@@ -38,6 +38,34 @@ text and drops sixel images, so the viewer duplicates the write end of the pseud
 output pipe, which leads straight to sshd, and writes its images there. Keys still arrive through
 the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20.
 
+## Window mode
+
+`desk` with no arguments (or a double click on `desk.exe`) opens the window: a connect screen with
+host, port, an optional password (handed to ssh through its askpass hook, never stored), the
+quality, and recent hosts. `desk --gui HOST` connects straight away.
+
+In a session the toolbar at the top offers the quality presets and custom colours, scale and fps,
+fit-to-window or original size, full screen (F11; the toolbar then hides until the pointer reaches
+the top edge), a keys menu (Ctrl+Alt+Del, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen,
+Win plus the next key), clipboard sharing, refresh, live traffic, round trip and fps, and disconnect.
+
+Every key goes to the remote host as a separate press and release by its position, so held
+modifiers, Shift+click, Ctrl+drag and games behave as on a local keyboard, and the remote keyboard
+layout decides the characters. Text from input methods (Korean, Japanese, Chinese) is sent as it
+is committed. Mouse back and forward buttons and horizontal wheels are passed through. Copied text
+is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME; on Windows it
+needs a service, which desk does not install yet.
+
+On Windows the window renders with Direct3D 12 (`WGPU_BACKEND` overrides it), which also works where
+a GPU driver's Vulkan or OpenGL does not.
+
+## Transports
+
+`src/transport.rs` is the only place that knows how a viewer reaches an agent: today a local child
+process or `ssh -T`. Everything above it sees two byte streams and a diagnostics stream, so a direct
+TCP/QUIC listener or a relay server for hosts behind NAT only needs another `Target` variant with its
+own authentication; the protocol, codecs and both viewers stay as they are.
+
 ## Use
 
 ```sh

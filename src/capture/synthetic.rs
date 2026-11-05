@@ -126,6 +126,7 @@ impl Capture for Synthetic {
             Input::Key { keysym: 0x76, .. } => self.playing = if self.playing.is_some() { None } else { Some(0) },
             Input::Key { keysym, .. } => self.typed.push(keysym),
             Input::Scroll { steps } => self.scrolled = self.scrolled.saturating_add_signed(steps as isize),
+            Input::KeyState { keysym, down: true } => self.typed.push(keysym),
             _ => return Ok(()),
         }
         self.dirty = true;

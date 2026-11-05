@@ -16,9 +16,12 @@ pub struct Image {
 #[derive(Debug)]
 pub enum Input {
     Key { keysym: u32, mods: u8 },
+    KeyState { keysym: u32, down: bool },
     Move { x: f64, y: f64 },
     Button { button: u8, pressed: bool },
     Scroll { steps: i32 },
+    HScroll { steps: i32 },
+    SecureAttention,
 }
 
 pub trait Capture {

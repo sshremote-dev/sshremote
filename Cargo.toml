@@ -6,8 +6,9 @@ description = "Remote desktop over SSH, viewed in a terminal or a window"
 license = "MIT"
 
 [dependencies]
+arboard = { version = "3", default-features = false }
 crossterm = "0.29.0"
-minifb = "0.29"
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 openh264 = "0.9"
 zstd = "0.14.3"
 

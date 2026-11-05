@@ -89,6 +89,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut fresh = false;
     let mut prev: Option<Plane> = None;
     let mut vid = video::Video::new();
+    let mut clip = crate::clip::Clip::new();
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
@@ -134,7 +135,14 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 }
                 ToAgent::Button { button, pressed } => report(cap.input(Input::Button { button, pressed })),
                 ToAgent::Scroll { steps } => report(cap.input(Input::Scroll { steps: steps as i32 })),
+                ToAgent::HScroll { steps } => report(cap.input(Input::HScroll { steps: steps as i32 })),
+                ToAgent::KeyState { keysym, down } => report(cap.input(Input::KeyState { keysym, down })),
+                ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
+                ToAgent::Clipboard(text) => clip.set(text),
             }
+        }
+        if let Some(text) = clip.poll() {
+            send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
         }
         let (Some(s), Some(red)) = (settings, reducer.as_ref()) else {
             continue;

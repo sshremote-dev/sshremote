@@ -177,11 +177,22 @@ impl Capture for Gnome {
                     1 => 0x110,
                     2 => 0x112,
                     3 => 0x111,
+                    8 => 0x113,
+                    9 => 0x114,
                     _ => return Ok(()),
                 };
                 notify!(self, "NotifyPointerButton", &(code, pressed))
             }
             Input::Scroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(0u32, steps)),
+            Input::HScroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(1u32, steps)),
+            Input::KeyState { keysym, down } => notify!(self, "NotifyKeyboardKeysym", &(keysym, down)),
+            Input::SecureAttention => {
+                // GNOME answers Ctrl+Alt+Del with its log-out dialog.
+                for (c, down) in [(29u32, true), (56, true), (111, true), (111, false), (56, false), (29, false)] {
+                    notify!(self, "NotifyKeyboardKeycode", &(c, down))?;
+                }
+                Ok(())
+            }
             Input::Key { keysym, mods } => {
                 // evdev keycodes for the modifiers; the key itself goes by keysym.
                 let held: Vec<u32> = [(MOD_CTRL, 29), (MOD_SHIFT, 42), (MOD_ALT, 56), (MOD_SUPER, 125)]

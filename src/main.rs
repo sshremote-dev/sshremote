@@ -1,6 +1,7 @@
 mod agent;
 mod capture;
 mod client;
+mod clip;
 mod color;
 #[cfg(windows)]
 mod conpty;
@@ -13,13 +14,15 @@ mod relay;
 mod scroll;
 mod session;
 mod sixel;
+mod transport;
 mod video;
 
 use color::Mode;
 
 const USAGE: &str = "\
-usage: desk [options] HOST        view HOST's desktop over ssh in this terminal
-       desk --gui [options] HOST  the same in a window
+usage: desk                       open the window: connect screen, recent hosts
+       desk [options] HOST        view HOST's desktop over ssh in this terminal
+       desk --gui [options] [HOST] the same in a window
        desk --local [options]     view a built-in test desktop (no ssh)
        desk --agent [--capture B] remote side, started by the viewer
 
@@ -42,7 +45,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         host: None,
         local: false,
         gui: false,
-        remote: "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" desk --agent".into(),
+        remote: session::REMOTE.into(),
         capture: String::new(),
         ssh_args: Vec::new(),
         preset: None,
@@ -98,7 +101,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
     if o.capture.is_empty() {
         o.capture = if o.local { "synthetic" } else { "auto" }.into();
     }
-    if !o.local && o.host.is_none() {
+    if !o.local && !o.gui && o.host.is_none() {
         return Err(USAGE.into());
     }
     Ok(o)
@@ -106,6 +109,32 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // ssh runs this program as its askpass helper with the prompt as the only argument.
+    if let Ok(secret) = std::env::var(transport::ASKPASS_SECRET)
+        && args.len() == 1
+        && !args[0].starts_with("--")
+    {
+        println!("{secret}");
+        return;
+    }
+    if args.is_empty() {
+        // Started from a file manager or a shortcut: open the window.
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+            // A console that holds only this process was made for it; drop it rather than show an empty window.
+            let mut pids = [0u32; 2];
+            if GetConsoleProcessList(pids.as_mut_ptr(), 2) == 1 {
+                FreeConsole();
+            }
+        }
+        let opt = parse_client(&["--gui".to_string()]).expect("default options");
+        if let Err(e) = client::run(opt) {
+            eprintln!("desk: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let result = if args.iter().any(|a| a == "--agent") {
         let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());
         let r = agent::run(opt("--capture").unwrap_or("auto"), opt("--pipe"));

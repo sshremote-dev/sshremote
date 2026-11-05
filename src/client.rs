@@ -304,10 +304,10 @@ impl Viewer {
 }
 
 pub fn run(opt: Options) -> Result<(), String> {
-    let (sess, tx, rx) = Session::connect(&opt)?;
     if opt.gui {
-        return crate::gui::run(&opt, sess, rx);
+        return crate::gui::run(&opt);
     }
+    let (sess, tx, rx) = Session::connect(&opt)?;
     let host = opt.host.clone().unwrap_or_else(|| "local".into());
     let mut v = Viewer {
         out: if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) },

@@ -2,7 +2,6 @@
 //! the decoded framebuffer, settings, statistics and the auto preset.
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -10,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::color::{Mode, unpack};
 use crate::proto::{Frame, MOD_CTRL, PRESETS, Settings, ToAgent, ToClient, read_msg, write_msg};
+use crate::transport::{self, Link, Target};
 
 pub struct Options {
     pub host: Option<String>,
@@ -53,62 +53,67 @@ impl<R: Read> Read for Counting<R> {
 }
 
 pub struct Session {
-    child: Child,
-    link: Option<BufWriter<ChildStdin>>,
+    link: Link,
+    writer: Option<BufWriter<Box<dyn Write + Send>>>,
     errlog: Arc<Mutex<Vec<u8>>>,
     pub rx_bytes: Arc<AtomicU64>,
     pub tx_bytes: u64,
     pub desk: (u16, u16),
     pub backend: String,
+    waker: Waker,
 }
 
-fn spawn(opt: &Options) -> Result<Child, String> {
-    let mut cmd = if opt.local {
-        let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-        c.args(["--agent", "--capture", &opt.capture]);
-        c
-    } else {
-        let host = opt.host.as_deref().ok_or("no host given")?;
-        let mut c = Command::new("ssh");
-        c.arg("-T").args(&opt.ssh_args).arg(host);
-        c.arg(format!("{} --capture {}", opt.remote, opt.capture));
-        c
-    };
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Keeps a window-mode viewer from flashing a console for ssh.
-        if opt.gui {
-            cmd.creation_flags(0x0800_0000);
+type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+impl Options {
+    pub fn target(&self) -> Result<Target, String> {
+        if self.local {
+            return Ok(Target::Local { capture: self.capture.clone() });
         }
+        Ok(Target::Ssh {
+            host: self.host.clone().ok_or("no host given")?,
+            port: None,
+            args: self.ssh_args.clone(),
+            remote: self.remote.clone(),
+            capture: self.capture.clone(),
+            password: None,
+            unattended: false,
+        })
     }
-    cmd.spawn().map_err(|e| format!("could not start the agent: {e}"))
 }
+
+/// Command that starts the agent on a host, finding it in the usual install places.
+pub const REMOTE: &str = "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" desk --agent";
 
 impl Session {
     /// Starts the agent and waits for its hello.
     pub fn connect(opt: &Options) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
-        let mut child = spawn(opt)?;
-        let link = BufWriter::new(child.stdin.take().unwrap());
-        let stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        Session::open(&opt.target()?, opt.gui)
+    }
+
+    /// Opens `target` and waits for the agent's hello; `hidden` keeps helper consoles out of sight.
+    pub fn open(target: &Target, hidden: bool) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
+        let mut link = transport::open(target, hidden)?;
+        let reader = std::mem::replace(&mut link.reader, Box::new(io::empty()));
+        let writer = std::mem::replace(&mut link.writer, Box::new(io::sink()));
+        let mut errors = std::mem::replace(&mut link.errors, Box::new(io::empty()));
         let errlog = Arc::new(Mutex::new(Vec::new()));
         {
             let errlog = errlog.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 4096];
-                while let Ok(n @ 1..) = stderr.read(&mut buf) {
+                while let Ok(n @ 1..) = errors.read(&mut buf) {
                     errlog.lock().unwrap().extend_from_slice(&buf[..n]);
                 }
             });
         }
         let rx_bytes = Arc::new(AtomicU64::new(0));
         let (tx, rx) = mpsc::channel();
+        let waker: Waker = Arc::new(Mutex::new(None));
         {
-            let (tx, n) = (tx.clone(), rx_bytes.clone());
+            let (tx, n, waker) = (tx.clone(), rx_bytes.clone(), waker.clone());
             thread::spawn(move || {
-                let reader = BufReader::with_capacity(1 << 16, Counting { inner: stdout, n });
+                let reader = BufReader::with_capacity(1 << 16, Counting { inner: reader, n });
                 let mut dec = match zstd::stream::read::Decoder::with_buffer(reader) {
                     Ok(d) => d,
                     Err(e) => return drop(tx.send(Ev::Closed(e.to_string()))),
@@ -124,11 +129,22 @@ impl Session {
                     if tx.send(msg.map_or_else(Ev::Closed, Ev::Net)).is_err() || stop {
                         break;
                     }
+                    if let Some(w) = waker.lock().unwrap().as_ref() {
+                        w();
+                    }
                 }
             });
         }
-        let mut sess =
-            Session { child, link: Some(link), errlog, rx_bytes, tx_bytes: 0, desk: (0, 0), backend: String::new() };
+        let mut sess = Session {
+            link,
+            writer: Some(BufWriter::new(writer)),
+            errlog,
+            rx_bytes,
+            tx_bytes: 0,
+            desk: (0, 0),
+            backend: String::new(),
+            waker,
+        };
         match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
                 sess.desk = (w, h);
@@ -137,12 +153,13 @@ impl Session {
             }
             Ok(Ev::Net(ToClient::Error(e))) => Err(e),
             Ok(Ev::Closed(e)) => {
-                let _ = sess.child.wait();
+                sess.link.wait();
                 thread::sleep(Duration::from_millis(100));
-                Err(format!("{e}\n{}", sess.log()))
+                let log = sess.log();
+                Err(if log.is_empty() { e } else { log })
             }
             _ => {
-                let _ = sess.child.kill();
+                sess.link.close();
                 Err("the agent did not answer within 60 s".into())
             }
         }
@@ -151,9 +168,14 @@ impl Session {
     pub fn send(&mut self, m: ToAgent) -> io::Result<()> {
         let (k, p) = m.encode();
         self.tx_bytes += 5 + p.len() as u64;
-        let link = self.link.as_mut().ok_or_else(|| io::Error::other("closed"))?;
-        write_msg(link, k, &p)?;
-        link.flush()
+        let w = self.writer.as_mut().ok_or_else(|| io::Error::other("closed"))?;
+        write_msg(w, k, &p)?;
+        w.flush()
+    }
+
+    /// Called from the network thread after each message, so a window can repaint at once.
+    pub fn on_message(&self, f: impl Fn() + Send + 'static) {
+        *self.waker.lock().unwrap() = Some(Box::new(f));
     }
 
     pub fn rx(&self) -> u64 {
@@ -166,9 +188,8 @@ impl Session {
     }
 
     pub fn close(&mut self) {
-        self.link = None;
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.writer = None;
+        self.link.close();
     }
 }
 

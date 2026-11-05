@@ -59,6 +59,19 @@ pub enum ToAgent {
     Refresh,
     /// Echoed back as `Pong` behind any queued frames, so its round trip shows queueing delay.
     Ping(u32),
+    /// One key going down or up, for viewers that see both (held modifiers, games).
+    KeyState {
+        keysym: u32,
+        down: bool,
+    },
+    /// Horizontal wheel steps, positive to the right.
+    HScroll {
+        steps: i8,
+    },
+    /// Text now on the viewer's clipboard.
+    Clipboard(String),
+    /// Ctrl+Alt+Del, which no viewer can capture locally.
+    SecureAttention,
 }
 
 #[derive(Debug, PartialEq)]
@@ -99,10 +112,16 @@ impl Frame {
 
 #[derive(Debug, PartialEq)]
 pub enum ToClient {
-    Hello { w: u16, h: u16, backend: String },
+    Hello {
+        w: u16,
+        h: u16,
+        backend: String,
+    },
     Frame(Frame),
     Error(String),
     Pong(u32),
+    /// Text now on the remote clipboard.
+    Clipboard(String),
 }
 
 fn bad() -> io::Error {
@@ -199,6 +218,20 @@ impl ToAgent {
                 b.extend_from_slice(&t.to_le_bytes());
                 8
             }
+            ToAgent::KeyState { keysym, down } => {
+                b.extend_from_slice(&keysym.to_le_bytes());
+                b.push(*down as u8);
+                9
+            }
+            ToAgent::HScroll { steps } => {
+                b.push(*steps as u8);
+                10
+            }
+            ToAgent::Clipboard(t) => {
+                b.extend_from_slice(t.as_bytes());
+                11
+            }
+            ToAgent::SecureAttention => 12,
         };
         (kind, b)
     }
@@ -220,6 +253,10 @@ impl ToAgent {
             6 => ToAgent::Scroll { steps: c.u8()? as i8 },
             7 => ToAgent::Refresh,
             8 => ToAgent::Ping(c.u32()?),
+            9 => ToAgent::KeyState { keysym: c.u32()?, down: c.u8()? != 0 },
+            10 => ToAgent::HScroll { steps: c.u8()? as i8 },
+            11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
+            12 => ToAgent::SecureAttention,
             _ => return Err(bad()),
         })
     }
@@ -271,6 +308,10 @@ impl ToClient {
                 b.extend_from_slice(&t.to_le_bytes());
                 104
             }
+            ToClient::Clipboard(t) => {
+                b.extend_from_slice(t.as_bytes());
+                105
+            }
         };
         (kind, b)
     }
@@ -318,6 +359,7 @@ impl ToClient {
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
+            105 => ToClient::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
             _ => return Err(bad()),
         })
     }
@@ -338,6 +380,10 @@ mod tests {
             ToAgent::Scroll { steps: -2 },
             ToAgent::Refresh,
             ToAgent::Ping(5),
+            ToAgent::KeyState { keysym: 0xffe1, down: true },
+            ToAgent::HScroll { steps: -3 },
+            ToAgent::Clipboard("hello".into()),
+            ToAgent::SecureAttention,
         ];
         for m in msgs {
             let (k, p) = m.encode();

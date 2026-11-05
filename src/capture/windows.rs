@@ -13,10 +13,12 @@ use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDes
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT,
-    VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP, VkKeyScanW,
+    MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY, VK_APPS,
+    VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LCONTROL,
+    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP, VkKeyScanW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics, ICONINFO,
@@ -196,12 +198,25 @@ impl Capture for Gdi {
                     (2, false) => MOUSEEVENTF_MIDDLEUP,
                     (3, true) => MOUSEEVENTF_RIGHTDOWN,
                     (3, false) => MOUSEEVENTF_RIGHTUP,
+                    (8 | 9, true) => MOUSEEVENTF_XDOWN,
+                    (8 | 9, false) => MOUSEEVENTF_XUP,
                     _ => return Ok(()),
                 };
-                seq.push(mouse(flags, 0, 0, 0));
+                // XBUTTON1 is back, XBUTTON2 forward.
+                let x = match button {
+                    8 => 1,
+                    9 => 2,
+                    _ => 0,
+                };
+                seq.push(mouse(flags, 0, 0, x));
             }
             Input::Scroll { steps } => seq.push(mouse(MOUSEEVENTF_WHEEL, 0, 0, (-steps * 120) as u32)),
+            Input::HScroll { steps } => seq.push(mouse(MOUSEEVENTF_HWHEEL, 0, 0, (steps * 120) as u32)),
             Input::Key { keysym, mods } => key_events(keysym, mods, &mut seq),
+            Input::KeyState { keysym, down } => key_state(keysym, down, &mut seq),
+            Input::SecureAttention => {
+                return Err("Ctrl+Alt+Del can only be raised by a Windows service, which desk does not install".into());
+            }
         }
         if seq.is_empty() {
             return Ok(());
@@ -249,6 +264,54 @@ fn special_vk(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         0xffec => (VK_RWIN, true),
         _ => return None,
     })
+}
+
+/// Virtual key and extended flag for a keysym pressed on its own, as a physical key.
+fn vk_of(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
+    if let Some(k) = special_vk(keysym) {
+        return Some(k);
+    }
+    Some(match keysym {
+        0xffe1 => (VK_LSHIFT, false),
+        0xffe2 => (VK_RSHIFT, false),
+        0xffe3 => (VK_LCONTROL, false),
+        0xffe4 => (VK_RCONTROL, true),
+        0xffe9 => (VK_LMENU, false),
+        0xffea => (VK_RMENU, true),
+        0xffe5 => (VK_CAPITAL, false),
+        0xff13 => (VK_PAUSE, false),
+        0xff61 => (VK_SNAPSHOT, true),
+        0xff67 => (VK_APPS, true),
+        0x20..=0x7e => {
+            let scan = unsafe { VkKeyScanW(keysym as u16) };
+            if scan == -1 {
+                return None;
+            }
+            ((scan & 0xff) as u16, false)
+        }
+        _ => return None,
+    })
+}
+
+/// One key down or up with its scan code, so held keys and games behave like a keyboard.
+/// Characters without a key on this layout go in as Unicode.
+fn key_state(keysym: u32, down: bool, seq: &mut Vec<INPUT>) {
+    let up = if down { 0 } else { KEYEVENTF_KEYUP };
+    match vk_of(keysym) {
+        Some((vk, ext)) => {
+            let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+            seq.push(kbd(vk, scan, up | if ext { KEYEVENTF_EXTENDEDKEY } else { 0 }));
+        }
+        None => {
+            let c = if keysym & 0xff00_0000 == 0x0100_0000 { keysym & 0xff_ffff } else { keysym };
+            if let Some(c) = char::from_u32(c) {
+                let mut buf = [0u16; 2];
+                for &unit in c.encode_utf16(&mut buf).iter() {
+                    seq.push(kbd(0, unit, KEYEVENTF_UNICODE | up));
+                }
+            }
+        }
+    }
 }
 
 /// Text goes in as Unicode; shortcuts and special keys go in as virtual keys
