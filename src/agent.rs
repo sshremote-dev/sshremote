@@ -1,0 +1,144 @@
+//! Remote side: captures the desktop, reduces it to the requested colour mode,
+//! sends only changed rectangles, and injects the viewer's input.
+
+use std::io::{self, BufReader, BufWriter, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::capture::{self, Image, Input};
+use crate::color::{Plane, Reducer, diff, pack};
+use crate::proto::{Frame, Settings, Tile, ToAgent, ToClient, read_msg, write_msg};
+
+/// Frames sent but not yet acknowledged; more would only queue stale screens in SSH.
+const IN_FLIGHT: u32 = 2;
+
+type Wire = zstd::stream::write::Encoder<'static, BufWriter<io::Stdout>>;
+
+fn send(w: &mut Wire, m: &ToClient) -> io::Result<()> {
+    let (k, p) = m.encode();
+    write_msg(w, k, &p)?;
+    w.flush()
+}
+
+fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
+    let (dw, dh) = (desk.0 as f64, desk.1 as f64);
+    let fit = (s.view_w.max(16) as f64 / dw).min(s.view_h.max(16) as f64 / dh).min(1.0);
+    let k = fit * s.scale as f64 / 100.0;
+    (((dw * k) as usize).max(16), ((dh * k) as usize).max(16))
+}
+
+pub fn run(backend: &str) -> Result<(), String> {
+    let mut enc = zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, io::stdout()), 3)
+        .map_err(|e| e.to_string())?;
+    // A long window lets earlier screens act as a dictionary for repeats.
+    enc.window_log(24).map_err(|e| e.to_string())?;
+    enc.long_distance_matching(true).map_err(|e| e.to_string())?;
+    let result = serve(&mut enc, backend);
+    if let Err(e) = &result {
+        let _ = send(&mut enc, &ToClient::Error(e.clone()));
+    }
+    result
+}
+
+fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
+    let mut cap = capture::open(backend)?;
+    let desk = cap.desktop_size();
+    let io_err = |e: io::Error| e.to_string();
+    send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut input = BufReader::new(io::stdin());
+        while let Ok(Some((k, p))) = read_msg(&mut input) {
+            let Ok(m) = ToAgent::decode(k, &p) else { break };
+            if tx.send(m).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut settings: Option<Settings> = None;
+    let mut size = (0, 0);
+    let mut reducer: Option<Reducer> = None;
+    let mut last: Option<Image> = None;
+    let mut fresh = false;
+    let mut prev: Option<Plane> = None;
+    let mut in_flight = 0u32;
+    let mut next_id = 1u32;
+    let mut due = Instant::now();
+    loop {
+        let wait = due.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(8));
+        let mut msgs = Vec::new();
+        match rx.recv_timeout(wait) {
+            Ok(m) => msgs.push(m),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => return Ok(()),
+        }
+        msgs.extend(rx.try_iter());
+        for m in msgs {
+            match m {
+                ToAgent::Settings(s) => {
+                    let t = target(desk, &s);
+                    if t != size {
+                        cap.set_target(t.0, t.1)?;
+                        size = t;
+                        prev = None;
+                    }
+                    if reducer.as_ref().is_none_or(|r| r.mode() != s.mode) {
+                        reducer = Some(Reducer::new(s.mode));
+                        prev = None;
+                    }
+                    settings = Some(s);
+                }
+                ToAgent::Ack(_) => in_flight = in_flight.saturating_sub(1),
+                ToAgent::Refresh => prev = None,
+                ToAgent::Key { keysym, mods } => report(cap.input(Input::Key { keysym, mods })),
+                ToAgent::Pointer { x, y } => {
+                    let img = last.as_ref().map_or(desk, |i| (i.w, i.h));
+                    let sx = (x as f64 + 0.5) * desk.0 as f64 / img.0.max(1) as f64;
+                    let sy = (y as f64 + 0.5) * desk.1 as f64 / img.1.max(1) as f64;
+                    report(cap.input(Input::Move { x: sx, y: sy }));
+                }
+                ToAgent::Button { button, pressed } => report(cap.input(Input::Button { button, pressed })),
+                ToAgent::Scroll { steps } => report(cap.input(Input::Scroll { steps: steps as i32 })),
+            }
+        }
+        let (Some(s), Some(red)) = (settings, reducer.as_ref()) else { continue };
+        if let Some(img) = cap.grab()? {
+            last = Some(img);
+            fresh = true;
+        }
+        let now = Instant::now();
+        if in_flight >= IN_FLIGHT || now < due {
+            continue;
+        }
+        let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else { continue };
+        if !fresh && prev.is_some() {
+            continue;
+        }
+        fresh = false;
+        let plane = red.reduce(img);
+        let rects = diff(prev.as_ref(), &plane);
+        prev = Some(plane);
+        if rects.is_empty() {
+            continue;
+        }
+        let plane = prev.as_ref().unwrap();
+        let tiles = rects
+            .iter()
+            .map(|r| Tile { x: r.x as u16, y: r.y as u16, w: r.w as u16, h: r.h as u16, data: pack(plane, r.x, r.y, r.w, r.h) })
+            .collect();
+        let frame = Frame { id: next_id, w: plane.w as u16, h: plane.h as u16, mode: plane.mode, tiles };
+        next_id = next_id.wrapping_add(1);
+        send(enc, &ToClient::Frame(frame)).map_err(io_err)?;
+        in_flight += 1;
+        due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
+    }
+}
+
+fn report(r: Result<(), String>) {
+    if let Err(e) = r {
+        eprintln!("desk agent: {e}");
+    }
+}

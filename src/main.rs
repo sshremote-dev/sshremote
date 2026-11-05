@@ -1,0 +1,99 @@
+mod agent;
+mod capture;
+mod client;
+mod color;
+mod keys;
+mod proto;
+mod sixel;
+
+use color::Mode;
+
+const USAGE: &str = "\
+usage: desk [options] HOST        view HOST's desktop over ssh in this terminal
+       desk --local [options]     view a built-in test desktop (no ssh)
+       desk --agent [--capture B] remote side, started by the viewer
+
+options:
+  --preset N      0 glance (mono) .. 4 exact; default 2
+  --mode M        mono gray4 gray16 16c 256c true
+  --scale P       capture scale in percent, 10-100
+  --fps N         frame rate cap, 1-60
+  --cell WxH      terminal cell size in pixels (default: ask the terminal, else 10x20)
+  --capture B     agent capture backend: auto gnome synthetic
+  --remote CMD    agent command on HOST (default: desk --agent)
+  --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
+  --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
+
+keys: Ctrl+] opens the menu (q quit, 0-4 presets, m colour, +/- scale, f fps, r refresh)";
+
+fn parse_client(args: &[String]) -> Result<client::Options, String> {
+    let mut o = client::Options {
+        host: None,
+        local: false,
+        remote: "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" desk --agent".into(),
+        capture: String::new(),
+        ssh_args: Vec::new(),
+        preset: 2,
+        mode: None,
+        scale: None,
+        fps: None,
+        cell: None,
+        probe: None,
+        probe_type: String::new(),
+    };
+    let mut view = (1900u16, 1000u16);
+    let mut dump = None;
+    let mut probe = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--local" => o.local = true,
+            "--preset" => o.preset = val()?.parse().map_err(|_| "bad --preset")?,
+            "--mode" => o.mode = Some(Mode::parse(&val()?).ok_or("bad --mode")?),
+            "--scale" => o.scale = Some(val()?.parse().map_err(|_| "bad --scale")?),
+            "--fps" => o.fps = Some(val()?.parse().map_err(|_| "bad --fps")?),
+            "--cell" => {
+                let v = val()?;
+                let (w, h) = v.split_once('x').ok_or("bad --cell")?;
+                o.cell = Some((w.parse().map_err(|_| "bad --cell")?, h.parse().map_err(|_| "bad --cell")?));
+            }
+            "--capture" => o.capture = val()?,
+            "--remote" => o.remote = val()?,
+            "--ssh" => o.ssh_args.push(val()?),
+            "--probe" => probe = Some(val()?.parse::<f64>().map_err(|_| "bad --probe")?),
+            "--view" => {
+                let v = val()?;
+                let (w, h) = v.split_once('x').ok_or("bad --view")?;
+                view = (w.parse().map_err(|_| "bad --view")?, h.parse().map_err(|_| "bad --view")?);
+            }
+            "--dump" => dump = Some(val()?),
+            "--type" => o.probe_type = val()?,
+            "-h" | "--help" => return Err(USAGE.into()),
+            s if s.starts_with('-') => return Err(format!("unknown option {s}\n\n{USAGE}")),
+            s => o.host = Some(s.into()),
+        }
+    }
+    o.probe = probe.map(|secs| (secs, view, dump));
+    if o.capture.is_empty() {
+        o.capture = if o.local { "synthetic" } else { "auto" }.into();
+    }
+    if !o.local && o.host.is_none() {
+        return Err(USAGE.into());
+    }
+    Ok(o)
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = if args.iter().any(|a| a == "--agent") {
+        let backend = args.iter().position(|a| a == "--capture").and_then(|i| args.get(i + 1));
+        agent::run(backend.map_or("auto", |s| s.as_str()))
+    } else {
+        parse_client(&args).and_then(client::run)
+    };
+    if let Err(e) = result {
+        eprintln!("desk: {e}");
+        std::process::exit(1);
+    }
+}

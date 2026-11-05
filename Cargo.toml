@@ -1,0 +1,20 @@
+[package]
+name = "desk"
+version = "0.1.0"
+edition = "2024"
+description = "Remote desktop over SSH, viewed in a terminal or a window"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29.0"
+zstd = "0.14.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.4"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
