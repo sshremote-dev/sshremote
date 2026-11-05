@@ -34,6 +34,8 @@ pub const MOD_SHIFT: u8 = 1;
 pub const MOD_CTRL: u8 = 2;
 pub const MOD_ALT: u8 = 4;
 pub const MOD_SUPER: u8 = 8;
+/// X11 keysym of the left Win (Super) key.
+pub const SUPER_L: u32 = 0xffeb;
 
 #[derive(Debug, PartialEq)]
 pub enum ToAgent {

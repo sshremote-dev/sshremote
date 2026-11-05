@@ -340,6 +340,8 @@ pub enum Action {
     Quit,
     Refresh,
     Zoom,
+    /// The next key goes out with the Win (Super) key held; Space sends Win alone.
+    ArmWin,
     Settings,
     Send(ToAgent),
 }
@@ -445,6 +447,7 @@ impl Control {
             }
             'r' => return Action::Refresh,
             'z' => return Action::Zoom,
+            'w' => return Action::ArmWin,
             ']' => {
                 return Action::Send(ToAgent::Key { keysym: ']' as u32, mods: MOD_CTRL });
             }
@@ -454,7 +457,7 @@ impl Control {
     }
 
     pub const MENU_HELP: &str =
-        "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | r refresh | ] send Ctrl+]";
+        "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | w Win key | r refresh | ] send Ctrl+]";
 
     /// `full` marks a frame that resent most of the screen; such bursts come from
     /// starting, resizing or a mode change, not from what the screen is doing, so auto waits them out.

@@ -11,7 +11,7 @@ use crossterm::{cursor, execute, terminal};
 
 use crate::color::{Lut, Mode};
 use crate::keys;
-use crate::proto::{Frame, ToAgent, ToClient};
+use crate::proto::{Frame, MOD_SUPER, SUPER_L, ToAgent, ToClient};
 use crate::quant;
 use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
@@ -39,6 +39,7 @@ struct Viewer {
     qpal: Vec<[u8; 3]>,
     dirty: Vec<bool>,
     menu: bool,
+    win_next: bool,
     /// Enlarge a reduced capture to the terminal; off where the terminal output itself crosses the network.
     stretch: bool,
     pointer: (u16, u16),
@@ -179,6 +180,8 @@ impl Viewer {
     fn status(&mut self) -> io::Result<()> {
         let text = if self.menu {
             format!(" menu: {} ", Control::MENU_HELP)
+        } else if self.win_next {
+            " Win+: press a key (Space: Win alone) ".to_string()
         } else {
             format!(
                 " {} | paint {:.1} ms | Ctrl+] menu ",
@@ -215,6 +218,10 @@ impl Viewer {
                 self.sess.send(ToAgent::Refresh)?;
                 self.status()
             }
+            Action::ArmWin => {
+                self.win_next = true;
+                self.status()
+            }
             Action::Zoom => {
                 self.stretch = !self.stretch;
                 self.full_redraw()?;
@@ -246,7 +253,16 @@ impl Viewer {
                     return self.status();
                 }
                 if let Some((keysym, mods)) = keys::keysym(&k) {
-                    self.sess.send(ToAgent::Key { keysym, mods })?;
+                    let m = if std::mem::take(&mut self.win_next) {
+                        self.status()?;
+                        if keysym == ' ' as u32 {
+                            return self.sess.send(ToAgent::Key { keysym: SUPER_L, mods: 0 });
+                        }
+                        mods | MOD_SUPER
+                    } else {
+                        mods
+                    };
+                    self.sess.send(ToAgent::Key { keysym, mods: m })?;
                 }
             }
             Event::Mouse(m) => {
@@ -316,6 +332,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         qpal: Vec::new(),
         dirty: Vec::new(),
         menu: false,
+        win_next: false,
         // A viewer run inside an ssh session sends its sixel output over that session.
         stretch: !(opt.local && std::env::var_os("SSH_CONNECTION").is_some()),
         pointer: (u16::MAX, u16::MAX),

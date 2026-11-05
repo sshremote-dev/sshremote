@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, ScaleMode, Window, WindowOptions};
 
 use crate::color::Mode;
-use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER, ToAgent, ToClient};
+use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER, SUPER_L, ToAgent, ToClient};
 use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 
 struct Chars(Arc<Mutex<Vec<u32>>>);
@@ -96,6 +96,7 @@ struct Gui {
     label: String,
     chars: Arc<Mutex<Vec<u32>>>,
     menu: bool,
+    win_next: bool,
     buttons: [bool; 3],
     pointer: (u16, u16),
     quit: bool,
@@ -149,6 +150,8 @@ impl Gui {
     fn title(&mut self) {
         let t = if self.menu {
             format!("desk menu: {}", Control::MENU_HELP)
+        } else if self.win_next {
+            "desk | Win+: press a key (Space: Win alone)".to_string()
         } else {
             format!("desk | {} | Ctrl+] menu", self.ctl.status(&self.label, self.fb.w, self.fb.h))
         };
@@ -158,6 +161,7 @@ impl Gui {
     fn act(&mut self, a: Action) -> std::io::Result<()> {
         match a {
             Action::None | Action::Zoom => {}
+            Action::ArmWin => self.win_next = true,
             Action::Quit => self.quit = true,
             Action::Refresh => {
                 self.fb = Framebuffer::default();
@@ -190,13 +194,23 @@ impl Gui {
                 self.title();
                 continue;
             }
+            if self.win_next {
+                let sym = if k == Key::Space { Some(SUPER_L) } else { special(k).or(base_char(k).map(|c| c as u32)) };
+                if let Some(sym) = sym {
+                    self.win_next = false;
+                    let m = if sym == SUPER_L { 0 } else { mods | MOD_SUPER };
+                    self.sess.send(ToAgent::Key { keysym: sym, mods: m })?;
+                    self.title();
+                }
+                continue;
+            }
             if let Some(sym) = special(k) {
                 self.sess.send(ToAgent::Key { keysym: sym, mods })?;
             } else if shortcut && let Some(c) = base_char(k) {
                 self.sess.send(ToAgent::Key { keysym: c as u32, mods })?;
             }
         }
-        if !shortcut && !self.menu {
+        if !shortcut && !self.menu && !self.win_next {
             // Text arrives already shifted and laid out, so shift is not sent again.
             for c in chars.into_iter().filter(|&c| c >= 0x20 && c != 0x7f) {
                 self.sess.send(ToAgent::Key { keysym: keysym_of(c), mods: mods & !MOD_SHIFT })?;
@@ -263,6 +277,7 @@ pub fn run(opt: &Options, sess: Session, rx: mpsc::Receiver<Ev>) -> Result<(), S
         ctl: Control::new(opt, Mode::True),
         chars,
         menu: false,
+        win_next: false,
         buttons: [false; 3],
         pointer: (u16::MAX, u16::MAX),
         quit: false,
