@@ -1,7 +1,7 @@
 //! Remote side: captures the desktop, reduces it to the requested colour mode,
 //! sends only changed rectangles, and injects the viewer's input.
 
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,7 +13,7 @@ use crate::proto::{Frame, Settings, Tile, ToAgent, ToClient, read_msg, write_msg
 /// Frames sent but not yet acknowledged; more would only queue stale screens in SSH.
 const IN_FLIGHT: u32 = 2;
 
-type Wire = zstd::stream::write::Encoder<'static, BufWriter<io::Stdout>>;
+type Wire = zstd::stream::write::Encoder<'static, BufWriter<Box<dyn Write>>>;
 
 fn send(w: &mut Wire, m: &ToClient) -> io::Result<()> {
     let (k, p) = m.encode();
@@ -28,20 +28,42 @@ fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
     (((dw * k) as usize).max(16), ((dh * k) as usize).max(16))
 }
 
-pub fn run(backend: &str) -> Result<(), String> {
-    let mut enc = zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, io::stdout()), 3)
-        .map_err(|e| e.to_string())?;
+/// Serves on stdin/stdout, or on the named pipes a Windows relay created.
+pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
+    #[cfg(windows)]
+    if pipe.is_none()
+        && matches!(backend, "auto" | "windows")
+        // DESK_RELAY forces the relay path so it can be tested from a console session.
+        && (crate::capture::windows::needs_relay() || std::env::var_os("DESK_RELAY").is_some())
+    {
+        return crate::relay::run(backend);
+    }
+    let (input, output): (Box<dyn Read + Send>, Box<dyn Write>) = match pipe {
+        #[cfg(windows)]
+        Some(base) => {
+            let (down, up) = crate::relay::pipe_names(base);
+            let open = |p: &str, write: bool| {
+                std::fs::OpenOptions::new().read(!write).write(write).open(p).map_err(|e| format!("{p}: {e}"))
+            };
+            (Box::new(open(&down, false)?), Box::new(open(&up, true)?))
+        }
+        #[cfg(not(windows))]
+        Some(_) => return Err("--pipe is only used on Windows".into()),
+        None => (Box::new(io::stdin()), Box::new(io::stdout())),
+    };
+    let mut enc =
+        zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, output), 3).map_err(|e| e.to_string())?;
     // A long window lets earlier screens act as a dictionary for repeats.
     enc.window_log(24).map_err(|e| e.to_string())?;
     enc.long_distance_matching(true).map_err(|e| e.to_string())?;
-    let result = serve(&mut enc, backend);
+    let result = serve(&mut enc, input, backend);
     if let Err(e) = &result {
         let _ = send(&mut enc, &ToClient::Error(e.clone()));
     }
     result
 }
 
-fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
+fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(), String> {
     let mut cap = capture::open(backend)?;
     let desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
@@ -49,7 +71,7 @@ fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut input = BufReader::new(io::stdin());
+        let mut input = BufReader::new(input);
         while let Ok(Some((k, p))) = read_msg(&mut input) {
             let Ok(m) = ToAgent::decode(k, &p) else { break };
             if tx.send(m).is_err() {
@@ -68,7 +90,8 @@ fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
     let mut next_id = 1u32;
     let mut due = Instant::now();
     loop {
-        let wait = due.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(8));
+        let wait =
+            due.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(8));
         let mut msgs = Vec::new();
         match rx.recv_timeout(wait) {
             Ok(m) => msgs.push(m),
@@ -93,6 +116,7 @@ fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
                 }
                 ToAgent::Ack(_) => in_flight = in_flight.saturating_sub(1),
                 ToAgent::Refresh => prev = None,
+                ToAgent::Ping(t) => send(enc, &ToClient::Pong(t)).map_err(io_err)?,
                 ToAgent::Key { keysym, mods } => report(cap.input(Input::Key { keysym, mods })),
                 ToAgent::Pointer { x, y } => {
                     let img = last.as_ref().map_or(desk, |i| (i.w, i.h));
@@ -104,16 +128,21 @@ fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
                 ToAgent::Scroll { steps } => report(cap.input(Input::Scroll { steps: steps as i32 })),
             }
         }
-        let (Some(s), Some(red)) = (settings, reducer.as_ref()) else { continue };
+        let (Some(s), Some(red)) = (settings, reducer.as_ref()) else {
+            continue;
+        };
+        let now = Instant::now();
+        // Grab only when a frame may go out: some backends copy the whole screen per grab.
+        if in_flight >= IN_FLIGHT || now < due {
+            continue;
+        }
         if let Some(img) = cap.grab()? {
             last = Some(img);
             fresh = true;
         }
-        let now = Instant::now();
-        if in_flight >= IN_FLIGHT || now < due {
+        let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else {
             continue;
-        }
-        let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else { continue };
+        };
         if !fresh && prev.is_some() {
             continue;
         }
@@ -122,12 +151,19 @@ fn serve(enc: &mut Wire, backend: &str) -> Result<(), String> {
         let rects = diff(prev.as_ref(), &plane);
         prev = Some(plane);
         if rects.is_empty() {
+            due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
             continue;
         }
         let plane = prev.as_ref().unwrap();
         let tiles = rects
             .iter()
-            .map(|r| Tile { x: r.x as u16, y: r.y as u16, w: r.w as u16, h: r.h as u16, data: pack(plane, r.x, r.y, r.w, r.h) })
+            .map(|r| Tile {
+                x: r.x as u16,
+                y: r.y as u16,
+                w: r.w as u16,
+                h: r.h as u16,
+                data: pack(plane, r.x, r.y, r.w, r.h),
+            })
             .collect();
         let frame = Frame { id: next_id, w: plane.w as u16, h: plane.h as u16, mode: plane.mode, tiles };
         next_id = next_id.wrapping_add(1);

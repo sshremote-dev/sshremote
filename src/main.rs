@@ -2,38 +2,46 @@ mod agent;
 mod capture;
 mod client;
 mod color;
+mod gui;
 mod keys;
 mod proto;
+#[cfg(windows)]
+mod relay;
+mod session;
 mod sixel;
 
 use color::Mode;
 
 const USAGE: &str = "\
 usage: desk [options] HOST        view HOST's desktop over ssh in this terminal
+       desk --gui [options] HOST  the same in a window
        desk --local [options]     view a built-in test desktop (no ssh)
        desk --agent [--capture B] remote side, started by the viewer
 
 options:
-  --preset N      0 glance (mono) .. 4 exact; default 2
+  --preset P      auto (default), or 0 glance (mono) .. 4 exact
+  --budget KB/s   traffic auto stays under; default 100
   --mode M        mono gray4 gray16 16c 256c true
   --scale P       capture scale in percent, 10-100
   --fps N         frame rate cap, 1-60
   --cell WxH      terminal cell size in pixels (default: ask the terminal, else 10x20)
-  --capture B     agent capture backend: auto gnome synthetic
+  --capture B     agent capture backend: auto gnome windows synthetic
   --remote CMD    agent command on HOST (default: desk --agent)
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
 
-keys: Ctrl+] opens the menu (q quit, 0-4 presets, m colour, +/- scale, f fps, r refresh)";
+keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, r refresh)";
 
-fn parse_client(args: &[String]) -> Result<client::Options, String> {
-    let mut o = client::Options {
+fn parse_client(args: &[String]) -> Result<session::Options, String> {
+    let mut o = session::Options {
         host: None,
         local: false,
+        gui: false,
         remote: "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" desk --agent".into(),
         capture: String::new(),
         ssh_args: Vec::new(),
-        preset: 2,
+        preset: None,
+        budget: 100.0,
         mode: None,
         scale: None,
         fps: None,
@@ -49,7 +57,12 @@ fn parse_client(args: &[String]) -> Result<client::Options, String> {
         let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--local" => o.local = true,
-            "--preset" => o.preset = val()?.parse().map_err(|_| "bad --preset")?,
+            "--gui" => o.gui = true,
+            "--preset" => {
+                let v = val()?;
+                o.preset = if v == "auto" { None } else { Some(v.parse().map_err(|_| "bad --preset")?) };
+            }
+            "--budget" => o.budget = val()?.parse().map_err(|_| "bad --budget")?,
             "--mode" => o.mode = Some(Mode::parse(&val()?).ok_or("bad --mode")?),
             "--scale" => o.scale = Some(val()?.parse().map_err(|_| "bad --scale")?),
             "--fps" => o.fps = Some(val()?.parse().map_err(|_| "bad --fps")?),
@@ -87,8 +100,13 @@ fn parse_client(args: &[String]) -> Result<client::Options, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = if args.iter().any(|a| a == "--agent") {
-        let backend = args.iter().position(|a| a == "--capture").and_then(|i| args.get(i + 1));
-        agent::run(backend.map_or("auto", |s| s.as_str()))
+        let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+        let r = agent::run(opt("--capture").unwrap_or("auto"), opt("--pipe"));
+        // A relay helper has no visible stderr; keep its failure where it can be found.
+        if let (Err(e), Some(_)) = (&r, opt("--pipe")) {
+            let _ = std::fs::write(std::env::temp_dir().join("desk-agent.log"), e);
+        }
+        r
     } else {
         parse_client(&args).and_then(client::run)
     };

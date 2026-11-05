@@ -38,11 +38,24 @@ pub const MOD_SUPER: u8 = 8;
 pub enum ToAgent {
     Settings(Settings),
     Ack(u32),
-    Key { keysym: u32, mods: u8 },
-    Pointer { x: u16, y: u16 },
-    Button { button: u8, pressed: bool },
-    Scroll { steps: i8 },
+    Key {
+        keysym: u32,
+        mods: u8,
+    },
+    Pointer {
+        x: u16,
+        y: u16,
+    },
+    Button {
+        button: u8,
+        pressed: bool,
+    },
+    Scroll {
+        steps: i8,
+    },
     Refresh,
+    /// Echoed back as `Pong` behind any queued frames, so its round trip shows queueing delay.
+    Ping(u32),
 }
 
 #[derive(Debug, PartialEq)]
@@ -68,6 +81,7 @@ pub enum ToClient {
     Hello { w: u16, h: u16, backend: String },
     Frame(Frame),
     Error(String),
+    Pong(u32),
 }
 
 fn bad() -> io::Error {
@@ -160,6 +174,10 @@ impl ToAgent {
                 6
             }
             ToAgent::Refresh => 7,
+            ToAgent::Ping(t) => {
+                b.extend_from_slice(&t.to_le_bytes());
+                8
+            }
         };
         (kind, b)
     }
@@ -180,6 +198,7 @@ impl ToAgent {
             5 => ToAgent::Button { button: c.u8()?, pressed: c.u8()? != 0 },
             6 => ToAgent::Scroll { steps: c.u8()? as i8 },
             7 => ToAgent::Refresh,
+            8 => ToAgent::Ping(c.u32()?),
             _ => return Err(bad()),
         })
     }
@@ -214,6 +233,10 @@ impl ToClient {
                 b.extend_from_slice(e.as_bytes());
                 103
             }
+            ToClient::Pong(t) => {
+                b.extend_from_slice(&t.to_le_bytes());
+                104
+            }
         };
         (kind, b)
     }
@@ -221,11 +244,9 @@ impl ToClient {
     pub fn decode(kind: u8, d: &[u8]) -> io::Result<ToClient> {
         let mut c = Cur { d, p: 0 };
         Ok(match kind {
-            101 => ToClient::Hello {
-                w: c.u16()?,
-                h: c.u16()?,
-                backend: String::from_utf8_lossy(c.rest()).into_owned(),
-            },
+            101 => {
+                ToClient::Hello { w: c.u16()?, h: c.u16()?, backend: String::from_utf8_lossy(c.rest()).into_owned() }
+            }
             102 => {
                 let (id, w, h, mode) = (c.u32()?, c.u16()?, c.u16()?, c.mode()?);
                 let n = c.u32()? as usize;
@@ -242,6 +263,7 @@ impl ToClient {
                 ToClient::Frame(Frame { id, w, h, mode, tiles })
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
+            104 => ToClient::Pong(c.u32()?),
             _ => return Err(bad()),
         })
     }
@@ -261,6 +283,7 @@ mod tests {
             ToAgent::Button { button: 1, pressed: true },
             ToAgent::Scroll { steps: -2 },
             ToAgent::Refresh,
+            ToAgent::Ping(5),
         ];
         for m in msgs {
             let (k, p) = m.encode();

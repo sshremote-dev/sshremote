@@ -1,6 +1,8 @@
 #[cfg(target_os = "linux")]
 mod gnome;
 mod synthetic;
+#[cfg(windows)]
+pub mod windows;
 
 /// A BGRx frame at the size requested with `set_target`.
 pub struct Image {
@@ -12,7 +14,6 @@ pub struct Image {
 
 /// Input in desktop pixel coordinates; keys are X11 keysyms.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum Input {
     Key { keysym: u32, mods: u8 },
     Move { x: f64, y: f64 },
@@ -34,6 +35,8 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),
         #[cfg(target_os = "linux")]
         "gnome" | "auto" => Ok(Box::new(gnome::Gnome::open()?)),
+        #[cfg(windows)]
+        "windows" | "auto" => Ok(Box::new(windows::Gdi::open()?)),
         _ => Err(format!("capture backend '{name}' is not available on this system")),
     }
 }

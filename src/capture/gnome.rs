@@ -44,7 +44,9 @@ fn ensure_env() {
     }
     let uid = std::fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)).map(str::to_owned))
+        .and_then(|s| {
+            s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)).map(str::to_owned)
+        })
         .unwrap_or_else(|| "1000".into());
     let run = format!("/run/user/{uid}");
     // SAFETY: called once at startup before any thread is spawned.
@@ -72,10 +74,8 @@ fn pipeline(node: u32, size: Option<(usize, usize)>) -> Result<(gst::Pipeline, g
         .map_err(|e| format!("GNOME capture pipeline: {e}"))?
         .downcast::<gst::Pipeline>()
         .map_err(|_| "GNOME capture pipeline is not a pipeline".to_string())?;
-    let sink = p
-        .by_name("sink")
-        .and_then(|s| s.downcast::<gst_app::AppSink>().ok())
-        .ok_or("GNOME capture sink missing")?;
+    let sink =
+        p.by_name("sink").and_then(|s| s.downcast::<gst_app::AppSink>().ok()).ok_or("GNOME capture sink missing")?;
     p.set_state(gst::State::Playing).map_err(|e| format!("GNOME capture did not start: {e}"))?;
     Ok((p, sink))
 }
@@ -127,9 +127,7 @@ impl Gnome {
         let desk = (img.w, img.h);
         Ok(Gnome { _conn: conn, session, stream_path, node, desk, target: desk, pipe: Some((p, sink)) })
     }
-
 }
-
 
 impl Capture for Gnome {
     fn name(&self) -> &'static str {
@@ -153,7 +151,9 @@ impl Capture for Gnome {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
-        let Some((p, sink)) = &self.pipe else { return Ok(None) };
+        let Some((p, sink)) = &self.pipe else {
+            return Ok(None);
+        };
         if let Some(bus) = p.bus() {
             if let Some(m) = bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos]) {
                 return Err(format!("GNOME stream stopped: {:?}", m.view()));

@@ -11,14 +11,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 6] = [
-        Mode::Mono,
-        Mode::Gray4,
-        Mode::Gray16,
-        Mode::Color16,
-        Mode::Color256,
-        Mode::True,
-    ];
+    pub const ALL: [Mode; 6] = [Mode::Mono, Mode::Gray4, Mode::Gray16, Mode::Color16, Mode::Color256, Mode::True];
 
     pub fn from_u8(v: u8) -> Option<Mode> {
         Self::ALL.get(v as usize).copied()
@@ -200,6 +193,9 @@ pub fn pack(p: &Plane, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
             let s = (row * p.w + x) * bpp;
             out.extend_from_slice(&p.data[s..s + w * bpp]);
         }
+        if p.mode == Mode::True {
+            med_forward(&mut out, w, h);
+        }
         return out;
     }
     let mut out = Vec::with_capacity((w * h * bits).div_ceil(8));
@@ -221,23 +217,75 @@ pub fn pack(p: &Plane, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
     out
 }
 
-/// Inverse of `pack`: returns `count` pixels, one byte each (three for true colour).
-pub fn unpack(data: &[u8], mode: Mode, count: usize) -> Option<Vec<u8>> {
+fn med(a: u8, b: u8, c: u8) -> u8 {
+    if c >= a.max(b) {
+        a.min(b)
+    } else if c <= a.min(b) {
+        a.max(b)
+    } else {
+        a.wrapping_add(b).wrapping_sub(c)
+    }
+}
+
+/// LOCO-I median prediction per channel, with green removed from red and blue.
+/// Flat areas and gradients become runs of zeros that zstd compresses well.
+fn med_forward(px: &mut [u8], w: usize, h: usize) {
+    for p in px.chunks_exact_mut(3) {
+        p[0] = p[0].wrapping_sub(p[1]);
+        p[2] = p[2].wrapping_sub(p[1]);
+    }
+    let src = px.to_vec();
+    for y in 0..h {
+        for x in 0..w {
+            for ch in 0..3 {
+                let at = |xx: usize, yy: usize| src[(yy * w + xx) * 3 + ch];
+                let a = if x > 0 { at(x - 1, y) } else { 0 };
+                let b = if y > 0 { at(x, y - 1) } else { 0 };
+                let c = if x > 0 && y > 0 { at(x - 1, y - 1) } else { 0 };
+                let i = (y * w + x) * 3 + ch;
+                px[i] = src[i].wrapping_sub(med(a, b, c));
+            }
+        }
+    }
+}
+
+fn med_inverse(px: &mut [u8], w: usize, h: usize) {
+    for y in 0..h {
+        for x in 0..w {
+            for ch in 0..3 {
+                let at = |xx: usize, yy: usize| px[(yy * w + xx) * 3 + ch];
+                let a = if x > 0 { at(x - 1, y) } else { 0 };
+                let b = if y > 0 { at(x, y - 1) } else { 0 };
+                let c = if x > 0 && y > 0 { at(x - 1, y - 1) } else { 0 };
+                let i = (y * w + x) * 3 + ch;
+                px[i] = px[i].wrapping_add(med(a, b, c));
+            }
+        }
+    }
+    for p in px.chunks_exact_mut(3) {
+        p[0] = p[0].wrapping_add(p[1]);
+        p[2] = p[2].wrapping_add(p[1]);
+    }
+}
+
+/// Inverse of `pack` for a `w` x `h` rectangle: one byte per pixel (three for true colour).
+pub fn unpack(data: &[u8], mode: Mode, w: usize, h: usize) -> Option<Vec<u8>> {
     let bits = mode.bits();
+    let count = w * h;
     if bits >= 8 {
         let len = count * mode.bpp();
-        return (data.len() >= len).then(|| data[..len].to_vec());
+        let mut out = data.get(..len)?.to_vec();
+        if mode == Mode::True {
+            med_inverse(&mut out, w, h);
+        }
+        return Some(out);
     }
     if data.len() * 8 < count * bits {
         return None;
     }
     let mask = (1u8 << bits) - 1;
     let per = 8 / bits;
-    Some(
-        (0..count)
-            .map(|i| (data[i / per] >> (8 - bits * (i % per + 1))) & mask)
-            .collect(),
-    )
+    Some((0..count).map(|i| (data[i / per] >> (8 - bits * (i % per + 1))) & mask).collect())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,7 +350,7 @@ mod tests {
             let max = if mode == Mode::True { 255 } else { (mode.palette().len() - 1) as u8 };
             let p = plane(mode, 37, 11, |i| (i * 7 % (max as usize + 1)) as u8);
             let packed = pack(&p, 3, 2, 29, 7);
-            let back = unpack(&packed, mode, 29 * 7).unwrap();
+            let back = unpack(&packed, mode, 29, 7).unwrap();
             let bpp = mode.bpp();
             for row in 0..7 {
                 let s = ((row + 2) * 37 + 3) * bpp;
