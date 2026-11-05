@@ -16,6 +16,8 @@ pub struct Synthetic {
     typed: Vec<u32>,
     clicks: u32,
     scrolled: usize,
+    /// Frames of the moving picture started by typing `v`, like a playing video.
+    playing: Option<u32>,
     dirty: bool,
 }
 
@@ -29,6 +31,7 @@ impl Synthetic {
             typed: Vec::new(),
             clicks: 0,
             scrolled: 0,
+            playing: None,
             dirty: true,
         }
     }
@@ -67,6 +70,16 @@ impl Synthetic {
             let (cx, cy) = (820 + (i % 40) * 10, 140 + (i / 40) * 22);
             fill(cx + 1, cy + 3, 7, 13, [229, 192, 123]);
         }
+        if let Some(f) = self.playing {
+            for y in 0..240 {
+                for x in 0..320 {
+                    let (a, b) = (x as u32 + f * 3, y as u32 + f * 2);
+                    let n = (a.wrapping_mul(2_654_435_761) ^ b.wrapping_mul(40_503)) >> 27;
+                    let rgb = [((a ^ b) & 255) as u8, ((a * 2 + b) & 255) as u8, (n * 8) as u8];
+                    fill(860 + x, 260 + y, 1, 1, rgb);
+                }
+            }
+        }
         let (px0, py0) = self.pointer;
         fill(px0.saturating_sub(1), py0.saturating_sub(1), 12, 12, [0, 0, 0]);
         fill(px0, py0, 10, 10, [255, 255, 255]);
@@ -91,8 +104,11 @@ impl Capture for Synthetic {
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
         let tick = self.start.elapsed().as_millis() as u64 / 500;
-        if tick == self.tick && !self.dirty {
+        if tick == self.tick && !self.dirty && self.playing.is_none() {
             return Ok(None);
+        }
+        if let Some(f) = self.playing.as_mut() {
+            *f += 1;
         }
         self.tick = tick;
         self.dirty = false;
@@ -107,6 +123,7 @@ impl Capture for Synthetic {
             Input::Key { keysym: 0xff08, .. } => {
                 self.typed.pop();
             }
+            Input::Key { keysym: 0x76, .. } => self.playing = if self.playing.is_some() { None } else { Some(0) },
             Input::Key { keysym, .. } => self.typed.push(keysym),
             Input::Scroll { steps } => self.scrolled = self.scrolled.saturating_add_signed(steps as isize),
             _ => return Ok(()),

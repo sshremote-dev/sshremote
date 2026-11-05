@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 crossterm = "0.29.0"
 minifb = "0.29"
+openh264 = "0.9"
 zstd = "0.14.3"
 
 [target.'cfg(unix)'.dependencies]

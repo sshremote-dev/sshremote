@@ -180,6 +180,7 @@ pub struct Framebuffer {
     pub h: usize,
     pub mode: Option<Mode>,
     pal: Vec<[u8; 3]>,
+    player: crate::video::Player,
 }
 
 impl Framebuffer {
@@ -198,6 +199,15 @@ impl Framebuffer {
         if !resized {
             for m in &f.moves {
                 crate::scroll::apply(&mut self.rgb, w, 3, m);
+            }
+        }
+        if let Some(v) = &f.video {
+            let r = (v.x as usize, v.y as usize, v.w as usize, v.h as usize);
+            if let Some(px) = self.player.decode(r, &v.data).map_err(io::Error::other)? {
+                for row in 0..r.3 {
+                    let o = ((r.1 + row) * w + r.0) * 3;
+                    self.rgb[o..o + r.2 * 3].copy_from_slice(&px[row * r.2 * 3..(row + 1) * r.2 * 3]);
+                }
             }
         }
         for t in &f.tiles {

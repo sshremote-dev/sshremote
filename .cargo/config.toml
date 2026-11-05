@@ -1,0 +1,18 @@
+# openh264 is C++; link its runtime statically on the Windows GNU target so
+# desk.exe runs without MinGW DLLs. The cc crate's dynamic libstdc++ is turned
+# off and the static one is added after Rust's own libraries, followed by the
+# C runtime and kernel32 it needs.
+[env]
+CXXSTDLIB_x86_64_pc_windows_gnu = ""
+
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "link-arg=-Wl,-Bstatic",
+    "-C", "link-arg=-lstdc++",
+    "-C", "link-arg=-lgcc_eh",
+    "-C", "link-arg=-lwinpthread",
+    "-C", "link-arg=-Wl,-Bdynamic",
+    "-C", "link-arg=-lmingwex",
+    "-C", "link-arg=-lmsvcrt",
+    "-C", "link-arg=-lkernel32",
+]

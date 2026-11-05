@@ -7,9 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::capture::{self, Image, Input};
+use crate::color::Mode;
 use crate::color::{Plane, Reducer, diff, pack};
 use crate::proto::{Frame, Settings, Tile, ToAgent, ToClient, read_msg, write_msg};
-use crate::scroll;
+use crate::{scroll, video};
 
 /// Frames sent but not yet acknowledged; more would only queue stale screens in SSH.
 const IN_FLIGHT: u32 = 2;
@@ -87,6 +88,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut last: Option<Image> = None;
     let mut fresh = false;
     let mut prev: Option<Plane> = None;
+    let mut vid = video::Video::new();
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
@@ -108,15 +110,20 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         cap.set_target(t.0, t.1)?;
                         size = t;
                         prev = None;
+                        vid.reset();
                     }
                     if reducer.as_ref().is_none_or(|r| r.mode() != s.mode) {
                         reducer = Some(Reducer::new(s.mode));
                         prev = None;
+                        vid.reset();
                     }
                     settings = Some(s);
                 }
                 ToAgent::Ack(_) => in_flight = in_flight.saturating_sub(1),
-                ToAgent::Refresh => prev = None,
+                ToAgent::Refresh => {
+                    prev = None;
+                    vid.restart();
+                }
                 ToAgent::Ping(t) => send(enc, &ToClient::Pong(t)).map_err(io_err)?,
                 ToAgent::Key { keysym, mods } => report(cap.input(Input::Key { keysym, mods })),
                 ToAgent::Pointer { x, y } => {
@@ -159,8 +166,24 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             rects = diff(Some(&moved), &plane);
             moves.push(m);
         }
+        let mut video_part = None;
+        if matches!(plane.mode, Mode::Color256 | Mode::True) {
+            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects) {
+                rects.push(r);
+            }
+            if let Some(reg) = vid.region {
+                if rects.iter().any(|r| video::overlaps(r, &reg)) {
+                    let rate =
+                        (reg.w * reg.h) as f64 * s.fps as f64 * if plane.mode == Mode::True { 0.08 } else { 0.04 };
+                    let data = vid.encode(img, s.fps, rate.clamp(150e3, 6e6) as u32)?;
+                    let (x, y, w, h) = (reg.x as u16, reg.y as u16, reg.w as u16, reg.h as u16);
+                    video_part = Some(Tile { x, y, w, h, data });
+                }
+                rects = rects.iter().flat_map(|r| video::subtract(r, &reg)).collect();
+            }
+        }
         prev = Some(plane);
-        if rects.is_empty() && moves.is_empty() {
+        if rects.is_empty() && moves.is_empty() && video_part.is_none() {
             due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
             continue;
         }
@@ -175,7 +198,15 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 data: pack(plane, r.x, r.y, r.w, r.h),
             })
             .collect();
-        let frame = Frame { id: next_id, w: plane.w as u16, h: plane.h as u16, mode: plane.mode, moves, tiles };
+        let frame = Frame {
+            id: next_id,
+            w: plane.w as u16,
+            h: plane.h as u16,
+            mode: plane.mode,
+            moves,
+            tiles,
+            video: video_part,
+        };
         next_id = next_id.wrapping_add(1);
         send(enc, &ToClient::Frame(frame)).map_err(io_err)?;
         in_flight += 1;

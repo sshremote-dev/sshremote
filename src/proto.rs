@@ -77,6 +77,8 @@ pub struct Frame {
     /// Applied before the tiles: areas the client already has, shifted vertically.
     pub moves: Vec<Move>,
     pub tiles: Vec<Tile>,
+    /// One H.264 access unit for the video region, which no tile covers.
+    pub video: Option<Tile>,
 }
 
 impl Frame {
@@ -88,7 +90,8 @@ impl Frame {
     /// Every rectangle whose pixels this frame changes, as (x, y, w, h).
     pub fn damage(&self) -> impl Iterator<Item = (usize, usize, usize, usize)> + '_ {
         let moved = self.moves.iter().map(|m| (m.x, m.y, m.w, m.h));
-        moved.chain(self.tiles.iter().map(|t| (t.x as usize, t.y as usize, t.w as usize, t.h as usize)))
+        let rect = |t: &Tile| (t.x as usize, t.y as usize, t.w as usize, t.h as usize);
+        moved.chain(self.tiles.iter().map(rect)).chain(self.video.iter().map(rect))
     }
 }
 
@@ -249,6 +252,13 @@ impl ToClient {
                     b.extend_from_slice(&(t.data.len() as u32).to_le_bytes());
                     b.extend_from_slice(&t.data);
                 }
+                if let Some(t) = &f.video {
+                    for v in [t.x, t.y, t.w, t.h] {
+                        b.extend_from_slice(&v.to_le_bytes());
+                    }
+                    b.extend_from_slice(&(t.data.len() as u32).to_le_bytes());
+                    b.extend_from_slice(&t.data);
+                }
                 102
             }
             ToClient::Error(e) => {
@@ -292,7 +302,17 @@ impl ToClient {
                     }
                     tiles.push(Tile { x, y, w: tw, h: th, data });
                 }
-                ToClient::Frame(Frame { id, w, h, mode, moves, tiles })
+                let mut video = None;
+                if c.p < c.d.len() {
+                    let (x, y, tw, th) = (c.u16()?, c.u16()?, c.u16()?, c.u16()?);
+                    let len = c.u32()? as usize;
+                    let data = c.take(len)?.to_vec();
+                    if x as usize + tw as usize > w as usize || y as usize + th as usize > h as usize {
+                        return Err(bad());
+                    }
+                    video = Some(Tile { x, y, w: tw, h: th, data });
+                }
+                ToClient::Frame(Frame { id, w, h, mode, moves, tiles, video })
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
@@ -328,6 +348,7 @@ mod tests {
             mode: Mode::Mono,
             moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3 }],
             tiles: vec![Tile { x: 1, y: 2, w: 3, h: 4, data: vec![1, 2] }],
+            video: Some(Tile { x: 0, y: 0, w: 16, h: 16, data: vec![0, 0, 1] }),
         });
         let mut wire = Vec::new();
         let (k, p) = f.encode();

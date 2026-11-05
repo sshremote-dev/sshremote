@@ -11,8 +11,7 @@ damaged cells locally (sixel in a terminal, a native window with `--gui`).
   Windows (GDI capture, SendInput), synthetic test desktop.
 - Viewer: sixel terminals (Windows Terminal, foot, WezTerm, VTE with sixel) and a native window,
   keyboard and mouse, live presets and an auto preset.
-- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics, video regions,
-  zero-install terminal mode, scroll detection.
+- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics.
 
 ## Build
 
@@ -20,7 +19,9 @@ damaged cells locally (sixel in a terminal, a native window with `--gui`).
 cargo build --release
 ```
 
-On Linux the agent needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config`.
+On Linux the agent needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config` and a C++
+compiler for the bundled OpenH264. On Windows the GNU toolchain links the C++ runtime statically
+(`.cargo/config.toml`), so `desk.exe` needs no MinGW DLLs.
 Install the binary on the remote host as `~/.local/bin/desk` (on Windows, anywhere on `PATH`).
 
 ## Windows hosts
@@ -66,6 +67,13 @@ Sixel allows 256 colours per image, so in a terminal true colour is drawn with a
 for each repainted rectangle: exact when it has at most 256 colours, median cut otherwise.
 True-colour tiles are sent with a median (LOCO-I) predictor before zstd. When a band of the screen
 scrolls, the agent sends a move for what the viewer already has and only the newly exposed rows.
+
+With 256 colours or true colour, an area that keeps changing (a playing video, an animation) becomes
+a video region: after about 160x160 pixels of tiles changed in five of the last eight frames, that
+area is sent as H.264 (OpenH264, bit rate from its size, the fps cap and the colour mode) and the
+rest of the screen stays lossless. When the area has been still for 1.2 s it is sent losslessly
+once more. On the synthetic desktop a 320x240 animation at 30 fps took 62% less traffic in true
+colour and 36% less in 256 colours than lossless tiles.
 
 Auto starts at preset 2. Each second it compares received traffic with the budget and the
 round trip of a ping that queues behind frames: two seconds over budget or slow steps down,

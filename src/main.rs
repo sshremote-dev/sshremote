@@ -13,6 +13,7 @@ mod relay;
 mod scroll;
 mod session;
 mod sixel;
+mod video;
 
 use color::Mode;
 
@@ -34,7 +35,7 @@ options:
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
 
-keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, r refresh)";
+keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, z zoom, r refresh)";
 
 fn parse_client(args: &[String]) -> Result<session::Options, String> {
     let mut o = session::Options {
