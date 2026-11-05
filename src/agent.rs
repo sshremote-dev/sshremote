@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::capture::{self, Image, Input};
 use crate::color::{Plane, Reducer, diff, pack};
 use crate::proto::{Frame, Settings, Tile, ToAgent, ToClient, read_msg, write_msg};
+use crate::scroll;
 
 /// Frames sent but not yet acknowledged; more would only queue stale screens in SSH.
 const IN_FLIGHT: u32 = 2;
@@ -148,9 +149,18 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         fresh = false;
         let plane = red.reduce(img);
-        let rects = diff(prev.as_ref(), &plane);
+        let mut rects = diff(prev.as_ref(), &plane);
+        let mut moves = Vec::new();
+        if let Some(p) = prev.as_ref()
+            && let Some(m) = scroll::find(p, &plane, &rects)
+        {
+            let mut moved = p.clone();
+            scroll::apply(&mut moved.data, moved.w, moved.mode.bpp(), &m);
+            rects = diff(Some(&moved), &plane);
+            moves.push(m);
+        }
         prev = Some(plane);
-        if rects.is_empty() {
+        if rects.is_empty() && moves.is_empty() {
             due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
             continue;
         }
@@ -165,7 +175,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 data: pack(plane, r.x, r.y, r.w, r.h),
             })
             .collect();
-        let frame = Frame { id: next_id, w: plane.w as u16, h: plane.h as u16, mode: plane.mode, tiles };
+        let frame = Frame { id: next_id, w: plane.w as u16, h: plane.h as u16, mode: plane.mode, moves, tiles };
         next_id = next_id.wrapping_add(1);
         send(enc, &ToClient::Frame(frame)).map_err(io_err)?;
         in_flight += 1;

@@ -39,6 +39,8 @@ struct Viewer {
     qpal: Vec<[u8; 3]>,
     dirty: Vec<bool>,
     menu: bool,
+    /// Enlarge a reduced capture to the terminal; off where the terminal output itself crosses the network.
+    stretch: bool,
     pointer: (u16, u16),
     quit: bool,
     paint_ms: f64,
@@ -72,7 +74,7 @@ impl Viewer {
     }
 
     fn display(&self) -> (usize, usize) {
-        self.fb.fit((self.ctl.s.view_w as usize, self.ctl.s.view_h as usize))
+        self.fb.fit((self.ctl.s.view_w as usize, self.ctl.s.view_h as usize), self.stretch)
     }
 
     fn apply(&mut self, f: Frame) -> io::Result<()> {
@@ -94,8 +96,7 @@ impl Viewer {
         let (dw, dh) = self.display();
         let img_rows = self.rows - 1;
         self.dirty.resize(self.cols * img_rows, false);
-        for t in &f.tiles {
-            let (tx, ty, tw, th) = (t.x as usize, t.y as usize, t.w as usize, t.h as usize);
+        for (tx, ty, tw, th) in f.damage() {
             let x0 = tx * dw / w;
             let x1 = ((tx + tw) * dw).div_ceil(w);
             let y0 = ty * dh / h;
@@ -214,6 +215,12 @@ impl Viewer {
                 self.sess.send(ToAgent::Refresh)?;
                 self.status()
             }
+            Action::Zoom => {
+                self.stretch = !self.stretch;
+                self.full_redraw()?;
+                self.sess.send(ToAgent::Refresh)?;
+                self.status()
+            }
             Action::Settings => self.push_settings(),
             Action::Send(m) => {
                 self.sess.send(m)?;
@@ -309,6 +316,8 @@ pub fn run(opt: Options) -> Result<(), String> {
         qpal: Vec::new(),
         dirty: Vec::new(),
         menu: false,
+        // A viewer run inside an ssh session sends its sixel output over that session.
+        stretch: !(opt.local && std::env::var_os("SSH_CONNECTION").is_some()),
         pointer: (u16::MAX, u16::MAX),
         quit: false,
         paint_ms: 0.0,
@@ -348,7 +357,13 @@ pub fn run(opt: Options) -> Result<(), String> {
     }
     v.measure();
     let mut failure = None;
-    let mut typing: Vec<char> = opt.probe_type.chars().rev().collect();
+    let mut typing: Vec<ToAgent> = opt
+        .probe_type
+        .chars()
+        .map(|c| ToAgent::Key { keysym: c as u32, mods: 0 })
+        .chain((0..opt.probe_scroll).map(|_| ToAgent::Scroll { steps: 1 }))
+        .rev()
+        .collect();
     let keys_total = typing.len();
     let mut next_key = Instant::now() + Duration::from_secs(2);
     let mut type_start = (0u64, 0u32);
@@ -371,8 +386,7 @@ pub fn run(opt: Options) -> Result<(), String> {
                 if typing.len() == keys_total {
                     type_start = (v.sess.rx(), v.ctl.frames);
                 }
-                let c = typing.pop().unwrap();
-                v.sess.send(ToAgent::Key { keysym: c as u32, mods: 0 })?;
+                v.sess.send(typing.pop().unwrap())?;
                 next_key = Instant::now() + Duration::from_millis(500);
             }
             if v.ctl.tick(&mut v.sess)? {
@@ -382,7 +396,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         if keys_total > 0 {
             let rx = v.sess.rx() - type_start.0;
             eprintln!(
-                "probe: typed {keys_total} keys, {} frames, {:.0} bytes per key (includes idle since the first key)",
+                "probe: sent {keys_total} inputs, {} frames, {:.0} bytes per input (includes idle since the first)",
                 v.ctl.frames - type_start.1,
                 rx as f64 / keys_total as f64
             );

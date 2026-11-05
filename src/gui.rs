@@ -122,7 +122,7 @@ impl Gui {
 
     /// Redraws the display rectangle covering frame pixels `x0..x1, y0..y1`.
     fn draw(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
-        let (dw, dh) = self.fb.fit((self.bw, self.bh));
+        let (dw, dh) = self.fb.fit((self.bw, self.bh), true);
         let (fw, fh) = (self.fb.w, self.fb.h);
         if dw == 0 {
             return;
@@ -157,7 +157,7 @@ impl Gui {
 
     fn act(&mut self, a: Action) -> std::io::Result<()> {
         match a {
-            Action::None => {}
+            Action::None | Action::Zoom => {}
             Action::Quit => self.quit = true,
             Action::Refresh => {
                 self.fb = Framebuffer::default();
@@ -206,7 +206,7 @@ impl Gui {
     }
 
     fn mouse(&mut self) -> std::io::Result<()> {
-        let (dw, dh) = self.fb.fit((self.bw, self.bh));
+        let (dw, dh) = self.fb.fit((self.bw, self.bh), true);
         let Some((mx, my)) = self.win.get_mouse_pos(MouseMode::Discard) else {
             return Ok(());
         };
@@ -287,9 +287,8 @@ pub fn run(opt: &Options, sess: Session, rx: mpsc::Receiver<Ev>) -> Result<(), S
                         if g.fb.apply(&f)? {
                             g.redraw_all();
                         } else {
-                            for t in &f.tiles {
-                                let (x, y) = (t.x as usize, t.y as usize);
-                                g.draw(x, y, x + t.w as usize, y + t.h as usize);
+                            for (x, y, w, h) in f.damage() {
+                                g.draw(x, y, x + w, y + h);
                             }
                         }
                         g.ctl.frame_done(f.covered() * 2 >= f.w as usize * f.h as usize);

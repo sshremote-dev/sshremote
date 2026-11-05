@@ -10,6 +10,7 @@ mod proto;
 mod quant;
 #[cfg(windows)]
 mod relay;
+mod scroll;
 mod session;
 mod sixel;
 
@@ -51,6 +52,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         cell: None,
         probe: None,
         probe_type: String::new(),
+        probe_scroll: 0,
     };
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
@@ -85,6 +87,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             }
             "--dump" => dump = Some(val()?),
             "--type" => o.probe_type = val()?,
+            "--scroll" => o.probe_scroll = val()?.parse().map_err(|_| "bad --scroll")?,
             "-h" | "--help" => return Err(USAGE.into()),
             s if s.starts_with('-') => return Err(format!("unknown option {s}\n\n{USAGE}")),
             s => o.host = Some(s.into()),

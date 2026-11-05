@@ -4,6 +4,7 @@
 use std::io::{self, Read, Write};
 
 use crate::color::Mode;
+use crate::scroll::Move;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -73,6 +74,8 @@ pub struct Frame {
     pub w: u16,
     pub h: u16,
     pub mode: Mode,
+    /// Applied before the tiles: areas the client already has, shifted vertically.
+    pub moves: Vec<Move>,
     pub tiles: Vec<Tile>,
 }
 
@@ -80,6 +83,12 @@ impl Frame {
     /// Pixels carried by the frame's tiles.
     pub fn covered(&self) -> usize {
         self.tiles.iter().map(|t| t.w as usize * t.h as usize).sum()
+    }
+
+    /// Every rectangle whose pixels this frame changes, as (x, y, w, h).
+    pub fn damage(&self) -> impl Iterator<Item = (usize, usize, usize, usize)> + '_ {
+        let moved = self.moves.iter().map(|m| (m.x, m.y, m.w, m.h));
+        moved.chain(self.tiles.iter().map(|t| (t.x as usize, t.y as usize, t.w as usize, t.h as usize)))
     }
 }
 
@@ -226,6 +235,12 @@ impl ToClient {
                 b.extend_from_slice(&f.w.to_le_bytes());
                 b.extend_from_slice(&f.h.to_le_bytes());
                 b.push(f.mode.to_u8());
+                b.extend_from_slice(&(f.moves.len() as u16).to_le_bytes());
+                for m in &f.moves {
+                    for v in [m.x as u16, m.y as u16, m.w as u16, m.h as u16, m.dy as i16 as u16] {
+                        b.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
                 b.extend_from_slice(&(f.tiles.len() as u32).to_le_bytes());
                 for t in &f.tiles {
                     for v in [t.x, t.y, t.w, t.h] {
@@ -256,6 +271,16 @@ impl ToClient {
             }
             102 => {
                 let (id, w, h, mode) = (c.u32()?, c.u16()?, c.u16()?, c.mode()?);
+                let mut moves = Vec::new();
+                for _ in 0..c.u16()? {
+                    let (x, y, mw, mh) = (c.u16()? as usize, c.u16()? as usize, c.u16()? as usize, c.u16()? as usize);
+                    let dy = c.u16()? as i16 as isize;
+                    let src = y as isize - dy;
+                    if x + mw > w as usize || y + mh > h as usize || src < 0 || src as usize + mh > h as usize {
+                        return Err(bad());
+                    }
+                    moves.push(Move { x, y, w: mw, h: mh, dy });
+                }
                 let n = c.u32()? as usize;
                 let mut tiles = Vec::with_capacity(n.min(1 << 16));
                 for _ in 0..n {
@@ -267,7 +292,7 @@ impl ToClient {
                     }
                     tiles.push(Tile { x, y, w: tw, h: th, data });
                 }
-                ToClient::Frame(Frame { id, w, h, mode, tiles })
+                ToClient::Frame(Frame { id, w, h, mode, moves, tiles })
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
@@ -301,6 +326,7 @@ mod tests {
             w: 64,
             h: 32,
             mode: Mode::Mono,
+            moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3 }],
             tiles: vec![Tile { x: 1, y: 2, w: 3, h: 4, data: vec![1, 2] }],
         });
         let mut wire = Vec::new();

@@ -29,6 +29,8 @@ pub struct Options {
     pub probe: Option<(f64, (u16, u16), Option<String>)>,
     /// Probe only: text typed one key per 500 ms after a 2 s settle, to measure per-key traffic.
     pub probe_type: String,
+    /// Probe only: scroll steps sent the same way after the typed text.
+    pub probe_scroll: usize,
 }
 
 pub enum Ev {
@@ -193,6 +195,11 @@ impl Framebuffer {
             self.pal = f.mode.palette();
             self.mode = Some(f.mode);
         }
+        if !resized {
+            for m in &f.moves {
+                crate::scroll::apply(&mut self.rgb, w, 3, m);
+            }
+        }
         for t in &f.tiles {
             let (tx, ty, tw, th) = (t.x as usize, t.y as usize, t.w as usize, t.h as usize);
             let px = unpack(&t.data, f.mode, tw, th).ok_or_else(|| io::Error::other("short tile"))?;
@@ -217,12 +224,13 @@ impl Framebuffer {
         ppm
     }
 
-    /// The frame scaled to fit `view` without distortion, shown top-left.
-    pub fn fit(&self, view: (usize, usize)) -> (usize, usize) {
+    /// The frame scaled to fit `view` without distortion, shown top-left; never enlarged unless `upscale`.
+    pub fn fit(&self, view: (usize, usize), upscale: bool) -> (usize, usize) {
         if self.w == 0 || self.h == 0 {
             return (0, 0);
         }
         let k = (view.0 as f64 / self.w as f64).min(view.1 as f64 / self.h as f64);
+        let k = if upscale { k } else { k.min(1.0) };
         (((self.w as f64 * k) as usize).max(1), ((self.h as f64 * k) as usize).max(1))
     }
 }
@@ -321,6 +329,7 @@ pub enum Action {
     None,
     Quit,
     Refresh,
+    Zoom,
     Settings,
     Send(ToAgent),
 }
@@ -425,6 +434,7 @@ impl Control {
                 self.custom();
             }
             'r' => return Action::Refresh,
+            'z' => return Action::Zoom,
             ']' => {
                 return Action::Send(ToAgent::Key { keysym: ']' as u32, mods: MOD_CTRL });
             }
@@ -434,7 +444,7 @@ impl Control {
     }
 
     pub const MENU_HELP: &str =
-        "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | r refresh | ] send Ctrl+]";
+        "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | r refresh | ] send Ctrl+]";
 
     /// `full` marks a frame that resent most of the screen; such bursts come from
     /// starting, resizing or a mode change, not from what the screen is doing, so auto waits them out.

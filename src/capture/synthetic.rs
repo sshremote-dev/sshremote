@@ -15,6 +15,7 @@ pub struct Synthetic {
     pointer: (usize, usize),
     typed: Vec<u32>,
     clicks: u32,
+    scrolled: usize,
     dirty: bool,
 }
 
@@ -27,6 +28,7 @@ impl Synthetic {
             pointer: (W / 2, H / 2),
             typed: Vec::new(),
             clicks: 0,
+            scrolled: 0,
             dirty: true,
         }
     }
@@ -43,8 +45,9 @@ impl Synthetic {
         fill(0, 0, W, H, [40, 44, 52]);
         let bar = if self.clicks % 2 == 0 { [60, 64, 72] } else { [30, 90, 160] };
         fill(0, 0, W, 40, bar);
-        for line in 0..24 {
-            let y = 60 + line * 22;
+        for row in 0..24 {
+            let y = 60 + row * 22;
+            let line = row + self.scrolled;
             let mut x = 20 + (line % 3) * 30;
             let mut seed = line as u32 * 2654435761;
             while x < 760 {
@@ -105,6 +108,7 @@ impl Capture for Synthetic {
                 self.typed.pop();
             }
             Input::Key { keysym, .. } => self.typed.push(keysym),
+            Input::Scroll { steps } => self.scrolled = self.scrolled.saturating_add_signed(steps as isize),
             _ => return Ok(()),
         }
         self.dirty = true;

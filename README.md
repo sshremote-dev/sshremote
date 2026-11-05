@@ -51,7 +51,8 @@ desk HOST --probe 5 --dump out.ppm   # headless: print traffic, save the reconst
 ```
 
 Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`/`-` scale, `f` fps,
-`r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
+`z` zoom (enlarge a reduced capture to the terminal; off by default inside an ssh session, where the
+terminal output itself crosses the network), `r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
 
 | Preset | Scale | Colour | fps |
 |---|---|---|---|
@@ -61,8 +62,10 @@ Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`
 | 3 crisp | 100% | true | 30 |
 | 4 exact | 100% | true | 60 |
 
-A terminal shows at most 256 colours through sixel, so there presets 3 and 4 send 256 colours.
-True-colour tiles are sent with a median (LOCO-I) predictor before zstd.
+Sixel allows 256 colours per image, so in a terminal true colour is drawn with a palette made
+for each repainted rectangle: exact when it has at most 256 colours, median cut otherwise.
+True-colour tiles are sent with a median (LOCO-I) predictor before zstd. When a band of the screen
+scrolls, the agent sends a move for what the viewer already has and only the newly exposed rows.
 
 Auto starts at preset 2. Each second it compares received traffic with the budget and the
 round trip of a ping that queues behind frames: two seconds over budget or slow steps down,

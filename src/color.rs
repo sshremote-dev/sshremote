@@ -129,6 +129,7 @@ impl Lut {
 }
 
 /// A screen reduced to the wire colour mode: one byte per pixel, or RGB for true colour.
+#[derive(Clone)]
 pub struct Plane {
     pub w: usize,
     pub h: usize,
