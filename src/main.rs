@@ -2,9 +2,12 @@ mod agent;
 mod capture;
 mod client;
 mod color;
+#[cfg(windows)]
+mod conpty;
 mod gui;
 mod keys;
 mod proto;
+mod quant;
 #[cfg(windows)]
 mod relay;
 mod session;

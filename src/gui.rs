@@ -292,7 +292,7 @@ pub fn run(opt: &Options, sess: Session, rx: mpsc::Receiver<Ev>) -> Result<(), S
                                 g.draw(x, y, x + t.w as usize, y + t.h as usize);
                             }
                         }
-                        g.ctl.frame_done();
+                        g.ctl.frame_done(f.covered() * 2 >= f.w as usize * f.h as usize);
                         g.sess.send(ToAgent::Ack(f.id))?;
                     }
                     Ev::Net(ToClient::Pong(t)) => g.ctl.pong(t),

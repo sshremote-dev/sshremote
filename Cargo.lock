@@ -301,6 +301,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
+ "libc",
  "minifb",
  "windows-sys",
  "zbus",

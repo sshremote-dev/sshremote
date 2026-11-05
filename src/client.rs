@@ -12,6 +12,7 @@ use crossterm::{cursor, execute, terminal};
 use crate::color::{Lut, Mode};
 use crate::keys;
 use crate::proto::{Frame, ToAgent, ToClient};
+use crate::quant;
 use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
@@ -27,12 +28,15 @@ struct Viewer {
     cw: usize,
     ch: usize,
     cell_override: Option<(usize, usize)>,
+    cell_queried: Option<(usize, usize)>,
     fb: Framebuffer,
     lut_mode: Option<Mode>,
     lut: Lut,
     pal: Vec<[u8; 3]>,
     sixel: Sixel,
     idx: Vec<u8>,
+    px: Vec<[u8; 3]>,
+    qpal: Vec<[u8; 3]>,
     dirty: Vec<bool>,
     menu: bool,
     pointer: (u16, u16),
@@ -53,15 +57,16 @@ impl Viewer {
         self.rows = r.max(3) as usize;
         let (mut cw, mut ch) = (10, 20);
         if let Ok(ws) = terminal::window_size()
-            && ws.width > 0
-            && ws.height > 0
             && ws.columns > 0
             && ws.rows > 0
         {
-            cw = ws.width as usize / ws.columns as usize;
-            ch = ws.height as usize / ws.rows as usize;
+            let (w, h) = (ws.width as usize / ws.columns as usize, ws.height as usize / ws.rows as usize);
+            // Some ssh clients (Windows OpenSSH) report a fixed 640x480 whatever the window is.
+            if (4..=64).contains(&w) && (8..=128).contains(&h) && (ws.width, ws.height) != (640, 480) {
+                (cw, ch) = (w, h);
+            }
         }
-        (self.cw, self.ch) = self.cell_override.unwrap_or((cw, ch));
+        (self.cw, self.ch) = self.cell_override.or(self.cell_queried).unwrap_or((cw, ch));
         self.ctl.s.view_w = (self.cols * self.cw).min(u16::MAX as usize) as u16;
         self.ctl.s.view_h = ((self.rows - 1) * self.ch).min(u16::MAX as usize) as u16;
     }
@@ -79,7 +84,7 @@ impl Viewer {
             self.dirty.iter_mut().for_each(|d| *d = true);
         }
         if self.lut_mode != Some(f.mode) {
-            // Sixel registers hold at most 256 colours, so true colour is shown through the 256 palette.
+            // True colour gets a palette per painted rectangle instead (see `paint`).
             let shown = if f.mode == Mode::True { Mode::Color256 } else { f.mode };
             self.pal = shown.palette();
             self.lut = Lut::new(&self.pal);
@@ -107,7 +112,7 @@ impl Viewer {
         self.out.write_all(&out)?;
         self.out.flush()?;
         self.paint_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.ctl.frame_done();
+        self.ctl.frame_done(f.covered() * 2 >= w * h);
         self.sess.send(ToAgent::Ack(f.id))
     }
 
@@ -115,7 +120,7 @@ impl Viewer {
     fn paint(&mut self, out: &mut Vec<u8>, dw: usize, dh: usize) {
         let (cols, img_rows) = (self.cols, self.rows - 1);
         let (fw, fh) = (self.fb.w, self.fb.h);
-        let black = self.lut.get(0, 0, 0);
+        let adaptive = self.fb.mode == Some(Mode::True);
         for r in 0..img_rows {
             let mut c = 0;
             while c < cols {
@@ -136,8 +141,8 @@ impl Viewer {
                 }
                 let (x0, y0) = (c * self.cw, r * self.ch);
                 let (w, h) = ((c1 - c) * self.cw, (r1 - r) * self.ch);
-                self.idx.clear();
-                self.idx.resize(w * h, black);
+                self.px.clear();
+                self.px.resize(w * h, [0; 3]);
                 if dw > 0 {
                     for py in 0..h {
                         let dy = y0 + py;
@@ -145,20 +150,26 @@ impl Viewer {
                             break;
                         }
                         let frow = (dy * fh / dh) * fw;
-                        let line = &mut self.idx[py * w..(py + 1) * w];
+                        let line = &mut self.px[py * w..(py + 1) * w];
                         for (px, slot) in line.iter_mut().enumerate() {
                             let dx = x0 + px;
                             if dx >= dw {
                                 break;
                             }
                             let o = (frow + dx * fw / dw) * 3;
-                            let rgb = &self.fb.rgb[o..o + 3];
-                            *slot = self.lut.get(rgb[0], rgb[1], rgb[2]);
+                            slot.copy_from_slice(&self.fb.rgb[o..o + 3]);
                         }
                     }
                 }
                 let _ = write!(out, "\x1b[{};{}H", r + 1, c + 1);
-                self.sixel.encode(out, w, h, &self.idx, &self.pal);
+                if adaptive {
+                    quant::quantize(&self.px, &mut self.qpal, &mut self.idx);
+                    self.sixel.encode(out, w, h, &self.idx, &self.qpal);
+                } else {
+                    self.idx.clear();
+                    self.idx.extend(self.px.iter().map(|p| self.lut.get(p[0], p[1], p[2])));
+                    self.sixel.encode(out, w, h, &self.idx, &self.pal);
+                }
                 c = c1;
             }
         }
@@ -281,18 +292,21 @@ pub fn run(opt: Options) -> Result<(), String> {
         paint_bytes: 0,
         label: format!("{host} {}x{} {}", sess.desk.0, sess.desk.1, sess.backend),
         sess,
-        ctl: Control::new(&opt, Mode::Color256),
+        ctl: Control::new(&opt, Mode::True),
         cols: 0,
         rows: 0,
         cw: 10,
         ch: 20,
         cell_override: opt.cell,
+        cell_queried: None,
         fb: Framebuffer::default(),
         lut_mode: None,
         lut: Lut::new(&[[0, 0, 0]]),
         pal: Vec::new(),
         sixel: Sixel::new(),
         idx: Vec::new(),
+        px: Vec::new(),
+        qpal: Vec::new(),
         dirty: Vec::new(),
         menu: false,
         pointer: (u16::MAX, u16::MAX),
@@ -303,8 +317,27 @@ pub fn run(opt: Options) -> Result<(), String> {
     let interactive = opt.probe.is_none();
     let deadline = opt.probe.as_ref().map(|p| Instant::now() + Duration::from_secs_f64(p.0));
     if interactive {
+        #[cfg(windows)]
+        if windows_ssh_session() {
+            // Write past the pseudo console, which would drop the images.
+            v.out = Box::new(crate::conpty::raw_output().map_err(|e| {
+                format!(
+                    "{WINDOWS_SSH}
+({e})"
+                )
+            })?);
+        }
         terminal::enable_raw_mode().map_err(|e| e.to_string())?;
+        if opt.cell.is_none() {
+            v.cell_queried = query_cell();
+        }
         let _ = execute!(v.out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
+        #[cfg(windows)]
+        {
+            use crossterm::Command;
+            // The console itself must also deliver mouse records, not only the client terminal.
+            let _ = event::EnableMouseCapture.execute_winapi();
+        }
         thread::spawn(move || {
             while let Ok(e) = event::read() {
                 if tx.send(Ev::Term(e)).is_err() {
@@ -387,5 +420,70 @@ pub fn run(opt: Options) -> Result<(), String> {
     match failure {
         Some(e) => Err(format!("{e}\n{}", v.sess.log())),
         None => Ok(()),
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const WINDOWS_SSH: &str = "this is a Windows ssh session, whose console layer drops sixel graphics,
+and its output pipe could not be reached directly.
+Run the viewer on the computer you are sitting at instead, for example:
+  desk USER@THIS-PC --remote \"D:\\Projects\\desk.exe --agent\"
+or add --gui to open a window there.";
+
+/// The viewer runs inside a Windows OpenSSH session, where output through the pseudo console cannot carry images.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_ssh_session() -> bool {
+    cfg!(windows) && (std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_CLIENT").is_some())
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_cell_report(buf: &[u8]) -> Option<(usize, usize)> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let body = &s[s.find("[6;")? + 4..];
+    let (h, rest) = body.split_once(';')?;
+    let w = &rest[..rest.find('t')?];
+    let (w, h) = (w.parse().ok()?, h.parse().ok()?);
+    ((4..=64).contains(&w) && (8..=128).contains(&h)).then_some((w, h))
+}
+
+/// Asks the terminal for its cell size in pixels (XTWINOPS 16); works through ssh,
+/// unlike the pixel size in the window-size ioctl. Needs raw mode.
+#[cfg(unix)]
+fn query_cell() -> Option<(usize, usize)> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+    tty.write_all(b"[16t").ok()?;
+    tty.flush().ok()?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut buf = Vec::new();
+    while !buf.ends_with(b"t") {
+        let left = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let mut pfd = libc::pollfd { fd: tty.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        if left == 0 || unsafe { libc::poll(&mut pfd, 1, left) } <= 0 {
+            break;
+        }
+        let mut b = [0u8; 64];
+        match tty.read(&mut b) {
+            Ok(n @ 1..) => buf.extend_from_slice(&b[..n]),
+            _ => break,
+        }
+    }
+    parse_cell_report(&buf)
+}
+
+/// The Windows console reports keys, not replies, so the default cell size is used there.
+#[cfg(not(unix))]
+fn query_cell() -> Option<(usize, usize)> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cell_report() {
+        assert_eq!(super::parse_cell_report(b"[6;20;10t"), Some((10, 20)));
+        assert_eq!(super::parse_cell_report(b"junk[6;17;8t"), Some((8, 17)));
+        assert_eq!(super::parse_cell_report(b"[4;600;1200t"), None);
     }
 }

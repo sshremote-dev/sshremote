@@ -436,9 +436,15 @@ impl Control {
     pub const MENU_HELP: &str =
         "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | r refresh | ] send Ctrl+]";
 
-    pub fn frame_done(&mut self) {
+    /// `full` marks a frame that resent most of the screen; such bursts come from
+    /// starting, resizing or a mode change, not from what the screen is doing, so auto waits them out.
+    pub fn frame_done(&mut self, full: bool) {
         self.frames += 1;
         self.stat_frames += 1;
+        if full && let Some(a) = self.auto.as_mut() {
+            a.changed = Instant::now();
+            a.over = 0;
+        }
     }
 
     pub fn pong(&mut self, t: u32) {

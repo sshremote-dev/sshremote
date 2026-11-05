@@ -76,6 +76,13 @@ pub struct Frame {
     pub tiles: Vec<Tile>,
 }
 
+impl Frame {
+    /// Pixels carried by the frame's tiles.
+    pub fn covered(&self) -> usize {
+        self.tiles.iter().map(|t| t.w as usize * t.h as usize).sum()
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ToClient {
     Hello { w: u16, h: u16, backend: String },

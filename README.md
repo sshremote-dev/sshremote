@@ -31,6 +31,12 @@ one-shot scheduled task (`schtasks /it`), then relays the stream over two named 
 that user and SYSTEM may open. The user must be logged on at the console. A helper that fails
 writes its error to `%TEMP%\desk-agent.log`.
 
+The viewer also runs inside a Windows ssh session (`desk --local --capture windows` typed in the
+remote shell). There every byte normally passes through a pseudo console (ConPTY) that re-renders
+text and drops sixel images, so the viewer duplicates the write end of the pseudo console host's
+output pipe, which leads straight to sshd, and writes its images there. Keys still arrive through
+the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20.
+
 ## Use
 
 ```sh
