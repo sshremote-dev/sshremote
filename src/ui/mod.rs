@@ -16,6 +16,7 @@ pub use atspi::Ui;
 pub use win::Ui;
 
 /// What is shared, as the capture knows it (Windows); GNOME pins its own when sharing starts.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Scope {
     pub window: Option<u64>,
     pub app: Option<String>,
