@@ -85,7 +85,8 @@ is committed. Mouse back and forward buttons and horizontal wheels are passed th
 is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME, and on Windows
 with the sshremote service installed.
 
-On a Windows viewer, while the session window is in front, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
+On a Windows viewer, while the session window is in front and the pointer is over the picture (as in
+RustDesk), Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
 Print Screen are taken with a low-level keyboard hook (on a thread of its own, since Windows skips a
 hook whose thread is busy) and go to the SSH host instead of this PC; the toolbar's "System keys"
 switch turns this off.

@@ -242,6 +242,8 @@ struct Remote {
     sharing: (u8, String),
     /// The next click on the picture chooses the window to share.
     click_pick: bool,
+    /// Where the remote picture was drawn last, to tell when the pointer is over it.
+    last_shown: Option<Rect>,
     /// That click has been pressed on the picture (the release of the click that opened the mode does not count).
     pick_pressed: bool,
     /// When to share the window that the choosing click brought to the front.
@@ -357,6 +359,8 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
 
 pub fn style(ctx: &egui::Context) {
     install_fonts(ctx);
+    // Ctrl+plus and Ctrl+minus belong to the remote host and the terminal, not to zooming this window.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
     set_theme(ctx, dark);
     ctx.all_styles_mut(|s| {
@@ -820,6 +824,7 @@ impl eframe::App for App {
                         picker: None,
                         sharing: (0, String::new()),
                         click_pick: false,
+                        last_shown: None,
                         pick_pressed: false,
                         pick_at: None,
                         label: format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend),
@@ -904,7 +909,11 @@ impl eframe::App for App {
             },
             Screen::Remote(r) => {
                 #[cfg(windows)]
-                crate::keygrab::set_active(r.grab_keys && ctx.input(|i| i.focused));
+                {
+                    // As in RustDesk: system keys go to the remote host while the pointer is over its picture.
+                    let over = ctx.pointer_hover_pos().is_some_and(|p| r.last_shown.is_some_and(|s| s.contains(p)));
+                    crate::keygrab::set_active(r.grab_keys && ctx.input(|i| i.focused) && over);
+                }
                 let grabbed: Vec<(u32, bool)> =
                     self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
                 let result = grabbed
@@ -971,6 +980,7 @@ impl Remote {
         self.resize(area.size() * ppp)?;
         self.edge_pan(&ctx, area);
         let shown = self.picture(ui, area, ppp);
+        self.last_shown = shown;
         let toolbar_rect = self.toolbar(&ctx, screen)?;
         let chat_rect = self.chat_panel(&ctx)?;
         self.upload_overlay(&ctx, screen);
@@ -981,6 +991,20 @@ impl Remote {
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
             self.pick_at = None;
             self.send(ToAgent::Share { kind: 3, id: 0 })?;
+        }
+        if self.paused {
+            // A badge on the picture: it is a still image until resumed.
+            let text =
+                format!("{}  Paused   ·   {} resumes, {} fetches one frame", ic::PAUSE, ic::PLAY, ic::ARROW_CLOCKWISE);
+            let painter =
+                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("paused-badge")));
+            let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+            let r = Rect::from_min_size(
+                Pos2::new(screen.left() + 12.0, screen.bottom() - galley.size().y - 30.0),
+                galley.size() + Vec2::new(24.0, 14.0),
+            );
+            painter.rect_filled(r, CornerRadius::same(8), Color32::from_rgba_unmultiplied(20, 22, 28, 220));
+            painter.galley(r.min + Vec2::new(12.0, 7.0), galley, Color32::WHITE);
         }
         if self.click_pick {
             // A hint over the picture while the next click chooses the window.
@@ -2147,7 +2171,15 @@ impl Remote {
         } else {
             (ic::PAUSE, "Pause the picture to save traffic; fetch single frames when needed")
         };
-        if icon(ui, glyph, tip, self.paused).clicked() {
+        // Paused: a filled blue play button, so the frozen state is plain to see.
+        let b = if self.paused {
+            egui::Button::new(RichText::new(glyph).size(16.0).color(Color32::WHITE))
+                .fill(ACCENT)
+                .min_size(Vec2::splat(28.0))
+        } else {
+            tool_button(glyph, false)
+        };
+        if ui.add(b).on_hover_text(tip).clicked() {
             let on = !self.paused;
             self.paused = on;
             *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
@@ -2164,7 +2196,7 @@ impl Remote {
             ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
             sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
             if cfg!(windows) {
-                let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the SSH host instead of this PC";
+                let tip = "While the pointer is over the picture, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
                 ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
             }
             theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();

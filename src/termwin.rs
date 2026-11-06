@@ -16,6 +16,9 @@ use crate::gui::{ACCENT, ic};
 use crate::proto::ToAgent;
 
 const BACKGROUND: Color32 = Color32::from_rgb(22, 23, 28);
+const TAB_STRIP: Color32 = Color32::from_rgb(12, 13, 16);
+const TAB_HOVER: Color32 = Color32::from_rgb(34, 36, 43);
+const TAB_DIVIDER: Color32 = Color32::from_rgb(52, 55, 64);
 const FOREGROUND: Color32 = Color32::from_rgb(215, 218, 224);
 const PALETTE: [Color32; 16] = [
     Color32::from_rgb(59, 63, 74),
@@ -271,7 +274,7 @@ impl TermWindow {
                     TermEvent::PtyWrite(s) => {
                         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: s.into_bytes() }))
                     }
-                    TermEvent::Title(s) => t.title = s,
+                    TermEvent::Title(s) => t.title = tab_title(&s),
                     TermEvent::ResetTitle => t.title = format!("Shell {}", t.id),
                     TermEvent::ClipboardStore(_, s) => ctx.copy_text(s),
                     _ => {}
@@ -282,27 +285,121 @@ impl TermWindow {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
-        egui::Panel::top("term-tabs").show(ui, |ui| {
+        // A tab strip as in Windows Terminal or a browser: the active tab joins the terminal below.
+        let strip =
+            egui::Frame::new().fill(TAB_STRIP).inner_margin(egui::Margin { left: 8, right: 6, top: 6, bottom: 0 });
+        egui::Panel::top("term-tabs").frame(strip).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
             ui.horizontal(|ui| {
                 let mut close = None;
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let mut title: String = t.title.chars().take(28).collect();
-                    if t.exited.is_some() {
+                let n = self.tabs.len().max(1) as f32;
+                let room = (ui.available_width() - 150.0).max(120.0);
+                let tab_w = (room / n).clamp(110.0, 220.0);
+                for i in 0..self.tabs.len() {
+                    let active = i == self.active;
+                    let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click());
+                    let hovered = r.hovered();
+                    let p = ui.painter();
+                    let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+                    if active {
+                        p.rect_filled(rect, top_round, BACKGROUND);
+                    } else if hovered {
+                        p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
+                    } else if i + 1 != self.active && i + 1 < self.tabs.len() {
+                        // A thin divider between two inactive tabs.
+                        let x = rect.right() - 0.5;
+                        p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, TAB_DIVIDER));
+                    }
+                    let t = &self.tabs[i];
+                    let ended = t.exited.is_some();
+                    let fg = if active { Color32::WHITE } else { Color32::from_gray(170) };
+                    let fg = if ended { fg.gamma_multiply(0.5) } else { fg };
+                    p.text(
+                        rect.left_center() + Vec2::new(12.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        ic::TERMINAL,
+                        FontId::proportional(14.0),
+                        fg,
+                    );
+                    // The close button appears on the active tab and under the pointer, as in browsers.
+                    let close_rect =
+                        Rect::from_center_size(rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
+                    let show_close = active || hovered;
+                    let title_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 10.0 };
+                    let mut title = t.title.clone();
+                    if ended {
                         title.push_str(" (ended)");
                     }
-                    let r = ui.selectable_label(i == self.active, format!("{}  {title}", ic::TERMINAL));
-                    if r.clicked() {
+                    let title_rect = Rect::from_min_max(
+                        Pos2::new(rect.left() + 32.0, rect.top()),
+                        Pos2::new(title_right, rect.bottom()),
+                    );
+                    let galley = p.layout_no_wrap(title, FontId::proportional(13.0), fg);
+                    let clip = ui.painter_at(title_rect);
+                    clip.galley(
+                        Pos2::new(title_rect.left(), rect.center().y - galley.size().y / 2.0),
+                        galley.clone(),
+                        fg,
+                    );
+                    if galley.size().x > title_rect.width() {
+                        // Fade the cut end instead of ending mid-letter.
+                        let bg = if active {
+                            BACKGROUND
+                        } else if hovered {
+                            TAB_HOVER
+                        } else {
+                            TAB_STRIP
+                        };
+                        let fade = Rect::from_min_max(
+                            Pos2::new(title_rect.right() - 18.0, rect.top() + 6.0),
+                            Pos2::new(title_rect.right(), rect.bottom() - 6.0),
+                        );
+                        for k in 0..6 {
+                            let a = (k as f32 + 1.0) / 6.0;
+                            let x0 = fade.left() + fade.width() * k as f32 / 6.0;
+                            let slice =
+                                Rect::from_min_max(Pos2::new(x0, fade.top()), Pos2::new(fade.right(), fade.bottom()));
+                            ui.painter().rect_filled(slice, CornerRadius::ZERO, bg.gamma_multiply(a * 0.35));
+                        }
+                    }
+                    if show_close {
+                        let cr = ui.interact(close_rect, ui.make_persistent_id(("close-tab", t.id)), Sense::click());
+                        if cr.hovered() {
+                            ui.painter().circle_filled(close_rect.center(), 10.0, Color32::from_white_alpha(28));
+                        }
+                        ui.painter().text(
+                            close_rect.center(),
+                            Align2::CENTER_CENTER,
+                            ic::X,
+                            FontId::proportional(12.0),
+                            fg,
+                        );
+                        if cr.clicked() {
+                            close = Some(i);
+                        }
+                        cr.on_hover_text("Close (middle click on the tab also closes)");
+                    }
+                    if r.clicked() && close.is_none() {
                         self.active = i;
                     }
                     if r.middle_clicked() {
                         close = Some(i);
                     }
-                    if ui.small_button(ic::X).on_hover_text("Close this shell").clicked() {
-                        close = Some(i);
-                    }
-                    ui.separator();
+                    r.on_hover_text(&self.tabs[i].title);
                 }
-                if crate::gui::icon(ui, ic::PLUS, "New shell", false).clicked() {
+                ui.add_space(4.0);
+                let (plus, pr) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::click());
+                if pr.hovered() {
+                    ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), TAB_HOVER);
+                }
+                ui.painter().text(
+                    plus.center(),
+                    Align2::CENTER_CENTER,
+                    ic::PLUS,
+                    FontId::proportional(15.0),
+                    Color32::from_gray(200),
+                );
+                if pr.on_hover_text("New shell (Ctrl+Shift+T)").clicked() {
                     self.open_tab(out);
                 }
                 if let Some(i) = close {
@@ -313,30 +410,66 @@ impl TermWindow {
                     if self.tabs.is_empty() {
                         out.push(Cmd::Close);
                     }
-                    self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    if self.active > i || self.active >= self.tabs.len() {
+                        self.active = self.active.saturating_sub(1);
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+                        let b = egui::Button::new(RichText::new(glyph).size(14.0).color(Color32::from_gray(190)))
+                            .frame_when_inactive(false)
+                            .min_size(Vec2::splat(28.0));
+                        ui.add(b).on_hover_text(tip).clicked()
+                    };
                     if let Some(cmd) = &self.system
-                        && crate::gui::icon(
-                            ui,
-                            ic::ARROW_SQUARE_OUT,
-                            "Open this host in the system terminal (ssh)",
-                            false,
-                        )
-                        .clicked()
+                        && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)")
                     {
                         let _ = spawn_system(cmd);
                     }
-                    if crate::gui::icon(ui, ic::PLUS, "Larger text", false).clicked() {
+                    if small(ui, ic::PLUS, "Larger text (Ctrl+=)") {
                         self.font_size = (self.font_size + 1.0).min(32.0);
                     }
-                    ui.label(RichText::new(format!("{:.0}", self.font_size)).weak());
-                    if crate::gui::icon(ui, ic::MINUS, "Smaller text", false).clicked() {
+                    ui.label(RichText::new(format!("{:.0}", self.font_size)).size(12.0).color(Color32::from_gray(140)));
+                    if small(ui, ic::MINUS, "Smaller text (Ctrl+-)") {
                         self.font_size = (self.font_size - 1.0).max(8.0);
                     }
                 });
             });
         });
+        // Keyboard shortcuts of the window itself, as in other terminals.
+        let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
+            let cs = i.modifiers.ctrl && i.modifiers.shift;
+            (
+                cs && i.key_pressed(Key::T),
+                cs && i.key_pressed(Key::W),
+                i.modifiers.ctrl && i.key_pressed(Key::Tab),
+                i.modifiers.ctrl && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
+                i.modifiers.ctrl && i.key_pressed(Key::Minus),
+            )
+        });
+        if new_tab {
+            self.open_tab(out);
+        }
+        if close_tab && !self.tabs.is_empty() {
+            let t = self.tabs.remove(self.active);
+            if t.exited.is_none() {
+                out.push(Cmd::Send(ToAgent::TermClose { id: t.id }));
+            }
+            if self.tabs.is_empty() {
+                out.push(Cmd::Close);
+            }
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        }
+        if next && !self.tabs.is_empty() {
+            self.active = (self.active + 1) % self.tabs.len();
+        }
+        if bigger {
+            self.font_size = (self.font_size + 1.0).min(32.0);
+        }
+        if smaller {
+            self.font_size = (self.font_size - 1.0).max(8.0);
+        }
         let frame = egui::Frame::new().fill(BACKGROUND).inner_margin(6.0);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let font_size = self.font_size;
@@ -456,6 +589,13 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
                 }
             }
             Event::Key { key, pressed: true, modifiers, .. } => {
+                // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
+                let cs = modifiers.ctrl && modifiers.shift;
+                if (cs && matches!(key, Key::T | Key::W))
+                    || (modifiers.ctrl && matches!(key, Key::Tab | Key::Equals | Key::Plus | Key::Minus))
+                {
+                    continue;
+                }
                 if modifiers.shift && matches!(key, Key::PageUp | Key::PageDown) {
                     t.term.scroll_display(if key == Key::PageUp { Scroll::PageUp } else { Scroll::PageDown });
                     continue;
@@ -568,6 +708,16 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
     }
 }
 
+/// A shell's title made short for a tab: "Administrator: C:\...\powershell.exe" becomes "powershell".
+fn tab_title(raw: &str) -> String {
+    let t = raw.trim().trim_start_matches("Administrator:").trim();
+    if t.contains('\\') && !t.contains(' ') || t.ends_with(".exe") {
+        let last = t.rsplit(['\\', '/']).next().unwrap_or(t);
+        return last.trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+    }
+    t.to_string()
+}
+
 /// Runs `cmd` in a new window of the system's terminal.
 fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
     if cfg!(windows) {
@@ -586,6 +736,12 @@ fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_titles_are_short() {
+        assert_eq!(tab_title(r"Administrator: C:\WINDOWS\System32\WindowsPowerShell1.0\powershell.exe"), "powershell");
+        assert_eq!(tab_title("a@server: ~"), "a@server: ~");
+    }
 
     #[test]
     fn keys_become_terminal_bytes() {
