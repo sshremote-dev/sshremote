@@ -179,18 +179,23 @@ impl Reducer {
                     let lut = self.lut.as_ref().unwrap();
                     data.extend(row.chunks_exact(4).map(|p| lut.get(p[2], p[1], p[0])));
                 }
-                Mode::Mono | Mode::Gray4 | Mode::Gray16 => {
-                    let levels = match self.mode {
-                        Mode::Mono => 1,
-                        Mode::Gray4 => 3,
-                        _ => 15,
-                    };
+                Mode::Mono => {}
+                Mode::Gray4 | Mode::Gray16 => {
+                    let levels = if self.mode == Mode::Gray4 { 3 } else { 15 };
                     data.extend(row.chunks_exact(4).map(|p| {
                         let luma = (77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8;
                         ((luma * levels + 127) / 255) as u8
                     }));
                 }
             }
+        }
+        if self.mode == Mode::Mono {
+            // Text and lines on any background, not only dark on light (see `bilevel`).
+            let luma: Vec<u8> = (0..h)
+                .flat_map(|y| img.data[y * img.stride..y * img.stride + w * 4].chunks_exact(4))
+                .map(|p| ((77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8) as u8)
+                .collect();
+            data = crate::bilevel::binarize(&luma, w, h);
         }
         Plane { w, h, mode: self.mode, data }
     }

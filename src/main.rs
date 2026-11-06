@@ -1,5 +1,6 @@
 mod agent;
 mod audio;
+mod bilevel;
 mod capture;
 mod chat;
 mod client;

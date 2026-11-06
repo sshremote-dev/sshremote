@@ -307,6 +307,12 @@ it believes, which is wrong behind ssh clients that report a fixed 640x480 windo
 | 3 | 100% | full colour | 30 |
 | 4 | 100% | full colour | 60 |
 
+Black and white is made for reading screens: where a pixel's neighbourhood has contrast (text, lines,
+icons, field borders) it takes the side of the local mean, so grey text on white and light text on
+dark panels both survive, while flat areas keep the plain threshold. A context-modelled coder in the
+manner of JBIG2 was measured as well; with 32 px tiles the session's zstd stream, which reuses glyphs
+seen anywhere before, stayed 30-50% smaller, so tiles stay bit-packed.
+
 Sixel allows 256 colours per image, so in a terminal true colour is drawn with a palette made
 for each repainted rectangle: exact when it has at most 256 colours, median cut otherwise.
 True-colour tiles are sent with a median (LOCO-I) predictor before zstd. When a band of the screen
