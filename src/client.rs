@@ -17,10 +17,21 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
 const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
-p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v share window/app/screen | w Win | r refresh";
+p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v share window/app/screen | w Win | \
+k Ctrl+Alt+Del | r refresh";
 
 struct Viewer {
     out: Box<dyn Write>,
+    /// Inside tmux: where the pane starts on the outer terminal (row, column), when images pass through
+    /// tmux to it. tmux's own sixel support scales by the cell size it believes, which ssh clients that
+    /// report a fixed 640x480 window get wrong.
+    tmux: Option<(usize, usize)>,
+    /// The terminal reports key releases (kitty keyboard protocol, or the Windows console), so keys go
+    /// to the host as presses and releases and stay held as long as they are held here.
+    key_states: bool,
+    /// Keys and modifiers pressed on the host by this viewer.
+    held: std::collections::BTreeSet<u32>,
+    held_mods: u8,
     probe: Option<(u16, u16)>,
     paint_bytes: u64,
     sess: Session,
@@ -75,6 +86,9 @@ impl Viewer {
             (self.cols, self.rows) = (w as usize / self.cw, h as usize / self.ch + 1);
             (self.ctl.s.view_w, self.ctl.s.view_h) = (w, h);
             return;
+        }
+        if self.tmux.is_some() {
+            self.tmux = tmux_pane();
         }
         let (c, r) = terminal::size().unwrap_or((80, 24));
         self.cols = c.max(10) as usize;
@@ -189,14 +203,21 @@ impl Viewer {
                         }
                     }
                 }
-                let _ = write!(out, "\x1b[{};{}H", r + 1, c + 1);
+                let mut img = Vec::new();
+                let (top, left) = self.tmux.unwrap_or((0, 0));
+                let _ = write!(img, "\x1b[{};{}H", top + r + 1, left + c + 1);
                 if adaptive {
                     quant::quantize(&self.px, &mut self.qpal, &mut self.idx);
-                    self.sixel.encode(out, w, h, &self.idx, &self.qpal);
+                    self.sixel.encode(&mut img, w, h, &self.idx, &self.qpal);
                 } else {
                     self.idx.clear();
                     self.idx.extend(self.px.iter().map(|p| self.lut.get(p[0], p[1], p[2])));
-                    self.sixel.encode(out, w, h, &self.idx, &self.pal);
+                    self.sixel.encode(&mut img, w, h, &self.idx, &self.pal);
+                }
+                if self.tmux.is_some() {
+                    tmux_wrap(out, &img);
+                } else {
+                    out.extend_from_slice(&img);
                 }
                 c = c1;
             }
@@ -303,9 +324,57 @@ impl Viewer {
         self.status()
     }
 
+    /// A key press or release, with the modifiers brought in line first.
+    fn key_state(&mut self, k: &event::KeyEvent) -> io::Result<()> {
+        let Some((keysym, _)) = keys::keysym(k) else { return Ok(()) };
+        let keysym = keys::base(keysym);
+        let mods = keys::mod_bits(k.modifiers);
+        if k.kind != KeyEventKind::Release {
+            self.sync_mods(mods)?;
+            self.held.insert(keysym);
+            return self.sess.send(ToAgent::KeyState { keysym, down: true });
+        }
+        // A release reported as another symbol (Shift let go first, say) ends the key that is down.
+        let keysym = if self.held.contains(&keysym) {
+            keysym
+        } else {
+            match self.held.iter().copied().collect::<Vec<_>>()[..] {
+                [only] => only,
+                _ => return Ok(()),
+            }
+        };
+        self.held.remove(&keysym);
+        self.sess.send(ToAgent::KeyState { keysym, down: false })?;
+        self.sync_mods(mods)
+    }
+
+    /// Presses or releases Shift, Ctrl, Alt and Super on the host to match `mods`.
+    fn sync_mods(&mut self, mods: u8) -> io::Result<()> {
+        for (bit, keysym) in keys::MODIFIERS {
+            let want = mods & bit != 0;
+            if want != (self.held_mods & bit != 0) {
+                self.sess.send(ToAgent::KeyState { keysym, down: want })?;
+                self.held_mods ^= bit;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets go of everything held on the host (the menu, leaving).
+    fn release_all(&mut self) -> io::Result<()> {
+        for keysym in std::mem::take(&mut self.held) {
+            self.sess.send(ToAgent::KeyState { keysym, down: false })?;
+        }
+        self.sync_mods(0)
+    }
+
     /// Menu keys beyond the shared ones: screenshot, pause, sound, chat and files.
     fn menu_extra(&mut self, c: char) -> io::Result<()> {
         match c {
+            'k' => {
+                self.sess.send(ToAgent::SecureAttention)?;
+                self.notify("Sent Ctrl+Alt+Del")
+            }
             'x' => {
                 self.sess.send(ToAgent::Snapshot)?;
                 self.notify("Taking a screenshot...")
@@ -599,6 +668,11 @@ impl Viewer {
             ToClient::TermExit { id, text } if self.shell == Some(id) => {
                 self.close_shell(&format!("Shell: {text}"))?;
             }
+            ToClient::Clipboard(text) if self.probe.is_none() && text.len() < 100_000 => {
+                // OSC 52 puts it on this computer's clipboard, also through ssh and tmux.
+                write!(self.out, "\x1b]52;c;{}\x07", crate::shot::base64(text.as_bytes()))?;
+                self.out.flush()?;
+            }
             ToClient::FileDone { ok, text, .. } => {
                 let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
                 self.notify(&t)?
@@ -640,6 +714,22 @@ impl Viewer {
                 self.measure();
             }
             Event::Mouse(_) if self.shell.is_some() => {}
+            Event::Paste(text) => {
+                // As in RustDesk: the text goes to the host's clipboard and is pasted there.
+                self.sess.send(ToAgent::Clipboard(text))?;
+                self.sess.send(ToAgent::Key { keysym: 'v' as u32, mods: crate::proto::MOD_CTRL })?;
+                self.notify("Pasted into the host")?;
+            }
+            Event::Key(k)
+                if self.key_states
+                    && self.prompt.is_none()
+                    && !self.menu
+                    && !self.win_next
+                    && !keys::is_menu(&k)
+                    && !matches!(k.code, event::KeyCode::Modifier(_)) =>
+            {
+                self.key_state(&k)?;
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if self.prompt.is_some() {
                     return self.prompt_key(&k);
@@ -653,8 +743,12 @@ impl Viewer {
                     return self.menu_extra(c);
                 }
                 if keys::is_menu(&k) {
+                    self.release_all()?;
                     self.menu = true;
                     return self.status();
+                }
+                if matches!(k.code, event::KeyCode::Modifier(_)) {
+                    return Ok(());
                 }
                 if let Some((keysym, mods)) = keys::keysym(&k) {
                     let m = if std::mem::take(&mut self.win_next) {
@@ -670,6 +764,10 @@ impl Viewer {
                 }
             }
             Event::Mouse(m) => {
+                if self.key_states {
+                    // Shift+click and Ctrl+drag: the modifiers held here are held on the host too.
+                    self.sync_mods(keys::mod_bits(m.modifiers))?;
+                }
                 let (dw, dh) = self.display();
                 let dx = m.column as usize * self.cw + self.cw / 2;
                 let dy = m.row as usize * self.ch + self.ch / 2;
@@ -714,6 +812,10 @@ pub fn run(opt: Options) -> Result<(), String> {
     let (sess, tx, rx) = Session::connect(&opt)?;
     let host = opt.host.clone().unwrap_or_else(|| "local".into());
     let mut v = Viewer {
+        tmux: None,
+        key_states: false,
+        held: Default::default(),
+        held_mods: 0,
         out: if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) },
         probe: opt.probe.as_ref().map(|p| p.1),
         paint_bytes: 0,
@@ -770,10 +872,26 @@ pub fn run(opt: Options) -> Result<(), String> {
             })?);
         }
         terminal::enable_raw_mode().map_err(|e| e.to_string())?;
+        v.tmux = tmux_passthrough();
         if opt.cell.is_none() {
             v.cell_queried = query_cell();
         }
-        let _ = execute!(v.out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
+        let _ = execute!(
+            v.out,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            event::EnableMouseCapture,
+            event::EnableBracketedPaste
+        );
+        // Key releases: the Windows console always reports them; elsewhere the kitty keyboard protocol
+        // (kitty, WezTerm, Ghostty, foot) is asked for.
+        v.key_states = cfg!(windows);
+        #[cfg(unix)]
+        if terminal::supports_keyboard_enhancement().unwrap_or(false) {
+            use event::KeyboardEnhancementFlags as F;
+            let flags = F::DISAMBIGUATE_ESCAPE_CODES | F::REPORT_EVENT_TYPES | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+            v.key_states = execute!(v.out, event::PushKeyboardEnhancementFlags(flags)).is_ok();
+        }
         #[cfg(windows)]
         {
             use crossterm::Command;
@@ -862,7 +980,18 @@ pub fn run(opt: Options) -> Result<(), String> {
         Ok(())
     })();
     if interactive {
-        let _ = execute!(v.out, event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = v.release_all();
+        #[cfg(unix)]
+        if v.key_states {
+            let _ = execute!(v.out, event::PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(
+            v.out,
+            event::DisableBracketedPaste,
+            event::DisableMouseCapture,
+            cursor::Show,
+            terminal::LeaveAlternateScreen
+        );
         let _ = terminal::disable_raw_mode();
     } else {
         eprintln!(
@@ -918,6 +1047,51 @@ fn parse_cell_report(buf: &[u8]) -> Option<(usize, usize)> {
     ((4..=64).contains(&w) && (8..=128).contains(&h)).then_some((w, h))
 }
 
+/// Lets this pane's images through tmux to the outer terminal; the pane's position, or None outside tmux.
+fn tmux_passthrough() -> Option<(usize, usize)> {
+    std::env::var_os("TMUX")?;
+    let ok = std::process::Command::new("tmux")
+        .args(["set", "-p", "allow-passthrough", "on"])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok { tmux_pane() } else { None }
+}
+
+/// Where the current tmux pane starts on the outer terminal, counting a status line at the top.
+fn tmux_pane() -> Option<(usize, usize)> {
+    let out = std::process::Command::new("tmux")
+        .args(["display", "-p", "#{pane_top} #{pane_left} #{status} #{status-position}"])
+        .output()
+        .ok()?;
+    parse_tmux_pane(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_tmux_pane(text: &str) -> Option<(usize, usize)> {
+    let mut it = text.split_whitespace();
+    let top: usize = it.next()?.parse().ok()?;
+    let left: usize = it.next()?.parse().ok()?;
+    let status = match it.next() {
+        Some("on") => 1,
+        Some(n) => n.parse().unwrap_or(0),
+        None => 0,
+    };
+    let above = if it.next() == Some("top") { status } else { 0 };
+    Some((top + above, left))
+}
+
+/// A DCS passthrough for tmux: the sequence inside reaches the outer terminal with its escapes doubled.
+fn tmux_wrap(out: &mut Vec<u8>, seq: &[u8]) {
+    out.extend_from_slice(b"\x1bPtmux;");
+    for &b in seq {
+        if b == 0x1b {
+            out.push(0x1b);
+        }
+        out.push(b);
+    }
+    out.extend_from_slice(b"\x1b\\");
+}
+
 /// Asks the terminal for its cell size in pixels (XTWINOPS 16); works through ssh,
 /// unlike the pixel size in the window-size ioctl. Needs raw mode.
 #[cfg(unix)]
@@ -952,6 +1126,15 @@ fn query_cell() -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tmux_pane_and_passthrough() {
+        assert_eq!(super::parse_tmux_pane("3 40 on top\n"), Some((4, 40)));
+        assert_eq!(super::parse_tmux_pane("0 0 2 bottom\n"), Some((0, 0)));
+        let mut out = Vec::new();
+        super::tmux_wrap(&mut out, b"\x1b[1;1H\x1bPq#0\x1b\\");
+        assert_eq!(out, b"\x1bPtmux;\x1b\x1b[1;1H\x1b\x1bPq#0\x1b\x1b\\\x1b\\".to_vec());
+    }
+
     #[test]
     fn cell_report() {
         assert_eq!(super::parse_cell_report(b"[6;20;10t"), Some((10, 20)));

@@ -42,6 +42,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --gui [options] [HOST] the same in a window
        sshremote --term [options]      choose a recent or ~/.ssh/config host, then view it here
        sshremote mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
+       sshremote mcp --here            the same for this computer's own screen
        sshremote terminal [HOST [PORT]] the terminal window: a local shell, or ssh to HOST
        sshremote --local [options]     view a built-in test desktop (no ssh)
        sshremote --agent [--capture B] remote side, started by the viewer
@@ -92,11 +93,17 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
     let mut probe = None;
+    let mut here = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
         match a.as_str() {
             "--local" => o.local = true,
+            // This computer's own screen, through a local agent: for MCP on the machine it runs on.
+            "--here" => {
+                o.local = true;
+                here = true;
+            }
             "--gui" => o.gui = true,
             "--term" => {}
             "--preset" => {
@@ -136,7 +143,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
     }
     o.probe = probe.map(|secs| (secs, view, dump));
     if o.capture.is_empty() {
-        o.capture = if o.local { "synthetic" } else { "auto" }.into();
+        o.capture = if o.local && !here { "synthetic" } else { "auto" }.into();
     }
     if !o.local && !o.gui && o.host.is_none() {
         // `sshremote --term` without a host: choose one in the terminal.

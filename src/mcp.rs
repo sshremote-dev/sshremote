@@ -556,7 +556,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "sshremote", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Remote desktop control. Take a screenshot first; give coordinates in the latest screenshot's pixels. Prefer a small max_width and a region to read details."
+                "instructions": "Desktop control. Start with state, which lists the window in front and its numbered controls as text, and act with click_element, type_into and focus_window. Take a screenshot only for what has no text (pictures, canvases, games); its coordinates are in that screenshot's pixels, and a small max_width or a region keeps it cheap."
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),

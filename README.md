@@ -51,11 +51,19 @@ the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20
 
 ## Window mode
 
-`sshremote` with no arguments (or a double click on `sshremote.exe`) opens the window: a connect screen with
-host, port, an optional password (handed to ssh through its askpass hook, never stored), the
-quality, and host cards. A failed connection is explained with its likely cause and what to try.
-The window has a dark and a light theme, remembered between runs. `sshremote --gui HOST` connects
-straight away.
+`sshremote` with no arguments (or a double click on `sshremote.exe`, which opens no console window)
+shows the home screen, laid out like AnyDesk: the app's mark and name at the top, a "Connect to a host"
+field, and below it the connections (favorites, recent hosts and the `Host` aliases of
+`~/.ssh/config`) with a search box. Only the list scrolls.
+
+Connecting opens an SSH terminal by default (the Terminal button, Enter, or a double click on a
+host). The `...` button next to it, and the `...` menu of each host, open the remote screen, or the
+host in the system's own terminal. The gear shows the connection options: port, a password for the
+remote screen (handed to ssh through its askpass hook, never stored), the screen quality, the agent
+command and the capture backend. A failed connection is explained with its likely cause and what to
+try. The header holds a local terminal button, the tools menu (SSH keys, SSH hosts, local shells,
+the built-in test desktop) and the dark or light theme, remembered between runs. `sshremote --gui
+HOST` opens the remote screen straight away.
 
 In a session the toolbar at the top shows the connection state (a green, yellow or red dot with the
 round trip; hover for traffic, fps and quality) and icon buttons for:
@@ -120,15 +128,43 @@ capped at 300 ms so the sound stays live. It is off until asked for.
 
 ## Terminal
 
-The Terminal button opens shells on the SSH host in a window with tabs. The agent starts the
-user's login shell on a pseudo-terminal (PowerShell or cmd in a pseudo console on Windows) and the
-bytes travel over the same connection, so it needs no second login and also works over `sshremote://`.
-The window emulates xterm with Alacritty's terminal engine: colours, full-screen programs such as
-vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with copy (Ctrl+C
-with a selection, otherwise it interrupts) and paste, and text size buttons. For ssh hosts a button
-opens the same host in the system's own terminal. In a terminal viewer, `Ctrl+] t` swaps the picture
-for a remote shell that the terminal itself emulates; `exit` or Ctrl+] returns to the screen. A
-Windows agent running as the service (SYSTEM) refuses shells; connect over ssh for one.
+The terminal is one window with tabs, in the manner of Windows Terminal. The `+` button opens the
+default profile and the arrow beside it lists the others: the shell on the SSH host of a remote-screen
+session, and local shells (Windows PowerShell, PowerShell 7, Command Prompt, Git Bash and WSL on
+Windows; the login shell, bash, zsh and fish elsewhere). SSH terminals from the home screen are local
+`ssh` processes in a pseudo console, so password and host-key prompts appear in the tab.
+`sshremote terminal [HOST [PORT]]` opens the window on its own.
+
+A remote-screen session's shells run under the agent on a pseudo-terminal (a pseudo console on
+Windows) and travel over the same connection, so they need no second login and also work over
+`sshremote://`. The window emulates xterm with Alacritty's terminal engine: colours, full-screen
+programs such as vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with
+copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
+
+- Tabs: double-click to rename, Ctrl+Shift+T new, Ctrl+Shift+W close, Ctrl+Tab next.
+- Find (Ctrl+Shift+F) searches the scrollback; Ctrl+click opens a link.
+- Settings: text size (also Ctrl+= and Ctrl+-), colour schemes (One Half Dark, Campbell, Dracula,
+  Solarized Dark, Tango Dark, One Half Light) and copy on select, remembered between runs.
+- Three views: the terminal itself, plain text, and Markdown. The text and Markdown views show the
+  whole scrollback for reading and copying, and can strip the frames, borders and bullets that
+  terminal agents such as Claude Code and Codex draw, so their answers read as documents: headings,
+  lists, tables and code blocks with a Copy button.
+- The context menu has copy, paste, select all, find, the reading views and clearing the scrollback.
+
+In a terminal viewer, `Ctrl+] t` swaps the picture for a remote shell that the terminal itself
+emulates; `exit` or Ctrl+] returns to the screen. A Windows agent running as the service (SYSTEM)
+refuses shells; connect over ssh for one.
+
+## SSH tools
+
+The tools menu on the home screen has:
+
+- SSH keys: the key pairs in `~/.ssh` with a button to copy the public key, and to install it on a
+  host (appended once to its `~/.ssh/authorized_keys` in a terminal tab, where the password is asked
+  for once); a form creates new Ed25519, RSA 4096 or ECDSA keys with `ssh-keygen`, with an optional
+  passphrase.
+- SSH hosts: the `Host` entries of `~/.ssh/config` with their address, user, port and key, a form
+  that adds one, and a button that opens the file in an editor.
 
 ## Sharing a window or an application
 
@@ -176,16 +212,16 @@ window closes itself shortly after the viewer leaves.
 
 ## Hosts
 
-The connect screen shows favorites, recent hosts and the `Host` aliases of `~/.ssh/config` as
-cards with the time of the last connection, a search box and a star to pin a host; ssh applies
-their user, port and keys as usual. A click fills in the form, a double click connects. Hosts are
-remembered only after a successful connection. `sshremote --term` offers the same list in a terminal.
+The home screen lists favorites, recent hosts and the `Host` aliases of `~/.ssh/config` with the
+time of the last connection, a search box and a star to pin a host; ssh applies their user, port and
+keys as usual. `sshremote --term` offers the same list in a terminal.
 
 ## MCP
 
-`sshremote mcp HOST` (or `sshremote mcp --local`, `sshremote mcp sshremote://...`) is a Model Context
-Protocol server on stdio that lets an AI agent operate the SSH host, in the manner of Windows-MCP: it
-works from text and looks at pictures only when it has to.
+`sshremote mcp HOST` (or `sshremote mcp sshremote://...`) is a Model Context Protocol server on stdio
+that lets an AI agent operate the SSH host, in the manner of Windows-MCP: it works from text and looks
+at pictures only when it has to. `sshremote mcp --here` does the same for the computer it runs on,
+through a local agent and no ssh; `sshremote mcp --local` is the built-in test desktop.
 
 - `state` lists the window in front as text: its title, the other open windows, and its controls
   numbered as `[id] role "name" =value @x,y` with focused, disabled and checked marks. It comes from
@@ -209,7 +245,10 @@ desktop's accessibility flag (as a screen reader does), which Chrome and Electro
 they publish their content. Example client configuration:
 
 ```json
-{"mcpServers": {"sshremote": {"command": "sshremote", "args": ["mcp", "user@host"]}}}
+{"mcpServers": {
+  "remote-pc": {"command": "sshremote", "args": ["mcp", "user@host"]},
+  "this-pc": {"command": "sshremote", "args": ["mcp", "--here"]}
+}}
 ```
 
 On GNOME, text the keyboard layout cannot produce (Korean, emoji) is pasted through the clipboard;
@@ -247,7 +286,18 @@ sshremote HOST --probe 5 --dump out.ppm   # headless: print traffic, save the re
 Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`/`-` scale, `f` fps,
 `z` zoom (enlarge a reduced capture to the terminal; off by default inside an ssh session, where the
 terminal output itself crosses the network), `t` remote shell, `v` share a window, an application or the whole screen,
-`r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
+`k` Ctrl+Alt+Del, `r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
+
+Where the terminal reports key releases (the Windows console, and terminals with the kitty keyboard
+protocol: kitty, WezTerm, Ghostty, foot), keys reach the host as separate presses and releases, so
+held keys, Shift+click and Ctrl+drag work as in the window; elsewhere each key is a tap with its
+modifiers. Pasting into the terminal (bracketed paste) puts the text on the host's clipboard and
+presses Ctrl+V there; text copied on the host reaches this computer's clipboard through OSC 52.
+
+Inside tmux the viewer turns on `allow-passthrough` for its pane and sends its images straight to the
+outer terminal at the pane's position, because tmux's own sixel support scales images by the cell size
+it believes, which is wrong behind ssh clients that report a fixed 640x480 window (Windows OpenSSH).
+`Ctrl+] r` repaints after tmux redraws the pane.
 
 | Key | Resolution | Colours | fps |
 |---|---|---|---|
