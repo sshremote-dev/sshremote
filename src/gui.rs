@@ -17,6 +17,61 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, REMOTE, Session}
 use crate::transport::Target;
 
 const ACCENT: Color32 = Color32::from_rgb(64, 132, 245);
+
+/// Phosphor icon codepoints (assets/fonts, MIT licensed).
+mod ic {
+    pub const ARROW_CLOCKWISE: &str = "\u{E036}";
+    pub const CAMERA: &str = "\u{E10E}";
+    pub const CHAT: &str = "\u{E16C}";
+    pub const CORNERS_IN: &str = "\u{E1CE}";
+    pub const CORNERS_OUT: &str = "\u{E1D0}";
+    pub const FILE: &str = "\u{E230}";
+    pub const FOLDER: &str = "\u{E24A}";
+    pub const GEAR: &str = "\u{E272}";
+    pub const KEYBOARD: &str = "\u{E2D8}";
+    pub const LINK: &str = "\u{E2E2}";
+    pub const SEARCH: &str = "\u{E30C}";
+    pub const MONITOR: &str = "\u{E32E}";
+    pub const MOON: &str = "\u{E330}";
+    pub const PAUSE: &str = "\u{E39E}";
+    pub const PLAY: &str = "\u{E3D0}";
+    pub const STAR: &str = "\u{E46A}";
+    pub const SUN: &str = "\u{E472}";
+    pub const TERMINAL: &str = "\u{EAE8}";
+    pub const X: &str = "\u{E4F6}";
+}
+
+/// The filled variant of the icon font, for a set star.
+fn filled() -> egui::FontFamily {
+    egui::FontFamily::Name("phosphor-fill".into())
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+    let regular = egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor.ttf"));
+    let fill = egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor-Fill.ttf"));
+    let fallback = |f| InsertFontFamily { family: f, priority: FontPriority::Lowest };
+    ctx.add_font(FontInsert {
+        name: "phosphor".into(),
+        data: regular,
+        families: vec![fallback(egui::FontFamily::Proportional), fallback(egui::FontFamily::Monospace)],
+    });
+    ctx.add_font(FontInsert {
+        name: "phosphor-fill".into(),
+        data: fill,
+        families: vec![InsertFontFamily { family: filled(), priority: FontPriority::Highest }],
+    });
+}
+
+/// The logo, for the window and the task bar.
+fn app_icon() -> Option<egui::IconData> {
+    let mut reader =
+        png::Decoder::new(std::io::Cursor::new(&include_bytes!("../assets/desk.png")[..])).read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut rgba).ok()?;
+    rgba.truncate(info.buffer_size());
+    Some(egui::IconData { rgba, width: info.width, height: info.height })
+}
 const SHIFT_L: u32 = 0xffe1;
 const CONTROL_L: u32 = 0xffe3;
 const ALT_L: u32 = 0xffe9;
@@ -269,12 +324,16 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
             .with_min_inner_size([320.0, 240.0]),
         ..Default::default()
     };
+    if let Some(icon) = app_icon() {
+        native.viewport = native.viewport.with_icon(icon);
+    }
     // Some drivers block a vsynced present for a quarter second; frames are paced by the agent anyway.
     native.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
     native
 }
 
 pub fn style(ctx: &egui::Context) {
+    install_fonts(ctx);
     let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
     set_theme(ctx, dark);
     ctx.all_styles_mut(|s| {
@@ -316,8 +375,39 @@ const BAD: Color32 = Color32::from_rgb(225, 85, 75);
 
 /// An icon button with a tooltip; `on` shows it pressed.
 fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
-    let b = egui::Button::new(RichText::new(glyph).size(17.0)).min_size(Vec2::new(36.0, 30.0)).selected(on);
-    ui.add(b).on_hover_text(tip)
+    ui.add(tool_button(glyph, on)).on_hover_text(tip)
+}
+
+/// A square, borderless icon button that shows its frame on hover or while on.
+fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(glyph).size(18.0))
+        .min_size(Vec2::splat(32.0))
+        .frame_when_inactive(false)
+        .selected(on)
+}
+
+/// An icon button that opens a menu.
+fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
+    egui::containers::menu::MenuButton::from_button(tool_button(glyph, false)).ui(ui, add).0
+}
+
+/// A circle with the host's initial, coloured by its name.
+fn badge(ui: &mut egui::Ui, name: &str) {
+    const COLORS: [Color32; 6] = [
+        Color32::from_rgb(64, 132, 245),
+        Color32::from_rgb(46, 160, 120),
+        Color32::from_rgb(150, 100, 220),
+        Color32::from_rgb(220, 120, 60),
+        Color32::from_rgb(200, 80, 120),
+        Color32::from_rgb(60, 150, 180),
+    ];
+    let bare = name.trim_start_matches("desk://");
+    let bare = bare.rsplit('@').next().unwrap_or(bare);
+    let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 18.0, COLORS[hash as usize % COLORS.len()]);
+    let initial = bare.chars().next().unwrap_or('?').to_uppercase().to_string();
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), Color32::WHITE);
 }
 
 /// The cause of a failed connection in plain words, with what to try.
@@ -456,11 +546,11 @@ impl App {
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
         let mut go: Option<bool> = None;
-        let mut star: Option<(String, bool)> = None;
+        let mut starred: Option<(String, bool)> = None;
         egui::CentralPanel::default().show(ui, |ui| {
             let dark = ui.visuals().dark_mode;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                let (glyph, tip) = if dark { ("☀", "Light theme") } else { ("🌙", "Dark theme") };
+                let (glyph, tip) = if dark { (ic::SUN, "Light theme") } else { (ic::MOON, "Dark theme") };
                 if icon(ui, glyph, tip, false).clicked() {
                     set_theme(ui.ctx(), !dark);
                 }
@@ -469,7 +559,11 @@ impl App {
                 ui.vertical_centered(|ui| {
                     let width = ui.available_width().min(860.0);
                     ui.add_space(8.0);
-                    ui.label(RichText::new("🖥  desk").size(34.0).strong());
+                    let (logo, _) = ui.allocate_exact_size(Vec2::splat(60.0), egui::Sense::hover());
+                    ui.painter().rect_filled(logo, CornerRadius::same(16), ACCENT);
+                    ui.painter().text(logo.center(), Align2::CENTER_CENTER, ic::TERMINAL, FontId::proportional(34.0), Color32::WHITE);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("desk").size(30.0).strong());
                     ui.label(RichText::new("Remote desktop over SSH").size(15.0).weak());
                     ui.add_space(18.0);
                     let card = ui.visuals().window_fill;
@@ -554,7 +648,7 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Hosts").size(17.0).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(200.0));
+                                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(format!("{}  Search", ic::SEARCH)).desired_width(200.0));
                             });
                         });
                     });
@@ -576,39 +670,44 @@ impl App {
                                     } else {
                                         (card, Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
                                     };
-                                    let inner = egui::Frame::new()
+                                    // The card's click area goes first so the star button on top keeps its own clicks.
+                                    let (rect, r) = ui.allocate_exact_size(Vec2::new(272.0, 78.0), egui::Sense::click());
+                                    let fill = if r.hovered() { ui.visuals().widgets.hovered.bg_fill } else { fill };
+                                    let mut card_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                                    card_ui.style_mut().interaction.selectable_labels = false;
+                                    egui::Frame::new()
                                         .fill(fill)
                                         .stroke(stroke)
                                         .corner_radius(CornerRadius::same(12))
                                         .inner_margin(12.0)
-                                        .show(ui, |ui| {
+                                        .show(&mut card_ui, |ui| {
                                             ui.set_width(246.0);
                                             ui.set_height(52.0);
                                             ui.horizontal(|ui| {
-                                                let glyph = if h.starts_with("desk://") { "🔗" } else { "🖥" };
-                                                ui.label(RichText::new(glyph).size(24.0));
+                                                badge(ui, h);
                                                 ui.vertical(|ui| {
                                                     let name = if p.is_empty() { h.clone() } else { format!("{h}:{p}") };
                                                     ui.label(RichText::new(name).strong());
-                                                    let sub = match (src, self.seen.get(h)) {
+                                                    let (kind, how) = if h.starts_with("desk://") { (ic::LINK, "direct") } else { (ic::TERMINAL, "SSH") };
+                                                    let when = match (src, self.seen.get(h)) {
                                                         (_, Some(t)) => crate::hosts::ago(*t),
-                                                        (Source::SshConfig, None) => "~/.ssh/config".into(),
-                                                        _ => "saved".into(),
+                                                        (Source::SshConfig, None) => "from ~/.ssh/config".into(),
+                                                        _ => "never connected".into(),
                                                     };
-                                                    ui.label(RichText::new(sub).small().weak());
+                                                    ui.label(RichText::new(format!("{kind} {how}  ·  {when}")).small().weak());
                                                 });
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                                     let fav = *src == Source::Favorite;
-                                                    let (g, tip) = if fav { ("⭐", "Remove from favorites") } else { ("⭐", "Add to favorites") };
-                                                    let b = egui::Button::new(RichText::new(g).size(16.0).color(if fav { Color32::WHITE } else { Color32::from_white_alpha(60) }))
-                                                        .frame(false);
+                                                    let tip = if fav { "Remove from favorites" } else { "Add to favorites" };
+                                                    let mut star = RichText::new(ic::STAR).size(17.0);
+                                                    star = if fav { star.family(filled()).color(WARN) } else { star.color(ui.visuals().weak_text_color()) };
+                                                    let b = egui::Button::new(star).frame(false);
                                                     if ui.add(b).on_hover_text(tip).clicked() {
-                                                        star = Some((h.clone(), !fav));
+                                                        starred = Some((h.clone(), !fav));
                                                     }
                                                 });
                                             });
                                         });
-                                    let r = ui.interact(inner.response.rect, egui::Id::unique(("host", h.as_str())), egui::Sense::click());
                                     if r.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
@@ -629,7 +728,7 @@ impl App {
                 });
             });
         });
-        if let Some((h, on)) = star {
+        if let Some((h, on)) = starred {
             crate::hosts::set_favorite(&h, on);
             self.favorites = crate::hosts::favorites();
         }
@@ -1071,7 +1170,7 @@ impl Remote {
                         if !p.hidden && e.name.starts_with('.') {
                             continue;
                         }
-                        let icon = if e.dir { "📁" } else { "📄" };
+                        let icon = if e.dir { ic::FOLDER } else { ic::FILE };
                         let size = if e.dir { String::new() } else { human(e.size) };
                         ui.horizontal(|ui| {
                             let r = ui.selectable_label(p.selected == Some(i), format!("{icon} {}", e.name));
@@ -1485,7 +1584,7 @@ impl Remote {
         ui.label(RichText::new(format!("{:.0} ms", self.ctl.rtt)).small().weak()).on_hover_text(&details);
         ui.separator();
 
-        let display = ui.menu_button(RichText::new("🖥").size(17.0), |ui| {
+        let display = icon_menu(ui, ic::MONITOR, |ui| {
             ui.label(RichText::new("Quality").strong());
             let auto = self.ctl.auto.is_some();
             if ui.selectable_label(auto, "Auto  (adapts to the link)").clicked() {
@@ -1547,32 +1646,29 @@ impl Remote {
                 }
             }
         });
-        display.response.on_hover_text(format!(
-            "Display: quality {}, view {}",
-            self.ctl.preset_label(),
-            self.fit.label()
-        ));
+        display.on_hover_text(format!("Display: quality {}, view {}", self.ctl.preset_label(), self.fit.label()));
 
         let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
-        if icon(ui, "🔲", fs_tip, self.fullscreen).clicked() {
+        let fs_glyph = if self.fullscreen { ic::CORNERS_IN } else { ic::CORNERS_OUT };
+        if icon(ui, fs_glyph, fs_tip, self.fullscreen).clicked() {
             *action = Some(Box::new(|r, c| {
                 r.set_fullscreen(c, !r.fullscreen);
                 Ok(())
             }));
         }
-        let keys = ui.menu_button(RichText::new("⌨").size(17.0), |ui| {
-            let combos: [(&str, Option<Vec<u32>>); 8] = [
-                ("Ctrl+Alt+Del", None),
-                ("Win", Some(vec![SUPER_L])),
-                ("Win+R   Run", Some(vec![SUPER_L, 'r' as u32])),
-                ("Win+E   Files", Some(vec![SUPER_L, 'e' as u32])),
-                ("Win+D   Desktop", Some(vec![SUPER_L, 'd' as u32])),
-                ("Alt+Tab", Some(vec![ALT_L, 0xff09])),
-                ("Alt+F4", Some(vec![ALT_L, 0xffc1])),
-                ("Print Screen", Some(vec![0xff61])),
+        let keys = icon_menu(ui, ic::KEYBOARD, |ui| {
+            let combos: [(&str, &str, Option<Vec<u32>>); 8] = [
+                ("Secure attention", "Ctrl+Alt+Del", None),
+                ("Start menu", "Win", Some(vec![SUPER_L])),
+                ("Run", "Win+R", Some(vec![SUPER_L, 'r' as u32])),
+                ("File explorer", "Win+E", Some(vec![SUPER_L, 'e' as u32])),
+                ("Show desktop", "Win+D", Some(vec![SUPER_L, 'd' as u32])),
+                ("Switch window", "Alt+Tab", Some(vec![ALT_L, 0xff09])),
+                ("Close window", "Alt+F4", Some(vec![ALT_L, 0xffc1])),
+                ("Print screen", "PrtSc", Some(vec![0xff61])),
             ];
-            for (label, keys) in combos {
-                if ui.button(label).clicked() {
+            for (label, shortcut, keys) in combos {
+                if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {
                     *action = Some(Box::new(move |r, _| match keys {
                         None => r.send(ToAgent::SecureAttention),
                         Some(k) => r.combo(&k),
@@ -1590,11 +1686,11 @@ impl Remote {
                 ui.close();
             }
         });
-        keys.response.on_hover_text("Send special keys");
+        keys.on_hover_text("Send special keys");
         ui.separator();
 
         let files_tip = "Remote files: browse and download. Drop files or folders on the window to upload.";
-        if icon(ui, "📁", files_tip, self.panel.is_some()).clicked() {
+        if icon(ui, ic::FOLDER, files_tip, self.panel.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {
                 if r.panel.take().is_none() {
                     r.send(ToAgent::ListDir { path: String::new() })?;
@@ -1602,7 +1698,7 @@ impl Remote {
                 Ok(())
             }));
         }
-        let chat_glyph = if self.unread > 0 { format!("💬 {}", self.unread) } else { "💬".into() };
+        let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
         if icon(ui, &chat_glyph, "Chat with the person at the remote screen", self.chat.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {
                 match r.chat.take() {
@@ -1615,20 +1711,20 @@ impl Remote {
                 Ok(())
             }));
         }
-        if icon(ui, "📷", "Screenshot: save the remote screen as a PNG in Pictures", false).clicked() {
+        if icon(ui, ic::CAMERA, "Screenshot: save the remote screen as a PNG in Pictures", false).clicked() {
             *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
         }
         let (glyph, tip) = if self.paused {
-            ("▶", "Resume the picture")
+            (ic::PLAY, "Resume the picture")
         } else {
-            ("⏸", "Pause the picture to save traffic; fetch single frames when needed")
+            (ic::PAUSE, "Pause the picture to save traffic; fetch single frames when needed")
         };
         if icon(ui, glyph, tip, self.paused).clicked() {
             let on = !self.paused;
             self.paused = on;
             *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
         }
-        if self.paused && icon(ui, "⟳", "Fetch one frame", false).clicked() {
+        if self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked() {
             *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
         }
 
@@ -1636,7 +1732,7 @@ impl Remote {
         let mut sound_clicked = false;
         let mut dark = ui.visuals().dark_mode;
         let mut theme_clicked = false;
-        let more = ui.menu_button(RichText::new("⚙").size(17.0), |ui| {
+        let more = icon_menu(ui, ic::GEAR, |ui| {
             ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
             sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
             if cfg!(windows) {
@@ -1654,7 +1750,7 @@ impl Remote {
                 ui.close();
             }
         });
-        more.response.on_hover_text("Options");
+        more.on_hover_text("Options");
         if theme_clicked {
             set_theme(ui.ctx(), dark);
         }
@@ -1675,9 +1771,9 @@ impl Remote {
             }));
         }
         ui.separator();
-        let end = egui::Button::new(RichText::new("✖").size(15.0).color(Color32::WHITE))
-            .fill(Color32::from_rgb(200, 62, 62))
-            .min_size(Vec2::new(36.0, 30.0));
+        let end = egui::Button::new(RichText::new(ic::X).size(17.0).color(Color32::WHITE))
+            .fill(BAD)
+            .min_size(Vec2::splat(32.0));
         if ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }

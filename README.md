@@ -50,12 +50,23 @@ the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20
 
 `desk` with no arguments (or a double click on `desk.exe`) opens the window: a connect screen with
 host, port, an optional password (handed to ssh through its askpass hook, never stored), the
-quality, and recent hosts. `desk --gui HOST` connects straight away.
+quality, and host cards. A failed connection is explained with its likely cause and what to try.
+The window has a dark and a light theme, remembered between runs. `desk --gui HOST` connects
+straight away.
 
-In a session the toolbar at the top offers the quality presets and custom colours, scale and fps,
-fit-to-window or original size, full screen (F11; the toolbar then hides until the pointer reaches
-the top edge), a keys menu (Ctrl+Alt+Del, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen,
-Win plus the next key), clipboard sharing, refresh, live traffic, round trip and fps, and disconnect.
+In a session the toolbar at the top shows the connection state (a green, yellow or red dot with the
+round trip; hover for traffic, fps and quality) and icon buttons for:
+
+- display: quality presets and custom colours, scale and fps; fit, stretch or a fixed zoom; the
+  remote screen to show;
+- full screen (F11; the toolbar then hides until the pointer reaches the top edge);
+- special keys (Ctrl+Alt+Del, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen, Win plus
+  the next key);
+- files, chat, screenshot, pause and single frame;
+- options: clipboard sharing, sound, system keys, toolbar auto-hide, theme and a full repaint;
+- disconnect.
+
+Messages such as saved screenshots and finished downloads appear as notifications at the bottom right.
 
 Every key goes to the remote host as a separate press and release by its position, so held
 modifiers, Shift+click, Ctrl+drag and games behave as on a local keyboard, and the remote keyboard
@@ -107,8 +118,10 @@ window closes itself shortly after the viewer leaves.
 
 ## Hosts
 
-The connect screen lists recent hosts and the `Host` aliases of `~/.ssh/config`; ssh applies their
-user, port and keys as usual. `desk --term` offers the same list in a terminal.
+The connect screen shows favorites, recent hosts and the `Host` aliases of `~/.ssh/config` as
+cards with the time of the last connection, a search box and a star to pin a host; ssh applies
+their user, port and keys as usual. A click fills in the form, a double click connects. Hosts are
+remembered only after a successful connection. `desk --term` offers the same list in a terminal.
 
 ## MCP
 
@@ -185,3 +198,8 @@ round trip of a ping that queues behind frames: two seconds over budget or slow 
 a quiet spell steps up, and the wait before climbing back to a level that failed doubles.
 A climb whose full-screen resend alone exceeds the budget caps auto below that level for ten
 minutes.
+
+## Credits
+
+The icons are from [Phosphor Icons](https://phosphoricons.com) (MIT), as packaged by
+[egui-phosphor](https://github.com/amPerl/egui-phosphor); see `assets/fonts/LICENSE-phosphor.txt`.
