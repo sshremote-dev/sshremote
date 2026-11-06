@@ -31,6 +31,8 @@ pub struct Options {
     pub probe_type: String,
     /// Probe only: scroll steps sent the same way after the typed text.
     pub probe_scroll: usize,
+    /// Probe only: a file uploaded at the start, to check transfers end to end.
+    pub probe_send: Option<String>,
 }
 
 pub enum Ev {

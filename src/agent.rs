@@ -90,6 +90,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut prev: Option<Plane> = None;
     let mut vid = video::Video::new();
     let mut clip = crate::clip::Clip::new();
+    let mut inbox = crate::files::Inbox::default();
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
@@ -139,6 +140,21 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 ToAgent::KeyState { keysym, down } => report(cap.input(Input::KeyState { keysym, down })),
                 ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
                 ToAgent::Clipboard(text) => clip.set(text),
+                ToAgent::FileStart { id, size, name } => {
+                    if let Some(m) = inbox.start(id, size, &name) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
+                ToAgent::FileData { id, data } => {
+                    if let Some(m) = inbox.data(id, &data) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
+                ToAgent::FileEnd { id } => {
+                    if let Some(m) = inbox.end(id) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
             }
         }
         if let Some(text) = clip.poll() {

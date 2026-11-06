@@ -146,7 +146,25 @@ struct Remote {
     view_changed: Option<Instant>,
     win_next: bool,
     note: Option<(String, Instant)>,
+    grab_keys: bool,
+    uploads: std::collections::VecDeque<Upload>,
+    next_upload: u32,
 }
+
+/// A file being sent to the remote Downloads folder.
+struct Upload {
+    id: u32,
+    name: String,
+    file: std::fs::File,
+    size: u64,
+    sent: u64,
+    acked: u64,
+    ended: bool,
+}
+
+/// Unacknowledged upload bytes; more would only queue in ssh and delay the screen.
+const UPLOAD_WINDOW: u64 = 1 << 20;
+const UPLOAD_CHUNK: usize = 64 << 10;
 
 pub struct App {
     screen: Screen,
@@ -154,6 +172,8 @@ pub struct App {
     recent: Vec<(String, String)>,
     error: Option<String>,
     budget: f64,
+    /// System keys taken from Windows while a session is in front.
+    grabbed: Option<mpsc::Receiver<(u32, bool)>>,
 }
 
 pub fn run(opt: &Options) -> Result<(), String> {
@@ -187,7 +207,11 @@ pub fn run(opt: &Options) -> Result<(), String> {
         native,
         Box::new(move |cc| {
             style(&cc.egui_ctx);
-            let mut app = App { screen: Screen::Connect, form, recent: load_recent(), error: None, budget };
+            #[cfg(windows)]
+            let grabbed = crate::keygrab::install();
+            #[cfg(not(windows))]
+            let grabbed = None;
+            let mut app = App { screen: Screen::Connect, form, recent: load_recent(), error: None, budget, grabbed };
             if auto_start {
                 app.connect(&cc.egui_ctx, local);
             }
@@ -274,6 +298,7 @@ impl App {
             probe: None,
             probe_type: String::new(),
             probe_scroll: 0,
+            probe_send: None,
         }
     }
 
@@ -413,6 +438,9 @@ impl eframe::App for App {
                         view_changed: None,
                         win_next: false,
                         note: None,
+                        grab_keys: true,
+                        uploads: std::collections::VecDeque::new(),
+                        next_upload: 1,
                     })));
                 }
                 Ok(Err(e)) => {
@@ -440,7 +468,15 @@ impl eframe::App for App {
                 }
             },
             Screen::Remote(r) => {
-                if let Err(e) = r.frame(ui) {
+                #[cfg(windows)]
+                crate::keygrab::set_active(r.grab_keys && ctx.input(|i| i.focused));
+                let grabbed: Vec<(u32, bool)> =
+                    self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
+                let result = grabbed
+                    .into_iter()
+                    .try_for_each(|(keysym, down)| r.send(ToAgent::KeyState { keysym, down }))
+                    .and_then(|_| r.frame(ui));
+                if let Err(e) = result {
                     r.sess.close();
                     if r.fullscreen {
                         ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
@@ -453,6 +489,10 @@ impl eframe::App for App {
         }
         if let Some(s) = next {
             self.screen = s;
+        }
+        #[cfg(windows)]
+        if !matches!(self.screen, Screen::Remote(_)) {
+            crate::keygrab::set_active(false);
         }
         if matches!(self.screen, Screen::Connect) {
             self.connect_screen(ui);
@@ -479,6 +519,8 @@ impl Remote {
             self.send(ToAgent::Clipboard(text))?;
         }
         self.ctl.tick(&mut self.sess).map_err(|e| e.to_string())?;
+        self.take_drops(&ctx)?;
+        self.feed_uploads()?;
         let screen = ui.max_rect();
         let ppp = ctx.pixels_per_point();
         // A pinned toolbar gets its own strip instead of covering the top of the remote screen.
@@ -488,6 +530,7 @@ impl Remote {
         self.resize(area.size() * ppp)?;
         let shown = self.picture(ui, area, ppp);
         let toolbar_rect = self.toolbar(&ctx, screen)?;
+        self.upload_overlay(&ctx, screen);
         self.input(&ctx, shown, toolbar_rect)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
             self.set_fullscreen(&ctx, !self.fullscreen);
@@ -512,6 +555,21 @@ impl Remote {
                         self.clip.set(t);
                     }
                 }
+                Ok(Ev::Net(ToClient::FileProgress { id, received })) => {
+                    if let Some(u) = self.uploads.iter_mut().find(|u| u.id == id) {
+                        u.acked = received;
+                    }
+                }
+                Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
+                    let name = self.uploads.iter().find(|u| u.id == id).map(|u| u.name.clone()).unwrap_or_default();
+                    self.uploads.retain(|u| u.id != id);
+                    let msg = if ok {
+                        format!("{name} saved on the remote host: {text}")
+                    } else {
+                        format!("{name} failed: {text}")
+                    };
+                    self.notify(&msg);
+                }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     let log = self.sess.log();
                     return Err(if log.is_empty() { e } else { format!("{e}\n{log}") });
@@ -521,6 +579,82 @@ impl Remote {
                 Err(mpsc::TryRecvError::Disconnected) => return Err("connection closed".into()),
             }
         }
+    }
+
+    /// Starts uploading files dropped on the window.
+    fn take_drops(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for f in dropped {
+            let path = f.path().to_path_buf();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            if path.is_dir() {
+                self.notify("Folders cannot be sent yet; drop the files inside");
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.notify(&format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let id = self.next_upload;
+            self.next_upload += 1;
+            self.send(ToAgent::FileStart { id, size, name: name.clone() })?;
+            self.uploads.push_back(Upload { id, name, file, size, sent: 0, acked: 0, ended: false });
+        }
+        Ok(())
+    }
+
+    /// Sends the next chunks of the first unfinished upload, keeping a bounded amount unacknowledged.
+    fn feed_uploads(&mut self) -> Result<(), String> {
+        use std::io::Read;
+        let Some(i) = self.uploads.iter().position(|u| !u.ended) else { return Ok(()) };
+        let mut buf = vec![0u8; UPLOAD_CHUNK];
+        loop {
+            let u = &mut self.uploads[i];
+            if u.sent - u.acked.min(u.sent) >= UPLOAD_WINDOW {
+                return Ok(());
+            }
+            let n = u.file.read(&mut buf).map_err(|e| format!("{}: {e}", u.name))?;
+            let id = u.id;
+            if n == 0 {
+                u.ended = true;
+                return self.send(ToAgent::FileEnd { id });
+            }
+            u.sent += n as u64;
+            self.send(ToAgent::FileData { id, data: buf[..n].to_vec() })?;
+        }
+    }
+
+    /// Progress of uploads and the drop hint, bottom left over the remote screen.
+    fn upload_overlay(&self, ctx: &egui::Context, screen: Rect) {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let mut lines: Vec<String> = self
+            .uploads
+            .iter()
+            .map(|u| format!("Sending {}  {}%", u.name, if u.size == 0 { 100 } else { u.acked * 100 / u.size }))
+            .collect();
+        if hovering {
+            lines.push("Drop to send to the remote Downloads folder".into());
+        }
+        if lines.is_empty() {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("uploads")));
+        let text = lines.join(
+            "
+",
+        );
+        let galley = painter.layout_no_wrap(text, FontId::proportional(14.0), Color32::WHITE);
+        let pos = Pos2::new(screen.left() + 16.0, screen.bottom() - 16.0 - galley.size().y);
+        let bg = Rect::from_min_size(pos, galley.size()).expand(8.0);
+        painter.rect_filled(bg, CornerRadius::same(8), Color32::from_rgba_unmultiplied(28, 30, 36, 230));
+        painter.galley(pos, galley, Color32::WHITE);
     }
 
     /// Copies changed pixels into the texture.
@@ -848,6 +982,16 @@ impl Remote {
                 r.share_clipboard = !r.share_clipboard;
                 Ok(())
             }));
+        }
+        if cfg!(windows) {
+            let grab = if self.grab_keys { "System keys: on" } else { "System keys: off" };
+            let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
+            if ui.button(grab).on_hover_text(tip).clicked() {
+                *action = Some(Box::new(|r, _| {
+                    r.grab_keys = !r.grab_keys;
+                    Ok(())
+                }));
+            }
         }
         if ui.button("Refresh").clicked() {
             *action = Some(Box::new(|r, _| r.menu('r')));

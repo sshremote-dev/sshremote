@@ -386,10 +386,21 @@ pub fn run(opt: Options) -> Result<(), String> {
     let mut type_start = (0u64, 0u32);
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
+        if let Some(path) = &opt.probe_send {
+            let data = std::fs::read(path)?;
+            let name =
+                std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
+            v.sess.send(ToAgent::FileStart { id: 1, size: data.len() as u64, name })?;
+            for chunk in data.chunks(64 << 10) {
+                v.sess.send(ToAgent::FileData { id: 1, data: chunk.to_vec() })?;
+            }
+            v.sess.send(ToAgent::FileEnd { id: 1 })?;
+        }
         while !v.quit && deadline.is_none_or(|d| Instant::now() < d) {
             match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
                 Ok(Ev::Net(ToClient::Pong(t))) => v.ctl.pong(t),
+                Ok(Ev::Net(ToClient::FileDone { ok, text, .. })) => eprintln!("probe: upload ok={ok} {text}"),
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     failure = Some(e);
                     break;

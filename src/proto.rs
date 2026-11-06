@@ -72,6 +72,19 @@ pub enum ToAgent {
     Clipboard(String),
     /// Ctrl+Alt+Del, which no viewer can capture locally.
     SecureAttention,
+    /// A file upload begins; it lands in the remote user's Downloads folder.
+    FileStart {
+        id: u32,
+        size: u64,
+        name: String,
+    },
+    FileData {
+        id: u32,
+        data: Vec<u8>,
+    },
+    FileEnd {
+        id: u32,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -122,6 +135,17 @@ pub enum ToClient {
     Pong(u32),
     /// Text now on the remote clipboard.
     Clipboard(String),
+    /// Bytes of an upload written so far.
+    FileProgress {
+        id: u32,
+        received: u64,
+    },
+    /// An upload finished: where it was saved, or why it failed.
+    FileDone {
+        id: u32,
+        ok: bool,
+        text: String,
+    },
 }
 
 fn bad() -> io::Error {
@@ -232,6 +256,21 @@ impl ToAgent {
                 11
             }
             ToAgent::SecureAttention => 12,
+            ToAgent::FileStart { id, size, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                13
+            }
+            ToAgent::FileData { id, data } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(data);
+                14
+            }
+            ToAgent::FileEnd { id } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                15
+            }
         };
         (kind, b)
     }
@@ -257,6 +296,13 @@ impl ToAgent {
             10 => ToAgent::HScroll { steps: c.u8()? as i8 },
             11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
             12 => ToAgent::SecureAttention,
+            13 => ToAgent::FileStart {
+                id: c.u32()?,
+                size: u64::from_le_bytes(c.take(8)?.try_into().unwrap()),
+                name: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
+            14 => ToAgent::FileData { id: c.u32()?, data: c.rest().to_vec() },
+            15 => ToAgent::FileEnd { id: c.u32()? },
             _ => return Err(bad()),
         })
     }
@@ -312,6 +358,17 @@ impl ToClient {
                 b.extend_from_slice(t.as_bytes());
                 105
             }
+            ToClient::FileProgress { id, received } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&received.to_le_bytes());
+                106
+            }
+            ToClient::FileDone { id, ok, text } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                107
+            }
         };
         (kind, b)
     }
@@ -360,6 +417,14 @@ impl ToClient {
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
             105 => ToClient::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
+            106 => {
+                ToClient::FileProgress { id: c.u32()?, received: u64::from_le_bytes(c.take(8)?.try_into().unwrap()) }
+            }
+            107 => ToClient::FileDone {
+                id: c.u32()?,
+                ok: c.u8()? != 0,
+                text: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             _ => return Err(bad()),
         })
     }
@@ -384,6 +449,9 @@ mod tests {
             ToAgent::HScroll { steps: -3 },
             ToAgent::Clipboard("hello".into()),
             ToAgent::SecureAttention,
+            ToAgent::FileStart { id: 1, size: 3, name: "a.txt".into() },
+            ToAgent::FileData { id: 1, data: vec![1, 2, 3] },
+            ToAgent::FileEnd { id: 1 },
         ];
         for m in msgs {
             let (k, p) = m.encode();

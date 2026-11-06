@@ -56,6 +56,15 @@ is committed. Mouse back and forward buttons and horizontal wheels are passed th
 is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME; on Windows it
 needs a service, which desk does not install yet.
 
+On a Windows viewer, while the session window is in front, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
+Print Screen are taken with a low-level keyboard hook (on a thread of its own, since Windows skips a
+hook whose thread is busy) and go to the remote host instead of this PC; the toolbar's "System keys"
+switch turns this off.
+
+Files dropped on the window are sent to the remote user's Downloads folder (an existing file is never
+overwritten; the copy gets " (2)" and so on). At most 1 MiB is unacknowledged at a time, so a large
+file does not hold up the screen. `--probe SECS --send FILE` uploads a file headless, for testing.
+
 On Windows the window renders with Direct3D 12 (`WGPU_BACKEND` overrides it), which also works where
 a GPU driver's Vulkan or OpenGL does not.
 
