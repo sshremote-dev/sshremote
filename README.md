@@ -134,7 +134,9 @@ Windows agent running as the service (SYSTEM) refuses shells; connect over ssh f
 As in a video call (Meet, Loom), the Share button lists what the SSH host can send: its screens,
 its open windows, and its applications (all Chrome windows, say). "Active window" and "Active
 application" at the top of the lists share the window in front, or every window of its program,
-without picking from a list. The picture is then only that
+without picking from a list. "Click a window to share" works everywhere without any helper: a hint
+appears over the picture, the next click on a window brings it to the front on the SSH host, and that
+window is then shared and controlled. The picture is then only that
 window or application, so it is smaller and cheaper; anything covering it is greyed out, clicks
 outside it are dropped, and keys go only while it has the focus. A chip in the toolbar shows what is
 shared and returns to the whole screen when clicked.

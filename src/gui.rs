@@ -240,6 +240,12 @@ struct Remote {
     picker: Option<(Option<Result<Vec<crate::capture::WindowInfo>, String>>, u8)>,
     /// What is shared now: kind as in `capture::Share` and a description.
     sharing: (u8, String),
+    /// The next click on the picture chooses the window to share.
+    click_pick: bool,
+    /// That click has been pressed on the picture (the release of the click that opened the mode does not count).
+    pick_pressed: bool,
+    /// When to share the window that the choosing click brought to the front.
+    pick_at: Option<Instant>,
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
@@ -397,8 +403,8 @@ pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui:
 
 /// A square, borderless icon button that shows its frame on hover or while on.
 fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(glyph).size(18.0))
-        .min_size(Vec2::splat(32.0))
+    egui::Button::new(RichText::new(glyph).size(16.0))
+        .min_size(Vec2::splat(28.0))
         .frame_when_inactive(false)
         .selected(on)
 }
@@ -813,6 +819,9 @@ impl eframe::App for App {
                         terms: None,
                         picker: None,
                         sharing: (0, String::new()),
+                        click_pick: false,
+                        pick_pressed: false,
+                        pick_at: None,
                         label: format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend),
                         sess,
                         rx,
@@ -956,7 +965,7 @@ impl Remote {
         let screen = ui.max_rect();
         let ppp = ctx.pixels_per_point();
         // A pinned toolbar gets its own strip instead of covering the top of the remote screen.
-        let area = if self.pinned { screen.with_min_y(screen.top() + 52.0) } else { screen };
+        let area = if self.pinned { screen.with_min_y(screen.top() + 42.0) } else { screen };
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
         self.resize(area.size() * ppp)?;
@@ -969,6 +978,25 @@ impl Remote {
         self.file_window(&ctx)?;
         self.term_window(&ctx)?;
         self.share_picker(&ctx)?;
+        if self.pick_at.is_some_and(|t| Instant::now() >= t) {
+            self.pick_at = None;
+            self.send(ToAgent::Share { kind: 3, id: 0 })?;
+        }
+        if self.click_pick {
+            // A hint over the picture while the next click chooses the window.
+            let text = format!("{}  Click the window to share   ·   Esc cancels", ic::CURSOR_CLICK);
+            let painter =
+                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("click-pick")));
+            let galley = painter.layout_no_wrap(text, FontId::proportional(15.0), Color32::WHITE);
+            let r = Rect::from_center_size(
+                Pos2::new(screen.center().x, screen.top() + 80.0),
+                galley.size() + Vec2::new(32.0, 18.0),
+            );
+            painter.rect_filled(r, CornerRadius::same(10), ACCENT);
+            painter.galley(r.min + Vec2::new(16.0, 9.0), galley, Color32::WHITE);
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
         self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
@@ -1280,6 +1308,7 @@ impl Remote {
         let Some((list, tab)) = self.picker.as_mut() else { return Ok(()) };
         let mut pick: Option<ToAgent> = None;
         let mut close = false;
+        let mut click_pick = false;
         let monitors = self.monitors.clone();
         let current = self.monitor;
         let modal = egui::Modal::new(egui::Id::unique("sshremote-share-picker")).show(ctx, |ui| {
@@ -1369,12 +1398,10 @@ impl Remote {
                         if row(ui, ic::APP_WINDOW, "Active window", sub, false) {
                             pick = Some(ToAgent::Share { kind: 3, id: 0 });
                         }
-                        if no_helper {
-                            // GNOME's own sharing dialog, opened on the remote screen and answered there.
-                            let sub = "Opens GNOME's sharing dialog on the SSH host's screen; pick a window there";
-                            if row(ui, ic::CURSOR_CLICK, "Choose on the SSH host", sub, false) {
-                                pick = Some(ToAgent::PickOnRemote);
-                            }
+                        // Pointing at the window itself: the click brings it to the front, then it is shared.
+                        let sub = "Click the window you want in the picture of the SSH host";
+                        if row(ui, ic::CURSOR_CLICK, "Click a window to share", sub, false) {
+                            click_pick = true;
                         }
                     } else if no_helper {
                         ui.add_enabled_ui(false, |ui| {
@@ -1399,6 +1426,15 @@ impl Remote {
         });
         if modal.should_close() {
             close = true;
+        }
+        if click_pick {
+            self.click_pick = true;
+            self.pick_pressed = false;
+            close = true;
+            if self.sharing.0 != 0 {
+                // The whole screen first, so every window can be seen and clicked.
+                self.send(ToAgent::Share { kind: 0, id: 0 })?;
+            }
         }
         if let Some(m) = pick {
             // The install answer comes back as the list's message, so the chooser stays open for it.
@@ -1709,6 +1745,13 @@ impl Remote {
             });
         }
         for e in events {
+            if self.click_pick && matches!(e, Event::Key { key: Key::Escape, .. }) {
+                if matches!(e, Event::Key { pressed: true, .. }) {
+                    self.click_pick = false;
+                    self.notify("Choosing a window cancelled");
+                }
+                continue;
+            }
             match e {
                 Event::Key { key: Key::F11, .. } => {}
                 Event::Key { key, physical_key, pressed, modifiers, .. } if !local => {
@@ -1756,6 +1799,15 @@ impl Remote {
                         egui::PointerButton::Extra2 => 9,
                     };
                     self.send(ToAgent::Button { button: b, pressed })?;
+                    if self.click_pick && b == 1 && pressed {
+                        self.pick_pressed = true;
+                    }
+                    if self.click_pick && self.pick_pressed && b == 1 && !pressed {
+                        self.pick_pressed = false;
+                        // Once the window has come to the front, it becomes what is shared.
+                        self.click_pick = false;
+                        self.pick_at = Some(Instant::now() + Duration::from_millis(400));
+                    }
                 }
                 Event::MouseWheel { unit, delta, .. } => {
                     let Some(pos) = ctx.pointer_hover_pos() else { continue };
@@ -1857,14 +1909,14 @@ impl Remote {
         let left = self.bar_left(screen, self.bar_w);
         let mut grip: Option<egui::Response> = None;
         let resp = egui::Area::new(id)
-            .fixed_pos(Pos2::new(left, screen.top() + 8.0))
+            .fixed_pos(Pos2::new(left, screen.top() + 4.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(ctx.global_style().visuals.window_fill.gamma_multiply(0.96))
                     .stroke(Stroke::new(1.0, Color32::from_white_alpha(25)))
                     .corner_radius(CornerRadius::same(12))
-                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let g = ui.add(
@@ -1895,7 +1947,8 @@ impl Remote {
     }
 
     fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Connection quality at a glance; details on hover.
         let (dot, state) = match self.ctl.rtt {
             r if r < 80.0 => (GOOD, "good"),
@@ -1912,13 +1965,14 @@ impl Remote {
         );
         ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
-        ui.add_sized([120.0, 20.0], egui::Label::new(RichText::new(host).strong()).truncate()).on_hover_text(&details);
+        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(host).strong().size(13.0)).truncate())
+            .on_hover_text(&details);
         // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
-        ui.add_sized([50.0, 20.0], egui::Label::new(RichText::new(rtt).small().weak().monospace()))
+        ui.add_sized([46.0, 20.0], egui::Label::new(RichText::new(rtt).small().weak().monospace()))
             .on_hover_text(&details);
         if self.sharing.0 != 0 {
-            let name: String = self.sharing.1.chars().take(32).collect();
+            let name: String = self.sharing.1.chars().take(18).collect();
             let chip = egui::Button::new(
                 RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small().color(Color32::WHITE),
             )
@@ -2143,17 +2197,17 @@ impl Remote {
         // Pinned: a filled, coloured pin on a highlighted button; not pinned: a struck-through pin.
         let (pin, tip) = if self.pinned {
             (
-                RichText::new(ic::PUSH_PIN).size(18.0).family(filled()).color(Color32::WHITE),
+                RichText::new(ic::PUSH_PIN).size(16.0).family(filled()).color(Color32::WHITE),
                 "Pinned: the toolbar stays. Click to unpin; it then folds into a tab at the top edge.",
             )
         } else {
             (
-                RichText::new(ic::PUSH_PIN_SLASH).size(18.0).color(ui.visuals().weak_text_color()),
+                RichText::new(ic::PUSH_PIN_SLASH).size(16.0).color(ui.visuals().weak_text_color()),
                 "Not pinned: the toolbar folds into a tab at the top edge. Click to pin it.",
             )
         };
         let b =
-            egui::Button::new(pin).min_size(Vec2::splat(32.0)).frame_when_inactive(self.pinned).selected(self.pinned);
+            egui::Button::new(pin).min_size(Vec2::splat(28.0)).frame_when_inactive(self.pinned).selected(self.pinned);
         if ui.add(b).on_hover_text(tip).clicked() {
             self.pinned = !self.pinned;
             self.notify(if self.pinned {
@@ -2163,9 +2217,9 @@ impl Remote {
             });
         }
         ui.separator();
-        let end = egui::Button::new(RichText::new(ic::X).size(17.0).color(Color32::WHITE))
+        let end = egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
             .fill(BAD)
-            .min_size(Vec2::splat(32.0));
+            .min_size(Vec2::splat(28.0));
         if ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }
