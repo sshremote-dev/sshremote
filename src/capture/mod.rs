@@ -54,6 +54,12 @@ pub trait Capture {
     fn input(&mut self, ev: Input) -> Result<(), String>;
 }
 
+/// Points an ssh-started process at the desktop session's bus and runtime directory.
+#[cfg(target_os = "linux")]
+pub fn ensure_session_env() {
+    gnome::ensure_env();
+}
+
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
     match name {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),

@@ -149,6 +149,7 @@ struct Remote {
     grab_keys: bool,
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
+    sound: Option<crate::audio::Player>,
     monitors: Vec<crate::proto::MonitorInfo>,
     monitor: usize,
     inbox: crate::files::Inbox,
@@ -355,6 +356,7 @@ impl App {
             probe_send: None,
             probe_fetch: None,
             probe_monitor: None,
+            sound: false,
         }
     }
 
@@ -500,6 +502,7 @@ impl eframe::App for App {
                         grab_keys: true,
                         uploads: std::collections::VecDeque::new(),
                         next_upload: 1,
+                        sound: None,
                         monitors: Vec::new(),
                         monitor: 0,
                         inbox: crate::files::Inbox::default(),
@@ -616,6 +619,12 @@ impl Remote {
                     self.send(ToAgent::Ack(f.id))?;
                 }
                 Ok(Ev::Net(ToClient::Pong(t))) => self.ctl.pong(t),
+                Ok(Ev::Net(ToClient::Audio(p))) => {
+                    if let Some(pl) = self.sound.as_mut() {
+                        pl.push(&p);
+                    }
+                }
+                Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
                 Ok(Ev::Net(ToClient::Monitors { list, current })) => {
                     (self.monitors, self.monitor) = (list, current as usize)
                 }
@@ -1201,6 +1210,23 @@ impl Remote {
             }
         });
         ui.toggle_value(&mut self.share_clipboard, "Clipboard").on_hover_text("Share copied text both ways");
+        let mut sound = self.sound.is_some();
+        if ui.toggle_value(&mut sound, "Sound").on_hover_text("Play the remote host's sound (about 8 KB/s)").clicked() {
+            *action = Some(Box::new(move |r, _| {
+                if sound {
+                    match crate::audio::Player::new() {
+                        Ok(p) => r.sound = Some(p),
+                        Err(e) => {
+                            r.notify(&format!("Sound: {e}"));
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    r.sound = None;
+                }
+                r.send(ToAgent::Audio(sound))
+            }));
+        }
         if cfg!(windows) {
             let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
             ui.toggle_value(&mut self.grab_keys, "System keys").on_hover_text(tip);

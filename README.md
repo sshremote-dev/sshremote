@@ -11,7 +11,7 @@ damaged cells locally (sixel in a terminal, a native window with `--gui`).
   Windows (GDI capture, SendInput), synthetic test desktop.
 - Viewer: sixel terminals (Windows Terminal, foot, WezTerm, VTE with sixel) and a native window,
   keyboard and mouse, live presets and an auto preset.
-- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics.
+- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics, chat.
 
 ## Build
 
@@ -19,8 +19,9 @@ damaged cells locally (sixel in a terminal, a native window with `--gui`).
 cargo build --release
 ```
 
-On Linux the agent needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config` and a C++
-compiler for the bundled OpenH264. On Windows the GNU toolchain links the C++ runtime statically
+On Linux the agent needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config libopus-dev
+libasound2-dev` and a C++ compiler for the bundled OpenH264. On Windows libopus is built from source
+with CMake (WinLibs ships one). On Windows the GNU toolchain links the C++ runtime statically
 (`.cargo/config.toml`), so `desk.exe` needs no MinGW DLLs.
 Install the binary on the remote host as `~/.local/bin/desk` (on Windows, anywhere on `PATH`).
 
@@ -82,6 +83,11 @@ a GPU driver's Vulkan or OpenGL does not.
 With several monitors on the remote host the toolbar shows a Screen menu (`Ctrl+] s` steps through
 them in a terminal). On Windows each monitor is captured and the pointer placed on the whole virtual
 desktop; on GNOME the agent records the chosen connector from Mutter's DisplayConfig.
+
+The Sound switch (`--sound` in a terminal) plays the host's sound: WASAPI loopback of the default
+output device on Windows, the default sink's monitor through PulseAudio or PipeWire on Linux, sent as
+20 ms Opus packets at 64 kbit/s (about 8 KB/s, much less during silence) and played from a buffer
+capped at 300 ms so the sound stays live. It is off until asked for.
 
 ## Transports
 

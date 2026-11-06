@@ -40,7 +40,7 @@ fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
 }
 
 /// An SSH login has no session bus variables; point them at the user's desktop session.
-fn ensure_env() {
+pub fn ensure_env() {
     if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
         return;
     }

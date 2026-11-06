@@ -395,8 +395,17 @@ pub fn run(opt: Options) -> Result<(), String> {
     let mut next_key = Instant::now() + Duration::from_secs(2);
     let mut type_start = (0u64, 0u32);
     let mut inbox = crate::files::Inbox::default();
+    let mut player: Option<crate::audio::Player> = None;
+    let mut audio_bytes = 0usize;
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
+        if opt.sound {
+            match crate::audio::Player::new() {
+                Ok(p) => player = Some(p),
+                Err(e) => eprintln!("desk: sound: {e}"),
+            }
+            v.sess.send(ToAgent::Audio(true))?;
+        }
         if let Some(m) = opt.probe_monitor {
             v.sess.send(ToAgent::SelectMonitor(m))?;
         }
@@ -417,6 +426,13 @@ pub fn run(opt: Options) -> Result<(), String> {
             match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
                 Ok(Ev::Net(ToClient::Pong(t))) => v.ctl.pong(t),
+                Ok(Ev::Net(ToClient::Audio(p))) => {
+                    audio_bytes += p.len();
+                    if let Some(pl) = player.as_mut() {
+                        pl.push(&p);
+                    }
+                }
+                Ok(Ev::Net(ToClient::Notice(t))) => eprintln!("desk: {t}"),
                 Ok(Ev::Net(ToClient::Monitors { list, current })) => {
                     if v.probe.is_some() {
                         let names: Vec<String> = list.iter().map(|m| format!("{} {}x{}", m.name, m.w, m.h)).collect();
@@ -461,6 +477,9 @@ pub fn run(opt: Options) -> Result<(), String> {
             if v.ctl.tick(&mut v.sess)? {
                 v.status()?;
             }
+        }
+        if opt.sound && v.probe.is_some() {
+            eprintln!("probe: sound {:.1} KB", audio_bytes as f64 / 1024.0);
         }
         if keys_total > 0 {
             let rx = v.sess.rx() - type_start.0;

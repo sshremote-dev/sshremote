@@ -100,6 +100,8 @@ pub enum ToAgent {
     },
     /// Shows another of the remote host's monitors (an index into `Monitors`).
     SelectMonitor(u8),
+    /// Starts or stops sending the host's sound.
+    Audio(bool),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -203,6 +205,10 @@ pub enum ToClient {
         list: Vec<MonitorInfo>,
         current: u8,
     },
+    /// One 20 ms Opus packet of the host's sound.
+    Audio(Vec<u8>),
+    /// Something the viewer should show without ending the session.
+    Notice(String),
 }
 
 fn bad() -> io::Error {
@@ -358,6 +364,10 @@ impl ToAgent {
                 b.push(*i);
                 19
             }
+            ToAgent::Audio(on) => {
+                b.push(*on as u8);
+                20
+            }
         };
         (kind, b)
     }
@@ -394,6 +404,7 @@ impl ToAgent {
             17 => ToAgent::Fetch { path: String::from_utf8_lossy(c.rest()).into_owned() },
             18 => ToAgent::FetchAck { id: c.u32()?, received: c.u64()? },
             19 => ToAgent::SelectMonitor(c.u8()?),
+            20 => ToAgent::Audio(c.u8()? != 0),
             _ => return Err(bad()),
         })
     }
@@ -481,6 +492,14 @@ impl ToClient {
                 b.push(*ok as u8);
                 b.extend_from_slice(text.as_bytes());
                 111
+            }
+            ToClient::Audio(p) => {
+                b.extend_from_slice(p);
+                113
+            }
+            ToClient::Notice(t) => {
+                b.extend_from_slice(t.as_bytes());
+                114
             }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
@@ -570,6 +589,8 @@ impl ToClient {
                 ok: c.u8()? != 0,
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
+            113 => ToClient::Audio(c.rest().to_vec()),
+            114 => ToClient::Notice(String::from_utf8_lossy(c.rest()).into_owned()),
             112 => {
                 let current = c.u8()?;
                 let n = c.u32()? as usize;

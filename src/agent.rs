@@ -98,6 +98,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
     let mut outbox = crate::files::Outbox::default();
+    let mut sound: Option<crate::audio::Capture> = None;
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
@@ -172,6 +173,15 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                 }
                 ToAgent::FetchAck { id, received } => outbox.ack(id, received),
+                ToAgent::Audio(on) => {
+                    sound = None;
+                    if on {
+                        match crate::audio::capture() {
+                            Ok(c) => sound = Some(c),
+                            Err(e) => send(enc, &ToClient::Notice(format!("Sound: {e}"))).map_err(io_err)?,
+                        }
+                    }
+                }
                 ToAgent::SelectMonitor(i) => {
                     if let Err(e) = cap.select(i as usize) {
                         report(Err(e));
@@ -188,6 +198,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     (prev, last) = (None, None);
                     vid.reset();
                 }
+            }
+        }
+        if let Some(c) = &sound {
+            for p in c.packets.try_iter() {
+                send(enc, &ToClient::Audio(p)).map_err(io_err)?;
             }
         }
         // Downloads share the stream with the screen, a slice per turn.

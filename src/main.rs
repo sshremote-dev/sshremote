@@ -1,4 +1,5 @@
 mod agent;
+mod audio;
 mod capture;
 mod client;
 mod clip;
@@ -47,6 +48,7 @@ options:
   --capture B     agent capture backend: auto gnome windows synthetic
   --remote CMD    agent command on HOST (default: desk --agent)
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
+  --sound         play the host's sound (about 8 KB/s)
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
 
 keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, z zoom, r refresh)";
@@ -72,6 +74,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         probe_send: None,
         probe_fetch: None,
         probe_monitor: None,
+        sound: false,
     };
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
@@ -99,6 +102,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             "--remote" => o.remote = val()?,
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
+            "--sound" => o.sound = true,
             "--probe" => probe = Some(val()?.parse::<f64>().map_err(|_| "bad --probe")?),
             "--view" => {
                 let v = val()?;

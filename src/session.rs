@@ -39,6 +39,8 @@ pub struct Options {
     pub probe_fetch: Option<String>,
     /// Probe only: asks for this monitor at the start.
     pub probe_monitor: Option<u8>,
+    /// Plays the host's sound.
+    pub sound: bool,
 }
 
 pub enum Ev {

@@ -4,6 +4,8 @@
 # C runtime and kernel32 it needs.
 [env]
 CXXSTDLIB_x86_64_pc_windows_gnu = ""
+# The bundled libopus declares an old CMake minimum that current CMake refuses without this.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
 [target.x86_64-pc-windows-gnu]
 rustflags = [
