@@ -15,29 +15,58 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, Event, FontId, Key, Pos2
 use crate::gui::{ACCENT, ic};
 use crate::proto::ToAgent;
 
-const BACKGROUND: Color32 = Color32::from_rgb(22, 23, 28);
 const TAB_STRIP: Color32 = Color32::from_rgb(12, 13, 16);
 const TAB_HOVER: Color32 = Color32::from_rgb(34, 36, 43);
 const TAB_DIVIDER: Color32 = Color32::from_rgb(52, 55, 64);
-const FOREGROUND: Color32 = Color32::from_rgb(215, 218, 224);
-const PALETTE: [Color32; 16] = [
-    Color32::from_rgb(59, 63, 74),
-    Color32::from_rgb(224, 108, 117),
-    Color32::from_rgb(152, 195, 121),
-    Color32::from_rgb(229, 192, 123),
-    Color32::from_rgb(97, 175, 239),
-    Color32::from_rgb(198, 120, 221),
-    Color32::from_rgb(86, 182, 194),
-    Color32::from_rgb(215, 218, 224),
-    Color32::from_rgb(92, 99, 112),
-    Color32::from_rgb(239, 123, 132),
-    Color32::from_rgb(169, 212, 138),
-    Color32::from_rgb(240, 207, 141),
-    Color32::from_rgb(124, 192, 245),
-    Color32::from_rgb(212, 143, 234),
-    Color32::from_rgb(111, 203, 214),
-    Color32::from_rgb(255, 255, 255),
+
+/// A colour scheme: name, background, foreground, the sixteen ANSI colours.
+struct Scheme(&'static str, [u8; 3], [u8; 3], [[u8; 3]; 16]);
+
+const SCHEMES: [Scheme; 6] = [
+    Scheme("One Half Dark", [22, 23, 28], [215, 218, 224], [
+        [59, 63, 74], [224, 108, 117], [152, 195, 121], [229, 192, 123], [97, 175, 239], [198, 120, 221], [86, 182, 194], [215, 218, 224],
+        [92, 99, 112], [239, 123, 132], [169, 212, 138], [240, 207, 141], [124, 192, 245], [212, 143, 234], [111, 203, 214], [255, 255, 255],
+    ]),
+    Scheme("Campbell", [12, 12, 12], [204, 204, 204], [
+        [12, 12, 12], [197, 15, 31], [19, 161, 14], [193, 156, 0], [0, 55, 218], [136, 23, 152], [58, 150, 221], [204, 204, 204],
+        [118, 118, 118], [231, 72, 86], [22, 198, 12], [249, 241, 165], [59, 120, 255], [180, 0, 158], [97, 214, 214], [242, 242, 242],
+    ]),
+    Scheme("Dracula", [40, 42, 54], [248, 248, 242], [
+        [33, 34, 44], [255, 85, 85], [80, 250, 123], [241, 250, 140], [189, 147, 249], [255, 121, 198], [139, 233, 253], [248, 248, 242],
+        [98, 114, 164], [255, 110, 110], [105, 255, 148], [255, 255, 165], [214, 172, 255], [255, 146, 223], [164, 255, 255], [255, 255, 255],
+    ]),
+    Scheme("Solarized Dark", [0, 43, 54], [131, 148, 150], [
+        [7, 54, 66], [220, 50, 47], [133, 153, 0], [181, 137, 0], [38, 139, 210], [211, 54, 130], [42, 161, 152], [238, 232, 213],
+        [0, 43, 54], [203, 75, 22], [88, 110, 117], [101, 123, 131], [131, 148, 150], [108, 113, 196], [147, 161, 161], [253, 246, 227],
+    ]),
+    Scheme("Tango Dark", [0, 0, 0], [211, 215, 207], [
+        [0, 0, 0], [204, 0, 0], [78, 154, 6], [196, 160, 0], [52, 101, 164], [117, 80, 123], [6, 152, 154], [211, 215, 207],
+        [85, 87, 83], [239, 41, 41], [138, 226, 52], [252, 233, 79], [114, 159, 207], [173, 127, 168], [52, 226, 226], [238, 238, 236],
+    ]),
+    Scheme("One Half Light", [250, 250, 250], [56, 58, 66], [
+        [56, 58, 66], [228, 86, 73], [80, 161, 79], [193, 132, 1], [1, 132, 188], [166, 38, 164], [9, 151, 179], [250, 250, 250],
+        [79, 82, 93], [223, 108, 117], [152, 195, 121], [228, 192, 122], [97, 175, 239], [197, 119, 221], [86, 181, 193], [255, 255, 255],
+    ]),
 ];
+
+/// The scheme in use, shared by every terminal window.
+static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+fn scheme_bg() -> Color32 {
+    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].1)
+}
+
+fn scheme_fg() -> Color32 {
+    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].2)
+}
+
+fn pal(i: usize) -> Color32 {
+    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].3[i % 16])
+}
 
 struct Size {
     cols: usize,
@@ -65,14 +94,62 @@ impl EventListener for Listener {
     }
 }
 
+/// Where a tab's program runs.
+enum Backend {
+    /// A shell on the SSH host, through the remote-screen session's agent.
+    Agent,
+    /// A program on this computer in a pseudo-terminal: a local shell or `ssh HOST`.
+    Local(crate::pty::Local),
+}
+
+/// How a tab is shown: the live terminal, its text, or its text read as Markdown.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Terminal,
+    Text,
+    Markdown,
+}
+
+/// Find in the scrollback, as Ctrl+Shift+F in Windows Terminal.
+#[derive(Default)]
+struct Search {
+    query: String,
+    found: Option<alacritty_terminal::term::search::Match>,
+    missing: bool,
+}
+
 struct Tab {
     id: u32,
     term: Term<Listener>,
     parser: Processor,
     events: mpsc::Receiver<TermEvent>,
     title: String,
+    /// A name the user gave the tab, which the program's title does not replace.
+    custom: Option<String>,
     exited: Option<String>,
     size: (u16, u16),
+    backend: Backend,
+    view: View,
+    search: Option<Search>,
+    /// Agent markers and frames removed in the Markdown view.
+    clean: bool,
+}
+
+/// What a new tab runs.
+#[derive(Clone)]
+pub enum Launch {
+    /// A shell on the SSH host of the remote-screen session.
+    Agent,
+    /// A program here; empty means the login shell.
+    Local(Vec<String>),
+}
+
+/// An entry of the new-tab menu.
+#[derive(Clone)]
+pub struct Profile {
+    pub name: String,
+    pub icon: &'static str,
+    pub launch: Launch,
 }
 
 /// What the window asks the session to do.
@@ -88,6 +165,16 @@ pub struct TermWindow {
     font_size: f32,
     /// A command that opens the same host in the system's own terminal, if there is one.
     system: Option<Vec<String>>,
+    profiles: Vec<Profile>,
+    /// Where the window's position is remembered and what its title says.
+    viewport: &'static str,
+    title: String,
+    copy_on_select: bool,
+    renaming: Option<(usize, String)>,
+    /// Tabs to open on the next frame (the window's context is needed to wake it for output).
+    pending: Vec<Profile>,
+    /// The window closes with its last tab instead of opening a fresh shell.
+    standalone: bool,
 }
 
 fn color(c: Color, colors: &alacritty_terminal::term::color::Colors) -> Color32 {
@@ -100,13 +187,13 @@ fn color(c: Color, colors: &alacritty_terminal::term::color::Colors) -> Color32 
                 return rgb(r);
             }
             match n {
-                NamedColor::Foreground | NamedColor::Cursor => FOREGROUND,
-                NamedColor::Background => BACKGROUND,
+                NamedColor::Foreground | NamedColor::Cursor => scheme_fg(),
+                NamedColor::Background => scheme_bg(),
                 NamedColor::BrightForeground => Color32::WHITE,
-                NamedColor::DimForeground => FOREGROUND.gamma_multiply(0.66),
-                n if (n as usize) < 16 => PALETTE[n as usize],
+                NamedColor::DimForeground => scheme_fg().gamma_multiply(0.66),
+                n if (n as usize) < 16 => pal(n as usize),
                 // DimBlack.. DimWhite follow the eight base colours.
-                n => PALETTE[(n as usize).saturating_sub(NamedColor::DimBlack as usize) % 8].gamma_multiply(0.66),
+                n => pal((n as usize).saturating_sub(NamedColor::DimBlack as usize) % 8).gamma_multiply(0.66),
             }
         }
     }
@@ -115,7 +202,7 @@ fn color(c: Color, colors: &alacritty_terminal::term::color::Colors) -> Color32 
 /// The xterm 256-colour palette.
 fn indexed(i: u8) -> Color32 {
     match i {
-        0..16 => PALETTE[i as usize],
+        0..16 => pal(i as usize),
         16..232 => {
             let v = |n: u8| if n == 0 { 0 } else { 55 + n * 40 };
             let n = i - 16;
@@ -207,27 +294,118 @@ fn key_bytes(key: Key, m: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> 
 }
 
 impl TermWindow {
+    /// The terminal of a remote-screen session: shells on its SSH host.
     pub fn new(system: Option<Vec<String>>) -> Self {
-        TermWindow { tabs: Vec::new(), active: 0, next_id: 1, font_size: 14.0, system }
+        let mut profiles = vec![Profile { name: "Shell on the SSH host".into(), icon: ic::MONITOR, launch: Launch::Agent }];
+        profiles.extend(local_profiles());
+        let mut w = Self::with_profiles(profiles, "sshremote-terminal", "Terminal");
+        w.system = system;
+        w
+    }
+
+    /// The stand-alone terminal: local shells and ssh sessions, the first profile opening first.
+    pub fn standalone(first: Profile, mut more: Vec<Profile>) -> Self {
+        let mut profiles = local_profiles();
+        profiles.append(&mut more);
+        let mut w = Self::with_profiles(profiles, "sshremote-standalone-terminal", "SSH Remote Terminal");
+        w.pending.push(first);
+        w.standalone = true;
+        w
+    }
+
+    fn with_profiles(profiles: Vec<Profile>, viewport: &'static str, title: &str) -> Self {
+        let setting = |k: &str| crate::hosts::setting(k);
+        if let Some(i) = setting("term_scheme").and_then(|v| v.parse().ok()) {
+            SCHEME.store(i, std::sync::atomic::Ordering::Relaxed);
+        }
+        TermWindow {
+            tabs: Vec::new(),
+            active: 0,
+            next_id: 1,
+            font_size: setting("term_font").and_then(|v| v.parse().ok()).unwrap_or(14.0),
+            system: None,
+            profiles,
+            viewport,
+            title: title.into(),
+            copy_on_select: setting("term_copy_select").is_some_and(|v| v == "1"),
+            renaming: None,
+            pending: Vec::new(),
+            standalone: false,
+        }
+    }
+
+    /// Opens a tab for `profile` in this window (shown from the next frame).
+    pub fn open(&mut self, profile: Profile) {
+        self.pending.push(profile);
     }
 
     fn open_tab(&mut self, out: &mut Vec<Cmd>) {
+        let first = self.profiles.first().cloned();
+        if let Some(p) = first {
+            self.pending.push(p);
+        }
+        let _ = out;
+    }
+
+    fn start(&mut self, ctx: &egui::Context, profile: Profile, out: &mut Vec<Cmd>) {
         let (tx, rx) = mpsc::channel();
         let size = (100u16, 30u16);
         let term = Term::new(Config::default(), &Size { cols: size.0 as usize, rows: size.1 as usize }, Listener(tx));
         let id = self.next_id;
         self.next_id += 1;
-        out.push(Cmd::Send(ToAgent::TermOpen { id, cols: size.0, rows: size.1 }));
+        let (backend, exited) = match &profile.launch {
+            Launch::Agent => {
+                out.push(Cmd::Send(ToAgent::TermOpen { id, cols: size.0, rows: size.1 }));
+                (Backend::Agent, None)
+            }
+            Launch::Local(argv) => {
+                let waker = ctx.clone();
+                match crate::pty::Local::spawn(argv, size.0, size.1, Box::new(move || waker.request_repaint())) {
+                    Ok(l) => (Backend::Local(l), None),
+                    Err(e) => (Backend::Agent, Some(format!("cannot start {}: {e}", profile.name))),
+                }
+            }
+        };
         self.tabs.push(Tab {
             id,
             term,
             parser: Processor::new(),
             events: rx,
-            title: format!("Shell {id}"),
-            exited: None,
+            title: profile.name.clone(),
+            custom: None,
+            exited,
             size,
+            backend,
+            view: View::Terminal,
+            search: None,
+            clean: true,
         });
         self.active = self.tabs.len() - 1;
+    }
+
+    /// Hands keystrokes and sizes of local tabs to their programs instead of the agent.
+    fn route_local(&mut self, out: &mut Vec<Cmd>) {
+        let mut keep = Vec::new();
+        for c in out.drain(..) {
+            if let Cmd::Send(m) = &c {
+                let (id, data, size) = match m {
+                    ToAgent::TermInput { id, data } => (*id, Some(data.clone()), None),
+                    ToAgent::TermResize { id, cols, rows } => (*id, None, Some((*cols, *rows))),
+                    _ => (0, None, None),
+                };
+                if let Some(Backend::Local(l)) = self.tabs.iter_mut().find(|t| t.id == id).map(|t| &mut t.backend) {
+                    if let Some(d) = data {
+                        l.write(&d);
+                    }
+                    if let Some((c, r)) = size {
+                        l.resize(c, r);
+                    }
+                    continue;
+                }
+            }
+            keep.push(c);
+        }
+        *out = keep;
     }
 
     pub fn output(&mut self, id: u32, data: &[u8]) {
@@ -249,17 +427,18 @@ impl TermWindow {
 
     pub fn show(&mut self, ctx: &egui::Context, host: &str) -> Vec<Cmd> {
         let mut out = Vec::new();
-        if self.tabs.is_empty() {
-            self.open_tab(&mut out);
+        if !self.before(ctx, &mut out) {
+            return vec![Cmd::Close];
         }
+        let window_title = if host.is_empty() { self.title.clone() } else { format!("{} - {host}", self.title) };
         let mut builder = egui::ViewportBuilder::default()
-            .with_title(format!("Terminal - {host}"))
+            .with_title(window_title)
             .with_inner_size([900.0, 560.0])
             .with_min_inner_size([360.0, 200.0]);
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sshremote-terminal"), builder, |ui, _| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(self.viewport), builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 out.extend(self.close_all());
                 out.push(Cmd::Close);
@@ -267,6 +446,38 @@ impl TermWindow {
             }
             self.body(ui, &mut out);
         });
+        self.after(ctx, &mut out);
+        out
+    }
+
+    /// Starts pending tabs and takes in program output; false once a stand-alone window has no tabs left.
+    fn before(&mut self, ctx: &egui::Context, out: &mut Vec<Cmd>) -> bool {
+        if self.tabs.is_empty() && self.pending.is_empty() {
+            if self.standalone {
+                return false;
+            }
+            self.open_tab(out);
+        }
+        for p in std::mem::take(&mut self.pending) {
+            self.start(ctx, p, out);
+        }
+        // Output of local programs.
+        for t in &mut self.tabs {
+            if let Backend::Local(l) = &mut t.backend {
+                let (data, exit) = l.drain();
+                if !data.is_empty() {
+                    t.parser.advance(&mut t.term, &data);
+                }
+                if let Some(e) = exit {
+                    t.exited = Some(e);
+                }
+            }
+        }
+        true
+    }
+
+    /// Hands the emulators' replies and local keystrokes on.
+    fn after(&mut self, ctx: &egui::Context, out: &mut Vec<Cmd>) {
         // Replies the emulator owes the shell (cursor position, colours) and title changes.
         for t in &mut self.tabs {
             for e in t.events.try_iter() {
@@ -281,7 +492,14 @@ impl TermWindow {
                 }
             }
         }
-        out
+        self.route_local(out);
+    }
+
+    /// Saves the terminal preferences.
+    fn save_settings(&self) {
+        crate::hosts::set_setting("term_font", &format!("{}", self.font_size));
+        crate::hosts::set_setting("term_scheme", &SCHEME.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        crate::hosts::set_setting("term_copy_select", if self.copy_on_select { "1" } else { "0" });
     }
 
     fn body(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
@@ -302,7 +520,7 @@ impl TermWindow {
                     let p = ui.painter();
                     let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
                     if active {
-                        p.rect_filled(rect, top_round, BACKGROUND);
+                        p.rect_filled(rect, top_round, scheme_bg());
                     } else if hovered {
                         p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
                     } else if i + 1 != self.active && i + 1 < self.tabs.len() {
@@ -326,7 +544,7 @@ impl TermWindow {
                         Rect::from_center_size(rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
                     let show_close = active || hovered;
                     let title_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 10.0 };
-                    let mut title = t.title.clone();
+                    let mut title = t.custom.clone().unwrap_or_else(|| t.title.clone());
                     if ended {
                         title.push_str(" (ended)");
                     }
@@ -344,7 +562,7 @@ impl TermWindow {
                     if galley.size().x > title_rect.width() {
                         // Fade the cut end instead of ending mid-letter.
                         let bg = if active {
-                            BACKGROUND
+                            scheme_bg()
                         } else if hovered {
                             TAB_HOVER
                         } else {
@@ -385,6 +603,10 @@ impl TermWindow {
                     if r.middle_clicked() {
                         close = Some(i);
                     }
+                    if r.double_clicked() {
+                        let name = self.tabs[i].custom.clone().unwrap_or_else(|| self.tabs[i].title.clone());
+                        self.renaming = Some((i, name));
+                    }
                     r.on_hover_text(&self.tabs[i].title);
                 }
                 ui.add_space(4.0);
@@ -399,9 +621,24 @@ impl TermWindow {
                     FontId::proportional(15.0),
                     Color32::from_gray(200),
                 );
-                if pr.on_hover_text("New shell (Ctrl+Shift+T)").clicked() {
+                if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
                     self.open_tab(out);
                 }
+                // The profiles: local shells, ssh hosts, the SSH host's own shell.
+                let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
+                    .frame_when_inactive(false)
+                    .min_size(Vec2::new(22.0, 30.0));
+                let profiles = self.profiles.clone();
+                egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+                    ui.set_min_width(240.0);
+                    for (k, p) in profiles.iter().enumerate() {
+                        let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
+                        if ui.add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut)).clicked() {
+                            self.pending.push(p.clone());
+                            ui.close();
+                        }
+                    }
+                });
                 if let Some(i) = close {
                     let t = self.tabs.remove(i);
                     if t.exited.is_none() {
@@ -416,23 +653,73 @@ impl TermWindow {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
-                        let b = egui::Button::new(RichText::new(glyph).size(14.0).color(Color32::from_gray(190)))
-                            .frame_when_inactive(false)
+                    let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
+                        let color = if on { Color32::WHITE } else { Color32::from_gray(170) };
+                        let b = egui::Button::new(RichText::new(glyph).size(14.0).color(color))
+                            .frame_when_inactive(on)
+                            .selected(on)
                             .min_size(Vec2::splat(28.0));
                         ui.add(b).on_hover_text(tip).clicked()
                     };
                     if let Some(cmd) = &self.system
-                        && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)")
+                        && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)", false)
                     {
                         let _ = spawn_system(cmd);
                     }
-                    if small(ui, ic::PLUS, "Larger text (Ctrl+=)") {
-                        self.font_size = (self.font_size + 1.0).min(32.0);
+                    let font = &mut self.font_size;
+                    let mut copy_on_select = self.copy_on_select;
+                    let mut changed = false;
+                    let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(Color32::from_gray(170)))
+                        .frame_when_inactive(false)
+                        .min_size(Vec2::splat(28.0));
+                    egui::containers::menu::MenuButton::from_button(gear)
+                        .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                        .ui(ui, |ui| {
+                            ui.set_min_width(240.0);
+                            ui.label(RichText::new("Appearance").strong());
+                            changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
+                            let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len();
+                            for (k, sc) in SCHEMES.iter().enumerate() {
+                                if ui.selectable_label(k == current, sc.0).clicked() {
+                                    SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+                                    changed = true;
+                                }
+                            }
+                            ui.separator();
+                            changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
+                            ui.separator();
+                            ui.label(RichText::new("Shortcuts").strong());
+                            for (k, v) in [
+                                ("Ctrl+Shift+T / W", "New / close tab"),
+                                ("Ctrl+Tab", "Next tab"),
+                                ("Ctrl+Shift+F", "Find"),
+                                ("Ctrl+Shift+C / V", "Copy / paste"),
+                                ("Ctrl+= / Ctrl+-", "Text size"),
+                                ("Ctrl+click", "Open a link"),
+                                ("Double-click a tab", "Rename it"),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(k).monospace().size(12.0));
+                                    ui.label(RichText::new(v).weak().size(12.0));
+                                });
+                            }
+                        });
+                    self.copy_on_select = copy_on_select;
+                    if changed {
+                        self.save_settings();
                     }
-                    ui.label(RichText::new(format!("{:.0}", self.font_size)).size(12.0).color(Color32::from_gray(140)));
-                    if small(ui, ic::MINUS, "Smaller text (Ctrl+-)") {
-                        self.font_size = (self.font_size - 1.0).max(8.0);
+                    ui.add_space(6.0);
+                    // How the active tab is shown.
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        for (v, glyph, tip) in [
+                            (View::Markdown, ic::ARTICLE, "Read the output as Markdown, with copy buttons on code (agent replies)"),
+                            (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
+                            (View::Terminal, ic::TERMINAL, "Terminal"),
+                        ] {
+                            if small(ui, glyph, tip, t.view == v) {
+                                t.view = v;
+                            }
+                        }
                     }
                 });
             });
@@ -470,17 +757,116 @@ impl TermWindow {
         if smaller {
             self.font_size = (self.font_size - 1.0).max(8.0);
         }
-        let frame = egui::Frame::new().fill(BACKGROUND).inner_margin(6.0);
+        let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
+        let copy_on_select = self.copy_on_select;
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let font_size = self.font_size;
             let Some(t) = self.tabs.get_mut(self.active) else { return };
-            screen(ui, t, font_size, out);
+            match t.view {
+                View::Terminal => screen(ui, t, font_size, copy_on_select, out),
+                View::Text | View::Markdown => reader(ui, t),
+            }
         });
+        if let Some((i, mut name)) = self.renaming.take() {
+            let mut done = None;
+            let modal = egui::Modal::new(egui::Id::unique("rename-tab")).show(ui.ctx(), |ui| {
+                ui.set_width(300.0);
+                ui.label(RichText::new("Rename tab").strong());
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+                if !r.has_focus() {
+                    r.request_focus();
+                }
+                if ui.input(|k| k.key_pressed(Key::Enter)) {
+                    done = Some(true);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Rename").clicked() {
+                        done = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = Some(false);
+                    }
+                });
+            });
+            match done {
+                Some(true) => {
+                    if let Some(t) = self.tabs.get_mut(i) {
+                        t.custom = (!name.trim().is_empty()).then(|| name.trim().to_string());
+                    }
+                }
+                Some(false) => {}
+                None if modal.should_close() => {}
+                None => self.renaming = Some((i, name)),
+            }
+        }
     }
 }
 
 /// Draws a shell and passes keys, paste and the mouse wheel to it.
-fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
+/// The whole buffer as text, plain or read as Markdown.
+fn buffer_text(t: &Tab) -> String {
+    let grid = t.term.grid();
+    let history = grid.total_lines() - grid.screen_lines();
+    let start = Point::new(Line(-(history as i32)), Column(0));
+    let end = Point::new(Line(grid.screen_lines() as i32 - 1), Column(grid.columns().saturating_sub(1)));
+    let text = t.term.bounds_to_string(start, end);
+    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string()
+}
+
+/// The text and Markdown views of a tab.
+fn reader(ui: &mut egui::Ui, t: &mut Tab) {
+    let raw = buffer_text(t);
+    let markdown = t.view == View::Markdown;
+    let text = if markdown && t.clean { crate::markdown::clean_agent_output(&raw) } else { raw };
+    ui.horizontal(|ui| {
+        if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
+            ui.ctx().copy_text(text.clone());
+        }
+        if markdown {
+            ui.checkbox(&mut t.clean, "Remove terminal frames and agent markers");
+        }
+        ui.label(RichText::new(format!("{} lines", text.lines().count())).weak().small());
+    });
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+        ui.visuals_mut().override_text_color = Some(scheme_fg());
+        if markdown {
+            crate::markdown::show(ui, &text);
+        } else {
+            ui.add(egui::Label::new(RichText::new(&text).monospace().size(13.0)).selectable(true).extend());
+        }
+    });
+}
+
+/// A web address under column `col` of a line, for Ctrl+click.
+fn url_at(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    if col >= chars.len() {
+        return None;
+    }
+    let stop = |c: char| c.is_whitespace() || "\"'<>()[]{}`".contains(c);
+    let mut a = col;
+    while a > 0 && !stop(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col;
+    while b < chars.len() && !stop(chars[b]) {
+        b += 1;
+    }
+    let word: String = chars[a..b].iter().collect();
+    let word = word.trim_end_matches(['.', ',', ';', ':']);
+    (word.starts_with("http://") || word.starts_with("https://")).then(|| word.to_string())
+}
+
+fn open_url(url: &str) {
+    if cfg!(windows) {
+        let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    } else {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, out: &mut Vec<Cmd>) {
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let area = ui.available_rect_before_wrap();
@@ -517,6 +903,17 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
         let (pt, side) = cell_at(p);
         sel.update(pt, side);
     }
+    if resp.drag_stopped() && copy_on_select && let Some(s) = t.term.selection_to_string().filter(|s| !s.is_empty()) {
+        ui.ctx().copy_text(s);
+    }
+    let ctrl = ui.input(|i| i.modifiers.ctrl);
+    if resp.hovered() && ctrl && let Some(p) = resp.hover_pos() {
+        let (pt, _) = cell_at(p);
+        let line = t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
+        if url_at(&line, pt.column.0).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
     if resp.double_clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
@@ -524,19 +921,142 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
         t.term.selection = Some(Selection::new(SelectionType::Semantic, pt, side));
     } else if resp.clicked() {
         t.term.selection = None;
+        if ctrl && let Some(p) = resp.interact_pointer_pos() {
+            let (pt, _) = cell_at(p);
+            let line = t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
+            if let Some(url) = url_at(&line, pt.column.0) {
+                open_url(&url);
+            }
+        }
+    }
+    // Find (Ctrl+Shift+F): a bar at the top right, Enter for the next match upwards.
+    if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::F)) {
+        t.search = Some(t.search.take().unwrap_or_default());
+    }
+    let mut close_search = false;
+    let mut search_step: Option<alacritty_terminal::index::Direction> = None;
+    if let Some(search) = t.search.as_mut() {
+        let bar = Rect::from_min_size(Pos2::new(area.right() - 330.0, area.top() + 4.0), Vec2::new(322.0, 34.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar).layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("find", t.id)))));
+        egui::Frame::new().fill(Color32::from_rgb(36, 38, 46)).corner_radius(CornerRadius::same(8)).inner_margin(4.0).show(&mut child, |ui| {
+            ui.horizontal(|ui| {
+                let edit = ui.add(egui::TextEdit::singleline(&mut search.query).hint_text("Find").desired_width(170.0));
+                if !edit.has_focus() && search.found.is_none() && !search.missing {
+                    edit.request_focus();
+                }
+                if edit.changed() {
+                    search.found = None;
+                    search.missing = false;
+                }
+                let enter = ui.input(|i| i.key_pressed(Key::Enter));
+                let shift = ui.input(|i| i.modifiers.shift);
+                if enter {
+                    search_step = Some(if shift { alacritty_terminal::index::Direction::Right } else { alacritty_terminal::index::Direction::Left });
+                }
+                if ui.small_button(ic::CARET_UP).on_hover_text("Previous (Enter)").clicked() {
+                    search_step = Some(alacritty_terminal::index::Direction::Left);
+                }
+                if ui.small_button(ic::CARET_DOWN).on_hover_text("Next (Shift+Enter)").clicked() {
+                    search_step = Some(alacritty_terminal::index::Direction::Right);
+                }
+                if search.missing {
+                    ui.label(RichText::new("none").small().color(Color32::from_rgb(240, 120, 110)));
+                }
+                if ui.small_button(ic::X).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    close_search = true;
+                }
+            });
+        });
+    }
+    if close_search {
+        t.search = None;
+    }
+    if let (Some(dir), Some(search)) = (search_step, t.search.as_mut())
+        && !search.query.is_empty()
+    {
+        let escaped: String = search.query.chars().map(|c| if "\\.+*?()|[]{}^$#&-~".contains(c) { format!("\\{c}") } else { c.to_string() }).collect();
+        if let Ok(mut re) = alacritty_terminal::term::search::RegexSearch::new(&escaped) {
+            let origin = match (&search.found, dir) {
+                (Some(m), alacritty_terminal::index::Direction::Left) => *m.start(),
+                (Some(m), _) => *m.end(),
+                (None, _) => Point::new(Line(t.term.grid().screen_lines() as i32 - 1), Column(cols as usize - 1)),
+            };
+            let origin = if search.found.is_some() {
+                match dir {
+                    alacritty_terminal::index::Direction::Left => origin.sub(&t.term, alacritty_terminal::index::Boundary::Grid, 1),
+                    _ => origin.add(&t.term, alacritty_terminal::index::Boundary::Grid, 1),
+                }
+            } else {
+                origin
+            };
+            match t.term.search_next(&mut re, origin, dir, Side::Left, None) {
+                Some(m) => {
+                    let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+                    sel.update(*m.end(), Side::Right);
+                    t.term.selection = Some(sel);
+                    t.term.scroll_to_point(*m.start());
+                    search.found = Some(m);
+                    search.missing = false;
+                }
+                None => search.missing = true,
+            }
+        }
     }
     let mut copy_now = false;
     let mut paste_now = false;
+    let mut select_all = false;
+    let mut clear = false;
+    let mut find = false;
+    let mut view = None;
     resp.context_menu(|ui| {
-        if ui.button("Copy").clicked() {
+        if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C")).clicked() {
             copy_now = true;
             ui.close();
         }
-        if ui.button("Paste").clicked() {
+        if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V")).clicked() {
             paste_now = true;
             ui.close();
         }
+        if ui.button("Select all").clicked() {
+            select_all = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(egui::Button::new("Find").shortcut_text("Ctrl+Shift+F")).clicked() {
+            find = true;
+            ui.close();
+        }
+        if ui.button("Read as text").clicked() {
+            view = Some(View::Text);
+            ui.close();
+        }
+        if ui.button("Read as Markdown").clicked() {
+            view = Some(View::Markdown);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Clear scrollback").clicked() {
+            clear = true;
+            ui.close();
+        }
     });
+    if select_all {
+        let grid = t.term.grid();
+        let history = (grid.total_lines() - grid.screen_lines()) as i32;
+        let mut sel = Selection::new(SelectionType::Simple, Point::new(Line(-history), Column(0)), Side::Left);
+        sel.update(Point::new(Line(grid.screen_lines() as i32 - 1), Column(grid.columns() - 1)), Side::Right);
+        t.term.selection = Some(sel);
+    }
+    if find {
+        t.search = Some(Search::default());
+    }
+    if let Some(v) = view {
+        t.view = v;
+    }
+    if clear {
+        // Erase saved lines, as Windows Terminal's "Clear buffer" does for the scrollback.
+        t.parser.advance(&mut t.term, b"\x1b[3J");
+    }
     if copy_now && let Some(s) = t.term.selection_to_string() {
         ui.ctx().copy_text(s);
     }
@@ -622,7 +1142,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
     let show_cursor = content.mode.contains(TermMode::SHOW_CURSOR) && offset == 0 && t.exited.is_none();
     let mut run = String::new();
     let mut run_start = Pos2::ZERO;
-    let mut run_color = FOREGROUND;
+    let mut run_color = scheme_fg();
     let flush = |run: &mut String, at: Pos2, color: Color32| {
         if !run.trim().is_empty() {
             painter.text(at, Align2::LEFT_TOP, run.as_str(), font.clone(), color);
@@ -650,7 +1170,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
             && let Color::Named(n) = cell.fg
             && (n as usize) < 8
         {
-            fg = PALETTE[n as usize + 8];
+            fg = pal(n as usize + 8);
         }
         if flags.contains(Flags::DIM) {
             fg = fg.gamma_multiply(0.66);
@@ -664,10 +1184,10 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
         }
         let at_cursor = show_cursor && cell.point == cursor;
         if at_cursor {
-            (fg, bg) = (BACKGROUND, FOREGROUND);
+            (fg, bg) = (scheme_bg(), scheme_fg());
         }
         let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
-        if bg != BACKGROUND {
+        if bg != scheme_bg() {
             painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
         }
         if flags.contains(Flags::UNDERLINE) {
@@ -700,7 +1220,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, out: &mut Vec<Cmd>) {
             Align2::LEFT_CENTER,
             format!("{text}. Close the tab or open a new one."),
             FontId::proportional(13.0),
-            FOREGROUND,
+            scheme_fg(),
         );
     }
     if resp.hovered() {
@@ -718,8 +1238,79 @@ fn tab_title(raw: &str) -> String {
     t.to_string()
 }
 
+/// The shells of this computer, as in Windows Terminal's new-tab menu.
+pub fn local_profiles() -> Vec<Profile> {
+    let mut out = Vec::new();
+    let mut add = |name: &str, argv: Vec<&str>| {
+        out.push(Profile {
+            name: name.into(),
+            icon: ic::TERMINAL,
+            launch: Launch::Local(argv.into_iter().map(str::to_string).collect()),
+        })
+    };
+    if cfg!(windows) {
+        add("PowerShell", vec!["powershell.exe", "-NoLogo"]);
+        let found = |p: &str| std::path::Path::new(p).exists();
+        if found(r"C:\Program Files\PowerShell\7\pwsh.exe") {
+            add("PowerShell 7", vec![r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]);
+        }
+        add("Command Prompt", vec!["cmd.exe"]);
+        if found(r"C:\Program Files\Git\bin\bash.exe") {
+            add("Git Bash", vec![r"C:\Program Files\Git\bin\bash.exe", "--login", "-i"]);
+        }
+        if found(r"C:\Windows\System32\wsl.exe") {
+            add("WSL", vec!["wsl.exe"]);
+        }
+    } else {
+        add("Shell", Vec::new());
+        for (name, path) in [("bash", "/bin/bash"), ("zsh", "/usr/bin/zsh"), ("fish", "/usr/bin/fish")] {
+            if std::path::Path::new(path).exists() {
+                add(name, vec![path, "-l"]);
+            }
+        }
+    }
+    out
+}
+
+/// The terminal as a program of its own (`sshremote terminal [HOST]`).
+pub fn run_window(first: Profile) -> Result<(), String> {
+    struct Solo(TermWindow);
+    impl eframe::App for Solo {
+        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            let ctx = ui.ctx().clone();
+            let mut out = Vec::new();
+            if !self.0.before(&ctx, &mut out) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            self.0.body(ui, &mut out);
+            self.0.after(&ctx, &mut out);
+        }
+    }
+    let native = crate::gui::native_options("SSH Remote Terminal", [960.0, 600.0]);
+    eframe::run_native(
+        "sshremote-terminal",
+        native,
+        Box::new(move |cc| {
+            crate::gui::style(&cc.egui_ctx);
+            Ok(Box::new(Solo(TermWindow::standalone(first, Vec::new()))))
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// An ssh session in a local terminal (password and host key prompts appear in it).
+pub fn ssh_profile(host: &str, port: &str) -> Profile {
+    let mut argv = vec!["ssh".to_string()];
+    if !port.trim().is_empty() {
+        argv.extend(["-p".into(), port.trim().to_string()]);
+    }
+    argv.push(host.to_string());
+    Profile { name: host.to_string(), icon: ic::GLOBE, launch: Launch::Local(argv) }
+}
+
 /// Runs `cmd` in a new window of the system's terminal.
-fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
+pub(crate) fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
     if cfg!(windows) {
         // "start" opens the default terminal (Windows Terminal or the console host).
         std::process::Command::new("cmd").arg("/c").arg("start").arg("").args(cmd).spawn()?;

@@ -1,6 +1,6 @@
-//! Shells for the viewer's terminal window: a pseudo-terminal on Unix, a
-//! pseudo console (ConPTY) on Windows. Output is read on a thread per shell
-//! and collected by the agent loop.
+//! Shells in pseudo-terminals (a pty on Unix, a pseudo console on Windows):
+//! on the SSH host for the viewer's terminal (`Terms`, driven by the agent),
+//! and on this computer for local shells and `ssh` sessions (`Local`).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -29,7 +29,7 @@ pub struct Terms {
 impl Terms {
     /// Starts a shell; returns a message to send if it failed.
     pub fn open(&mut self, id: u32, cols: u16, rows: u16) -> Option<ToClient> {
-        match sys::spawn(cols.max(2), rows.max(1)) {
+        match sys::spawn(cols.max(2), rows.max(1), None) {
             Ok((input, output, handle)) => {
                 let (tx, rx) = mpsc::channel();
                 std::thread::spawn(move || read_loop(output, tx));
@@ -88,20 +88,64 @@ impl Terms {
     }
 }
 
-fn read_loop(mut output: File, tx: mpsc::Sender<Out>) {
+fn read_loop(output: File, tx: mpsc::Sender<Out>) {
+    read_loop_waking(output, tx, Box::new(|| {}));
+}
+
+fn read_loop_waking(mut output: File, tx: mpsc::Sender<Out>, wake: Box<dyn Fn() + Send>) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
         match output.read(&mut buf) {
             Ok(0) | Err(_) => {
                 let _ = tx.send(Out::Exit("the shell ended".into()));
+                wake();
                 return;
             }
             Ok(n) => {
                 if tx.send(Out::Data(buf[..n].to_vec())).is_err() {
                     return;
                 }
+                wake();
             }
         }
+    }
+}
+
+/// A program in a pseudo-terminal on this computer: a local shell, or `ssh HOST`.
+pub struct Local {
+    input: File,
+    out: mpsc::Receiver<Out>,
+    sys: sys::Handle,
+}
+
+impl Local {
+    /// Starts `argv` (the login shell when empty); `wake` is called whenever output arrives.
+    pub fn spawn(argv: &[String], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
+        let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv))?;
+        let (tx, out) = mpsc::channel();
+        std::thread::spawn(move || read_loop_waking(output, tx, wake));
+        Ok(Local { input, out, sys })
+    }
+
+    pub fn write(&mut self, data: &[u8]) {
+        let _ = self.input.write_all(data);
+        let _ = self.input.flush();
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) {
+        self.sys.resize(cols.max(2), rows.max(1));
+    }
+
+    /// Output since the last call, and why the program ended once it has.
+    pub fn drain(&mut self) -> (Vec<u8>, Option<String>) {
+        let mut data = Vec::new();
+        for o in self.out.try_iter() {
+            match o {
+                Out::Data(d) => data.extend_from_slice(&d),
+                Out::Exit(text) => return (data, Some(self.sys.exit_text().unwrap_or(text))),
+            }
+        }
+        (data, None)
     }
 }
 
@@ -128,7 +172,7 @@ mod sys {
     }
 
     /// The user's shell started as a login shell on a new pseudo-terminal.
-    pub fn spawn(cols: u16, rows: u16) -> Result<(File, File, Handle), String> {
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
         unsafe {
             let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             if m < 0 {
@@ -151,10 +195,14 @@ mod sys {
             let slave = File::from_raw_fd(s);
             let ws = winsize(cols, rows);
             libc::ioctl(m, libc::TIOCSWINSZ, &ws);
-            let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+            let login = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
             let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
+            let (shell, args): (String, Vec<String>) = match argv {
+                Some([first, rest @ ..]) => (first.clone(), rest.to_vec()),
+                _ => (login, vec!["-l".into()]),
+            };
             let mut cmd = Command::new(&shell);
-            cmd.arg("-l")
+            cmd.args(&args)
                 .current_dir(home)
                 .env("TERM", "xterm-256color")
                 .env("COLORTERM", "truecolor")
@@ -244,7 +292,39 @@ mod sys {
     }
 
     /// PowerShell (or cmd) attached to a new pseudo console.
-    pub fn spawn(cols: u16, rows: u16) -> Result<(File, File, Handle), String> {
+    /// A command line from separate arguments, quoted the way the C runtime splits them.
+    fn command_line(argv: &[String]) -> String {
+        argv.iter()
+            .map(|a| {
+                if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+                    return a.clone();
+                }
+                let mut q = String::from('"');
+                let mut slashes = 0;
+                for c in a.chars() {
+                    match c {
+                        '\\' => slashes += 1,
+                        '"' => {
+                            q.push_str(&"\\".repeat(slashes * 2 + 1));
+                            q.push('"');
+                            slashes = 0;
+                        }
+                        c => {
+                            q.push_str(&"\\".repeat(slashes));
+                            q.push(c);
+                            slashes = 0;
+                        }
+                    }
+                }
+                q.push_str(&"\\".repeat(slashes * 2));
+                q.push('"');
+                q
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
         let user = std::env::var("USERNAME").unwrap_or_default();
         if user.eq_ignore_ascii_case("SYSTEM") || user.ends_with('$') {
             return Err("the agent runs as the Windows service; connect over SSH for a terminal".into());
@@ -295,7 +375,11 @@ mod sys {
             let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
             let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
             let mut started = false;
-            for cmd in ["powershell.exe -NoLogo", "cmd.exe"] {
+            let wanted: Vec<String> = match argv {
+                Some(a) => vec![command_line(a)],
+                None => vec!["powershell.exe -NoLogo".into(), "cmd.exe".into()],
+            };
+            for cmd in &wanted {
                 let mut line = wide(cmd);
                 let dir = wide(&home);
                 if CreateProcessW(

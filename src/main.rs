@@ -14,6 +14,7 @@ mod hosts;
 #[cfg(windows)]
 mod keygrab;
 mod keys;
+mod markdown;
 mod mcp;
 mod net;
 mod proto;
@@ -28,6 +29,7 @@ mod session;
 mod shot;
 mod sixel;
 mod termwin;
+mod tools;
 mod transport;
 mod ui;
 mod video;
@@ -40,6 +42,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --gui [options] [HOST] the same in a window
        sshremote --term [options]      choose a recent or ~/.ssh/config host, then view it here
        sshremote mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
+       sshremote terminal [HOST [PORT]] the terminal window: a local shell, or ssh to HOST
        sshremote --local [options]     view a built-in test desktop (no ssh)
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
@@ -148,6 +151,40 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
     Ok(o)
 }
 
+/// Gives command-line use a console: the parent's, or a new one, with the standard handles on it.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    unsafe {
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        // Redirected (ssh, a pipe, a file) or already on a console: nothing to do.
+        if !GetConsoleWindow().is_null() || (!out.is_null() && out != INVALID_HANDLE_VALUE) {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 && AllocConsole() == 0 {
+            return;
+        }
+        let open = |name: &str, access: u32| {
+            let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            CreateFileW(w.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut())
+        };
+        let conout = open("CONOUT$", GENERIC_READ | GENERIC_WRITE);
+        let conin = open("CONIN$", GENERIC_READ | GENERIC_WRITE);
+        if conout != INVALID_HANDLE_VALUE {
+            SetStdHandle(STD_OUTPUT_HANDLE, conout);
+            SetStdHandle(STD_ERROR_HANDLE, conout);
+        }
+        if conin != INVALID_HANDLE_VALUE {
+            SetStdHandle(STD_INPUT_HANDLE, conin);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ssh runs this program as its askpass helper with the prompt as the only argument.
@@ -171,6 +208,25 @@ fn main() {
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");
         if let Err(e) = client::run(opt) {
+            eprintln!("sshremote: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Without a console of its own (a double click under the manifest's detached policy), command-line
+    // use borrows the terminal it was started from, or opens one; window modes and helpers need none.
+    #[cfg(windows)]
+    if !args.iter().any(|a| ["--gui", "--service", "--chat-window", "--agent"].contains(&a.as_str()))
+        && args[0] != "terminal"
+    {
+        attach_console();
+    }
+    if args[0] == "terminal" {
+        let profile = match args.get(1) {
+            Some(host) => termwin::ssh_profile(host, args.get(2).map_or("", |s| s.as_str())),
+            None => termwin::local_profiles().into_iter().next().expect("a local shell"),
+        };
+        if let Err(e) = termwin::run_window(profile) {
             eprintln!("sshremote: {e}");
             std::process::exit(1);
         }
