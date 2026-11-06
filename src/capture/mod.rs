@@ -3,6 +3,8 @@ mod gnome;
 mod synthetic;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+mod winlist;
 
 /// A BGRx frame at the size requested with `set_target`.
 pub struct Image {
@@ -33,7 +35,54 @@ pub struct Monitor {
     pub primary: bool,
 }
 
+/// A top-level window that can be shared on its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowInfo {
+    pub id: u64,
+    pub title: String,
+    /// The program it belongs to, e.g. "chrome".
+    pub app: String,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// What part of the desktop is shared, as in a video call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Share {
+    /// The whole monitor.
+    Screen,
+    /// One window, with its menus and dialogs.
+    Window(u64),
+    /// Every window of the program the given window belongs to.
+    App(u64),
+    /// Whichever window has the focus now.
+    ActiveWindow,
+}
+
+impl Share {
+    pub fn from_wire(kind: u8, id: u64) -> Option<Share> {
+        Some(match kind {
+            0 => Share::Screen,
+            1 => Share::Window(id),
+            2 => Share::App(id),
+            3 => Share::ActiveWindow,
+            _ => return None,
+        })
+    }
+}
+
 pub trait Capture {
+    /// The windows that could be shared on their own.
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        Err("This desktop can only share whole screens.".into())
+    }
+    /// Shares a window or a program instead of the whole screen; returns what is shown, in words.
+    fn share(&mut self, scope: Share) -> Result<String, String> {
+        match scope {
+            Share::Screen => Ok("the whole screen".into()),
+            _ => Err("This desktop can only share whole screens.".into()),
+        }
+    }
     fn name(&self) -> &'static str;
     /// The host's monitors, when the backend can tell them apart.
     fn monitors(&self) -> Vec<Monitor> {

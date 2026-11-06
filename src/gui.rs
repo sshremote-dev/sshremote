@@ -24,6 +24,9 @@ pub(crate) mod ic {
     pub const ARROW_LEFT: &str = "\u{E058}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const ARROW_UP: &str = "\u{E08E}";
+    pub const APP_WINDOW: &str = "\u{E5DA}";
+    pub const BROWSER: &str = "\u{E0F4}";
+    pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const MINUS: &str = "\u{E32A}";
     pub const PLUS: &str = "\u{E3D4}";
@@ -225,6 +228,10 @@ struct Remote {
     /// The terminal window, while open.
     terms: Option<crate::termwin::TermWindow>,
     ssh_cmd: Option<Vec<String>>,
+    /// The "what to share" chooser while open: the window list once it arrived, and the tab shown.
+    picker: Option<(Option<Result<Vec<crate::capture::WindowInfo>, String>>, u8)>,
+    /// What is shared now: kind as in `capture::Share` and a description.
+    sharing: (u8, String),
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
@@ -796,6 +803,8 @@ impl eframe::App for App {
                     next = Some(Screen::Remote(Box::new(Remote {
                         ssh_cmd,
                         terms: None,
+                        picker: None,
+                        sharing: (0, String::new()),
                         label: format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend),
                         sess,
                         rx,
@@ -948,6 +957,7 @@ impl Remote {
         self.draw_toasts(&ctx, screen);
         self.file_window(&ctx)?;
         self.term_window(&ctx)?;
+        self.share_picker(&ctx)?;
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
         self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
@@ -1014,6 +1024,17 @@ impl Remote {
                     if let Some(f) = self.files.as_mut() {
                         f.remote.set_list(path, entries, error);
                     }
+                }
+                Ok(Ev::Net(ToClient::WindowList { list, error })) => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.0 = Some(if error.is_empty() { Ok(list) } else { Err(error) });
+                    }
+                }
+                Ok(Ev::Net(ToClient::Sharing { kind, text })) => {
+                    if kind != self.sharing.0 || text != self.sharing.1 {
+                        self.notify(&format!("Now sharing {text}"));
+                    }
+                    self.sharing = (kind, text);
                 }
                 Ok(Ev::Net(ToClient::TermOutput { id, data })) => {
                     if let Some(t) = self.terms.as_mut() {
@@ -1239,6 +1260,150 @@ impl Remote {
         self.files = Some(f);
         for c in cmds {
             self.file_cmd(c)?;
+        }
+        Ok(())
+    }
+
+    /// Chooses what the remote host shares, as in a video call: a screen, a window or a program.
+    fn share_picker(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let Some((list, tab)) = self.picker.as_mut() else { return Ok(()) };
+        let mut pick: Option<ToAgent> = None;
+        let mut close = false;
+        let monitors = self.monitors.clone();
+        let current = self.monitor;
+        let modal = egui::Modal::new(egui::Id::unique("desk-share-picker")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.set_min_height(440.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Choose what to share").size(18.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon(ui, ic::X, "Close", false).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.label(
+                RichText::new("The remote host sends only what you choose; clicks and keys reach only that.").weak(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for (i, (g, name)) in
+                    [(ic::MONITOR, "Entire screen"), (ic::APP_WINDOW, "Window"), (ic::SQUARES_FOUR, "Application")]
+                        .into_iter()
+                        .enumerate()
+                {
+                    if ui.selectable_label(*tab == i as u8, format!("{g}  {name}")).clicked() {
+                        *tab = i as u8;
+                    }
+                }
+            });
+            ui.separator();
+            let row = |ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, on: bool| -> bool {
+                let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), egui::Sense::click());
+                let fill = if on {
+                    ACCENT.gamma_multiply(0.3)
+                } else if r.hovered() {
+                    ui.visuals().widgets.hovered.bg_fill
+                } else {
+                    Color32::TRANSPARENT
+                };
+                ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+                let text = ui.visuals().text_color();
+                let weak = ui.visuals().weak_text_color();
+                ui.painter().text(
+                    rect.left_center() + Vec2::new(14.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    glyph,
+                    FontId::proportional(20.0),
+                    text,
+                );
+                let galley =
+                    ui.painter().layout(title.to_string(), FontId::proportional(14.0), text, rect.width() - 70.0);
+                ui.painter().galley(rect.min + Vec2::new(46.0, 5.0), galley, text);
+                ui.painter().text(
+                    rect.min + Vec2::new(46.0, 25.0),
+                    Align2::LEFT_TOP,
+                    sub,
+                    FontId::proportional(11.5),
+                    weak,
+                );
+                r.clicked()
+            };
+            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(330.0).show(ui, |ui| match *tab {
+                0 => {
+                    let screens: Vec<(String, String)> = if monitors.is_empty() {
+                        vec![(String::new(), "The only screen".into())]
+                    } else {
+                        monitors
+                            .iter()
+                            .map(|m| {
+                                (m.name.clone(), format!("{}x{}{}", m.w, m.h, if m.primary { ", primary" } else { "" }))
+                            })
+                            .collect()
+                    };
+                    for (i, (name, sub)) in screens.iter().enumerate() {
+                        let on = self.sharing.0 == 0 && i == current;
+                        if row(ui, ic::MONITOR, format!("Screen {}  {name}", i + 1).trim(), sub, on) {
+                            pick = Some(if i == current || monitors.len() < 2 {
+                                ToAgent::Share { kind: 0, id: 0 }
+                            } else {
+                                ToAgent::SelectMonitor(i as u8)
+                            });
+                        }
+                    }
+                }
+                t => {
+                    let active_sub = "The window that has the focus on the remote host; click it there first";
+                    if row(ui, ic::BROWSER, "Active window", active_sub, false) {
+                        pick = Some(ToAgent::Share { kind: 3, id: 0 });
+                    }
+                    ui.separator();
+                    match list {
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Asking the remote host for its windows...");
+                            });
+                        }
+                        Some(Err(e)) => {
+                            ui.label(RichText::new(e.as_str()).weak());
+                        }
+                        Some(Ok(wins)) if t == 1 => {
+                            for w in wins {
+                                let sub = format!("{}  {}x{}", w.app, w.w, w.h);
+                                if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
+                                    pick = Some(ToAgent::Share { kind: 1, id: w.id });
+                                }
+                            }
+                        }
+                        Some(Ok(wins)) => {
+                            let mut apps: Vec<(String, u64, usize)> = Vec::new();
+                            for w in wins {
+                                match apps.iter_mut().find(|a| a.0 == w.app) {
+                                    Some(a) => a.2 += 1,
+                                    None => apps.push((w.app.clone(), w.id, 1)),
+                                }
+                            }
+                            for (app, id, n) in apps {
+                                let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
+                                if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
+                                    pick = Some(ToAgent::Share { kind: 2, id });
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        if modal.should_close() {
+            close = true;
+        }
+        if let Some(m) = pick {
+            self.send(m)?;
+            close = true;
+        }
+        if close {
+            self.picker = None;
         }
         Ok(())
     }
@@ -1669,6 +1834,21 @@ impl Remote {
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
         ui.label(RichText::new(host).strong()).on_hover_text(&details);
         ui.label(RichText::new(format!("{:.0} ms", self.ctl.rtt)).small().weak()).on_hover_text(&details);
+        if self.sharing.0 != 0 {
+            let name: String = self.sharing.1.chars().take(32).collect();
+            let chip = egui::Button::new(
+                RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small().color(Color32::WHITE),
+            )
+            .fill(ACCENT)
+            .corner_radius(CornerRadius::same(10));
+            if ui
+                .add(chip)
+                .on_hover_text(format!("Sharing {}. Click to share the whole screen again.", self.sharing.1))
+                .clicked()
+            {
+                *action = Some(Box::new(|r, _| r.send(ToAgent::Share { kind: 0, id: 0 })));
+            }
+        }
         ui.separator();
 
         let display = icon_menu(ui, ic::MONITOR, |ui| {
@@ -1735,6 +1915,14 @@ impl Remote {
         });
         display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
 
+        if icon(ui, ic::APP_WINDOW, "Share: the entire screen, one window or one application", self.sharing.0 != 0)
+            .clicked()
+        {
+            *action = Some(Box::new(|r, _| {
+                r.picker = Some((None, if r.sharing.0 == 0 { 0 } else { 1 }));
+                r.send(ToAgent::ListWindows)
+            }));
+        }
         let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
         let fs_glyph = if self.fullscreen { ic::CORNERS_IN } else { ic::CORNERS_OUT };
         if icon(ui, fs_glyph, fs_tip, self.fullscreen).clicked() {

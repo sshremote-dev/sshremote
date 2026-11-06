@@ -27,7 +27,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-use super::{Capture, Image, Input, Monitor};
+use super::winlist::{self, R, Scope};
+use super::{Capture, Image, Input, Monitor, Share, WindowInfo};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 const DESKTOP_ALL: u32 = 0x01ff;
@@ -80,6 +81,14 @@ pub struct Gdi {
     bmp: HBITMAP,
     old: HGDIOBJ,
     bits: *mut u8,
+    /// The whole monitor, or a window or program on it.
+    scope: Scope,
+    /// The monitor's place, kept while a window decides `origin` and `desk`.
+    monitor: ((i32, i32), (usize, usize)),
+    /// Where the shared windows show, in captured pixels; empty when hidden.
+    shown: Vec<R>,
+    /// Whether the pointer was last moved over a shared window.
+    pointer_inside: bool,
 }
 
 impl Gdi {
@@ -109,6 +118,10 @@ impl Gdi {
                 bmp: null_mut(),
                 old: null_mut(),
                 bits: null_mut(),
+                scope: Scope::Screen,
+                monitor: (origin, desk),
+                shown: Vec::new(),
+                pointer_inside: true,
             };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
@@ -134,6 +147,55 @@ impl Gdi {
             } else {
                 SetStretchBltMode(self.mem, COLORONCOLOR);
                 StretchBlt(self.mem, 0, 0, w, h, self.screen, self.origin.0, self.origin.1, dw, dh, SRCCOPY) != 0
+            }
+        }
+    }
+
+    /// Follows the shared windows: the captured area and the parts that show them.
+    fn update_layout(&mut self) {
+        if self.scope == Scope::Screen {
+            return;
+        }
+        let screen = unsafe {
+            let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+            R { l: x, t: y, r: x + GetSystemMetrics(SM_CXVIRTUALSCREEN), b: y + GetSystemMetrics(SM_CYVIRTUALSCREEN) }
+        };
+        match winlist::layout(&self.scope, screen) {
+            Some(l) => {
+                self.origin = (l.area.l, l.area.t);
+                self.desk = ((l.area.r - l.area.l) as usize, (l.area.b - l.area.t) as usize);
+                self.shown = l
+                    .shown
+                    .iter()
+                    .map(|r| R { l: r.l - l.area.l, t: r.t - l.area.t, r: r.r - l.area.l, b: r.b - l.area.t })
+                    .collect();
+            }
+            // Minimized or closed: the last area stays, all of it hidden.
+            None => self.shown.clear(),
+        }
+    }
+
+    /// Greys out what is not part of the shared windows.
+    fn mask(&self, data: &mut [u8]) {
+        let (tw, th) = self.target;
+        let (dw, dh) = (self.desk.0.max(1), self.desk.1.max(1));
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for y in 0..th {
+            let yd = (y * dh / th) as i32;
+            spans.clear();
+            for r in self.shown.iter().filter(|r| yd >= r.t && yd < r.b) {
+                let x0 = (r.l.max(0) as usize * tw / dw).min(tw);
+                let x1 = ((r.r.max(0) as usize * tw).div_ceil(dw)).min(tw);
+                spans.push((x0, x1));
+            }
+            spans.sort_unstable();
+            let row = &mut data[y * tw * 4..(y + 1) * tw * 4];
+            let mut x = 0;
+            for &(a, b) in spans.iter().chain(std::iter::once(&(tw, tw))) {
+                for px in row[x * 4..a.max(x) * 4].chunks_exact_mut(4) {
+                    px.copy_from_slice(&[38, 34, 34, 0]);
+                }
+                x = x.max(b);
             }
         }
     }
@@ -205,7 +267,45 @@ impl Capture for Gdi {
         self.screens = screens();
         let s = self.screens.get(index).ok_or("no such monitor")?;
         (self.current, self.origin, self.desk) = (index, (s.left, s.top), (s.info.w, s.info.h));
+        self.monitor = (self.origin, self.desk);
+        self.scope = Scope::Screen;
         Ok(())
+    }
+
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        Ok(winlist::shareable())
+    }
+
+    fn share(&mut self, scope: Share) -> Result<String, String> {
+        let hwnd = match scope {
+            Share::Screen => {
+                self.scope = Scope::Screen;
+                (self.origin, self.desk) = self.monitor;
+                self.pointer_inside = true;
+                return Ok("the whole screen".into());
+            }
+            Share::Window(id) | Share::App(id) => id as HWND,
+            Share::ActiveWindow => winlist::foreground(),
+        };
+        if hwnd.is_null() || winlist::pid_of(hwnd) == 0 {
+            return Err("that window is gone".into());
+        }
+        let title = winlist::title_of(hwnd);
+        let text = if let Share::App(_) = scope {
+            let exe = winlist::exe_of(winlist::pid_of(hwnd));
+            if exe.is_empty() {
+                return Err("cannot tell which program that window belongs to".into());
+            }
+            let text = format!("every window of {}", winlist::app_name(&exe));
+            self.scope = Scope::App(exe);
+            text
+        } else {
+            self.scope = Scope::Window(hwnd);
+            format!("the window \"{title}\"")
+        };
+        winlist::raise(hwnd);
+        self.update_layout();
+        Ok(text)
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
@@ -233,6 +333,7 @@ impl Capture for Gdi {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        self.update_layout();
         if !self.blit() {
             // The input desktop changed (lock screen, UAC); follow it and retry once.
             if !follow_input_desktop() {
@@ -248,15 +349,35 @@ impl Capture for Gdi {
         }
         self.draw_cursor();
         let (w, h) = self.target;
-        let data = unsafe {
+        let mut data = unsafe {
             GdiFlush();
             std::slice::from_raw_parts(self.bits, w * h * 4).to_vec()
         };
+        if self.scope != Scope::Screen {
+            self.mask(&mut data);
+        }
         Ok(Some(Image { w, h, stride: w * 4, data }))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
         let mut seq = Vec::new();
+        if self.scope != Scope::Screen {
+            // Only the shared windows take clicks and keys.
+            match &ev {
+                Input::Move { x, y } => {
+                    self.pointer_inside = self.shown.iter().any(|r| r.contains(*x as i32, *y as i32));
+                }
+                Input::Button { pressed: true, .. } | Input::Scroll { .. } | Input::HScroll { .. }
+                    if !self.pointer_inside =>
+                {
+                    return Ok(());
+                }
+                Input::Key { .. } | Input::KeyState { down: true, .. } if !winlist::focus_inside(&self.scope) => {
+                    return Err("keys go only to the shared window; click it first".into());
+                }
+                _ => {}
+            }
+        }
         match ev {
             Input::Move { x, y } => {
                 // Absolute coordinates span the whole virtual desktop, every monitor included.

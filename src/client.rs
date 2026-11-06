@@ -17,7 +17,7 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
 const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
-p pause | u one frame | o sound | c chat | g get file | l send file | t shell | w Win | r refresh";
+p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v active window/screen | w Win | r refresh";
 
 struct Viewer {
     out: Box<dyn Write>,
@@ -62,6 +62,8 @@ struct Viewer {
     /// The remote shell shown instead of the picture, while open.
     shell: Option<u32>,
     next_shell: u32,
+    /// Whether one window is shared instead of the screen.
+    window_only: bool,
 }
 
 impl Viewer {
@@ -323,6 +325,11 @@ impl Viewer {
                 }
             }
             't' => self.open_shell(),
+            'v' => {
+                let kind = if self.window_only { 0 } else { 3 };
+                self.sess.send(ToAgent::Share { kind, id: 0 })?;
+                self.notify(if kind == 3 { "Sharing the active window..." } else { "Sharing the whole screen..." })
+            }
             'c' | 'g' | 'l' => {
                 self.prompt = Some((c, String::new()));
                 self.status()
@@ -487,6 +494,10 @@ impl Viewer {
                 }
                 self.monitors = (list.len(), current as usize);
             }
+            ToClient::Sharing { kind, text } => {
+                self.window_only = kind != 0;
+                self.notify(&format!("Sharing {text}"))?
+            }
             ToClient::TermOutput { id, data } if self.shell == Some(id) => {
                 self.out.write_all(&data)?;
                 self.out.flush()?;
@@ -647,6 +658,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         paint_ms: 0.0,
         shell: None,
         next_shell: 1,
+        window_only: false,
     };
 
     let interactive = opt.probe.is_none();

@@ -11,7 +11,9 @@ damaged cells locally (sixel in a terminal, a native window with `--gui`).
   Windows (GDI capture, SendInput), synthetic test desktop.
 - Viewer: sixel terminals (Windows Terminal, foot, WezTerm, VTE with sixel) and a native window,
   keyboard and mouse, live presets and an auto preset.
-- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics, chat.
+- Also: file transfer, a remote terminal, chat, sound, screenshots, sharing one window or application,
+  and an MCP server.
+- Planned: DXGI capture, macOS (ScreenCaptureKit), kitty graphics.
 
 ## Build
 
@@ -59,12 +61,16 @@ round trip; hover for traffic, fps and quality) and icon buttons for:
 
 - display: quality presets and custom colours, scale and fps; fit, stretch or a fixed zoom; the
   remote screen to show;
+- share: the entire screen, one window or one application (see below);
 - full screen (F11; the toolbar then hides until the pointer reaches the top edge);
 - special keys (Ctrl+Alt+Del, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen, Win plus
   the next key);
-- files, chat, screenshot, pause and single frame;
-- options: clipboard sharing, sound, system keys, toolbar auto-hide, theme and a full repaint;
+- file transfer, terminal, chat, screenshot, pause and single frame;
+- options: clipboard sharing, sound, system keys, theme and a full repaint;
+- a pin that keeps the toolbar shown, also in full screen;
 - disconnect.
+
+Menus stay open while their sliders and switches are used, and the toolbar stays while a menu is open.
 
 Messages such as saved screenshots and finished downloads appear as notifications at the bottom right.
 
@@ -80,10 +86,17 @@ Print Screen are taken with a low-level keyboard hook (on a thread of its own, s
 hook whose thread is busy) and go to the remote host instead of this PC; the toolbar's "System keys"
 switch turns this off.
 
-Files and folders dropped on the window are sent to the remote user's Downloads folder; a folder
-keeps its structure. The toolbar's Files button opens a browser of the remote host's folders (home
-first, hidden files on request); a selected file or folder is downloaded to this PC's Downloads
-folder. Either way an existing file is never overwritten (the copy gets " (2)" and so on), names
+## File transfer
+
+The Files button opens a window of its own with this computer on the left and the remote host on the
+right. Each side has a path bar, Up, Home and Drives, a list sortable by name, size and modification
+time, multiple selection (Ctrl, Shift, Ctrl+A) and hidden files on request. Files and whole folders
+go across with the arrow buttons, by dragging from one side to the other, by double click, or by
+dropping them from the desktop on the window (uploaded into the remote folder shown). New folder,
+rename (F2) and delete (Del, confirmed) work on both sides, and a transfer list shows progress with a
+cancel button. Files dropped on the main window go to the remote Downloads folder as before.
+
+Either way an existing file is never overwritten (the copy gets " (2)" and so on), names
 cannot leave the target folder, and at most 1 MiB per transfer is unacknowledged, so a large file
 does not hold up the screen. `--probe SECS --send FILE` and `--fetch REMOTE_PATH` test transfers
 headless.
@@ -99,6 +112,31 @@ The Sound switch (`--sound` in a terminal) plays the host's sound: WASAPI loopba
 output device on Windows, the default sink's monitor through PulseAudio or PipeWire on Linux, sent as
 20 ms Opus packets at 64 kbit/s (about 8 KB/s, much less during silence) and played from a buffer
 capped at 300 ms so the sound stays live. It is off until asked for.
+
+## Terminal
+
+The Terminal button opens shells on the remote host in a window with tabs. The agent starts the
+user's login shell on a pseudo-terminal (PowerShell or cmd in a pseudo console on Windows) and the
+bytes travel over the same connection, so it needs no second login and also works over `desk://`.
+The window emulates xterm with Alacritty's terminal engine: colours, full-screen programs such as
+vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with copy (Ctrl+C
+with a selection, otherwise it interrupts) and paste, and text size buttons. For ssh hosts a button
+opens the same host in the system's own terminal. In a terminal viewer, `Ctrl+] t` swaps the picture
+for a remote shell that the terminal itself emulates; `exit` or Ctrl+] returns to the screen. A
+Windows agent running as the service (SYSTEM) refuses shells; connect over ssh for one.
+
+## Sharing a window or an application
+
+As in a video call, the Share button chooses what the remote host sends: an entire screen, one
+window, or every window of one application (all Chrome windows, say), or simply the window that has
+the focus. The picture is then only that window or application, so it is smaller and cheaper;
+anything covering it is greyed out, clicks outside it are dropped, and keys go only while it has the
+focus. A chip in the toolbar shows what is shared and returns to the whole screen when clicked.
+
+On Windows the list comes from the desktop's top-level windows, and the chosen window is brought to
+the front. GNOME does not let other programs read its window list, so there only "Active window" is
+offered: Mutter records the window that has the focus (click it first). In a terminal viewer
+`Ctrl+] v` switches between the active window and the whole screen; MCP has `windows` and `share`.
 
 ## Viewing modes, screenshots and saving traffic
 
@@ -127,8 +165,8 @@ remembered only after a successful connection. `desk --term` offers the same lis
 
 `desk mcp HOST` (or `desk mcp --local`, `desk mcp desk://...`) is a Model Context Protocol server on
 stdio that lets an AI agent see and operate the remote desktop. Tools: `screenshot`, `click`, `move`,
-`drag`, `type`, `key`, `scroll`, `wait`, `monitors`, `select_monitor`, `clipboard_get`,
-`clipboard_set`. To keep tokens low the picture stream stays paused and a screenshot is taken only on
+`drag`, `type`, `key`, `scroll`, `wait`, `monitors`, `select_monitor`, `windows`, `share`,
+`clipboard_get`, `clipboard_set`. Sharing just the window being worked on keeps screenshots small. To keep tokens low the picture stream stays paused and a screenshot is taken only on
 request, 1024 px wide by default, optionally a region and in grey; coordinates passed to the other
 tools are in the latest screenshot's pixels and are mapped back to the screen by the server. Example
 client configuration:
@@ -171,7 +209,8 @@ desk HOST --probe 5 --dump out.ppm   # headless: print traffic, save the reconst
 
 Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`/`-` scale, `f` fps,
 `z` zoom (enlarge a reduced capture to the terminal; off by default inside an ssh session, where the
-terminal output itself crosses the network), `r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
+terminal output itself crosses the network), `t` remote shell, `v` active window or whole screen,
+`r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
 
 | Key | Resolution | Colours | fps |
 |---|---|---|---|

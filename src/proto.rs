@@ -151,6 +151,13 @@ pub enum ToAgent {
     TermClose {
         id: u32,
     },
+    /// Asks for the windows that can be shared on their own.
+    ListWindows,
+    /// Shares the screen, a window or a program (see `capture::Share`).
+    Share {
+        kind: u8,
+        id: u64,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -294,6 +301,16 @@ pub enum ToClient {
     /// A shell ended, or could not start: why.
     TermExit {
         id: u32,
+        text: String,
+    },
+    /// The shareable windows, or why there is no list.
+    WindowList {
+        list: Vec<crate::capture::WindowInfo>,
+        error: String,
+    },
+    /// What is shared now; `kind` as in `Share`.
+    Sharing {
+        kind: u8,
         text: String,
     },
 }
@@ -508,6 +525,12 @@ impl ToAgent {
                 b.extend_from_slice(&id.to_le_bytes());
                 31
             }
+            ToAgent::ListWindows => 32,
+            ToAgent::Share { kind, id } => {
+                b.push(*kind);
+                b.extend_from_slice(&id.to_le_bytes());
+                33
+            }
         };
         (kind, b)
     }
@@ -565,6 +588,8 @@ impl ToAgent {
             29 => ToAgent::TermInput { id: c.u32()?, data: c.rest().to_vec() },
             30 => ToAgent::TermResize { id: c.u32()?, cols: c.u16()?, rows: c.u16()? },
             31 => ToAgent::TermClose { id: c.u32()? },
+            32 => ToAgent::ListWindows,
+            33 => ToAgent::Share { kind: c.u8()?, id: c.u64()? },
             _ => return Err(bad()),
         })
     }
@@ -695,6 +720,23 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 120
             }
+            ToClient::WindowList { list, error } => {
+                put_str(&mut b, error);
+                b.extend_from_slice(&(list.len() as u32).to_le_bytes());
+                for w in list {
+                    b.extend_from_slice(&w.id.to_le_bytes());
+                    put_str(&mut b, &w.title);
+                    put_str(&mut b, &w.app);
+                    b.extend_from_slice(&w.w.to_le_bytes());
+                    b.extend_from_slice(&w.h.to_le_bytes());
+                }
+                121
+            }
+            ToClient::Sharing { kind, text } => {
+                b.push(*kind);
+                b.extend_from_slice(text.as_bytes());
+                122
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -794,6 +836,22 @@ impl ToClient {
             116 => ToClient::Snapshot(c.rest().to_vec()),
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             119 => ToClient::TermOutput { id: c.u32()?, data: c.rest().to_vec() },
+            121 => {
+                let error = c.str()?;
+                let n = c.u32()? as usize;
+                let mut list = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    list.push(crate::capture::WindowInfo {
+                        id: c.u64()?,
+                        title: c.str()?,
+                        app: c.str()?,
+                        w: c.u16()?,
+                        h: c.u16()?,
+                    });
+                }
+                ToClient::WindowList { list, error }
+            }
+            122 => ToClient::Sharing { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchBegin {
                 id: c.u32()?,
@@ -853,6 +911,8 @@ mod tests {
             ToAgent::TermInput { id: 1, data: b"ls\r".to_vec() },
             ToAgent::TermResize { id: 1, cols: 120, rows: 40 },
             ToAgent::TermClose { id: 1 },
+            ToAgent::ListWindows,
+            ToAgent::Share { kind: 2, id: 0x1234 },
         ];
         for m in [
             ToClient::DirList {
@@ -867,6 +927,17 @@ mod tests {
             ToClient::FetchBegin { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },
+            ToClient::WindowList {
+                list: vec![crate::capture::WindowInfo {
+                    id: 9,
+                    title: "Inbox".into(),
+                    app: "chrome".into(),
+                    w: 800,
+                    h: 600,
+                }],
+                error: String::new(),
+            },
+            ToClient::Sharing { kind: 1, text: "Inbox".into() },
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

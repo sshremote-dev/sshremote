@@ -11,7 +11,7 @@ use gstreamer_video as gst_video;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-use super::{Capture, Image, Input, Monitor};
+use super::{Capture, Image, Input, Monitor, Share, WindowInfo};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 macro_rules! notify {
@@ -33,6 +33,8 @@ pub struct Gnome {
     desk: (usize, usize),
     target: (usize, usize),
     pipe: Option<(gst::Pipeline, gst_app::AppSink)>,
+    /// Recording one window, whose size can change, instead of a monitor.
+    window: bool,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -109,6 +111,20 @@ fn to_image(sample: &gst::Sample) -> Result<Image, String> {
     })
 }
 
+/// Without crop information: the frame minus pure black rows and columns at its right and bottom.
+fn content_box(img: &Image) -> (usize, usize, usize, usize) {
+    let black_px = |x: usize, y: usize| img.data[y * img.stride + x * 4..y * img.stride + x * 4 + 3] == [0, 0, 0];
+    let mut h = img.h;
+    while h > 16 && (0..img.w).step_by(4).all(|x| black_px(x, h - 1)) {
+        h -= 1;
+    }
+    let mut w = img.w;
+    while w > 16 && (0..h).step_by(4).all(|y| black_px(w - 1, y)) {
+        w -= 1;
+    }
+    (0, 0, w, h)
+}
+
 type ModeT = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
 type MonitorT = ((String, String, String, String), Vec<ModeT>, HashMap<String, OwnedValue>);
 type LogicalT = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
@@ -143,11 +159,11 @@ fn monitors(conn: &Connection) -> Vec<(String, Monitor)> {
 
 impl Gnome {
     pub fn open() -> Result<Gnome, String> {
-        Gnome::open_on(None)
+        Gnome::open_on(None, false)
     }
 
-    /// Records the monitor at `index` in the monitor list, or the primary one.
-    fn open_on(index: Option<usize>) -> Result<Gnome, String> {
+    /// Records the monitor at `index` in the monitor list (or the primary one), or the focused window.
+    fn open_on(index: Option<usize>, window: bool) -> Result<Gnome, String> {
         ensure_env();
         gst::init().map_err(|e| format!("GStreamer init: {e}"))?;
         let conn = Connection::session().map_err(err("session bus"))?;
@@ -167,8 +183,12 @@ impl Gnome {
         let list = monitors(&conn);
         let current = index.unwrap_or(0).min(list.len().saturating_sub(1));
         let connector = list.get(current).map_or(String::new(), |m| m.0.clone());
-        let stream: OwnedObjectPath =
-            cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?;
+        // Without a window id Mutter records the window that has the focus.
+        let stream: OwnedObjectPath = if window {
+            cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?
+        } else {
+            cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?
+        };
         let stream_path = stream.as_str().to_owned();
         let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
         let mut added = sproxy.receive_signal("PipeWireStreamAdded").map_err(err("signal"))?;
@@ -192,6 +212,7 @@ impl Gnome {
             desk,
             target: desk,
             pipe: Some((p, sink)),
+            window,
         })
     }
 }
@@ -218,12 +239,42 @@ impl Capture for Gnome {
             return Err("no such monitor".into());
         }
         // A new remote-desktop session records the other monitor; dropping the old one stops it.
-        *self = Gnome::open_on(Some(index))?;
+        *self = Gnome::open_on(Some(index), false)?;
         Ok(())
+    }
+
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        Err("GNOME does not let other programs see its list of windows. Share the active window instead: \
+             click the window you want, then choose Active window."
+            .into())
+    }
+
+    fn share(&mut self, scope: Share) -> Result<String, String> {
+        match scope {
+            Share::Screen => {
+                if self.window {
+                    *self = Gnome::open_on(Some(self.current), false)?;
+                }
+                Ok("the whole screen".into())
+            }
+            Share::ActiveWindow => {
+                *self = Gnome::open_on(Some(self.current), true)?;
+                Ok("the active window".into())
+            }
+            _ => Err("GNOME can share the active window, but not a window or program picked from a list".into()),
+        }
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
         let t = (w.min(self.desk.0), h.min(self.desk.1));
+        if self.window {
+            // A window stream stays at its own size, which follows the window; it is scaled here.
+            if self.pipe.is_none() {
+                self.pipe = Some(pipeline(self.node, None)?);
+            }
+            self.target = t;
+            return Ok(());
+        }
         if t != self.target || self.pipe.is_none() {
             if let Some((p, _)) = self.pipe.take() {
                 let _ = p.set_state(gst::State::Null);
@@ -243,10 +294,34 @@ impl Capture for Gnome {
                 return Err(format!("GNOME stream stopped: {:?}", m.view()));
             }
         }
-        match sink.try_pull_sample(gst::ClockTime::ZERO) {
-            Some(s) => to_image(&s).map(Some),
-            None => Ok(None),
+        let Some(s) = sink.try_pull_sample(gst::ClockTime::ZERO) else { return Ok(None) };
+        let mut img = to_image(&s)?;
+        if !self.window {
+            return Ok(Some(img));
         }
+        // A window stream's buffers can be larger than the window; the window is the crop area.
+        let crop = s.buffer().and_then(|b| b.meta::<gst_video::VideoCropMeta>().map(|m| m.rect()));
+        let (cx, cy, cw, ch) = match crop {
+            Some((x, y, w, h)) if w > 0 && h > 0 => (x as usize, y as usize, w as usize, h as usize),
+            _ => content_box(&img),
+        };
+        if (cx, cy, cw, ch) != (0, 0, img.w, img.h) && cx + cw <= img.w && cy + ch <= img.h {
+            let mut data = Vec::with_capacity(cw * ch * 4);
+            for y in cy..cy + ch {
+                let row = y * img.stride + cx * 4;
+                data.extend_from_slice(&img.data[row..row + cw * 4]);
+            }
+            img = Image { w: cw, h: ch, stride: cw * 4, data };
+        }
+        if (img.w, img.h) != self.desk {
+            // The window was resized: the agent sees the new size and asks for a new target.
+            self.desk = (img.w, img.h);
+            self.target = self.desk;
+        }
+        if self.target == self.desk {
+            return Ok(Some(img));
+        }
+        Ok(Some(super::scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

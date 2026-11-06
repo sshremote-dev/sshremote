@@ -258,16 +258,33 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         report(Err(e));
                         continue;
                     }
-                    desk = cap.desktop_size();
-                    let hello = ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() };
-                    send(enc, &hello).map_err(io_err)?;
-                    send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
-                    if let Some(s) = settings {
-                        size = target(desk, &s);
-                        cap.set_target(size.0, size.1)?;
+                    if let Ok(text) = cap.share(crate::capture::Share::Screen) {
+                        send(enc, &ToClient::Sharing { kind: 0, text }).map_err(io_err)?;
                     }
+                    desk = cap.desktop_size();
+                    announce(enc, cap.as_mut(), desk, settings, &mut size)?;
                     (prev, last) = (None, None);
                     vid.reset();
+                }
+                ToAgent::ListWindows => {
+                    let m = match cap.windows() {
+                        Ok(list) => ToClient::WindowList { list, error: String::new() },
+                        Err(error) => ToClient::WindowList { list: Vec::new(), error },
+                    };
+                    send(enc, &m).map_err(io_err)?;
+                }
+                ToAgent::Share { kind, id } => {
+                    let Some(scope) = crate::capture::Share::from_wire(kind, id) else { continue };
+                    match cap.share(scope) {
+                        Ok(text) => {
+                            send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
+                            desk = cap.desktop_size();
+                            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+                            (prev, last) = (None, None);
+                            vid.reset();
+                        }
+                        Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+                    }
                 }
             }
         }
@@ -301,6 +318,14 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         if let Some(img) = cap.grab()? {
             last = Some(img);
             fresh = true;
+        }
+        // A shared window was resized or moved to where its size changed.
+        if cap.desktop_size() != desk {
+            desk = cap.desktop_size();
+            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+            (prev, last) = (None, None);
+            vid.reset();
+            continue;
         }
         let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else {
             continue;
@@ -392,6 +417,25 @@ fn monitors(cap: &dyn capture::Capture) -> ToClient {
         .map(|m| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary })
         .collect();
     ToClient::Monitors { list, current: cap.current() as u8 }
+}
+
+/// Tells the viewer the new picture size and fits the capture to it.
+fn announce(
+    enc: &mut Wire,
+    cap: &mut dyn capture::Capture,
+    desk: (usize, usize),
+    settings: Option<Settings>,
+    size: &mut (usize, usize),
+) -> Result<(), String> {
+    let io_err = |e: io::Error| e.to_string();
+    let hello = ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() };
+    send(enc, &hello).map_err(io_err)?;
+    send(enc, &monitors(cap)).map_err(io_err)?;
+    if let Some(s) = settings {
+        *size = target(desk, &s);
+        cap.set_target(size.0, size.1)?;
+    }
+    Ok(())
 }
 
 fn report(r: Result<(), String>) {

@@ -32,6 +32,8 @@ struct Server {
     view: View,
     clipboard: String,
     monitors: Vec<crate::proto::MonitorInfo>,
+    windows: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
+    sharing: Option<String>,
 }
 
 fn tools() -> Value {
@@ -71,6 +73,10 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "select_monitor", "description": "Show another monitor (index from monitors).",
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
+        {"name": "windows", "description": "List the remote windows that can be shared on their own (id, program, title, size).",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "share", "description": "Limit the picture, clicks and keys to one window or program, which makes screenshots smaller and cheaper. target: \"screen\", \"active\" (the focused window), a window id from windows, or \"app:<window id>\" for every window of that program.",
+         "inputSchema": {"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}}},
         {"name": "clipboard_get", "description": "Text last copied on the remote host.",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "clipboard_set", "description": "Put text on the remote clipboard.",
@@ -152,6 +158,10 @@ impl Server {
                 Ev::Net(ToClient::Snapshot(png)) => return Ok(Some(png)),
                 Ev::Net(ToClient::Clipboard(t)) => self.clipboard = t,
                 Ev::Net(ToClient::Monitors { list, .. }) => self.monitors = list,
+                Ev::Net(ToClient::WindowList { list, error }) => {
+                    self.windows = Some(if error.is_empty() { Ok(list) } else { Err(error) });
+                }
+                Ev::Net(ToClient::Sharing { text, .. }) => self.sharing = Some(text),
                 Ev::Net(ToClient::Hello { w, h, .. }) => self.screen = (w as u32, h as u32),
                 Ev::Net(ToClient::Notice(t)) if until.is_some() => return Err(t),
                 Ev::Net(ToClient::Error(e)) | Ev::Closed(e) => return Err(e),
@@ -311,6 +321,46 @@ impl Server {
                 self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
                 Ok(text_result(format!("showing monitor {i}; take a screenshot")))
             }
+            "windows" => {
+                self.windows = None;
+                self.send(ToAgent::ListWindows)?;
+                let until = Instant::now() + Duration::from_secs(5);
+                while self.windows.is_none() && Instant::now() < until {
+                    self.drain(Some(Instant::now() + Duration::from_millis(100)))?;
+                }
+                match self.windows.take() {
+                    Some(Ok(list)) => Ok(text_result(
+                        list.iter()
+                            .map(|w| format!("{}  {}  \"{}\"  {}x{}", w.id, w.app, w.title, w.w, w.h))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )),
+                    Some(Err(e)) => Ok(error_result(e)),
+                    None => Ok(error_result("no window list within 5 s")),
+                }
+            }
+            "share" => {
+                let t = args.get("target").and_then(Value::as_str).ok_or("missing target")?.trim();
+                let (kind, id) = match t {
+                    "screen" => (0, 0),
+                    "active" => (3, 0),
+                    _ => match t.strip_prefix("app:") {
+                        Some(id) => (2, id.trim().parse::<u64>().map_err(|_| "bad window id")?),
+                        None => (1, t.parse::<u64>().map_err(|_| "target is screen, active, a window id or app:<id>")?),
+                    },
+                };
+                self.sharing = None;
+                self.send(ToAgent::Share { kind, id })?;
+                let until = Instant::now() + Duration::from_secs(5);
+                while self.sharing.is_none() && Instant::now() < until {
+                    self.drain(Some(Instant::now() + Duration::from_millis(100)))?;
+                }
+                self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
+                match self.sharing.clone() {
+                    Some(text) => Ok(text_result(format!("sharing {text}; take a screenshot"))),
+                    None => Ok(error_result("the remote host did not confirm")),
+                }
+            }
             "clipboard_get" => {
                 self.drain(None)?;
                 Ok(text_result(self.clipboard.clone()))
@@ -340,6 +390,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
         view: View { ox: 0.0, oy: 0.0, scale: 1.0 },
         clipboard: String::new(),
         monitors: Vec::new(),
+        windows: None,
+        sharing: None,
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
