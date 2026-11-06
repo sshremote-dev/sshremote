@@ -159,7 +159,7 @@ impl eframe::App for ChatApp {
             }
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.label(RichText::new("Message from the person viewing this screen").color(Color32::GRAY));
+            ui.label(RichText::new("Message from the person viewing this screen").weak());
             ui.separator();
             let input_h = 64.0;
             egui::ScrollArea::vertical()
@@ -168,7 +168,7 @@ impl eframe::App for ChatApp {
                 .max_height(ui.available_height() - input_h)
                 .show(ui, |ui| show_lines(ui, &self.lines, "Viewer", "You"));
             if self.ended.is_some() {
-                ui.colored_label(Color32::GRAY, "The viewer has disconnected; this window closes shortly.");
+                ui.label(RichText::new("The viewer has disconnected; this window closes shortly.").weak());
             }
             if let Some(text) = input_row(ui, &mut self.input, self.ended.is_none()) {
                 println!("{}", escape(&text));
@@ -193,7 +193,7 @@ pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &
             (me, Color32::from_rgb(40, 84, 160), egui::Align::Max)
         };
         ui.with_layout(egui::Layout::top_down(align), |ui| {
-            ui.label(RichText::new(who).small().color(Color32::GRAY));
+            ui.label(RichText::new(who).small().weak());
             egui::Frame::new().fill(fill).corner_radius(egui::CornerRadius::same(10)).inner_margin(8.0).show(
                 ui,
                 |ui| {

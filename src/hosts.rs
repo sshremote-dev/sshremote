@@ -86,6 +86,90 @@ pub fn pick() -> Option<String> {
     }
 }
 
+fn read_lines(name: &str) -> Vec<String> {
+    let Some(p) = config_dir().map(|d| d.join(name)) else { return Vec::new() };
+    std::fs::read_to_string(p).unwrap_or_default().lines().map(str::to_string).filter(|l| !l.is_empty()).collect()
+}
+
+fn write_lines(name: &str, lines: &[String]) {
+    if let Some(d) = config_dir() {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(
+            d.join(name),
+            lines
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{l}
+"
+                    )
+                })
+                .collect::<String>(),
+        );
+    }
+}
+
+/// Hosts marked with a star on the connect screen.
+pub fn favorites() -> Vec<String> {
+    read_lines("favorites.txt")
+}
+
+pub fn set_favorite(host: &str, on: bool) {
+    let mut list = favorites();
+    list.retain(|h| h != host);
+    if on {
+        list.insert(0, host.to_string());
+    }
+    write_lines("favorites.txt", &list);
+}
+
+/// When each host was last connected, in seconds since 1970.
+pub fn last_seen() -> std::collections::HashMap<String, u64> {
+    read_lines("seen.txt")
+        .iter()
+        .filter_map(|l| {
+            let (h, t) = l.rsplit_once(' ')?;
+            Some((h.to_string(), t.parse().ok()?))
+        })
+        .collect()
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+pub fn mark_seen(host: &str) {
+    let mut seen = last_seen();
+    seen.insert(host.to_string(), now());
+    let mut lines: Vec<(String, u64)> = seen.into_iter().collect();
+    lines.sort_by(|a, b| b.1.cmp(&a.1));
+    lines.truncate(64);
+    write_lines("seen.txt", &lines.iter().map(|(h, t)| format!("{h} {t}")).collect::<Vec<_>>());
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+pub fn ago(when: u64) -> String {
+    let d = now().saturating_sub(when);
+    match d {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", d / 60),
+        3600..86_400 => format!("{} h ago", d / 3600),
+        _ => format!("{} days ago", d / 86_400),
+    }
+}
+
+/// A small persisted preference such as the theme.
+pub fn setting(key: &str) -> Option<String> {
+    read_lines("settings.txt").iter().find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
+}
+
+pub fn set_setting(key: &str, value: &str) {
+    let mut lines: Vec<String> =
+        read_lines("settings.txt").into_iter().filter(|l| !l.starts_with(&format!("{key}="))).collect();
+    lines.push(format!("{key}={value}"));
+    write_lines("settings.txt", &lines);
+}
+
 /// Puts `host` first in the recent list.
 pub fn remember(host: &str) {
     let mut list = load_recent();
@@ -93,6 +177,7 @@ pub fn remember(host: &str) {
     list.insert(0, (host.to_string(), String::new()));
     list.truncate(8);
     save_recent(&list);
+    mark_seen(host);
 }
 
 #[cfg(test)]

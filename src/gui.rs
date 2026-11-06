@@ -17,7 +17,6 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, REMOTE, Session}
 use crate::transport::Target;
 
 const ACCENT: Color32 = Color32::from_rgb(64, 132, 245);
-const PANEL: Color32 = Color32::from_rgb(28, 30, 36);
 const SHIFT_L: u32 = 0xffe1;
 const CONTROL_L: u32 = 0xffe3;
 const ALT_L: u32 = 0xffe9;
@@ -127,7 +126,8 @@ struct Remote {
     view: (u16, u16),
     view_changed: Option<Instant>,
     win_next: bool,
-    note: Option<(String, Instant)>,
+    /// Notifications at the bottom right: text, whether it is a warning, when it came.
+    toasts: Vec<(String, bool, Instant)>,
     grab_keys: bool,
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
@@ -200,6 +200,11 @@ pub struct App {
     recent: Vec<(String, String)>,
     /// Host aliases from ~/.ssh/config; ssh applies their user, port and key itself.
     ssh_hosts: Vec<String>,
+    favorites: Vec<String>,
+    /// Host and port of the connection in progress.
+    pending_host: Option<(String, String)>,
+    seen: std::collections::HashMap<String, u64>,
+    search: String,
     error: Option<String>,
     budget: f64,
     /// System keys taken from Windows while a session is in front.
@@ -233,6 +238,10 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 form,
                 recent: crate::hosts::load_recent(),
                 ssh_hosts: crate::hosts::ssh_config_hosts(),
+                favorites: crate::hosts::favorites(),
+                pending_host: None,
+                seen: crate::hosts::last_seen(),
+                search: String::new(),
                 error: None,
                 budget,
                 grabbed,
@@ -266,23 +275,86 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
 }
 
 pub fn style(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = Color32::from_rgb(18, 19, 23);
-    v.window_fill = PANEL;
-    v.extreme_bg_color = Color32::from_rgb(12, 13, 16);
-    v.selection.bg_fill = ACCENT;
-    v.widgets.hovered.bg_fill = Color32::from_rgb(48, 52, 62);
-    v.widgets.inactive.corner_radius = CornerRadius::same(8);
-    v.widgets.hovered.corner_radius = CornerRadius::same(8);
-    v.widgets.active.corner_radius = CornerRadius::same(8);
-    v.window_corner_radius = CornerRadius::same(12);
-    ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.set_visuals_of(egui::Theme::Dark, v);
+    let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
+    set_theme(ctx, dark);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = Vec2::new(10.0, 10.0);
         s.spacing.button_padding = Vec2::new(12.0, 6.0);
         s.spacing.interact_size.y = 30.0;
     });
+}
+
+/// Dark or light, remembered between runs.
+pub fn set_theme(ctx: &egui::Context, dark: bool) {
+    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    if dark {
+        v.panel_fill = Color32::from_rgb(18, 19, 23);
+        v.window_fill = Color32::from_rgb(28, 30, 36);
+        v.extreme_bg_color = Color32::from_rgb(12, 13, 16);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(48, 52, 62);
+    } else {
+        v.panel_fill = Color32::from_rgb(242, 243, 246);
+        v.window_fill = Color32::WHITE;
+        v.extreme_bg_color = Color32::from_rgb(234, 236, 241);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(226, 230, 238);
+    }
+    v.selection.bg_fill = ACCENT;
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.corner_radius = CornerRadius::same(8);
+    }
+    v.window_corner_radius = CornerRadius::same(12);
+    v.menu_corner_radius = CornerRadius::same(10);
+    let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
+    ctx.set_visuals_of(theme, v);
+    ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
+    crate::hosts::set_setting("theme", if dark { "dark" } else { "light" });
+}
+
+const GOOD: Color32 = Color32::from_rgb(70, 190, 110);
+const WARN: Color32 = Color32::from_rgb(230, 170, 50);
+const BAD: Color32 = Color32::from_rgb(225, 85, 75);
+
+/// An icon button with a tooltip; `on` shows it pressed.
+fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
+    let b = egui::Button::new(RichText::new(glyph).size(17.0)).min_size(Vec2::new(36.0, 30.0)).selected(on);
+    ui.add(b).on_hover_text(tip)
+}
+
+/// The cause of a failed connection in plain words, with what to try.
+fn friendly(e: &str) -> (String, &'static str) {
+    let first = e.lines().find(|l| !l.trim().is_empty()).unwrap_or(e).trim().to_string();
+    let l = e.to_lowercase();
+    let hint = if l.contains("permission denied") {
+        "The host refused the login. Enter the password, or install your key on the host with ssh-copy-id."
+    } else if l.contains("could not resolve") || l.contains("name or service not known") || l.contains("no such host") {
+        "The host name is unknown. Check the spelling, or use the IP address."
+    } else if l.contains("connection refused") || l.contains("actively refused") {
+        "Nothing answered on that port. Is the SSH server (or desk --serve) running there?"
+    } else if l.contains("timed out") || l.contains("no route") || l.contains("unreachable") {
+        "The host did not answer. Check the address, the network and any firewall."
+    } else if l.contains("command not found") || l.contains("not recognized") || l.contains("no such file") {
+        "desk is not installed on the host. Copy it to ~/.local/bin/desk (Windows: anywhere on PATH)."
+    } else if l.contains("host key verification failed") {
+        "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
+    } else if l.contains("wrong password") {
+        "The password does not match the one shown by desk --serve on the host."
+    } else if l.contains("no agent with that id") {
+        "No desk --serve with that ID is waiting at the relay."
+    } else if l.contains("no frame") || l.contains("no interactive desktop") || l.contains("logged") {
+        "Nobody is signed in to the remote desktop, or it is locked."
+    } else if l.contains("did not answer within") {
+        "The remote agent did not start in time. Try again, or check that desk runs on the host."
+    } else {
+        ""
+    };
+    (first, hint)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Favorite,
+    Recent,
+    SshConfig,
 }
 
 impl App {
@@ -321,12 +393,8 @@ impl App {
     fn start(&mut self, ctx: &egui::Context, target: Target, label: String) {
         let f = self.form.clone();
         let local = matches!(target, Target::Local { .. });
-        if !local {
-            self.recent.retain(|(h, _)| h != f.host.trim());
-            self.recent.insert(0, (f.host.trim().to_string(), f.port.trim().to_string()));
-            self.recent.truncate(8);
-            crate::hosts::save_recent(&self.recent);
-        }
+        // Remembered once the connection works, so typos do not pile up in the list.
+        self.pending_host = (!local).then(|| (f.host.trim().to_string(), f.port.trim().to_string()));
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
@@ -364,65 +432,93 @@ impl App {
         }
     }
 
+    /// Favorites, then recent hosts, then ~/.ssh/config aliases, without repeats.
+    fn host_list(&self) -> Vec<(String, String, Source)> {
+        let mut out: Vec<(String, String, Source)> = Vec::new();
+        let port_of = |h: &str| self.recent.iter().find(|r| r.0 == h).map(|r| r.1.clone()).unwrap_or_default();
+        for h in &self.favorites {
+            out.push((h.clone(), port_of(h), Source::Favorite));
+        }
+        for (h, p) in &self.recent {
+            if !out.iter().any(|o| &o.0 == h) {
+                out.push((h.clone(), p.clone(), Source::Recent));
+            }
+        }
+        for h in &self.ssh_hosts {
+            if !out.iter().any(|o| &o.0 == h) {
+                out.push((h.clone(), String::new(), Source::SshConfig));
+            }
+        }
+        let q = self.search.trim().to_lowercase();
+        out.retain(|o| q.is_empty() || o.0.to_lowercase().contains(&q));
+        out
+    }
+
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
         let mut go: Option<bool> = None;
+        let mut star: Option<(String, bool)> = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space((ui.available_height() * 0.10).max(16.0));
-                ui.label(RichText::new("desk").size(40.0).strong().color(Color32::WHITE));
-                ui.label(RichText::new("Remote desktop over SSH").size(15.0).color(Color32::GRAY));
-                ui.add_space(20.0);
-                egui::Frame::new().fill(PANEL).corner_radius(CornerRadius::same(14)).inner_margin(24.0).show(
-                    ui,
-                    |ui| {
-                        ui.set_width(420.0);
+            let dark = ui.visuals().dark_mode;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let (glyph, tip) = if dark { ("☀", "Light theme") } else { ("🌙", "Dark theme") };
+                if icon(ui, glyph, tip, false).clicked() {
+                    set_theme(ui.ctx(), !dark);
+                }
+            });
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    let width = ui.available_width().min(860.0);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("🖥  desk").size(34.0).strong());
+                    ui.label(RichText::new("Remote desktop over SSH").size(15.0).weak());
+                    ui.add_space(18.0);
+                    let card = ui.visuals().window_fill;
+                    egui::Frame::new().fill(card).corner_radius(CornerRadius::same(14)).inner_margin(22.0).show(ui, |ui| {
+                        ui.set_width(width.min(460.0));
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            ui.label(RichText::new("Host").color(Color32::GRAY));
+                            ui.label(RichText::new("Host").weak());
                             let host = ui.add(
                                 egui::TextEdit::singleline(&mut self.form.host)
-                                    .hint_text("user@host  or  desk://host  or  desk://ID@relay")
+                                    .hint_text("user@host,  an ~/.ssh/config alias,  or desk://host")
                                     .desired_width(f32::INFINITY),
                             );
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Port").color(Color32::GRAY));
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.form.port)
-                                            .hint_text("22")
-                                            .desired_width(80.0),
-                                    );
+                                    ui.label(RichText::new("Port").weak());
+                                    ui.add(egui::TextEdit::singleline(&mut self.form.port).hint_text("22").desired_width(70.0));
                                 });
                                 ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new("Password (blank for SSH keys; desk:// needs one)")
-                                            .color(Color32::GRAY),
-                                    );
+                                    ui.label(RichText::new("Password").weak())
+                                        .on_hover_text("Leave empty to sign in with your SSH keys. desk:// addresses need the password desk --serve shows.");
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.form.password)
                                             .password(true)
+                                            .hint_text("optional with SSH keys")
                                             .desired_width(f32::INFINITY),
                                     );
                                 });
                             });
-                            ui.label(RichText::new("Quality").color(Color32::GRAY));
+                            ui.label(RichText::new("Quality").weak());
                             ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut self.form.preset, None, "Auto");
+                                ui.selectable_value(&mut self.form.preset, None, "Auto")
+                                    .on_hover_text("Adapts to the link");
                                 for (i, p) in PRESETS.iter().enumerate() {
                                     let name = p.name.split_once(' ').map_or(p.name, |(_, n)| n);
-                                    ui.selectable_value(&mut self.form.preset, Some(i), name);
+                                    ui.selectable_value(&mut self.form.preset, Some(i), name)
+                                        .on_hover_text(format!("{}, {}%, {} fps", p.mode.name(), p.scale, p.fps));
                                 }
                             });
                             ui.collapsing("Advanced", |ui| {
-                                ui.label(RichText::new("Agent command on the host").color(Color32::GRAY));
+                                ui.label(RichText::new("Agent command on the host").weak());
                                 ui.add(egui::TextEdit::singleline(&mut self.form.remote).desired_width(f32::INFINITY));
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Capture").color(Color32::GRAY));
+                                    ui.label(RichText::new("Capture").weak());
                                     for c in ["auto", "gnome", "windows", "synthetic"] {
                                         ui.selectable_value(&mut self.form.capture, c.to_string(), c);
                                     }
                                 });
                             });
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
                             let enter = host.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                             let button = egui::Button::new(RichText::new("Connect").size(16.0).color(Color32::WHITE))
                                 .fill(ACCENT)
@@ -434,39 +530,109 @@ impl App {
                                 go = Some(true);
                             }
                             if let Some(e) = &self.error {
-                                ui.colored_label(Color32::from_rgb(240, 110, 100), e);
+                                let (what, hint) = friendly(e);
+                                egui::Frame::new()
+                                    .fill(BAD.gamma_multiply(0.15))
+                                    .stroke(Stroke::new(1.0, BAD.gamma_multiply(0.6)))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(10.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(RichText::new("Could not connect").strong().color(BAD));
+                                        ui.label(&what).on_hover_text(e.as_str());
+                                        if !hint.is_empty() {
+                                            ui.label(RichText::new(hint).weak());
+                                        }
+                                    });
                             }
                         });
-                    },
-                );
-                let saved: Vec<(String, String)> = self.ssh_hosts.iter().map(|h| (h.clone(), String::new())).collect();
-                for (title, list) in [("Recent", self.recent.clone()), ("From ~/.ssh/config", saved)] {
-                    if list.is_empty() {
-                        continue;
+                    });
+
+                    let hosts = self.host_list();
+                    ui.add_space(22.0);
+                    ui.allocate_ui(Vec2::new(width, 34.0), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Hosts").size(17.0).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(200.0));
+                            });
+                        });
+                    });
+                    if hosts.is_empty() {
+                        let text = if self.search.is_empty() {
+                            "Hosts you connect to, and the aliases in ~/.ssh/config, appear here."
+                        } else {
+                            "No host matches the search."
+                        };
+                        ui.label(RichText::new(text).weak());
+                    }
+                    let per_row = ((width + 12.0) / 284.0).floor().max(1.0) as usize;
+                    for row in hosts.chunks(per_row) {
+                        ui.allocate_ui(Vec2::new(width, 86.0), |ui| {
+                            ui.horizontal(|ui| {
+                                for (h, p, src) in row {
+                                    let (fill, stroke) = if self.form.host == *h {
+                                        (card, Stroke::new(1.5, ACCENT))
+                                    } else {
+                                        (card, Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                    };
+                                    let inner = egui::Frame::new()
+                                        .fill(fill)
+                                        .stroke(stroke)
+                                        .corner_radius(CornerRadius::same(12))
+                                        .inner_margin(12.0)
+                                        .show(ui, |ui| {
+                                            ui.set_width(246.0);
+                                            ui.set_height(52.0);
+                                            ui.horizontal(|ui| {
+                                                let glyph = if h.starts_with("desk://") { "🔗" } else { "🖥" };
+                                                ui.label(RichText::new(glyph).size(24.0));
+                                                ui.vertical(|ui| {
+                                                    let name = if p.is_empty() { h.clone() } else { format!("{h}:{p}") };
+                                                    ui.label(RichText::new(name).strong());
+                                                    let sub = match (src, self.seen.get(h)) {
+                                                        (_, Some(t)) => crate::hosts::ago(*t),
+                                                        (Source::SshConfig, None) => "~/.ssh/config".into(),
+                                                        _ => "saved".into(),
+                                                    };
+                                                    ui.label(RichText::new(sub).small().weak());
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                                    let fav = *src == Source::Favorite;
+                                                    let (g, tip) = if fav { ("⭐", "Remove from favorites") } else { ("⭐", "Add to favorites") };
+                                                    let b = egui::Button::new(RichText::new(g).size(16.0).color(if fav { Color32::WHITE } else { Color32::from_white_alpha(60) }))
+                                                        .frame(false);
+                                                    if ui.add(b).on_hover_text(tip).clicked() {
+                                                        star = Some((h.clone(), !fav));
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    let r = ui.interact(inner.response.rect, egui::Id::unique(("host", h.as_str())), egui::Sense::click());
+                                    if r.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if r.clicked() {
+                                        self.form.host = h.clone();
+                                        self.form.port = p.clone();
+                                    }
+                                    if r.double_clicked() {
+                                        (self.form.host, self.form.port) = (h.clone(), p.clone());
+                                        go = Some(false);
+                                    }
+                                    r.on_hover_text("Click to select, double-click to connect");
+                                }
+                            });
+                        });
                     }
                     ui.add_space(16.0);
-                    ui.label(RichText::new(title).color(Color32::GRAY));
-                    let mut pick = None;
-                    for (h, p) in &list {
-                        let text = if p.is_empty() { h.clone() } else { format!("{h}  :{p}") };
-                        let r = ui.add(egui::Button::new(text).min_size(Vec2::new(468.0, 30.0)));
-                        if r.clicked() {
-                            pick = Some((h.clone(), p.clone(), false));
-                        }
-                        if r.double_clicked() {
-                            pick = Some((h.clone(), p.clone(), true));
-                        }
-                    }
-                    if let Some((h, p, now)) = pick {
-                        self.form.host = h;
-                        self.form.port = p;
-                        if now {
-                            go = Some(false);
-                        }
-                    }
-                }
+                });
             });
         });
+        if let Some((h, on)) = star {
+            crate::hosts::set_favorite(&h, on);
+            self.favorites = crate::hosts::favorites();
+        }
         if let Some(local) = go {
             let ctx = ui.ctx().clone();
             self.connect(&ctx, local);
@@ -483,6 +649,14 @@ impl eframe::App for App {
             Screen::Connect => {}
             Screen::Connecting { started, rx, label } => match rx.try_recv() {
                 Ok(Ok((sess, rx))) => {
+                    if let Some((h, p)) = self.pending_host.take() {
+                        self.recent.retain(|(r, _)| *r != h);
+                        self.recent.insert(0, (h.clone(), p));
+                        self.recent.truncate(8);
+                        crate::hosts::save_recent(&self.recent);
+                        crate::hosts::mark_seen(&h);
+                        self.seen = crate::hosts::last_seen();
+                    }
                     let ctl = Control::new(&opt, Mode::True);
                     let waker = ctx.clone();
                     sess.on_message(move || waker.request_repaint());
@@ -507,7 +681,7 @@ impl eframe::App for App {
                         view: (0, 0),
                         view_changed: None,
                         win_next: false,
-                        note: None,
+                        toasts: Vec::new(),
                         grab_keys: true,
                         uploads: std::collections::VecDeque::new(),
                         next_upload: 1,
@@ -536,9 +710,26 @@ impl eframe::App for App {
                     let label = label.clone();
                     egui::CentralPanel::default().show(ui, |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() * 0.4);
-                            ui.spinner();
-                            ui.label(RichText::new(format!("Connecting to {label}...  {secs} s")).size(16.0));
+                            ui.add_space(ui.available_height() * 0.35);
+                            ui.add(egui::Spinner::new().size(36.0));
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(format!("Connecting to {label}")).size(20.0).strong());
+                            let step = match secs {
+                                0 => "Opening the connection",
+                                1..=2 => "Signing in",
+                                _ => "Starting the remote agent and the screen capture",
+                            };
+                            ui.label(RichText::new(format!("{step}...  {secs} s")).weak());
+                            if secs >= 10 {
+                                ui.label(
+                                    RichText::new(
+                                        "Still waiting. A host that needs a password gets it on the connect screen.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                            }
+                            ui.add_space(12.0);
                             if ui.button("Cancel").clicked() {
                                 next = Some(Screen::Connect);
                             }
@@ -586,7 +777,13 @@ impl Remote {
     }
 
     fn notify(&mut self, text: &str) {
-        self.note = Some((text.to_string(), Instant::now()));
+        let l = text.to_lowercase();
+        let warn =
+            ["fail", "error", "unavailable", "cannot", "could not", "denied", "sound:"].iter().any(|w| l.contains(w));
+        self.toasts.push((text.to_string(), warn, Instant::now()));
+        if self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
     }
 
     /// One UI pass: network, input, picture and toolbar. An error ends the session.
@@ -614,6 +811,7 @@ impl Remote {
         let panel_rect = self.file_panel(&ctx)?;
         let chat_rect = self.chat_panel(&ctx)?;
         self.upload_overlay(&ctx, screen);
+        self.draw_toasts(&ctx, screen);
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(panel_rect).chain(chat_rect).collect();
         self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
@@ -863,7 +1061,7 @@ impl Remote {
                     request = Some(ToAgent::Fetch { path: p.child(&e.name) });
                 }
                 let hint = "Downloads go to this PC's Downloads folder. Drop files or folders on the window to upload.";
-                ui.label(RichText::new(hint).small().color(Color32::GRAY));
+                ui.label(RichText::new(hint).small().weak());
                 ui.separator();
                 ui.checkbox(&mut p.hidden, "Show hidden files");
                 let mut clicked = None;
@@ -878,7 +1076,7 @@ impl Remote {
                         ui.horizontal(|ui| {
                             let r = ui.selectable_label(p.selected == Some(i), format!("{icon} {}", e.name));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(size).color(Color32::GRAY));
+                                ui.label(RichText::new(size).weak());
                             });
                             if r.clicked() {
                                 clicked = Some(i);
@@ -905,6 +1103,32 @@ impl Remote {
             self.send(m)?;
         }
         Ok(rect)
+    }
+
+    /// Stacked notifications at the bottom right that fade out after a few seconds.
+    fn draw_toasts(&mut self, ctx: &egui::Context, screen: Rect) {
+        self.toasts.retain(|t| t.2.elapsed() < Duration::from_secs(6));
+        let mut y = screen.bottom() - 16.0;
+        for (i, (text, warn, at)) in self.toasts.iter().enumerate().rev() {
+            let fade = (1.0 - (at.elapsed().as_secs_f32() - 5.0).max(0.0)).clamp(0.0, 1.0);
+            let id = egui::Id::unique(("toast", i));
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id));
+            let galley = painter.layout(text.clone(), FontId::proportional(14.0), Color32::WHITE, 380.0);
+            let size = galley.size() + Vec2::new(30.0, 20.0);
+            let rect = Rect::from_min_size(Pos2::new(screen.right() - 16.0 - size.x, y - size.y), size);
+            painter.rect_filled(
+                rect,
+                CornerRadius::same(10),
+                Color32::from_rgba_unmultiplied(32, 34, 41, (235.0 * fade) as u8),
+            );
+            let bar = Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height()));
+            painter.rect_filled(bar, CornerRadius::same(2), (if *warn { WARN } else { ACCENT }).gamma_multiply(fade));
+            painter.galley(rect.min + Vec2::new(18.0, 10.0), galley, Color32::WHITE.gamma_multiply(fade));
+            y = rect.top() - 8.0;
+        }
+        if !self.toasts.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     /// Progress of uploads and the drop hint, bottom left over the remote screen.
@@ -1223,7 +1447,7 @@ impl Remote {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(Color32::from_rgba_unmultiplied(28, 30, 36, 240))
+                    .fill(ctx.global_style().visuals.window_fill.gamma_multiply(0.96))
                     .stroke(Stroke::new(1.0, Color32::from_white_alpha(25)))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(egui::Margin::symmetric(10, 6))
@@ -1231,19 +1455,6 @@ impl Remote {
             });
         let rect = resp.response.rect;
         ctx.memory_mut(|m| m.data.insert_temp(id, resp.response.contains_pointer()));
-        if let Some((text, at)) = &self.note {
-            if at.elapsed() < Duration::from_secs(4) {
-                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id.with("note"))).text(
-                    Pos2::new(screen.center().x, rect.bottom() + 20.0),
-                    Align2::CENTER_TOP,
-                    text,
-                    FontId::proportional(14.0),
-                    Color32::WHITE,
-                );
-            } else {
-                self.note = None;
-            }
-        }
         if let Some(f) = action {
             f(self, ctx)?;
         }
@@ -1251,51 +1462,62 @@ impl Remote {
     }
 
     fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
-        ui.label(RichText::new("●").color(Color32::from_rgb(80, 200, 120)));
+        ui.spacing_mut().item_spacing.x = 6.0;
+        // Connection quality at a glance; details on hover.
+        let (dot, state) = match self.ctl.rtt {
+            r if r < 80.0 => (GOOD, "good"),
+            r if r < 250.0 => (WARN, "slow"),
+            _ => (BAD, "poor"),
+        };
+        let details = format!(
+            "Connection {state}\nRound trip {:.0} ms, {:.0} KB/s, {:.0} fps\n{}\nQuality {} ({}, {}%)",
+            self.ctl.rtt,
+            self.ctl.kbps,
+            self.ctl.fps_now,
+            self.label,
+            self.ctl.preset_label(),
+            self.ctl.s.mode.name(),
+            self.ctl.s.scale
+        );
+        ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
-        ui.label(RichText::new(host).strong()).on_hover_text(&self.label);
+        ui.label(RichText::new(host).strong()).on_hover_text(&details);
+        ui.label(RichText::new(format!("{:.0} ms", self.ctl.rtt)).small().weak()).on_hover_text(&details);
         ui.separator();
-        let quality = self.ctl.preset_label().replace(" crisp", "").replace(" exact", "").replace(" balanced", "");
-        ui.menu_button(format!("Quality: {quality}"), |ui| {
-            if ui.button("Auto").clicked() {
+
+        let display = ui.menu_button(RichText::new("🖥").size(17.0), |ui| {
+            ui.label(RichText::new("Quality").strong());
+            let auto = self.ctl.auto.is_some();
+            if ui.selectable_label(auto, "Auto  (adapts to the link)").clicked() {
                 *action = Some(Box::new(|r, _| r.menu('a')));
                 ui.close();
             }
             for (i, p) in PRESETS.iter().enumerate() {
-                if ui.button(p.name).clicked() {
+                let on = !auto && self.ctl.preset == p.name;
+                let text = format!("{}  ({}, {}%, {} fps)", p.name, p.mode.name(), p.scale, p.fps);
+                if ui.selectable_label(on, text).clicked() {
                     let c = char::from(b'0' + i as u8);
                     *action = Some(Box::new(move |r, _| r.menu(c)));
                     ui.close();
                 }
             }
-            ui.separator();
-            let mut mode = self.ctl.s.mode;
-            egui::ComboBox::from_label("Colours").selected_text(mode.name()).show_ui(ui, |ui| {
-                for m in Mode::ALL {
-                    ui.selectable_value(&mut mode, m, m.name());
-                }
-            });
-            let mut scale = self.ctl.s.scale;
-            ui.add(egui::Slider::new(&mut scale, 20..=100).text("Scale %"));
-            let mut fps = self.ctl.s.fps;
-            ui.add(egui::Slider::new(&mut fps, 1..=60).text("FPS"));
-            if (mode, scale, fps) != (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) {
-                *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
-            }
-        });
-        if self.monitors.len() > 1 {
-            ui.menu_button(format!("Screen {}", self.monitor + 1), |ui| {
-                for (i, m) in self.monitors.iter().enumerate() {
-                    let primary = if m.primary { "  (primary)" } else { "" };
-                    let text = format!("{}: {}  {}x{}{primary}", i + 1, m.name, m.w, m.h);
-                    if ui.selectable_label(i == self.monitor, text).clicked() {
-                        *action = Some(Box::new(move |r, _| r.send(ToAgent::SelectMonitor(i as u8))));
-                        ui.close();
+            ui.collapsing("Custom", |ui| {
+                let mut mode = self.ctl.s.mode;
+                egui::ComboBox::from_label("Colours").selected_text(mode.name()).show_ui(ui, |ui| {
+                    for m in Mode::ALL {
+                        ui.selectable_value(&mut mode, m, m.name());
                     }
+                });
+                let mut scale = self.ctl.s.scale;
+                ui.add(egui::Slider::new(&mut scale, 20..=100).text("Scale %"));
+                let mut fps = self.ctl.s.fps;
+                ui.add(egui::Slider::new(&mut fps, 1..=60).text("FPS"));
+                if (mode, scale, fps) != (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) {
+                    *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
                 }
             });
-        }
-        ui.menu_button(format!("View: {}", self.fit.label()), |ui| {
+            ui.separator();
+            ui.label(RichText::new("View").strong());
             let mut pick = |ui: &mut egui::Ui, fit: Fit, text: &str| {
                 if ui.selectable_label(self.fit == fit, text).clicked() {
                     *action = Some(Box::new(move |r, _| {
@@ -1307,20 +1529,38 @@ impl Remote {
             };
             pick(ui, Fit::Window, "Fit to window");
             pick(ui, Fit::Stretch, "Stretch to fill");
-            ui.separator();
-            for p in [50, 75, 100, 125, 150, 200] {
-                let text = if p == 100 { "100%  original size".to_string() } else { format!("{p}%") };
-                pick(ui, Fit::Fixed(p), &text);
+            ui.horizontal_wrapped(|ui| {
+                for p in [50, 75, 100, 125, 150, 200] {
+                    pick(ui, Fit::Fixed(p), &format!("{p}%"));
+                }
+            });
+            if self.monitors.len() > 1 {
+                ui.separator();
+                ui.label(RichText::new("Screen").strong());
+                for (i, m) in self.monitors.iter().enumerate() {
+                    let primary = if m.primary { ", primary" } else { "" };
+                    let text = format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h);
+                    if ui.selectable_label(i == self.monitor, text).clicked() {
+                        *action = Some(Box::new(move |r, _| r.send(ToAgent::SelectMonitor(i as u8))));
+                        ui.close();
+                    }
+                }
             }
         });
-        let fs = if self.fullscreen { "Exit full screen" } else { "Full screen" };
-        if ui.button(fs).on_hover_text("F11").clicked() {
+        display.response.on_hover_text(format!(
+            "Display: quality {}, view {}",
+            self.ctl.preset_label(),
+            self.fit.label()
+        ));
+
+        let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
+        if icon(ui, "🔲", fs_tip, self.fullscreen).clicked() {
             *action = Some(Box::new(|r, c| {
                 r.set_fullscreen(c, !r.fullscreen);
                 Ok(())
             }));
         }
-        ui.menu_button("Keys", |ui| {
+        let keys = ui.menu_button(RichText::new("⌨").size(17.0), |ui| {
             let combos: [(&str, Option<Vec<u32>>); 8] = [
                 ("Ctrl+Alt+Del", None),
                 ("Win", Some(vec![SUPER_L])),
@@ -1350,16 +1590,74 @@ impl Remote {
                 ui.close();
             }
         });
+        keys.response.on_hover_text("Send special keys");
+        ui.separator();
+
+        let files_tip = "Remote files: browse and download. Drop files or folders on the window to upload.";
+        if icon(ui, "📁", files_tip, self.panel.is_some()).clicked() {
+            *action = Some(Box::new(|r, _| {
+                if r.panel.take().is_none() {
+                    r.send(ToAgent::ListDir { path: String::new() })?;
+                }
+                Ok(())
+            }));
+        }
+        let chat_glyph = if self.unread > 0 { format!("💬 {}", self.unread) } else { "💬".into() };
+        if icon(ui, &chat_glyph, "Chat with the person at the remote screen", self.chat.is_some()).clicked() {
+            *action = Some(Box::new(|r, _| {
+                match r.chat.take() {
+                    Some((lines, _)) => r.chat_lines = lines,
+                    None => {
+                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
+                        r.unread = 0;
+                    }
+                }
+                Ok(())
+            }));
+        }
+        if icon(ui, "📷", "Screenshot: save the remote screen as a PNG in Pictures", false).clicked() {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
+        }
+        let (glyph, tip) = if self.paused {
+            ("▶", "Resume the picture")
+        } else {
+            ("⏸", "Pause the picture to save traffic; fetch single frames when needed")
+        };
+        if icon(ui, glyph, tip, self.paused).clicked() {
+            let on = !self.paused;
+            self.paused = on;
+            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
+        }
+        if self.paused && icon(ui, "⟳", "Fetch one frame", false).clicked() {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
+        }
+
         let mut sound = self.sound.is_some();
         let mut sound_clicked = false;
-        ui.menu_button("Options", |ui| {
+        let mut dark = ui.visuals().dark_mode;
+        let mut theme_clicked = false;
+        let more = ui.menu_button(RichText::new("⚙").size(17.0), |ui| {
             ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
             sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
             if cfg!(windows) {
                 let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
                 ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
             }
+            let mut hide = !self.pinned;
+            if ui.checkbox(&mut hide, "Hide this toolbar until the pointer reaches the top").changed() {
+                self.pinned = !hide;
+            }
+            theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
+            ui.separator();
+            if ui.button("Repaint the whole screen").clicked() {
+                *action = Some(Box::new(|r, _| r.menu('r')));
+                ui.close();
+            }
         });
+        more.response.on_hover_text("Options");
+        if theme_clicked {
+            set_theme(ui.ctx(), dark);
+        }
         if sound_clicked {
             *action = Some(Box::new(move |r, _| {
                 if sound {
@@ -1376,62 +1674,11 @@ impl Remote {
                 r.send(ToAgent::Audio(sound))
             }));
         }
-        let files_tip = "Browse and download remote files; drop files or folders on the window to upload";
-        if ui.button("Files").on_hover_text(files_tip).clicked() {
-            *action = Some(Box::new(|r, _| {
-                if r.panel.take().is_none() {
-                    r.send(ToAgent::ListDir { path: String::new() })?;
-                }
-                Ok(())
-            }));
-        }
-        let chat = if self.unread > 0 { format!("Chat ({})", self.unread) } else { "Chat".into() };
-        if ui.button(chat).on_hover_text("Talk to the person at the remote screen").clicked() {
-            *action = Some(Box::new(|r, _| {
-                match r.chat.take() {
-                    Some((lines, _)) => r.chat_lines = lines,
-                    None => {
-                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
-                        r.unread = 0;
-                    }
-                }
-                Ok(())
-            }));
-        }
-        if ui.button("Screenshot").on_hover_text("Save the remote screen as a PNG in Pictures").clicked() {
-            *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
-        }
-        let tip = "Stop the picture to save traffic; Update fetches one frame when you need it";
-        if ui.toggle_value(&mut self.paused, "Pause").on_hover_text(tip).changed() {
-            let on = self.paused;
-            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
-        }
-        if self.paused && ui.button("Update").on_hover_text("Fetch one frame").clicked() {
-            *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
-        }
-        if ui.button("Refresh").clicked() {
-            *action = Some(Box::new(|r, _| r.menu('r')));
-        }
         ui.separator();
-        ui.label(
-            RichText::new(format!("{:.0} KB/s  {:.0} ms", self.ctl.kbps, self.ctl.rtt))
-                .font(FontId::monospace(12.0))
-                .color(Color32::GRAY),
-        );
-        let pin = if self.pinned { "Auto-hide" } else { "Pin" };
-        if ui
-            .small_button(pin)
-            .on_hover_text("Keep the toolbar shown or hide it until the pointer nears the top")
-            .clicked()
-        {
-            *action = Some(Box::new(|r, _| {
-                r.pinned = !r.pinned;
-                Ok(())
-            }));
-        }
-        let close =
-            egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE)).fill(Color32::from_rgb(190, 60, 60));
-        if ui.add(close).clicked() {
+        let end = egui::Button::new(RichText::new("✖").size(15.0).color(Color32::WHITE))
+            .fill(Color32::from_rgb(200, 62, 62))
+            .min_size(Vec2::new(36.0, 30.0));
+        if ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }
     }
