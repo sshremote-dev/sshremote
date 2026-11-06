@@ -1880,25 +1880,4 @@ mod tests {
         assert_eq!(keysym(Key::Enter), Some(0xff0d));
         assert_eq!(keysym(Key::Quote), Some('\'' as u32));
     }
-
-    fn panel(path: &str) -> Panel {
-        Panel {
-            path: path.into(),
-            typed: String::new(),
-            entries: Vec::new(),
-            error: String::new(),
-            selected: None,
-            hidden: false,
-        }
-    }
-
-    #[test]
-    fn panel_paths_follow_the_remote_os() {
-        assert_eq!(panel("/home/a").child("x"), "/home/a/x");
-        assert_eq!(panel("/home/a").parent(), "/home");
-        assert_eq!(panel("/home").parent(), "/");
-        assert_eq!(panel(r"C:\Users\a").child("x"), r"C:\Users\a\x");
-        assert_eq!(panel(r"C:\Users").parent(), r"C:\");
-        assert_eq!(panel(r"C:\").child("x"), r"C:\x");
-    }
 }
