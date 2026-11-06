@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::proto::{DirEntry, ToClient};
+use crate::proto::{DirEntry, FileOp, ToClient};
 
 /// Progress is reported about this often.
 pub const REPORT: u64 = 256 << 10;
@@ -21,7 +21,7 @@ pub fn downloads() -> PathBuf {
     home.map(|h| h.join("Downloads")).unwrap_or_else(std::env::temp_dir)
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     downloads().parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir)
 }
 
@@ -86,8 +86,13 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn start(&mut self, id: u32, size: u64, name: &str) -> Option<Note> {
+        self.start_in(id, size, &downloads(), name)
+    }
+
+    /// Like `start`, into `dir` instead of Downloads.
+    pub fn start_in(&mut self, id: u32, size: u64, dir: &Path, name: &str) -> Option<Note> {
         let parts = clean_relative(name);
-        let mut dir = downloads();
+        let mut dir = dir.to_path_buf();
         for p in &parts[..parts.len() - 1] {
             dir.push(p);
         }
@@ -140,6 +145,7 @@ impl Inbox {
 
 struct Outgoing {
     id: u32,
+    tag: u32,
     path: PathBuf,
     name: String,
     file: Option<File>,
@@ -172,6 +178,11 @@ pub fn walk(dir: &Path, base: &str, out: &mut Vec<(PathBuf, String)>) {
 impl Outbox {
     /// Queues a file or a whole folder; returns an error message to send at once, if any.
     pub fn fetch(&mut self, path: &str) -> Option<ToClient> {
+        self.fetch_tagged(path, 0)
+    }
+
+    /// Queues a download whose files are announced with `FetchBegin` and `tag`.
+    pub fn fetch_tagged(&mut self, path: &str, tag: u32) -> Option<ToClient> {
         let p = PathBuf::from(path);
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         let mut files = Vec::new();
@@ -184,7 +195,16 @@ impl Outbox {
         }
         for (path, name) in files {
             self.next_id += 1;
-            self.queue.push_back(Outgoing { id: self.next_id, path, name, file: None, size: 0, sent: 0, acked: 0 });
+            self.queue.push_back(Outgoing {
+                id: self.next_id,
+                tag,
+                path,
+                name,
+                file: None,
+                size: 0,
+                sent: 0,
+                acked: 0,
+            });
         }
         None
     }
@@ -193,6 +213,19 @@ impl Outbox {
         if let Some(o) = self.queue.iter_mut().find(|o| o.id == id) {
             o.acked = received;
         }
+    }
+
+    /// Drops a download, or every queued file of its request when `tag` is not 0.
+    pub fn cancel(&mut self, id: u32, tag: u32) -> Vec<ToClient> {
+        let mut out = Vec::new();
+        self.queue.retain(|o| {
+            let hit = o.id == id || (tag != 0 && o.tag == tag);
+            if hit && o.file.is_some() {
+                out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "cancelled".into() });
+            }
+            !hit
+        });
+        out
     }
 
     pub fn busy(&self) -> bool {
@@ -210,7 +243,11 @@ impl Outbox {
                     Ok(f) => {
                         o.size = f.metadata().map(|m| m.len()).unwrap_or(0);
                         o.file = Some(f);
-                        out.push(ToClient::FetchStart { id: o.id, size: o.size, name: o.name.clone() });
+                        out.push(if o.tag == 0 {
+                            ToClient::FetchStart { id: o.id, size: o.size, name: o.name.clone() }
+                        } else {
+                            ToClient::FetchBegin { id: o.id, size: o.size, tag: o.tag, name: o.name.clone() }
+                        });
                     }
                     Err(e) => {
                         out.push(ToClient::FetchEnd {
@@ -248,8 +285,30 @@ impl Outbox {
     }
 }
 
-/// A folder listing, folders first; an empty path is the user's home.
+/// The pseudo-folder listing the drives (Windows); elsewhere it is the root.
+pub const DRIVES: &str = "::";
+
+fn mtime(m: &std::fs::Metadata) -> u64 {
+    m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+}
+
+#[cfg(windows)]
+fn drives() -> ToClient {
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let entries = (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| DirEntry { name: format!("{}:\\", (b'A' + i) as char), dir: true, size: 0, mtime: 0 })
+        .collect();
+    ToClient::DirList { path: DRIVES.into(), entries, error: String::new() }
+}
+
+/// A folder listing, folders first; an empty path is the user's home, `DRIVES` the drives.
 pub fn list(path: &str) -> ToClient {
+    #[cfg(windows)]
+    if path == DRIVES {
+        return drives();
+    }
+    let path = if path == DRIVES { "/" } else { path };
     let dir = if path.is_empty() { home() } else { PathBuf::from(path) };
     let dir = dir.canonicalize().unwrap_or(dir);
     let shown = dir.display().to_string();
@@ -265,6 +324,7 @@ pub fn list(path: &str) -> ToClient {
                         name: e.file_name().to_string_lossy().into_owned(),
                         dir: m.is_dir(),
                         size: m.len(),
+                        mtime: mtime(&m),
                     })
                 })
                 .collect();
@@ -275,9 +335,88 @@ pub fn list(path: &str) -> ToClient {
     }
 }
 
+/// Carries out a `FileOp` on this machine.
+pub fn op(op: FileOp, path: &str, arg: &str) -> ToClient {
+    let p = Path::new(path);
+    let r = match op {
+        FileOp::Mkdir => std::fs::create_dir(p).map(|_| format!("Created {path}")),
+        FileOp::Rename => {
+            let name = clean(arg);
+            let to = p.with_file_name(&name);
+            if to.exists() {
+                Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{name} already exists")))
+            } else {
+                std::fs::rename(p, &to).map(|_| format!("Renamed to {name}"))
+            }
+        }
+        FileOp::Delete => {
+            let r = if std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            };
+            r.map(|_| format!("Deleted {path}"))
+        }
+    };
+    match r {
+        Ok(text) => ToClient::OpDone { ok: true, text },
+        Err(e) => ToClient::OpDone { ok: false, text: format!("{path}: {e}") },
+    }
+}
+
+/// A modification time as local "YYYY-MM-DD HH:MM".
+pub fn local_time(secs: u64) -> String {
+    if secs == 0 {
+        return String::new();
+    }
+    let (y, mo, d, h, mi) = local_parts(secs);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+}
+
+#[cfg(unix)]
+fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    (tm.tm_year as i64 + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
+}
+
+#[cfg(windows)]
+fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let ticks = (secs + 11_644_473_600) * 10_000_000;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc);
+        if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            local = utc;
+        }
+    }
+    (local.wYear as i64, local.wMonth as u32, local.wDay as u32, local.wHour as u32, local.wMinute as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_ops_work_and_report() {
+        let dir = std::env::temp_dir().join(format!("desk-ops-{}", std::process::id()));
+        let d = dir.to_str().unwrap();
+        assert!(matches!(op(FileOp::Mkdir, d, ""), ToClient::OpDone { ok: true, .. }));
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let a = dir.join("a.txt");
+        assert!(matches!(op(FileOp::Rename, a.to_str().unwrap(), "b.txt"), ToClient::OpDone { ok: true, .. }));
+        assert!(dir.join("b.txt").exists());
+        assert!(matches!(op(FileOp::Mkdir, d, ""), ToClient::OpDone { ok: false, .. }));
+        assert!(matches!(op(FileOp::Delete, d, ""), ToClient::OpDone { ok: true, .. }));
+        assert!(!dir.exists());
+        assert_eq!(local_time(0), "");
+        assert_eq!(local_time(1_700_000_000).len(), 16);
+    }
 
     #[test]
     fn names_stay_inside_the_folder() {

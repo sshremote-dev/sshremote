@@ -214,6 +214,22 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                 }
                 ToAgent::FetchAck { id, received } => outbox.ack(id, received),
+                ToAgent::FileStartIn { id, size, dir, name } => {
+                    if let Some(m) = inbox.start_in(id, size, std::path::Path::new(&dir), &name) {
+                        send(enc, &m.to_client()).map_err(io_err)?;
+                    }
+                }
+                ToAgent::FileOp { op, path, arg } => send(enc, &crate::files::op(op, &path, &arg)).map_err(io_err)?,
+                ToAgent::FetchTagged { tag, path } => {
+                    if let Some(m) = outbox.fetch_tagged(&path, tag) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
+                ToAgent::FetchCancel { id, tag } => {
+                    for m in outbox.cancel(id, tag) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
                 ToAgent::Chat(text) => {
                     if let Err(e) = chat.show(&text) {
                         send(enc, &ToClient::Notice(format!("Chat: {e}"))).map_err(io_err)?;

@@ -31,7 +31,7 @@ gstreamer-video = "0.25.4"
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_Console", "Win32_System_IO", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Services"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_Console", "Win32_System_IO", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Services", "Win32_System_Time"] }
 
 [profile.release]
 opt-level = 3

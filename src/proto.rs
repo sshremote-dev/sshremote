@@ -108,6 +108,39 @@ pub enum ToAgent {
     Pause(bool),
     /// Asks for the current screen as a full-colour PNG.
     Snapshot,
+    /// An upload into a chosen remote folder; `name` may be relative ("folder/file.txt").
+    FileStartIn {
+        id: u32,
+        size: u64,
+        dir: String,
+        name: String,
+    },
+    /// Changes the remote file system, answered with `OpDone`.
+    FileOp {
+        op: FileOp,
+        path: String,
+        arg: String,
+    },
+    /// Like `Fetch`, but each file is announced with `FetchBegin` carrying `tag`.
+    FetchTagged {
+        tag: u32,
+        path: String,
+    },
+    /// Stops a download; the rest of its folder too, if `tag` is not 0.
+    FetchCancel {
+        id: u32,
+        tag: u32,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum FileOp {
+    /// Creates the folder `path`.
+    Mkdir = 1,
+    /// Renames `path` to `arg`, a new name in the same folder.
+    Rename = 2,
+    /// Deletes `path`, with everything in it if it is a folder.
+    Delete = 3,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -123,6 +156,8 @@ pub struct DirEntry {
     pub name: String,
     pub dir: bool,
     pub size: u64,
+    /// Last modification, seconds since 1970; 0 when unknown.
+    pub mtime: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -219,6 +254,18 @@ pub enum ToClient {
     Chat(String),
     /// The screen at the current capture size as a PNG.
     Snapshot(Vec<u8>),
+    /// The result of a `FileOp`.
+    OpDone {
+        ok: bool,
+        text: String,
+    },
+    /// A download of a `FetchTagged` request begins.
+    FetchBegin {
+        id: u32,
+        size: u64,
+        tag: u32,
+        name: String,
+    },
 }
 
 fn bad() -> io::Error {
@@ -387,6 +434,29 @@ impl ToAgent {
                 22
             }
             ToAgent::Snapshot => 23,
+            ToAgent::FileStartIn { id, size, dir, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                put_str(&mut b, dir);
+                put_str(&mut b, name);
+                24
+            }
+            ToAgent::FileOp { op, path, arg } => {
+                b.push(*op as u8);
+                put_str(&mut b, path);
+                put_str(&mut b, arg);
+                25
+            }
+            ToAgent::FetchTagged { tag, path } => {
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(path.as_bytes());
+                26
+            }
+            ToAgent::FetchCancel { id, tag } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&tag.to_le_bytes());
+                27
+            }
         };
         (kind, b)
     }
@@ -427,6 +497,19 @@ impl ToAgent {
             21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             22 => ToAgent::Pause(c.u8()? != 0),
             23 => ToAgent::Snapshot,
+            24 => ToAgent::FileStartIn { id: c.u32()?, size: c.u64()?, dir: c.str()?, name: c.str()? },
+            25 => ToAgent::FileOp {
+                op: match c.u8()? {
+                    1 => FileOp::Mkdir,
+                    2 => FileOp::Rename,
+                    3 => FileOp::Delete,
+                    _ => return Err(bad()),
+                },
+                path: c.str()?,
+                arg: c.str()?,
+            },
+            26 => ToAgent::FetchTagged { tag: c.u32()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
+            27 => ToAgent::FetchCancel { id: c.u32()?, tag: c.u32()? },
             _ => return Err(bad()),
         })
     }
@@ -496,6 +579,10 @@ impl ToClient {
                     b.push(e.dir as u8);
                     b.extend_from_slice(&e.size.to_le_bytes());
                 }
+                // Appended after the entries, so older viewers still read the list.
+                for e in entries {
+                    b.extend_from_slice(&e.mtime.to_le_bytes());
+                }
                 108
             }
             ToClient::FetchStart { id, size, name } => {
@@ -530,6 +617,18 @@ impl ToClient {
             ToClient::Snapshot(p) => {
                 b.extend_from_slice(p);
                 116
+            }
+            ToClient::OpDone { ok, text } => {
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                117
+            }
+            ToClient::FetchBegin { id, size, tag, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                118
             }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
@@ -604,7 +703,12 @@ impl ToClient {
                 let n = c.u32()? as usize;
                 let mut entries = Vec::with_capacity(n.min(1 << 16));
                 for _ in 0..n {
-                    entries.push(DirEntry { name: c.str()?, dir: c.u8()? != 0, size: c.u64()? });
+                    entries.push(DirEntry { name: c.str()?, dir: c.u8()? != 0, size: c.u64()?, mtime: 0 });
+                }
+                if c.d.len() - c.p >= entries.len() * 8 {
+                    for e in entries.iter_mut() {
+                        e.mtime = c.u64()?;
+                    }
                 }
                 ToClient::DirList { path, entries, error }
             }
@@ -623,6 +727,13 @@ impl ToClient {
             114 => ToClient::Notice(String::from_utf8_lossy(c.rest()).into_owned()),
             115 => ToClient::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             116 => ToClient::Snapshot(c.rest().to_vec()),
+            117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            118 => ToClient::FetchBegin {
+                id: c.u32()?,
+                size: c.u64()?,
+                tag: c.u32()?,
+                name: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             112 => {
                 let current = c.u8()?;
                 let n = c.u32()? as usize;
@@ -667,16 +778,22 @@ mod tests {
             ToAgent::ListDir { path: "/home".into() },
             ToAgent::Fetch { path: "C:/x".into() },
             ToAgent::FetchAck { id: 3, received: 1 << 40 },
+            ToAgent::FileStartIn { id: 4, size: 10, dir: "/tmp".into(), name: "a/b.txt".into() },
+            ToAgent::FileOp { op: FileOp::Rename, path: "/tmp/a".into(), arg: "b".into() },
+            ToAgent::FetchTagged { tag: 5, path: "/x".into() },
+            ToAgent::FetchCancel { id: 6, tag: 5 },
         ];
         for m in [
             ToClient::DirList {
                 path: "/h".into(),
-                entries: vec![DirEntry { name: "a".into(), dir: true, size: 0 }],
+                entries: vec![DirEntry { name: "a".into(), dir: true, size: 0, mtime: 1_700_000_000 }],
                 error: String::new(),
             },
             ToClient::FetchStart { id: 2, size: 9, name: "d/x.txt".into() },
             ToClient::FetchData { id: 2, data: vec![1] },
             ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
+            ToClient::OpDone { ok: false, text: "denied".into() },
+            ToClient::FetchBegin { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

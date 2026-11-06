@@ -8,6 +8,7 @@ mod color;
 #[cfg(windows)]
 mod conpty;
 mod files;
+mod filewin;
 mod gui;
 mod hosts;
 #[cfg(windows)]
