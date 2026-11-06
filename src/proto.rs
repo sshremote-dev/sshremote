@@ -98,6 +98,16 @@ pub enum ToAgent {
         id: u32,
         received: u64,
     },
+    /// Shows another of the remote host's monitors (an index into `Monitors`).
+    SelectMonitor(u8),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub w: u16,
+    pub h: u16,
+    pub primary: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -187,6 +197,11 @@ pub enum ToClient {
         id: u32,
         ok: bool,
         text: String,
+    },
+    /// The remote host's monitors and which one is shown.
+    Monitors {
+        list: Vec<MonitorInfo>,
+        current: u8,
     },
 }
 
@@ -339,6 +354,10 @@ impl ToAgent {
                 b.extend_from_slice(&received.to_le_bytes());
                 18
             }
+            ToAgent::SelectMonitor(i) => {
+                b.push(*i);
+                19
+            }
         };
         (kind, b)
     }
@@ -374,6 +393,7 @@ impl ToAgent {
             16 => ToAgent::ListDir { path: String::from_utf8_lossy(c.rest()).into_owned() },
             17 => ToAgent::Fetch { path: String::from_utf8_lossy(c.rest()).into_owned() },
             18 => ToAgent::FetchAck { id: c.u32()?, received: c.u64()? },
+            19 => ToAgent::SelectMonitor(c.u8()?),
             _ => return Err(bad()),
         })
     }
@@ -462,6 +482,17 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 111
             }
+            ToClient::Monitors { list, current } => {
+                b.push(*current);
+                b.extend_from_slice(&(list.len() as u32).to_le_bytes());
+                for m in list {
+                    put_str(&mut b, &m.name);
+                    b.extend_from_slice(&m.w.to_le_bytes());
+                    b.extend_from_slice(&m.h.to_le_bytes());
+                    b.push(m.primary as u8);
+                }
+                112
+            }
             ToClient::FileDone { id, ok, text } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.push(*ok as u8);
@@ -539,6 +570,15 @@ impl ToClient {
                 ok: c.u8()? != 0,
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
+            112 => {
+                let current = c.u8()?;
+                let n = c.u32()? as usize;
+                let mut list = Vec::with_capacity(n.min(64));
+                for _ in 0..n {
+                    list.push(MonitorInfo { name: c.str()?, w: c.u16()?, h: c.u16()?, primary: c.u8()? != 0 });
+                }
+                ToClient::Monitors { list, current }
+            }
             107 => ToClient::FileDone {
                 id: c.u32()?,
                 ok: c.u8()? != 0,
@@ -584,6 +624,10 @@ mod tests {
             ToClient::FetchStart { id: 2, size: 9, name: "d/x.txt".into() },
             ToClient::FetchData { id: 2, data: vec![1] },
             ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
+            ToClient::Monitors {
+                list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
+                current: 0,
+            },
         ] {
             let (k, p) = m.encode();
             assert_eq!(ToClient::decode(k, &p).unwrap(), m);

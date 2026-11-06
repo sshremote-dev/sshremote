@@ -67,9 +67,10 @@ pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
 
 fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(), String> {
     let mut cap = capture::open(backend)?;
-    let desk = cap.desktop_size();
+    let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
+    send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -166,6 +167,22 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                 }
                 ToAgent::FetchAck { id, received } => outbox.ack(id, received),
+                ToAgent::SelectMonitor(i) => {
+                    if let Err(e) = cap.select(i as usize) {
+                        report(Err(e));
+                        continue;
+                    }
+                    desk = cap.desktop_size();
+                    let hello = ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() };
+                    send(enc, &hello).map_err(io_err)?;
+                    send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
+                    if let Some(s) = settings {
+                        size = target(desk, &s);
+                        cap.set_target(size.0, size.1)?;
+                    }
+                    (prev, last) = (None, None);
+                    vid.reset();
+                }
             }
         }
         // Downloads share the stream with the screen, a slice per turn.
@@ -251,6 +268,15 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         in_flight += 1;
         due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
     }
+}
+
+fn monitors(cap: &dyn capture::Capture) -> ToClient {
+    let list = cap
+        .monitors()
+        .into_iter()
+        .map(|m| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary })
+        .collect();
+    ToClient::Monitors { list, current: cap.current() as u8 }
 }
 
 fn report(r: Result<(), String>) {

@@ -9,9 +9,9 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-use super::{Capture, Image, Input};
+use super::{Capture, Image, Input, Monitor};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 macro_rules! notify {
@@ -24,6 +24,8 @@ const RD: &str = "org.gnome.Mutter.RemoteDesktop";
 const SC: &str = "org.gnome.Mutter.ScreenCast";
 
 pub struct Gnome {
+    monitors: Vec<(String, Monitor)>,
+    current: usize,
     _conn: Connection,
     session: Proxy<'static>,
     stream_path: String,
@@ -93,8 +95,45 @@ fn to_image(sample: &gst::Sample) -> Result<Image, String> {
     })
 }
 
+type ModeT = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
+type MonitorT = ((String, String, String, String), Vec<ModeT>, HashMap<String, OwnedValue>);
+type LogicalT = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
+
+/// Connectors and current modes of the monitors, primary first, from Mutter's DisplayConfig.
+fn monitors(conn: &Connection) -> Vec<(String, Monitor)> {
+    let Ok(dc) = Proxy::new(
+        conn,
+        "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+        "org.gnome.Mutter.DisplayConfig",
+    ) else {
+        return Vec::new();
+    };
+    let state: Result<(u32, Vec<MonitorT>, Vec<LogicalT>, HashMap<String, OwnedValue>), _> =
+        dc.call("GetCurrentState", &());
+    let Ok((_, mons, logical, _)) = state else { return Vec::new() };
+    let primary: Vec<String> = logical.iter().filter(|l| l.4).flat_map(|l| l.5.iter().map(|m| m.0.clone())).collect();
+    let mut out: Vec<(String, Monitor)> = mons
+        .into_iter()
+        .filter_map(|((connector, vendor, product, _), modes, _)| {
+            let current =
+                modes.iter().find(|m| m.6.get("is-current").is_some_and(|v| bool::try_from(v).unwrap_or(false)))?;
+            let name = format!("{connector} {vendor} {product}").trim().to_string();
+            let primary = primary.contains(&connector);
+            Some((connector, Monitor { name, w: current.1 as usize, h: current.2 as usize, primary }))
+        })
+        .collect();
+    out.sort_by_key(|m| !m.1.primary);
+    out
+}
+
 impl Gnome {
     pub fn open() -> Result<Gnome, String> {
+        Gnome::open_on(None)
+    }
+
+    /// Records the monitor at `index` in the monitor list, or the primary one.
+    fn open_on(index: Option<usize>) -> Result<Gnome, String> {
         ensure_env();
         gst::init().map_err(|e| format!("GStreamer init: {e}"))?;
         let conn = Connection::session().map_err(err("session bus"))?;
@@ -111,7 +150,11 @@ impl Gnome {
         let mut sprops: HashMap<&str, Value> = HashMap::new();
         // Cursor embedded in frames, so the remote pointer is visible.
         sprops.insert("cursor-mode", Value::U32(1));
-        let stream: OwnedObjectPath = cast.call("RecordMonitor", &("", sprops)).map_err(err("RecordMonitor"))?;
+        let list = monitors(&conn);
+        let current = index.unwrap_or(0).min(list.len().saturating_sub(1));
+        let connector = list.get(current).map_or(String::new(), |m| m.0.clone());
+        let stream: OwnedObjectPath =
+            cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?;
         let stream_path = stream.as_str().to_owned();
         let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
         let mut added = sproxy.receive_signal("PipeWireStreamAdded").map_err(err("signal"))?;
@@ -125,7 +168,17 @@ impl Gnome {
             .ok_or("no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)")?;
         let img = to_image(&first)?;
         let desk = (img.w, img.h);
-        Ok(Gnome { _conn: conn, session, stream_path, node, desk, target: desk, pipe: Some((p, sink)) })
+        Ok(Gnome {
+            monitors: list,
+            current,
+            _conn: conn,
+            session,
+            stream_path,
+            node,
+            desk,
+            target: desk,
+            pipe: Some((p, sink)),
+        })
     }
 }
 
@@ -136,6 +189,23 @@ impl Capture for Gnome {
 
     fn desktop_size(&self) -> (usize, usize) {
         self.desk
+    }
+
+    fn monitors(&self) -> Vec<Monitor> {
+        self.monitors.iter().map(|m| m.1.clone()).collect()
+    }
+
+    fn current(&self) -> usize {
+        self.current
+    }
+
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.monitors.len() {
+            return Err("no such monitor".into());
+        }
+        // A new remote-desktop session records the other monitor; dropping the old one stops it.
+        *self = Gnome::open_on(Some(index))?;
+        Ok(())
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {

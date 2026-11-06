@@ -3,11 +3,11 @@
 
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, COLORONCOLOR, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteDC, DeleteObject, GdiFlush, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
-    SetStretchBltMode, StretchBlt,
+    DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR,
+    MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
 };
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, SetThreadDesktop};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -15,22 +15,64 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY, VK_APPS,
-    VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LCONTROL,
-    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP, VkKeyScanW,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW,
+    SendInput, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+    VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PAUSE, VK_PRIOR,
+    VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP, VkKeyScanW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics, ICONINFO,
-    SM_CXSCREEN, SM_CYSCREEN,
+    MONITORINFOF_PRIMARY, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
 };
+use windows_sys::core::BOOL;
 
-use super::{Capture, Image, Input};
+use super::{Capture, Image, Input, Monitor};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 const DESKTOP_ALL: u32 = 0x01ff;
 
+/// A monitor as Windows places it on the virtual desktop.
+struct Screen {
+    info: Monitor,
+    left: i32,
+    top: i32,
+}
+
+unsafe extern "system" fn add_monitor(m: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
+    let list = unsafe { &mut *(list as *mut Vec<Screen>) };
+    let mut mi: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+    mi.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    if unsafe { GetMonitorInfoW(m, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) } != 0 {
+        let r = mi.monitorInfo.rcMonitor;
+        let n = mi.szDevice.iter().position(|&c| c == 0).unwrap_or(mi.szDevice.len());
+        let name = String::from_utf16_lossy(&mi.szDevice[..n]).trim_start_matches(r"\\.\").to_string();
+        list.push(Screen {
+            info: Monitor {
+                name,
+                w: (r.right - r.left) as usize,
+                h: (r.bottom - r.top) as usize,
+                primary: mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+            },
+            left: r.left,
+            top: r.top,
+        });
+    }
+    1
+}
+
+fn screens() -> Vec<Screen> {
+    let mut list: Vec<Screen> = Vec::new();
+    unsafe { EnumDisplayMonitors(null_mut(), null_mut(), Some(add_monitor), &mut list as *mut Vec<Screen> as LPARAM) };
+    // Primary first, then left to right, so index 0 is what a single-screen viewer expects.
+    list.sort_by_key(|s| (!s.info.primary, s.left, s.top));
+    list
+}
+
 pub struct Gdi {
+    screens: Vec<Screen>,
+    current: usize,
+    origin: (i32, i32),
     desk: (usize, usize),
     target: (usize, usize),
     screen: HDC,
@@ -45,13 +87,29 @@ impl Gdi {
         unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             follow_input_desktop();
-            let desk = (GetSystemMetrics(SM_CXSCREEN) as usize, GetSystemMetrics(SM_CYSCREEN) as usize);
+            let screens = screens();
+            let desk = match screens.first() {
+                Some(s) => (s.info.w, s.info.h),
+                None => (GetSystemMetrics(SM_CXSCREEN) as usize, GetSystemMetrics(SM_CYSCREEN) as usize),
+            };
+            let origin = screens.first().map_or((0, 0), |s| (s.left, s.top));
             let screen = GetDC(null_mut());
             if screen.is_null() || desk.0 == 0 {
                 return Err("no interactive desktop in this session".into());
             }
             let mem = CreateCompatibleDC(screen);
-            let mut g = Gdi { desk, target: (0, 0), screen, mem, bmp: null_mut(), old: null_mut(), bits: null_mut() };
+            let mut g = Gdi {
+                screens,
+                current: 0,
+                origin,
+                desk,
+                target: (0, 0),
+                screen,
+                mem,
+                bmp: null_mut(),
+                old: null_mut(),
+                bits: null_mut(),
+            };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
         }
@@ -72,10 +130,10 @@ impl Gdi {
         let (dw, dh) = (self.desk.0 as i32, self.desk.1 as i32);
         unsafe {
             if (w, h) == (dw, dh) {
-                BitBlt(self.mem, 0, 0, w, h, self.screen, 0, 0, SRCCOPY) != 0
+                BitBlt(self.mem, 0, 0, w, h, self.screen, self.origin.0, self.origin.1, SRCCOPY) != 0
             } else {
                 SetStretchBltMode(self.mem, COLORONCOLOR);
-                StretchBlt(self.mem, 0, 0, w, h, self.screen, 0, 0, dw, dh, SRCCOPY) != 0
+                StretchBlt(self.mem, 0, 0, w, h, self.screen, self.origin.0, self.origin.1, dw, dh, SRCCOPY) != 0
             }
         }
     }
@@ -91,8 +149,8 @@ impl Gdi {
             if GetIconInfo(ci.hCursor, &mut ii) == 0 {
                 return;
             }
-            let x = ci.ptScreenPos.x * self.target.0 as i32 / self.desk.0 as i32 - ii.xHotspot as i32;
-            let y = ci.ptScreenPos.y * self.target.1 as i32 / self.desk.1 as i32 - ii.yHotspot as i32;
+            let x = (ci.ptScreenPos.x - self.origin.0) * self.target.0 as i32 / self.desk.0 as i32 - ii.xHotspot as i32;
+            let y = (ci.ptScreenPos.y - self.origin.1) * self.target.1 as i32 / self.desk.1 as i32 - ii.yHotspot as i32;
             DrawIconEx(self.mem, x, y, ci.hCursor, 0, 0, 0, null_mut(), DI_NORMAL);
             DeleteObject(ii.hbmMask);
             DeleteObject(ii.hbmColor);
@@ -133,6 +191,21 @@ impl Capture for Gdi {
 
     fn desktop_size(&self) -> (usize, usize) {
         self.desk
+    }
+
+    fn monitors(&self) -> Vec<Monitor> {
+        self.screens.iter().map(|s| s.info.clone()).collect()
+    }
+
+    fn current(&self) -> usize {
+        self.current
+    }
+
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        self.screens = screens();
+        let s = self.screens.get(index).ok_or("no such monitor")?;
+        (self.current, self.origin, self.desk) = (index, (s.left, s.top), (s.info.w, s.info.h));
+        Ok(())
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
@@ -186,9 +259,18 @@ impl Capture for Gdi {
         let mut seq = Vec::new();
         match ev {
             Input::Move { x, y } => {
-                let nx = (x * 65535.0 / (self.desk.0 - 1).max(1) as f64) as i32;
-                let ny = (y * 65535.0 / (self.desk.1 - 1).max(1) as f64) as i32;
-                seq.push(mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, nx, ny, 0));
+                // Absolute coordinates span the whole virtual desktop, every monitor included.
+                let (vx, vy, vw, vh) = unsafe {
+                    (
+                        GetSystemMetrics(SM_XVIRTUALSCREEN) as f64,
+                        GetSystemMetrics(SM_YVIRTUALSCREEN) as f64,
+                        GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2) as f64,
+                        GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2) as f64,
+                    )
+                };
+                let nx = ((self.origin.0 as f64 + x - vx) * 65535.0 / (vw - 1.0)) as i32;
+                let ny = ((self.origin.1 as f64 + y - vy) * 65535.0 / (vh - 1.0)) as i32;
+                seq.push(mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0));
             }
             Input::Button { button, pressed } => {
                 let flags = match (button, pressed) {

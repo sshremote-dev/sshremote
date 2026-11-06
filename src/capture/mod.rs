@@ -24,8 +24,29 @@ pub enum Input {
     SecureAttention,
 }
 
+/// One of the host's monitors, in its native pixels.
+#[derive(Clone, Debug)]
+pub struct Monitor {
+    pub name: String,
+    pub w: usize,
+    pub h: usize,
+    pub primary: bool,
+}
+
 pub trait Capture {
     fn name(&self) -> &'static str;
+    /// The host's monitors, when the backend can tell them apart.
+    fn monitors(&self) -> Vec<Monitor> {
+        Vec::new()
+    }
+    /// Index of the monitor being captured.
+    fn current(&self) -> usize {
+        0
+    }
+    /// Captures another monitor; the desktop size changes with it.
+    fn select(&mut self, _index: usize) -> Result<(), String> {
+        Err("this capture backend has one screen".into())
+    }
     fn desktop_size(&self) -> (usize, usize);
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String>;
     /// Returns a frame when one arrived since the last call.

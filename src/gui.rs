@@ -149,6 +149,8 @@ struct Remote {
     grab_keys: bool,
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
+    monitors: Vec<crate::proto::MonitorInfo>,
+    monitor: usize,
     inbox: crate::files::Inbox,
     /// Downloads in progress: id and name.
     downloads: Vec<(u32, String)>,
@@ -337,6 +339,7 @@ impl App {
             probe_scroll: 0,
             probe_send: None,
             probe_fetch: None,
+            probe_monitor: None,
         }
     }
 
@@ -479,6 +482,8 @@ impl eframe::App for App {
                         grab_keys: true,
                         uploads: std::collections::VecDeque::new(),
                         next_upload: 1,
+                        monitors: Vec::new(),
+                        monitor: 0,
                         inbox: crate::files::Inbox::default(),
                         downloads: Vec::new(),
                         panel: None,
@@ -593,6 +598,16 @@ impl Remote {
                     self.send(ToAgent::Ack(f.id))?;
                 }
                 Ok(Ev::Net(ToClient::Pong(t))) => self.ctl.pong(t),
+                Ok(Ev::Net(ToClient::Monitors { list, current })) => {
+                    (self.monitors, self.monitor) = (list, current as usize)
+                }
+                Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
+                    // Another monitor: new size, and the capture must be fitted again.
+                    self.sess.desk = (w, h);
+                    let host = self.label.split("  ").next().unwrap_or("").to_string();
+                    self.label = format!("{host}  {w}x{h}  {backend}");
+                    self.view = (0, 0);
+                }
                 Ok(Ev::Net(ToClient::Clipboard(t))) => {
                     if self.share_clipboard {
                         self.clip.set(t);
@@ -1111,6 +1126,18 @@ impl Remote {
                 *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
             }
         });
+        if self.monitors.len() > 1 {
+            ui.menu_button(format!("Screen {}", self.monitor + 1), |ui| {
+                for (i, m) in self.monitors.iter().enumerate() {
+                    let primary = if m.primary { "  (primary)" } else { "" };
+                    let text = format!("{}: {}  {}x{}{primary}", i + 1, m.name, m.w, m.h);
+                    if ui.selectable_label(i == self.monitor, text).clicked() {
+                        *action = Some(Box::new(move |r, _| r.send(ToAgent::SelectMonitor(i as u8))));
+                        ui.close();
+                    }
+                }
+            });
+        }
         let fit_label = if self.fit == Fit::Window { "Fit" } else { "1:1" };
         if ui.button(fit_label).on_hover_text("Fit to the window or show at original size").clicked() {
             *action = Some(Box::new(|r, _| {

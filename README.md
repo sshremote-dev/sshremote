@@ -72,6 +72,10 @@ headless.
 On Windows the window renders with Direct3D 12 (`WGPU_BACKEND` overrides it), which also works where
 a GPU driver's Vulkan or OpenGL does not.
 
+With several monitors on the remote host the toolbar shows a Screen menu (`Ctrl+] s` steps through
+them in a terminal). On Windows each monitor is captured and the pointer placed on the whole virtual
+desktop; on GNOME the agent records the chosen connector from Mutter's DisplayConfig.
+
 ## Transports
 
 `src/transport.rs` is the only place that knows how a viewer reaches an agent: today a local child

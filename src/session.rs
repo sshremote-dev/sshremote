@@ -35,6 +35,8 @@ pub struct Options {
     pub probe_send: Option<String>,
     /// Probe only: a remote file or folder downloaded at the start.
     pub probe_fetch: Option<String>,
+    /// Probe only: asks for this monitor at the start.
+    pub probe_monitor: Option<u8>,
 }
 
 pub enum Ev {
@@ -367,6 +369,8 @@ pub enum Action {
     Zoom,
     /// The next key goes out with the Win (Super) key held; Space sends Win alone.
     ArmWin,
+    /// Shows the remote host's next monitor.
+    NextMonitor,
     Settings,
     Send(ToAgent),
 }
@@ -473,6 +477,7 @@ impl Control {
             'r' => return Action::Refresh,
             'z' => return Action::Zoom,
             'w' => return Action::ArmWin,
+            's' => return Action::NextMonitor,
             ']' => {
                 return Action::Send(ToAgent::Key { keysym: ']' as u32, mods: MOD_CTRL });
             }
@@ -481,8 +486,7 @@ impl Control {
         Action::Settings
     }
 
-    pub const MENU_HELP: &str =
-        "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | w Win key | r refresh | ] send Ctrl+]";
+    pub const MENU_HELP: &str = "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | w Win key | s screen | r refresh | ] send Ctrl+]";
 
     /// `full` marks a frame that resent most of the screen; such bursts come from
     /// starting, resizing or a mode change, not from what the screen is doing, so auto waits them out.

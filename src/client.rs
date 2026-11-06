@@ -40,6 +40,8 @@ struct Viewer {
     dirty: Vec<bool>,
     menu: bool,
     win_next: bool,
+    /// Number of remote monitors and the one shown.
+    monitors: (usize, usize),
     /// Enlarge a reduced capture to the terminal; off where the terminal output itself crosses the network.
     stretch: bool,
     pointer: (u16, u16),
@@ -218,6 +220,13 @@ impl Viewer {
                 self.sess.send(ToAgent::Refresh)?;
                 self.status()
             }
+            Action::NextMonitor => {
+                if self.monitors.0 > 1 {
+                    let next = (self.monitors.1 + 1) % self.monitors.0;
+                    self.sess.send(ToAgent::SelectMonitor(next as u8))?;
+                }
+                self.status()
+            }
             Action::ArmWin => {
                 self.win_next = true;
                 self.status()
@@ -333,6 +342,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         dirty: Vec::new(),
         menu: false,
         win_next: false,
+        monitors: (1, 0),
         // A viewer run inside an ssh session sends its sixel output over that session.
         stretch: !(opt.local && std::env::var_os("SSH_CONNECTION").is_some()),
         pointer: (u16::MAX, u16::MAX),
@@ -387,6 +397,9 @@ pub fn run(opt: Options) -> Result<(), String> {
     let mut inbox = crate::files::Inbox::default();
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
+        if let Some(m) = opt.probe_monitor {
+            v.sess.send(ToAgent::SelectMonitor(m))?;
+        }
         if let Some(path) = &opt.probe_fetch {
             v.sess.send(ToAgent::Fetch { path: path.clone() })?;
         }
@@ -404,6 +417,13 @@ pub fn run(opt: Options) -> Result<(), String> {
             match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
                 Ok(Ev::Net(ToClient::Pong(t))) => v.ctl.pong(t),
+                Ok(Ev::Net(ToClient::Monitors { list, current })) => {
+                    if v.probe.is_some() {
+                        let names: Vec<String> = list.iter().map(|m| format!("{} {}x{}", m.name, m.w, m.h)).collect();
+                        eprintln!("probe: monitors {names:?}, showing {current}");
+                    }
+                    v.monitors = (list.len(), current as usize);
+                }
                 Ok(Ev::Net(ToClient::FileDone { ok, text, .. })) => eprintln!("probe: upload ok={ok} {text}"),
                 Ok(Ev::Net(ToClient::FetchStart { id, size, name })) => {
                     if let Some(crate::files::Note::Done { text, .. }) = inbox.start(id, size, &name) {
