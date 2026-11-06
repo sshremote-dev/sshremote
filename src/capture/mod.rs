@@ -7,7 +7,7 @@ mod synthetic;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
-mod winlist;
+pub(crate) mod winlist;
 
 /// A BGRx frame at the size requested with `set_target`.
 pub struct Image {
@@ -87,8 +87,9 @@ pub trait Capture {
     fn pick(&mut self) -> Result<String, String> {
         Err("this desktop has no sharing dialog of its own; pick from the list".into())
     }
-    /// The outcome of `pick` once someone chose (or cancelled) on the remote screen.
-    fn poll_share(&mut self) -> Option<Result<String, String>> {
+    /// A change of what is shared that the viewer did not ask for: the outcome of `pick`, or the
+    /// shared window having closed. `kind` as in `Share`.
+    fn poll_share(&mut self) -> Option<Result<(u8, String), String>> {
         None
     }
     /// Installs what listing windows needs (the GNOME Shell helper); returns what to tell the viewer.
@@ -120,6 +121,14 @@ pub trait Capture {
         Err("this capture backend has one screen".into())
     }
     fn desktop_size(&self) -> (usize, usize);
+    /// Where the captured area starts on the virtual desktop, to place accessibility rectangles.
+    fn origin(&self) -> (i32, i32) {
+        (0, 0)
+    }
+    /// The shared window, if one is shared on its own (an id as in `WindowInfo`).
+    fn shared_window(&self) -> Option<u64> {
+        None
+    }
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String>;
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;

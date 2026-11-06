@@ -208,6 +208,28 @@ pub fn focus_inside(scope: &Scope) -> bool {
     }
 }
 
+/// Whether the window still exists (minimized counts).
+pub fn exists(hwnd: HWND) -> bool {
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) != 0 }
+}
+
+unsafe extern "system" fn find_visible(hwnd: HWND, found: LPARAM) -> BOOL {
+    let found = unsafe { &mut *(found as *mut Vec<u32>) };
+    if unsafe { IsWindowVisible(hwnd) } != 0 {
+        found.push(pid_of(hwnd));
+    }
+    1
+}
+
+/// Whether the program still has a visible window, minimized ones included.
+pub fn app_running(exe: &str) -> bool {
+    let mut pids: Vec<u32> = Vec::new();
+    unsafe { EnumWindows(Some(find_visible), &mut pids as *mut Vec<u32> as LPARAM) };
+    pids.sort_unstable();
+    pids.dedup();
+    pids.into_iter().any(|p| exe_of(p).eq_ignore_ascii_case(exe))
+}
+
 /// Brings a window forward, restoring it when minimized.
 pub fn raise(hwnd: HWND) {
     unsafe {

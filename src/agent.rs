@@ -100,6 +100,9 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
     let mut terms = crate::pty::Terms::default();
+    let mut ui = crate::ui::Ui::new();
+    // Keys an accessibility action leaves to be typed, handled like the viewer's own.
+    let mut queued: Vec<ToAgent> = Vec::new();
     let mut outbox = crate::files::Outbox::default();
     let mut sound: Option<crate::audio::Capture> = None;
     let mut chat = crate::chat::Window::default();
@@ -120,6 +123,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             Err(_) => return Ok(()),
         }
         msgs.extend(rx.try_iter());
+        msgs.splice(0..0, queued.drain(..));
         for m in msgs {
             // Text waiting to be pasted goes in before any later input, so the order is kept.
             let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if keysym & 0xff00_0000 == 0x0100_0000);
@@ -160,6 +164,14 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         if let Some(img) = cap.grab()? {
                             last = Some(img);
                             fresh = true;
+                        }
+                        // The shared window closed or changed size: fit the capture first, then grab again.
+                        if cap.desktop_size() != desk {
+                            desk = cap.desktop_size();
+                            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+                            (prev, last) = (None, None);
+                            vid.reset();
+                            continue;
                         }
                         if last.as_ref().is_some_and(|i| (i.w, i.h) == size) {
                             break;
@@ -273,6 +285,45 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     };
                     send(enc, &m).map_err(io_err)?;
                 }
+                ToAgent::UiState { text, max } => {
+                    let tree =
+                        ui.state(cap.origin(), cap.desktop_size(), cap.shared_window(), text, max.max(1) as usize);
+                    send(enc, &tree).map_err(io_err)?;
+                }
+                ToAgent::UiAct { target, act, text } => {
+                    let reply = match ui.act(target, act, &text) {
+                        Ok(crate::ui::Outcome::Done(t)) => ToClient::UiDone { ok: true, text: t },
+                        Ok(crate::ui::Outcome::ClickAt { x, y, button, double }) => {
+                            report(cap.input(Input::Move { x, y }));
+                            for _ in 0..if double { 2 } else { 1 } {
+                                report(cap.input(Input::Button { button, pressed: true }));
+                                report(cap.input(Input::Button { button, pressed: false }));
+                            }
+                            ToClient::UiDone { ok: true, text: "clicked".into() }
+                        }
+                        Ok(crate::ui::Outcome::Type { text, replace }) => {
+                            if replace {
+                                for (k, down) in
+                                    [(0xffe3, true), ('a' as u32, true), ('a' as u32, false), (0xffe3, false)]
+                                {
+                                    queued.push(ToAgent::KeyState { keysym: k, down });
+                                }
+                            }
+                            for c in text.chars() {
+                                let keysym = match c {
+                                    '\n' => 0xff0d,
+                                    '\t' => 0xff09,
+                                    c if (c as u32) < 0x100 => c as u32,
+                                    c => 0x0100_0000 | c as u32,
+                                };
+                                queued.push(ToAgent::Key { keysym, mods: 0 });
+                            }
+                            ToClient::UiDone { ok: true, text: "typed".into() }
+                        }
+                        Err(e) => ToClient::UiDone { ok: false, text: e },
+                    };
+                    send(enc, &reply).map_err(io_err)?;
+                }
                 ToAgent::PickOnRemote => match cap.pick() {
                     Ok(text) => {
                         send(enc, &ToClient::Sharing { kind: 0, text: "the whole screen".into() }).map_err(io_err)?;
@@ -327,7 +378,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         // The choice made in the desktop's sharing dialog, even while the picture is paused.
         match cap.poll_share() {
-            Some(Ok(text)) => send(enc, &ToClient::Sharing { kind: 1, text }).map_err(io_err)?,
+            Some(Ok((kind, text))) => send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?,
             Some(Err(e)) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
             None => {}
         }

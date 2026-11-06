@@ -176,13 +176,28 @@ remembered only after a successful connection. `sshremote --term` offers the sam
 
 ## MCP
 
-`sshremote mcp HOST` (or `sshremote mcp --local`, `sshremote mcp sshremote://...`) is a Model Context Protocol server on
-stdio that lets an AI agent see and operate the SSH host's desktop. Tools: `screenshot`, `click`, `move`,
-`drag`, `type`, `key`, `scroll`, `wait`, `monitors`, `select_monitor`, `windows`, `share`,
-`clipboard_get`, `clipboard_set`. Sharing just the window being worked on keeps screenshots small. To keep tokens low the picture stream stays paused and a screenshot is taken only on
-request, 1024 px wide by default, optionally a region and in grey; coordinates passed to the other
-tools are in the latest screenshot's pixels and are mapped back to the screen by the server. Example
-client configuration:
+`sshremote mcp HOST` (or `sshremote mcp --local`, `sshremote mcp sshremote://...`) is a Model Context
+Protocol server on stdio that lets an AI agent operate the SSH host, in the manner of Windows-MCP: it
+works from text and looks at pictures only when it has to.
+
+- `state` lists the window in front as text: its title, the other open windows, and its controls
+  numbered as `[id] role "name" =value @x,y` with focused, disabled and checked marks. It comes from
+  the accessibility interfaces screen readers use (UI Automation on Windows, AT-SPI on Linux) and
+  typically costs a few hundred tokens, where a 1024 px screenshot costs about 800 (image tokens
+  depend on the pixel count, not on colours or compression).
+- `click_element`, `type_into` and `focus_window` act on those numbers. On Windows a click lands on
+  the control's centre with the pointer, or uses the control's own action when it is off screen; text
+  goes in through the value interface or the keyboard. On GNOME under Wayland, which does not tell
+  where controls are, controls are pressed and filled through AT-SPI's actions and text interfaces.
+- `screenshot` (1024 px wide by default, a `region` to zoom in), `click`, `move`, `drag`, `type`,
+  `key`, `scroll` and `wait` are for what has no text: pictures, charts, canvas apps and games.
+- `monitors`, `select_monitor`, `windows` and `share` choose what is looked at; sharing one window
+  makes screenshots smaller. `clipboard_get` and `clipboard_set` reach the remote clipboard.
+
+The picture stream stays paused; coordinates passed to the tools are in the latest screenshot's
+pixels and are mapped back to the screen by the server. On GNOME the first `state` switches on the
+desktop's accessibility flag (as a screen reader does), which Chrome and Electron apps wait for before
+they publish their content. Example client configuration:
 
 ```json
 {"mcpServers": {"sshremote": {"command": "sshremote", "args": ["mcp", "user@host"]}}}

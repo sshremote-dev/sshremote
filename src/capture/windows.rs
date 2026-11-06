@@ -89,6 +89,8 @@ pub struct Gdi {
     shown: Vec<R>,
     /// Whether the pointer was last moved over a shared window.
     pointer_inside: bool,
+    /// The shared window closed and the whole screen came back; the viewer is told once.
+    ended: bool,
 }
 
 impl Gdi {
@@ -122,6 +124,7 @@ impl Gdi {
                 monitor: (origin, desk),
                 shown: Vec::new(),
                 pointer_inside: true,
+                ended: false,
             };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
@@ -170,8 +173,24 @@ impl Gdi {
                     .map(|r| R { l: r.l - l.area.l, t: r.t - l.area.t, r: r.r - l.area.l, b: r.b - l.area.t })
                     .collect();
             }
-            // Minimized or closed: the last area stays, all of it hidden.
-            None => self.shown.clear(),
+            None => {
+                let gone = match &self.scope {
+                    Scope::Window(h) => !winlist::exists(*h),
+                    Scope::App(exe) => !winlist::app_running(exe),
+                    Scope::Screen => false,
+                };
+                if gone {
+                    // Closed: back to the whole screen rather than a frozen last picture.
+                    self.scope = Scope::Screen;
+                    (self.origin, self.desk) = self.monitor;
+                    self.pointer_inside = true;
+                    self.shown.clear();
+                    self.ended = true;
+                } else {
+                    // Minimized: the area stays, all of it hidden, until it comes back.
+                    self.shown.clear();
+                }
+            }
         }
     }
 
@@ -255,6 +274,17 @@ impl Capture for Gdi {
         self.desk
     }
 
+    fn origin(&self) -> (i32, i32) {
+        self.origin
+    }
+
+    fn shared_window(&self) -> Option<u64> {
+        match self.scope {
+            Scope::Window(h) => Some(h as u64),
+            _ => None,
+        }
+    }
+
     fn monitors(&self) -> Vec<Monitor> {
         self.screens.iter().map(|s| s.info.clone()).collect()
     }
@@ -274,6 +304,10 @@ impl Capture for Gdi {
 
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         Ok(winlist::shareable())
+    }
+
+    fn poll_share(&mut self) -> Option<Result<(u8, String), String>> {
+        std::mem::take(&mut self.ended).then(|| Ok((0, "the whole screen, as the shared window closed".into())))
     }
 
     fn share(&mut self, scope: Share) -> Result<String, String> {

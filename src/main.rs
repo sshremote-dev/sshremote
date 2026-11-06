@@ -29,6 +29,7 @@ mod shot;
 mod sixel;
 mod termwin;
 mod transport;
+mod ui;
 mod video;
 
 use color::Mode;

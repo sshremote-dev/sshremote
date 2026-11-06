@@ -70,6 +70,11 @@ pub struct Gnome {
     picking: Option<std::sync::mpsc::Receiver<Result<super::portal::Portal, String>>>,
     /// For a shared window: whether it had the focus when last asked, and when that was.
     window_focus: (bool, std::time::Instant),
+    /// When the last frame came, and when the shared window was last checked for having closed.
+    last_frame: std::time::Instant,
+    checked_alive: std::time::Instant,
+    /// The shared window or program closed and the whole screen came back; the viewer is told once.
+    ended: bool,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -261,6 +266,9 @@ impl Gnome {
             portal: None,
             picking: None,
             window_focus: (true, std::time::Instant::now()),
+            last_frame: std::time::Instant::now(),
+            checked_alive: std::time::Instant::now(),
+            ended: false,
         })
     }
 
@@ -370,6 +378,24 @@ impl Gnome {
         }
     }
 
+    /// Whether the window stream (or the portal session) still exists; it goes away with its window.
+    fn stream_alive(&self) -> bool {
+        if let Some(p) = &self.portal {
+            return p.alive();
+        }
+        Proxy::new(&self.conn, SC, self.stream_path.as_str(), "org.gnome.Mutter.ScreenCast.Stream")
+            .and_then(|p| p.get_property::<HashMap<String, OwnedValue>>("Parameters"))
+            .is_ok()
+    }
+
+    /// Back to the whole monitor after the shared window or program closed.
+    fn back_to_screen(&mut self) -> Result<(), String> {
+        let current = self.current;
+        *self = Gnome::open_on(Some(current), Src::Monitor)?;
+        self.ended = true;
+        Ok(())
+    }
+
     /// Where the shared program's windows are on the recorded monitor, at most every 150 ms.
     fn refresh_app(&mut self, force: bool) {
         let Some(a) = self.app.as_ref() else { return };
@@ -377,6 +403,16 @@ impl Gnome {
             return;
         }
         let Ok(list) = self.helper_list() else { return };
+        if !list.iter().any(|w| self.app.as_ref().is_some_and(|a| a.app == w.2)) {
+            // The program closed its last window.
+            self.app = None;
+            if let Some(m) = self.monitors.get(self.current) {
+                self.desk = (m.1.w, m.1.h);
+            }
+            let _ = self.restart_pipe();
+            self.ended = true;
+            return;
+        }
         let (lx, ly, scale) = self.monitors.get(self.current).map_or((0, 0, 1.0), |m| m.2);
         let mon = self.monitors.get(self.current).map_or((self.desk.0, self.desk.1), |m| (m.1.w, m.1.h));
         let screen = R { l: 0, t: 0, r: mon.0 as i32, b: mon.1 as i32 };
@@ -489,7 +525,10 @@ impl Capture for Gnome {
             .into())
     }
 
-    fn poll_share(&mut self) -> Option<Result<String, String>> {
+    fn poll_share(&mut self) -> Option<Result<(u8, String), String>> {
+        if std::mem::take(&mut self.ended) {
+            return Some(Ok((0, "the whole screen, as the shared window closed".into())));
+        }
         let answer = self.picking.as_ref()?.try_recv();
         match answer {
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
@@ -499,7 +538,10 @@ impl Capture for Gnome {
             }
             Ok(r) => {
                 self.picking = None;
-                Some(r.and_then(|p| self.use_portal(p)).map(|_| "the window chosen on the SSH host's screen".into()))
+                Some(
+                    r.and_then(|p| self.use_portal(p))
+                        .map(|_| (1, "the window chosen on the SSH host's screen".into())),
+                )
             }
         }
     }
@@ -649,12 +691,29 @@ impl Capture for Gnome {
         let Some((p, sink)) = &self.pipe else {
             return Ok(None);
         };
+        let window = !matches!(self.src, Src::Monitor);
         if let Some(bus) = p.bus() {
             if let Some(m) = bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos]) {
+                if window {
+                    // The shared window closed and took its stream with it.
+                    self.back_to_screen()?;
+                    return Ok(None);
+                }
                 return Err(format!("GNOME stream stopped: {:?}", m.view()));
             }
         }
-        let Some(s) = sink.try_pull_sample(gst::ClockTime::ZERO) else { return Ok(None) };
+        let Some(s) = sink.try_pull_sample(gst::ClockTime::ZERO) else {
+            // A window stream sends nothing while its window is still; after a second, check it exists.
+            let quiet = self.last_frame.elapsed() > std::time::Duration::from_secs(1);
+            if window && quiet && self.checked_alive.elapsed() > std::time::Duration::from_secs(1) {
+                self.checked_alive = std::time::Instant::now();
+                if !self.stream_alive() {
+                    self.back_to_screen()?;
+                }
+            }
+            return Ok(None);
+        };
+        self.last_frame = std::time::Instant::now();
         let mut img = to_image(&s)?;
         if !self.native() {
             return Ok(Some(img));

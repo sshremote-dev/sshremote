@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::color::Mode;
-use crate::proto::{Settings, ToAgent, ToClient};
+use crate::proto::{
+    Settings, ToAgent, ToClient, UI_CHECKED, UI_DISABLED, UI_EXPANDED, UI_FOCUSED, UI_SELECTED, UiAction, UiElem,
+};
 use crate::session::{Ev, Options, Session};
 
 /// How the last screenshot maps to the screen: screen = origin + image / scale.
@@ -34,6 +36,10 @@ struct Server {
     monitors: Vec<crate::proto::MonitorInfo>,
     windows: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
     sharing: Option<String>,
+    /// The last accessibility listing or action result.
+    ui: Option<ToClient>,
+    /// Window ids of the latest listing, by the numbers shown for focus_window.
+    ui_windows: Vec<u64>,
 }
 
 fn tools() -> Value {
@@ -44,8 +50,24 @@ fn tools() -> Value {
         p
     };
     json!([
+        {"name": "state",
+         "description": "START HERE. The window in front on the SSH host as text: its title, the other open windows, and its controls numbered as [id] role \"name\" =value @x,y (position in the latest screenshot, when known), *focused, -disabled, +checked. Costs far fewer tokens than a screenshot; operate the controls with click_element and type_into, and call state again to see the result.",
+         "inputSchema": {"type": "object", "properties": {
+            "text": {"type": "boolean", "description": "Also list plain text such as labels and headings (default false)."},
+            "max": {"type": "integer", "description": "At most this many elements (default 120)."}}}},
+        {"name": "click_element", "description": "Click a control by its id from the latest state (double or right click on request).",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {
+            "id": {"type": "integer"},
+            "button": {"type": "string", "enum": ["left", "right"]},
+            "double": {"type": "boolean"}}}},
+        {"name": "type_into", "description": "Put text into a control by its id from the latest state: replaces its content unless append is true; enter presses Enter afterwards.",
+         "inputSchema": {"type": "object", "required": ["id", "text"], "properties": {
+            "id": {"type": "integer"}, "text": {"type": "string"},
+            "append": {"type": "boolean"}, "enter": {"type": "boolean"}}}},
+        {"name": "focus_window", "description": "Bring another window from the latest state's window list to the front.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}},
         {"name": "screenshot",
-         "description": "Capture the SSH host's screen as a PNG. Coordinates for the other tools refer to the pixels of the most recent screenshot. Keep max_width small and use region to zoom in; that saves tokens.",
+         "description": "Capture the SSH host's screen as a PNG, only when state is not enough (pictures, charts, canvas apps, checking a layout). Coordinates for the other tools refer to the pixels of the most recent screenshot. Keep max_width small and use region to zoom in; that saves tokens.",
          "inputSchema": {"type": "object", "properties": {
             "max_width": {"type": "integer", "description": "Scale down to at most this width (default 1024, 0 = full size)."},
             "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
@@ -135,6 +157,82 @@ fn error_result(t: impl Into<String>) -> Value {
 }
 
 impl Server {
+    /// Sends an accessibility request and waits for its answer.
+    fn ui_request(&mut self, m: ToAgent) -> Result<ToClient, String> {
+        self.drain(None)?;
+        self.ui = None;
+        self.send(m)?;
+        let until = Instant::now() + Duration::from_secs(15);
+        while self.ui.is_none() && Instant::now() < until {
+            self.drain(Some(Instant::now() + Duration::from_millis(50)))?;
+        }
+        self.ui.take().ok_or_else(|| "the SSH host did not answer within 15 s".to_string())
+    }
+
+    fn ui_act(&mut self, target: u64, act: UiAction, text: String) -> Result<Value, String> {
+        match self.ui_request(ToAgent::UiAct { target, act, text })? {
+            ToClient::UiDone { ok: true, text } => Ok(text_result(format!("{text}; call state to see the result"))),
+            ToClient::UiDone { ok: false, text } => Ok(error_result(text)),
+            _ => Ok(error_result("unexpected answer")),
+        }
+    }
+
+    /// The listing as compact text, positions given in the latest screenshot's pixels.
+    fn format_state(
+        &mut self,
+        title: &str,
+        windows: &[(u64, String)],
+        elems: &[UiElem],
+        more: u32,
+        note: &str,
+    ) -> String {
+        let mut s = format!("Window: \"{title}\"\n");
+        for e in elems {
+            s.push_str(&format!("[{}] {}", e.id, e.role));
+            if !e.name.is_empty() {
+                s.push_str(&format!(" \"{}\"", e.name));
+            }
+            if !e.value.is_empty() {
+                s.push_str(&format!(" ={}", e.value));
+            }
+            if e.x >= 0 && e.y >= 0 {
+                let x = (e.x as f64 - self.view.ox) * self.view.scale;
+                let y = (e.y as f64 - self.view.oy) * self.view.scale;
+                s.push_str(&format!(" @{x:.0},{y:.0}"));
+            }
+            for (bit, mark) in [
+                (UI_FOCUSED, " *focused"),
+                (UI_DISABLED, " -disabled"),
+                (UI_CHECKED, " +checked"),
+                (UI_SELECTED, " +selected"),
+                (UI_EXPANDED, " +expanded"),
+            ] {
+                if e.flags & bit != 0 {
+                    s.push_str(mark);
+                }
+            }
+            s.push('\n');
+        }
+        if elems.is_empty() {
+            s.push_str("(no controls listed: this window publishes no accessibility information; use screenshot)\n");
+        }
+        if more > 0 {
+            s.push_str(&format!("... {more} more (raise max)\n"));
+        }
+        // Windows are numbered here; focus_window takes these numbers.
+        self.ui_windows = windows.iter().map(|w| w.0).collect();
+        if !windows.is_empty() {
+            s.push_str("Other windows (focus_window id):\n");
+            for (i, (_, t)) in windows.iter().enumerate() {
+                s.push_str(&format!("  {} {t}\n", i + 1));
+            }
+        }
+        if !note.is_empty() {
+            s.push_str(&format!("Note: {note}\n"));
+        }
+        s
+    }
+
     fn send(&mut self, m: ToAgent) -> Result<(), String> {
         self.sess.send(m).map_err(|e| format!("connection lost: {e}"))
     }
@@ -162,6 +260,7 @@ impl Server {
                     self.windows = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                 }
                 Ev::Net(ToClient::Sharing { text, .. }) => self.sharing = Some(text),
+                Ev::Net(m @ (ToClient::UiTree { .. } | ToClient::UiDone { .. })) => self.ui = Some(m),
                 Ev::Net(ToClient::Hello { w, h, .. }) => self.screen = (w as u32, h as u32),
                 Ev::Net(ToClient::Notice(t)) if until.is_some() => return Err(t),
                 Ev::Net(ToClient::Error(e)) | Ev::Closed(e) => return Err(e),
@@ -321,6 +420,45 @@ impl Server {
                 self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
                 Ok(text_result(format!("showing monitor {i}; take a screenshot")))
             }
+            "state" => {
+                let text = args.get("text").and_then(Value::as_bool).unwrap_or(false);
+                let max = args.get("max").and_then(Value::as_u64).unwrap_or(120).clamp(1, 2000) as u16;
+                match self.ui_request(ToAgent::UiState { text, max })? {
+                    ToClient::UiTree { title, windows, elems, more, note } => {
+                        Ok(text_result(self.format_state(&title, &windows, &elems, more, &note)))
+                    }
+                    _ => Ok(error_result("unexpected answer")),
+                }
+            }
+            "click_element" | "type_into" | "focus_window" => {
+                let id = args.get("id").and_then(Value::as_u64).ok_or("missing id")?;
+                let (act, text) = match name {
+                    "focus_window" => {
+                        let target = self.ui_windows.get((id as usize).wrapping_sub(1)).copied().unwrap_or(id);
+                        return self.ui_act(target, UiAction::FocusWindow, String::new());
+                    }
+                    "type_into" => {
+                        let text = args.get("text").and_then(Value::as_str).ok_or("missing text")?.to_string();
+                        let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
+                        let enter = args.get("enter").and_then(Value::as_bool).unwrap_or(false);
+                        let text = if enter { format!("{text}\n") } else { text };
+                        (if append { UiAction::Type } else { UiAction::SetText }, text)
+                    }
+                    _ => {
+                        let right = args.get("button").and_then(Value::as_str) == Some("right");
+                        let double = args.get("double").and_then(Value::as_bool).unwrap_or(false);
+                        let act = if right {
+                            UiAction::RightClick
+                        } else if double {
+                            UiAction::DoubleClick
+                        } else {
+                            UiAction::Click
+                        };
+                        (act, String::new())
+                    }
+                };
+                self.ui_act(id, act, text)
+            }
             "windows" => {
                 self.windows = None;
                 self.send(ToAgent::ListWindows)?;
@@ -399,6 +537,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
         monitors: Vec::new(),
         windows: None,
         sharing: None,
+        ui: None,
+        ui_windows: Vec::new(),
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();

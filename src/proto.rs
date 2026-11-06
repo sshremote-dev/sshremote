@@ -162,7 +162,54 @@ pub enum ToAgent {
     InstallHelper,
     /// Opens the desktop's own sharing dialog on the remote screen to choose there.
     PickOnRemote,
+    /// Asks for the interactive elements of the window in front (accessibility), for AI agents.
+    UiState {
+        /// Also list plain text (labels, headings), not only what can be operated.
+        text: bool,
+        max: u16,
+    },
+    /// Operates an element from the last `UiState`, or brings a window (`target` = window id) forward.
+    UiAct {
+        target: u64,
+        act: UiAction,
+        text: String,
+    },
 }
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum UiAction {
+    Click = 1,
+    DoubleClick = 2,
+    RightClick = 3,
+    /// Puts `text` in (after focusing it), replacing what is there.
+    SetText = 4,
+    /// Types `text` at the element's caret, keeping what is there.
+    Type = 5,
+    Focus = 6,
+    /// Brings the window `target` to the front.
+    FocusWindow = 7,
+}
+
+/// One element of a window's accessibility tree.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct UiElem {
+    pub id: u32,
+    pub role: String,
+    pub name: String,
+    pub value: String,
+    /// Centre in captured pixels, or -1 when the desktop does not tell (GNOME on Wayland).
+    pub x: i32,
+    pub y: i32,
+    /// UI_FOCUSED, UI_DISABLED, UI_CHECKED, UI_SELECTED, UI_EXPANDED, UI_EDITABLE.
+    pub flags: u8,
+}
+
+pub const UI_FOCUSED: u8 = 1;
+pub const UI_DISABLED: u8 = 2;
+pub const UI_CHECKED: u8 = 4;
+pub const UI_SELECTED: u8 = 8;
+pub const UI_EXPANDED: u8 = 16;
+pub const UI_EDITABLE: u8 = 32;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum FileOp {
@@ -315,6 +362,20 @@ pub enum ToClient {
     /// What is shared now; `kind` as in `Share`.
     Sharing {
         kind: u8,
+        text: String,
+    },
+    /// The window in front: its title, the other windows (id, title), its elements, how many more
+    /// there were, and any problem.
+    UiTree {
+        title: String,
+        windows: Vec<(u64, String)>,
+        elems: Vec<UiElem>,
+        more: u32,
+        note: String,
+    },
+    /// The outcome of a `UiAct`.
+    UiDone {
+        ok: bool,
         text: String,
     },
 }
@@ -532,6 +593,17 @@ impl ToAgent {
             ToAgent::ListWindows => 32,
             ToAgent::InstallHelper => 34,
             ToAgent::PickOnRemote => 35,
+            ToAgent::UiState { text, max } => {
+                b.push(*text as u8);
+                b.extend_from_slice(&max.to_le_bytes());
+                36
+            }
+            ToAgent::UiAct { target, act, text } => {
+                b.extend_from_slice(&target.to_le_bytes());
+                b.push(*act as u8);
+                b.extend_from_slice(text.as_bytes());
+                37
+            }
             ToAgent::Share { kind, id } => {
                 b.push(*kind);
                 b.extend_from_slice(&id.to_le_bytes());
@@ -597,6 +669,21 @@ impl ToAgent {
             32 => ToAgent::ListWindows,
             34 => ToAgent::InstallHelper,
             35 => ToAgent::PickOnRemote,
+            36 => ToAgent::UiState { text: c.u8()? != 0, max: c.u16()? },
+            37 => ToAgent::UiAct {
+                target: c.u64()?,
+                act: match c.u8()? {
+                    1 => UiAction::Click,
+                    2 => UiAction::DoubleClick,
+                    3 => UiAction::RightClick,
+                    4 => UiAction::SetText,
+                    5 => UiAction::Type,
+                    6 => UiAction::Focus,
+                    7 => UiAction::FocusWindow,
+                    _ => return Err(bad()),
+                },
+                text: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             33 => ToAgent::Share { kind: c.u8()?, id: c.u64()? },
             _ => return Err(bad()),
         })
@@ -745,6 +832,32 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 122
             }
+            ToClient::UiTree { title, windows, elems, more, note } => {
+                put_str(&mut b, title);
+                put_str(&mut b, note);
+                b.extend_from_slice(&more.to_le_bytes());
+                b.extend_from_slice(&(windows.len() as u32).to_le_bytes());
+                for (id, t) in windows {
+                    b.extend_from_slice(&id.to_le_bytes());
+                    put_str(&mut b, t);
+                }
+                b.extend_from_slice(&(elems.len() as u32).to_le_bytes());
+                for e in elems {
+                    b.extend_from_slice(&e.id.to_le_bytes());
+                    put_str(&mut b, &e.role);
+                    put_str(&mut b, &e.name);
+                    put_str(&mut b, &e.value);
+                    b.extend_from_slice(&e.x.to_le_bytes());
+                    b.extend_from_slice(&e.y.to_le_bytes());
+                    b.push(e.flags);
+                }
+                123
+            }
+            ToClient::UiDone { ok, text } => {
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                124
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -860,6 +973,29 @@ impl ToClient {
                 ToClient::WindowList { list, error }
             }
             122 => ToClient::Sharing { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            123 => {
+                let (title, note, more) = (c.str()?, c.str()?, c.u32()?);
+                let n = c.u32()? as usize;
+                let mut windows = Vec::with_capacity(n.min(256));
+                for _ in 0..n {
+                    windows.push((c.u64()?, c.str()?));
+                }
+                let n = c.u32()? as usize;
+                let mut elems = Vec::with_capacity(n.min(4096));
+                for _ in 0..n {
+                    elems.push(UiElem {
+                        id: c.u32()?,
+                        role: c.str()?,
+                        name: c.str()?,
+                        value: c.str()?,
+                        x: c.u32()? as i32,
+                        y: c.u32()? as i32,
+                        flags: c.u8()?,
+                    });
+                }
+                ToClient::UiTree { title, windows, elems, more, note }
+            }
+            124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchBegin {
                 id: c.u32()?,
@@ -923,6 +1059,8 @@ mod tests {
             ToAgent::Share { kind: 2, id: 0x1234 },
             ToAgent::InstallHelper,
             ToAgent::PickOnRemote,
+            ToAgent::UiState { text: true, max: 150 },
+            ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
         ];
         for m in [
             ToClient::DirList {
@@ -948,6 +1086,22 @@ mod tests {
                 error: String::new(),
             },
             ToClient::Sharing { kind: 1, text: "Inbox".into() },
+            ToClient::UiTree {
+                title: "Notepad".into(),
+                windows: vec![(42, "Chrome".into())],
+                elems: vec![UiElem {
+                    id: 1,
+                    role: "button".into(),
+                    name: "Save".into(),
+                    x: -1,
+                    y: 20,
+                    flags: UI_FOCUSED,
+                    ..Default::default()
+                }],
+                more: 3,
+                note: String::new(),
+            },
+            ToClient::UiDone { ok: true, text: "clicked".into() },
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

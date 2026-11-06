@@ -101,6 +101,13 @@ pub fn pick() -> Result<Portal, String> {
 }
 
 impl Portal {
+    /// Whether the portal session is still open; it closes when the shared window does.
+    pub fn alive(&self) -> bool {
+        Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session")
+            .and_then(|p| p.get_property::<u32>("version"))
+            .is_ok()
+    }
+
     /// What GStreamer's pipewiresrc needs to read the stream.
     pub fn source(&self) -> String {
         format!("fd={} path={}", self.fd.as_raw_fd(), self.node)
