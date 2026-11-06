@@ -67,10 +67,13 @@ round trip; hover for traffic, fps and quality) and icon buttons for:
   the next key);
 - file transfer, terminal, chat, screenshot, pause and single frame;
 - options: clipboard sharing, sound, system keys, theme and a full repaint;
-- a pin that keeps the toolbar shown, also in full screen;
+- a pin that keeps the toolbar shown (a filled pin on a blue button); unpinned, the toolbar folds
+  into a small tab hanging from the top edge, as in Jump Desktop, that opens it when the pointer
+  reaches it; the tab and the toolbar's grip move it along the edge, and the place is remembered;
 - disconnect.
 
 Menus stay open while their sliders and switches are used, and the toolbar stays while a menu is open.
+The host name and round trip take fixed widths, so the buttons do not shift as the numbers change.
 
 Messages such as saved screenshots and finished downloads appear as notifications at the bottom right.
 
@@ -128,7 +131,9 @@ Windows agent running as the service (SYSTEM) refuses shells; connect over ssh f
 ## Sharing a window or an application
 
 As in a video call (Meet, Loom), the Share button lists what the remote host can send: its screens,
-its open windows, and its applications (all Chrome windows, say). The picture is then only that
+its open windows, and its applications (all Chrome windows, say). "Active window" and "Active
+application" at the top of the lists share the window in front, or every window of its program,
+without picking from a list. The picture is then only that
 window or application, so it is smaller and cheaper; anything covering it is greyed out, clicks
 outside it are dropped, and keys go only while it has the focus. A chip in the toolbar shows what is
 shared and returns to the whole screen when clicked.
@@ -136,7 +141,9 @@ shared and returns to the whole screen when clicked.
 On Windows the list comes from the desktop's top-level windows, and the chosen window is brought to
 the front. GNOME Shell gives its window list only to its own screen-sharing portal, so on GNOME the
 list comes from the desk helper, a small GNOME Shell extension (`assets/gnome-helper`) that the
-chooser offers to install; GNOME loads it at the next login on the remote host. A window is then
+chooser offers to install; GNOME loads it at the next login on the remote host. The helper is
+optional: without it GNOME offers the active window, while the active application and the lists need
+it, because only it can tell where a program's other windows are. A window is then
 recorded by Mutter on its own (its content shows even when covered), and an application is cut out of
 the monitor picture. In a terminal viewer `Ctrl+] v` switches between the focused window and the whole
 screen; MCP has `windows` and `share`.

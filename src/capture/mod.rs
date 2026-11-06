@@ -58,6 +58,8 @@ pub enum Share {
     App(u64),
     /// Whichever window has the focus now.
     ActiveWindow,
+    /// Every window of the program whose window has the focus now.
+    ActiveApp,
 }
 
 impl Share {
@@ -67,13 +69,14 @@ impl Share {
             1 => Share::Window(id),
             2 => Share::App(id),
             3 => Share::ActiveWindow,
+            4 => Share::ActiveApp,
             _ => return None,
         })
     }
 }
 
 /// Shown in the window chooser when GNOME Shell lacks the desk helper; the viewer offers to install it.
-pub const NEEDS_HELPER: &str = "The window list on GNOME needs the desk helper, a small GNOME Shell extension.";
+pub const NEEDS_HELPER: &str = "Picking from a list on GNOME needs the desk helper, a small GNOME Shell extension.";
 
 pub trait Capture {
     /// Installs what listing windows needs (the GNOME Shell helper); returns what to tell the viewer.

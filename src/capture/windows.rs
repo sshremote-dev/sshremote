@@ -285,13 +285,13 @@ impl Capture for Gdi {
                 return Ok("the whole screen".into());
             }
             Share::Window(id) | Share::App(id) => id as HWND,
-            Share::ActiveWindow => winlist::foreground(),
+            Share::ActiveWindow | Share::ActiveApp => winlist::foreground(),
         };
         if hwnd.is_null() || winlist::pid_of(hwnd) == 0 {
             return Err("that window is gone".into());
         }
         let title = winlist::title_of(hwnd);
-        let text = if let Share::App(_) = scope {
+        let text = if matches!(scope, Share::App(_) | Share::ActiveApp) {
             let exe = winlist::exe_of(winlist::pid_of(hwnd));
             if exe.is_empty() {
                 return Err("cannot tell which program that window belongs to".into());

@@ -32,6 +32,7 @@ pub(crate) mod ic {
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP: &str = "\u{E13C}";
+    pub const GRIP: &str = "\u{EAE2}";
     pub const DOWNLOAD: &str = "\u{E20C}";
     pub const EYE: &str = "\u{E220}";
     pub const EYE_SLASH: &str = "\u{E224}";
@@ -59,6 +60,7 @@ pub(crate) mod ic {
     pub const PAUSE: &str = "\u{E39E}";
     pub const PLAY: &str = "\u{E3D0}";
     pub const PUSH_PIN: &str = "\u{E3E2}";
+    pub const PUSH_PIN_SLASH: &str = "\u{E3E4}";
     pub const STAR: &str = "\u{E46A}";
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";
@@ -197,6 +199,12 @@ struct Remote {
     pan: Vec2,
     fullscreen: bool,
     pinned: bool,
+    /// Where the toolbar sits along the top edge, 0 left to 1 right; dragged by its grip or handle.
+    bar_x: f32,
+    /// The toolbar's width last frame, to keep it on screen.
+    bar_w: f32,
+    /// The tucked-away toolbar stays out until then: after the handle or the toolbar was last under the pointer.
+    bar_until: Instant,
     clip: Clip,
     share_clipboard: bool,
     held: BTreeSet<u32>,
@@ -814,6 +822,9 @@ impl eframe::App for App {
                         pan: Vec2::ZERO,
                         fullscreen: false,
                         pinned: true,
+                        bar_x: crate::hosts::setting("toolbar_x").and_then(|v| v.parse().ok()).unwrap_or(0.5),
+                        bar_w: 600.0,
+                        bar_until: Instant::now(),
                         clip: Clip::new(),
                         share_clipboard: true,
                         held: BTreeSet::new(),
@@ -1351,54 +1362,27 @@ impl Remote {
                         }
                     }
                 }
-                t => match list {
-                    None => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Asking the remote host for its windows...");
+                t => {
+                    // The window in front, or its program: no list needed.
+                    let no_helper = matches!(list, Some(Err(e)) if e.starts_with(crate::capture::NEEDS_HELPER));
+                    if t == 1 {
+                        let sub = "The window in front on the remote host; click it there first";
+                        if row(ui, ic::APP_WINDOW, "Active window", sub, false) {
+                            pick = Some(ToAgent::Share { kind: 3, id: 0 });
+                        }
+                    } else if no_helper {
+                        ui.add_enabled_ui(false, |ui| {
+                            row(ui, ic::SQUARES_FOUR, "Active application", "Needs the desk helper on GNOME", false)
                         });
-                    }
-                    Some(Err(e)) => {
-                        ui.add_space(8.0);
-                        ui.label(e.as_str());
-                        if e.starts_with(crate::capture::NEEDS_HELPER) && e.contains("Install it") {
-                            ui.add_space(6.0);
-                            let b = egui::Button::new(
-                                RichText::new("Install the helper on the remote host").color(Color32::WHITE),
-                            )
-                            .fill(ACCENT);
-                            if ui.add(b).clicked() {
-                                pick = Some(ToAgent::InstallHelper);
-                            }
+                    } else {
+                        let sub = "Every window of the program in front on the remote host";
+                        if row(ui, ic::SQUARES_FOUR, "Active application", sub, false) {
+                            pick = Some(ToAgent::Share { kind: 4, id: 0 });
                         }
                     }
-                    Some(Ok(wins)) if wins.is_empty() => {
-                        ui.label(RichText::new("No windows are open on the remote host.").weak());
-                    }
-                    Some(Ok(wins)) if t == 1 => {
-                        for w in wins {
-                            let sub = format!("{}  {}x{}", w.app, w.w, w.h);
-                            if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
-                                pick = Some(ToAgent::Share { kind: 1, id: w.id });
-                            }
-                        }
-                    }
-                    Some(Ok(wins)) => {
-                        let mut apps: Vec<(String, u64, usize)> = Vec::new();
-                        for w in wins {
-                            match apps.iter_mut().find(|a| a.0 == w.app) {
-                                Some(a) => a.2 += 1,
-                                None => apps.push((w.app.clone(), w.id, 1)),
-                            }
-                        }
-                        for (app, id, n) in apps {
-                            let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
-                            if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
-                                pick = Some(ToAgent::Share { kind: 2, id });
-                            }
-                        }
-                    }
-                },
+                    ui.separator();
+                    share_list(ui, list, t, &row, &mut pick);
+                }
             });
         });
         if modal.should_close() {
@@ -1792,33 +1776,106 @@ impl Remote {
     }
 
     /// The floating toolbar; returns its rectangle while shown.
+    /// Moves the toolbar along the top edge by `dx` points; remembered when the drag ends.
+    fn drag_bar(&mut self, ctx: &egui::Context, r: &egui::Response, screen: Rect) {
+        if r.dragged() {
+            self.bar_x = (self.bar_x + r.drag_delta().x / screen.width().max(1.0)).clamp(0.0, 1.0);
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if r.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if r.drag_stopped() {
+            crate::hosts::set_setting("toolbar_x", &format!("{:.3}", self.bar_x));
+        }
+    }
+
+    /// The toolbar's left edge for its remembered place, kept inside the window.
+    fn bar_left(&self, screen: Rect, width: f32) -> f32 {
+        let centre = screen.left() + self.bar_x * screen.width();
+        (centre - width / 2.0).clamp(screen.left() + 4.0, (screen.right() - width - 4.0).max(screen.left() + 4.0))
+    }
+
+    /// The toolbar, or while it is tucked away a small tab hanging from the top edge (as in Jump
+    /// Desktop) that brings it back when the pointer reaches it; returns the toolbar's rectangle.
     fn toolbar(&mut self, ctx: &egui::Context, screen: Rect) -> Result<Option<Rect>, String> {
         let id = egui::Id::unique("toolbar");
-        let near_top = ctx.pointer_hover_pos().is_some_and(|p| p.y < screen.top() + 56.0);
-        let was_hovered = ctx.memory(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
-        if !(self.pinned || near_top || was_hovered || menu_open(ctx) || ctx.any_popup_open()) {
-            let r = Rect::from_center_size(Pos2::new(screen.center().x, screen.top() + 4.0), Vec2::new(90.0, 4.0));
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id)).rect_filled(
-                r,
-                CornerRadius::same(2),
-                Color32::from_white_alpha(90),
-            );
+        let handle_id = egui::Id::unique("toolbar-handle");
+        let shown_a_while = Instant::now() < self.bar_until;
+        if !(self.pinned || shown_a_while || menu_open(ctx) || ctx.any_popup_open()) {
+            let size = Vec2::new(64.0, 18.0);
+            let left = self.bar_left(screen, size.x);
+            let rect = Rect::from_min_size(Pos2::new(left, screen.top()), size);
+            let dot = match self.ctl.rtt {
+                r if r < 80.0 => GOOD,
+                r if r < 250.0 => WARN,
+                _ => BAD,
+            };
+            let resp = egui::Area::new(handle_id).fixed_pos(rect.min).order(egui::Order::Foreground).show(ctx, |ui| {
+                let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                let fill = ctx.global_style().visuals.window_fill;
+                let radius = CornerRadius { nw: 0, ne: 0, sw: 9, se: 9 };
+                ui.painter().rect_filled(r, radius, fill.gamma_multiply(if resp.hovered() { 1.0 } else { 0.9 }));
+                ui.painter().rect_stroke(
+                    r,
+                    radius,
+                    Stroke::new(1.0, Color32::from_white_alpha(30)),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().circle_filled(r.left_center() + Vec2::new(14.0, 0.0), 3.5, dot);
+                let fg = ctx.global_style().visuals.text_color();
+                ui.painter().text(
+                    r.center() + Vec2::new(6.0, 0.0),
+                    Align2::CENTER_CENTER,
+                    ic::CARET_DOWN,
+                    FontId::proportional(13.0),
+                    fg,
+                );
+                resp.on_hover_text("Toolbar (not pinned). Point here to show it; drag to move it along the edge.")
+            });
+            let r = resp.inner;
+            self.drag_bar(ctx, &r, screen);
+            // Hovering opens the toolbar, which then stays while the pointer is on it.
+            if r.hovered() && !r.dragged() && !r.drag_stopped() {
+                self.bar_until = Instant::now() + Duration::from_millis(700);
+                ctx.request_repaint();
+            }
             return Ok(None);
         }
         let mut action: Option<Deferred> = None;
+        let left = self.bar_left(screen, self.bar_w);
+        let mut grip: Option<egui::Response> = None;
         let resp = egui::Area::new(id)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 8.0))
+            .fixed_pos(Pos2::new(left, screen.top() + 8.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(ctx.global_style().visuals.window_fill.gamma_multiply(0.96))
                     .stroke(Stroke::new(1.0, Color32::from_white_alpha(25)))
                     .corner_radius(CornerRadius::same(12))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
-                    .show(ui, |ui| ui.horizontal(|ui| self.toolbar_items(ui, &mut action)));
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let g = ui.add(
+                                egui::Label::new(RichText::new(ic::GRIP).size(16.0).weak())
+                                    .sense(egui::Sense::click_and_drag())
+                                    .selectable(false),
+                            );
+                            grip = Some(g.on_hover_text("Drag to move the toolbar"));
+                            self.toolbar_items(ui, &mut action)
+                        })
+                    });
             });
+        if let Some(g) = grip {
+            self.drag_bar(ctx, &g, screen);
+        }
         let rect = resp.response.rect;
-        ctx.memory_mut(|m| m.data.insert_temp(id, resp.response.contains_pointer()));
+        self.bar_w = rect.width();
+        if resp.response.contains_pointer() {
+            self.bar_until = Instant::now() + Duration::from_millis(500);
+        }
+        if !self.pinned {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         if let Some(f) = action {
             f(self, ctx)?;
         }
@@ -1843,8 +1900,11 @@ impl Remote {
         );
         ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
-        ui.label(RichText::new(host).strong()).on_hover_text(&details);
-        ui.label(RichText::new(format!("{:.0} ms", self.ctl.rtt)).small().weak()).on_hover_text(&details);
+        ui.add_sized([120.0, 20.0], egui::Label::new(RichText::new(host).strong()).truncate()).on_hover_text(&details);
+        // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
+        let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
+        ui.add_sized([50.0, 20.0], egui::Label::new(RichText::new(rtt).small().weak().monospace()))
+            .on_hover_text(&details);
         if self.sharing.0 != 0 {
             let name: String = self.sharing.1.chars().take(32).collect();
             let chip = egui::Button::new(
@@ -2068,13 +2128,27 @@ impl Remote {
                 r.send(ToAgent::Audio(sound))
             }));
         }
-        let pin_tip = if self.pinned {
-            "Toolbar locked: click to let it hide until the pointer reaches the top"
+        // Pinned: a filled, coloured pin on a highlighted button; not pinned: a struck-through pin.
+        let (pin, tip) = if self.pinned {
+            (
+                RichText::new(ic::PUSH_PIN).size(18.0).family(filled()).color(Color32::WHITE),
+                "Pinned: the toolbar stays. Click to unpin; it then folds into a tab at the top edge.",
+            )
         } else {
-            "Lock the toolbar so it stays shown"
+            (
+                RichText::new(ic::PUSH_PIN_SLASH).size(18.0).color(ui.visuals().weak_text_color()),
+                "Not pinned: the toolbar folds into a tab at the top edge. Click to pin it.",
+            )
         };
-        if icon(ui, ic::PUSH_PIN, pin_tip, self.pinned).clicked() {
+        let b =
+            egui::Button::new(pin).min_size(Vec2::splat(32.0)).frame_when_inactive(self.pinned).selected(self.pinned);
+        if ui.add(b).on_hover_text(tip).clicked() {
             self.pinned = !self.pinned;
+            self.notify(if self.pinned {
+                "Toolbar pinned"
+            } else {
+                "Toolbar unpinned: it folds into the tab at the top"
+            });
         }
         ui.separator();
         let end = egui::Button::new(RichText::new(ic::X).size(17.0).color(Color32::WHITE))
@@ -2126,6 +2200,62 @@ pub(crate) fn human(n: u64) -> String {
         1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
         1_048_576..1_073_741_824 => format!("{:.1} MB", n as f64 / 1_048_576.0),
         _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
+    }
+}
+
+/// The windows or programs to pick from, or why there is no list.
+fn share_list(
+    ui: &mut egui::Ui,
+    list: &Option<Result<Vec<crate::capture::WindowInfo>, String>>,
+    t: u8,
+    row: &dyn Fn(&mut egui::Ui, &str, &str, &str, bool) -> bool,
+    pick: &mut Option<ToAgent>,
+) {
+    match list {
+        None => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Asking the remote host for its windows...");
+            });
+        }
+        Some(Err(e)) => {
+            ui.add_space(8.0);
+            ui.label(e.as_str());
+            if e.starts_with(crate::capture::NEEDS_HELPER) && e.contains("Install it") {
+                ui.add_space(6.0);
+                let b = egui::Button::new(RichText::new("Install the helper on the remote host").color(Color32::WHITE))
+                    .fill(ACCENT);
+                if ui.add(b).clicked() {
+                    *pick = Some(ToAgent::InstallHelper);
+                }
+            }
+        }
+        Some(Ok(wins)) if wins.is_empty() => {
+            ui.label(RichText::new("No windows are open on the remote host.").weak());
+        }
+        Some(Ok(wins)) if t == 1 => {
+            for w in wins {
+                let sub = format!("{}  {}x{}", w.app, w.w, w.h);
+                if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
+                    *pick = Some(ToAgent::Share { kind: 1, id: w.id });
+                }
+            }
+        }
+        Some(Ok(wins)) => {
+            let mut apps: Vec<(String, u64, usize)> = Vec::new();
+            for w in wins {
+                match apps.iter_mut().find(|a| a.0 == w.app) {
+                    Some(a) => a.2 += 1,
+                    None => apps.push((w.app.clone(), w.id, 1)),
+                }
+            }
+            for (app, id, n) in apps {
+                let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
+                if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
+                    *pick = Some(ToAgent::Share { kind: 2, id });
+                }
+            }
+        }
     }
 }
 

@@ -75,7 +75,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
         {"name": "windows", "description": "List the remote windows that can be shared on their own (id, program, title, size).",
          "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "share", "description": "Limit the picture, clicks and keys to one window or program, which makes screenshots smaller and cheaper. target: \"screen\", \"active\" (the focused window), a window id from windows, or \"app:<window id>\" for every window of that program.",
+        {"name": "share", "description": "Limit the picture, clicks and keys to one window or program, which makes screenshots smaller and cheaper. target: \"screen\", \"active\" (the focused window), \"active-app\" (every window of its program), a window id from windows, or \"app:<window id>\" for every window of that program.",
          "inputSchema": {"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}}},
         {"name": "clipboard_get", "description": "Text last copied on the remote host.",
          "inputSchema": {"type": "object", "properties": {}}},
@@ -344,6 +344,7 @@ impl Server {
                 let (kind, id) = match t {
                     "screen" => (0, 0),
                     "active" => (3, 0),
+                    "active-app" => (4, 0),
                     _ => match t.strip_prefix("app:") {
                         Some(id) => (2, id.trim().parse::<u64>().map_err(|_| "bad window id")?),
                         None => (1, t.parse::<u64>().map_err(|_| "target is screen, active, a window id or app:<id>")?),

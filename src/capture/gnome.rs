@@ -276,7 +276,10 @@ impl Gnome {
                 if helper_dir().join("extension.js").exists() {
                     format!("{NEEDS_HELPER} It is installed but not running yet: log out and back in on the remote host once.")
                 } else {
-                    format!("{NEEDS_HELPER} Install it from here; GNOME loads it at the next login on the remote host.")
+                    format!(
+                        "{NEEDS_HELPER} Install it from here if you like; GNOME loads it at the next login on the \
+                         remote host. Without it, share the active window."
+                    )
                 }
             } else {
                 format!("GNOME helper: {e}")
@@ -474,6 +477,16 @@ impl Capture for Gnome {
             Share::ActiveWindow => {
                 *self = Gnome::open_on(Some(self.current), Src::Focused)?;
                 Ok("the active window".into())
+            }
+            Share::ActiveApp => {
+                // Cutting a program out needs to know where its other windows are, which only the helper tells.
+                let list = self.helper_list().map_err(|_| {
+                    "On GNOME the active application needs the desk helper, which tells where the program's \
+                     other windows are. The active window works without it."
+                        .to_string()
+                })?;
+                let id = list.iter().find(|w| w.9).map(|w| w.10).ok_or("no window has the focus")?;
+                self.share(Share::App(id))
             }
             Share::Window(id) => {
                 let list = self.helper_list()?;
