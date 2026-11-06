@@ -25,6 +25,8 @@ pub enum Target {
         /// No terminal to ask on: trust a host key the first time, fail instead of prompting.
         unattended: bool,
     },
+    /// A `desk --serve` agent reached directly or through a relay, sealed with a one-time password.
+    Direct { addr: crate::net::Address, password: String },
 }
 
 pub struct Link {
@@ -55,7 +57,12 @@ impl Link {
 pub const ASKPASS_SECRET: &str = "DESK_SSH_SECRET";
 
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
+    if let Target::Direct { addr, password } = target {
+        let (r, w) = crate::net::connect(addr, password)?;
+        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None });
+    }
     let mut cmd = match target {
+        Target::Direct { .. } => unreachable!(),
         Target::Local { capture } => {
             let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
             c.args(["--agent", "--capture", capture]);

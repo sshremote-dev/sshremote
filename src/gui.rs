@@ -291,6 +291,14 @@ impl App {
                 self.error = Some("Enter a host, for example user@192.168.1.20".into());
                 return;
             }
+            if let Some(addr) = crate::net::Address::parse(&host) {
+                if f.password.is_empty() {
+                    self.error = Some("Enter the one-time password shown by desk --serve".into());
+                    return;
+                }
+                let target = Target::Direct { addr, password: f.password.clone() };
+                return self.start(ctx, target, host);
+            }
             Target::Ssh {
                 host,
                 port: f.port.trim().parse().ok(),
@@ -302,6 +310,12 @@ impl App {
             }
         };
         let label = if local { "local test desktop".to_string() } else { f.host.trim().to_string() };
+        self.start(ctx, target, label);
+    }
+
+    fn start(&mut self, ctx: &egui::Context, target: Target, label: String) {
+        let f = self.form.clone();
+        let local = matches!(target, Target::Local { .. });
         if !local {
             self.recent.retain(|(h, _)| h != f.host.trim());
             self.recent.insert(0, (f.host.trim().to_string(), f.port.trim().to_string()));
@@ -328,6 +342,7 @@ impl App {
             remote: String::new(),
             capture: String::new(),
             ssh_args: Vec::new(),
+            password: None,
             preset: self.form.preset,
             budget: self.budget,
             mode: None,
@@ -359,7 +374,7 @@ impl App {
                             ui.label(RichText::new("Host").color(Color32::GRAY));
                             let host = ui.add(
                                 egui::TextEdit::singleline(&mut self.form.host)
-                                    .hint_text("user@host")
+                                    .hint_text("user@host  or  desk://host  or  desk://ID@relay")
                                     .desired_width(f32::INFINITY),
                             );
                             ui.horizontal(|ui| {
@@ -372,7 +387,10 @@ impl App {
                                     );
                                 });
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Password (blank for SSH keys)").color(Color32::GRAY));
+                                    ui.label(
+                                        RichText::new("Password (blank for SSH keys; desk:// needs one)")
+                                            .color(Color32::GRAY),
+                                    );
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.form.password)
                                             .password(true)

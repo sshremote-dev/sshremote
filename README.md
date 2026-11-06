@@ -85,10 +85,19 @@ desktop; on GNOME the agent records the chosen connector from Mutter's DisplayCo
 
 ## Transports
 
-`src/transport.rs` is the only place that knows how a viewer reaches an agent: today a local child
-process or `ssh -T`. Everything above it sees two byte streams and a diagnostics stream, so a direct
-TCP/QUIC listener or a relay server for hosts behind NAT only needs another `Target` variant with its
-own authentication; the protocol, codecs and both viewers stay as they are.
+`src/transport.rs` is the only place that knows how a viewer reaches an agent: a local child process,
+`ssh -T`, or a direct link. Everything above it sees two byte streams.
+
+Without ssh, `desk --serve` waits for viewers on TCP port 7070 and prints a one-time password; a viewer
+connects with `desk://HOST` and that password (`--password` in a terminal, the password field in the
+window). For a host behind NAT, `desk --relay` on any reachable machine pairs the two sides by an ID:
+the host runs `desk --serve --via RELAY` and is reached as `desk://ID@RELAY` (port 7071).
+
+Both ends run SPAKE2 on the password, so neither an eavesdropper nor the relay learns anything to
+guess offline, and every byte after that is sealed with ChaCha20-Poly1305 under keys derived from the
+exchange; a wrong password fails the sealed confirmation at once. Each failed attempt slows the server
+down further and ten end it, so a nine-digit password cannot be ground down online. The relay only
+copies bytes.
 
 ## Use
 

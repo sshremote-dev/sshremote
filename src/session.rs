@@ -18,6 +18,8 @@ pub struct Options {
     pub remote: String,
     pub capture: String,
     pub ssh_args: Vec<String>,
+    /// One-time password of a `desk --serve` agent.
+    pub password: Option<String>,
     /// `None` is the auto preset.
     pub preset: Option<usize>,
     pub budget: f64,
@@ -75,6 +77,10 @@ impl Options {
     pub fn target(&self) -> Result<Target, String> {
         if self.local {
             return Ok(Target::Local { capture: self.capture.clone() });
+        }
+        if let Some(addr) = self.host.as_deref().and_then(crate::net::Address::parse) {
+            let password = self.password.clone().ok_or("a desk:// address needs --password")?;
+            return Ok(Target::Direct { addr, password });
         }
         Ok(Target::Ssh {
             host: self.host.clone().ok_or("no host given")?,

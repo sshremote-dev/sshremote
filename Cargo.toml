@@ -7,9 +7,14 @@ license = "MIT"
 
 [dependencies]
 arboard = { version = "3", default-features = false }
+chacha20poly1305 = "0.10"
 crossterm = "0.29.0"
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
+getrandom = "0.2"
+hkdf = "0.12"
 openh264 = "0.9"
+sha2 = "0.10"
+spake2 = "0.4"
 zstd = "0.14.3"
 
 [target.'cfg(unix)'.dependencies]

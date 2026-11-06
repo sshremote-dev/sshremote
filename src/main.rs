@@ -10,6 +10,7 @@ mod gui;
 #[cfg(windows)]
 mod keygrab;
 mod keys;
+mod net;
 mod proto;
 mod quant;
 #[cfg(windows)]
@@ -30,6 +31,11 @@ usage: desk                       open the window: connect screen, recent hosts
        desk --gui [options] [HOST] the same in a window
        desk --local [options]     view a built-in test desktop (no ssh)
        desk --agent [--capture B] remote side, started by the viewer
+       desk --serve [--listen ADDR] [--via RELAY] [--password P]
+                                  wait for viewers without ssh (prints a one-time password)
+       desk --relay [--listen ADDR]  pair agents and viewers behind NAT
+       desk desk://HOST[:PORT] --password P     view a --serve agent directly
+       desk desk://ID@RELAY[:PORT] --password P view one through a relay
 
 options:
   --preset P      auto (default), or 0 glance (mono) .. 4 exact
@@ -53,6 +59,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         remote: session::REMOTE.into(),
         capture: String::new(),
         ssh_args: Vec::new(),
+        password: None,
         preset: None,
         budget: 100.0,
         mode: None,
@@ -91,6 +98,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             "--capture" => o.capture = val()?,
             "--remote" => o.remote = val()?,
             "--ssh" => o.ssh_args.push(val()?),
+            "--password" => o.password = Some(val()?),
             "--probe" => probe = Some(val()?.parse::<f64>().map_err(|_| "bad --probe")?),
             "--view" => {
                 let v = val()?;
@@ -159,6 +167,22 @@ fn main() {
             }
             return;
         }
+    }
+    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());
+    if args.first().is_some_and(|a| a == "--serve") {
+        let r = net::serve(opt("--listen"), opt("--via"), opt("--password"), opt("--capture").unwrap_or("auto"));
+        if let Err(e) = r {
+            eprintln!("desk: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.first().is_some_and(|a| a == "--relay") {
+        if let Err(e) = net::relay(opt("--listen")) {
+            eprintln!("desk: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
     let result = if args.iter().any(|a| a == "--agent") {
         let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());

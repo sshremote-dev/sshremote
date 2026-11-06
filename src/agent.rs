@@ -53,6 +53,11 @@ pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
         Some(_) => return Err("--pipe is only used on Windows".into()),
         None => (Box::new(io::stdin()), Box::new(io::stdout())),
     };
+    run_on(backend, input, output)
+}
+
+/// Serves one viewer over any pair of streams (stdio, relay pipes, a sealed network link).
+pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>) -> Result<(), String> {
     let mut enc =
         zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, output), 3).map_err(|e| e.to_string())?;
     // A long window lets earlier screens act as a dictionary for repeats.
