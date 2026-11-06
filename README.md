@@ -89,6 +89,44 @@ output device on Windows, the default sink's monitor through PulseAudio or PipeW
 20 ms Opus packets at 64 kbit/s (about 8 KB/s, much less during silence) and played from a buffer
 capped at 300 ms so the sound stays live. It is off until asked for.
 
+## Viewing modes, screenshots and saving traffic
+
+The View menu fits the remote screen to the window (proportions kept), stretches it to fill the
+window, or shows it at a fixed 50-200% of its resolution; a fixed size larger than the window scrolls
+when the pointer rests near an edge. Screenshot saves the remote screen as a PNG in Pictures. Pause
+stops the picture (input still works) and Update fetches a single frame, so a slow link can be used
+picture by picture. In a terminal the menu (Ctrl+]) offers the same: `x` screenshot, `p` pause,
+`u` one frame, `o` sound, `c` chat, `g` download a remote path, `l` send a local file, `s` next screen,
+`z` zoom; answers and messages appear in the status line.
+
+## Chat
+
+Chat (toolbar, or `Ctrl+] c` in a terminal) opens a small always-on-top window on the remote desktop
+for the person sitting there; their replies come back to the viewer. Nothing is stored, and the remote
+window closes itself shortly after the viewer leaves.
+
+## Hosts
+
+The connect screen lists recent hosts and the `Host` aliases of `~/.ssh/config`; ssh applies their
+user, port and keys as usual. `desk --term` offers the same list in a terminal.
+
+## MCP
+
+`desk mcp HOST` (or `desk mcp --local`, `desk mcp desk://...`) is a Model Context Protocol server on
+stdio that lets an AI agent see and operate the remote desktop. Tools: `screenshot`, `click`, `move`,
+`drag`, `type`, `key`, `scroll`, `wait`, `monitors`, `select_monitor`, `clipboard_get`,
+`clipboard_set`. To keep tokens low the picture stream stays paused and a screenshot is taken only on
+request, 1024 px wide by default, optionally a region and in grey; coordinates passed to the other
+tools are in the latest screenshot's pixels and are mapped back to the screen by the server. Example
+client configuration:
+
+```json
+{"mcpServers": {"desk": {"command": "desk", "args": ["mcp", "user@host"]}}}
+```
+
+On GNOME, text the keyboard layout cannot produce (Korean, emoji) is pasted through the clipboard;
+the previous clipboard text is put back a second later unless something new was copied.
+
 ## Transports
 
 `src/transport.rs` is the only place that knows how a viewer reaches an agent: a local child process,

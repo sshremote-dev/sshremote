@@ -41,9 +41,6 @@ fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
 
 /// An SSH login has no session bus variables; point them at the user's desktop session.
 pub fn ensure_env() {
-    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
-        return;
-    }
     let uid = std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
@@ -51,12 +48,29 @@ pub fn ensure_env() {
         })
         .unwrap_or_else(|| "1000".into());
     let run = format!("/run/user/{uid}");
-    // SAFETY: called once at startup before any thread is spawned.
+    // SAFETY: called at startup before other threads use the environment.
     unsafe {
         if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
             std::env::set_var("XDG_RUNTIME_DIR", &run);
         }
-        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={run}/bus"));
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={run}/bus"));
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("XAUTHORITY").is_some() {
+        return;
+    }
+    // The desktop session's display (Xwayland is not always :0) and its X authority come from the user manager.
+    let env = std::process::Command::new("systemctl").args(["--user", "show-environment"]).output();
+    if let Ok(out) = env {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some((k @ ("DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY"), v)) = line.split_once('=')
+                && std::env::var_os(k).is_none()
+            {
+                // SAFETY: as above.
+                unsafe { std::env::set_var(k, v) };
+            }
+        }
     }
 }
 

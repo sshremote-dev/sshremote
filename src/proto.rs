@@ -102,6 +102,12 @@ pub enum ToAgent {
     SelectMonitor(u8),
     /// Starts or stops sending the host's sound.
     Audio(bool),
+    /// A chat message for the person at the remote screen.
+    Chat(String),
+    /// Stops or resumes the picture; while paused, `Refresh` sends exactly one frame.
+    Pause(bool),
+    /// Asks for the current screen as a full-colour PNG.
+    Snapshot,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -209,6 +215,10 @@ pub enum ToClient {
     Audio(Vec<u8>),
     /// Something the viewer should show without ending the session.
     Notice(String),
+    /// A chat message typed at the remote screen.
+    Chat(String),
+    /// The screen at the current capture size as a PNG.
+    Snapshot(Vec<u8>),
 }
 
 fn bad() -> io::Error {
@@ -368,6 +378,15 @@ impl ToAgent {
                 b.push(*on as u8);
                 20
             }
+            ToAgent::Chat(t) => {
+                b.extend_from_slice(t.as_bytes());
+                21
+            }
+            ToAgent::Pause(on) => {
+                b.push(*on as u8);
+                22
+            }
+            ToAgent::Snapshot => 23,
         };
         (kind, b)
     }
@@ -405,6 +424,9 @@ impl ToAgent {
             18 => ToAgent::FetchAck { id: c.u32()?, received: c.u64()? },
             19 => ToAgent::SelectMonitor(c.u8()?),
             20 => ToAgent::Audio(c.u8()? != 0),
+            21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
+            22 => ToAgent::Pause(c.u8()? != 0),
+            23 => ToAgent::Snapshot,
             _ => return Err(bad()),
         })
     }
@@ -501,6 +523,14 @@ impl ToClient {
                 b.extend_from_slice(t.as_bytes());
                 114
             }
+            ToClient::Chat(t) => {
+                b.extend_from_slice(t.as_bytes());
+                115
+            }
+            ToClient::Snapshot(p) => {
+                b.extend_from_slice(p);
+                116
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -591,6 +621,8 @@ impl ToClient {
             },
             113 => ToClient::Audio(c.rest().to_vec()),
             114 => ToClient::Notice(String::from_utf8_lossy(c.rest()).into_owned()),
+            115 => ToClient::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
+            116 => ToClient::Snapshot(c.rest().to_vec()),
             112 => {
                 let current = c.u8()?;
                 let n = c.u32()? as usize;

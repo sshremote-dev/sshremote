@@ -67,38 +67,6 @@ fn keysym(k: Key) -> Option<u32> {
     }
 }
 
-fn config_dir() -> Option<std::path::PathBuf> {
-    let base: Option<std::path::PathBuf> = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(Into::into)
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(Into::into)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))
-    };
-    base.map(|b| b.join("desk"))
-}
-
-/// Recent connections as `host port` lines; passwords are never stored.
-fn load_recent() -> Vec<(String, String)> {
-    let Some(p) = config_dir().map(|d| d.join("recent.txt")) else { return Vec::new() };
-    std::fs::read_to_string(p)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            Some((it.next()?.to_string(), it.next().unwrap_or("").to_string()))
-        })
-        .collect()
-}
-
-fn save_recent(list: &[(String, String)]) {
-    if let Some(d) = config_dir() {
-        let _ = std::fs::create_dir_all(&d);
-        let text: String = list.iter().map(|(h, p)| format!("{h} {p}\n")).collect();
-        let _ = std::fs::write(d.join("recent.txt"), text);
-    }
-}
-
 #[derive(Clone)]
 struct Form {
     host: String,
@@ -119,10 +87,22 @@ enum Screen {
 
 #[derive(PartialEq, Clone, Copy)]
 enum Fit {
-    /// Remote capture sized to the window.
+    /// The whole screen in the window, proportions kept.
     Window,
-    /// One remote pixel per screen pixel.
-    Original,
+    /// The whole window filled, proportions ignored.
+    Stretch,
+    /// A fixed size: percent of the remote resolution, panned at the window edges when larger.
+    Fixed(u16),
+}
+
+impl Fit {
+    fn label(self) -> String {
+        match self {
+            Fit::Window => "Fit".into(),
+            Fit::Stretch => "Stretch".into(),
+            Fit::Fixed(p) => format!("{p}%"),
+        }
+    }
 }
 
 type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
@@ -135,6 +115,8 @@ struct Remote {
     tex: Option<TextureHandle>,
     label: String,
     fit: Fit,
+    /// How far a fixed-size picture is scrolled, in points.
+    pan: Vec2,
     fullscreen: bool,
     pinned: bool,
     clip: Clip,
@@ -150,6 +132,12 @@ struct Remote {
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
     sound: Option<crate::audio::Player>,
+    /// Open chat panel: messages (from the remote side?, text) and the line being typed.
+    chat: Option<(Vec<(bool, String)>, String)>,
+    /// Messages kept while the panel is closed, and how many are unread.
+    chat_lines: Vec<(bool, String)>,
+    unread: usize,
+    paused: bool,
     monitors: Vec<crate::proto::MonitorInfo>,
     monitor: usize,
     inbox: crate::files::Inbox,
@@ -210,6 +198,8 @@ pub struct App {
     screen: Screen,
     form: Form,
     recent: Vec<(String, String)>,
+    /// Host aliases from ~/.ssh/config; ssh applies their user, port and key itself.
+    ssh_hosts: Vec<String>,
     error: Option<String>,
     budget: f64,
     /// System keys taken from Windows while a session is in front.
@@ -217,11 +207,6 @@ pub struct App {
 }
 
 pub fn run(opt: &Options) -> Result<(), String> {
-    #[cfg(windows)]
-    if std::env::var_os("WGPU_BACKEND").is_none() {
-        // Direct3D 12 works on every Windows 10/11 GPU, including drivers whose Vulkan or OpenGL is broken.
-        unsafe { std::env::set_var("WGPU_BACKEND", "dx12") };
-    }
     let form = Form {
         host: opt.host.clone().unwrap_or_default(),
         port: String::new(),
@@ -233,15 +218,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let auto_start = opt.host.is_some() || opt.local;
     let local = opt.local;
     let budget = opt.budget;
-    let mut native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("desk")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([480.0, 360.0]),
-        ..Default::default()
-    };
-    // Some drivers block a vsynced present for a quarter second; frames are paced by the agent anyway.
-    native.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+    let native = native_options("desk", [1280.0, 800.0]);
     eframe::run_native(
         "desk",
         native,
@@ -251,7 +228,15 @@ pub fn run(opt: &Options) -> Result<(), String> {
             let grabbed = crate::keygrab::install();
             #[cfg(not(windows))]
             let grabbed = None;
-            let mut app = App { screen: Screen::Connect, form, recent: load_recent(), error: None, budget, grabbed };
+            let mut app = App {
+                screen: Screen::Connect,
+                form,
+                recent: crate::hosts::load_recent(),
+                ssh_hosts: crate::hosts::ssh_config_hosts(),
+                error: None,
+                budget,
+                grabbed,
+            };
             if auto_start {
                 app.connect(&cc.egui_ctx, local);
             }
@@ -261,7 +246,26 @@ pub fn run(opt: &Options) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn style(ctx: &egui::Context) {
+/// Window options shared by the viewer and the chat window.
+pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        // Direct3D 12 works on every Windows 10/11 GPU, including drivers whose Vulkan or OpenGL is broken.
+        unsafe { std::env::set_var("WGPU_BACKEND", "dx12") };
+    }
+    let mut native = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(size)
+            .with_min_inner_size([320.0, 240.0]),
+        ..Default::default()
+    };
+    // Some drivers block a vsynced present for a quarter second; frames are paced by the agent anyway.
+    native.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+    native
+}
+
+pub fn style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = Color32::from_rgb(18, 19, 23);
     v.window_fill = PANEL;
@@ -321,7 +325,7 @@ impl App {
             self.recent.retain(|(h, _)| h != f.host.trim());
             self.recent.insert(0, (f.host.trim().to_string(), f.port.trim().to_string()));
             self.recent.truncate(8);
-            save_recent(&self.recent);
+            crate::hosts::save_recent(&self.recent);
         }
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
@@ -435,11 +439,15 @@ impl App {
                         });
                     },
                 );
-                if !self.recent.is_empty() {
+                let saved: Vec<(String, String)> = self.ssh_hosts.iter().map(|h| (h.clone(), String::new())).collect();
+                for (title, list) in [("Recent", self.recent.clone()), ("From ~/.ssh/config", saved)] {
+                    if list.is_empty() {
+                        continue;
+                    }
                     ui.add_space(16.0);
-                    ui.label(RichText::new("Recent").color(Color32::GRAY));
+                    ui.label(RichText::new(title).color(Color32::GRAY));
                     let mut pick = None;
-                    for (h, p) in &self.recent {
+                    for (h, p) in &list {
                         let text = if p.is_empty() { h.clone() } else { format!("{h}  :{p}") };
                         let r = ui.add(egui::Button::new(text).min_size(Vec2::new(468.0, 30.0)));
                         if r.clicked() {
@@ -488,6 +496,7 @@ impl eframe::App for App {
                         fb: Framebuffer::default(),
                         tex: None,
                         fit: Fit::Window,
+                        pan: Vec2::ZERO,
                         fullscreen: false,
                         pinned: true,
                         clip: Clip::new(),
@@ -503,6 +512,10 @@ impl eframe::App for App {
                         uploads: std::collections::VecDeque::new(),
                         next_upload: 1,
                         sound: None,
+                        chat: None,
+                        chat_lines: Vec::new(),
+                        unread: 0,
+                        paused: false,
                         monitors: Vec::new(),
                         monitor: 0,
                         inbox: crate::files::Inbox::default(),
@@ -595,11 +608,13 @@ impl Remote {
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
         self.resize(area.size() * ppp)?;
+        self.edge_pan(&ctx, area);
         let shown = self.picture(ui, area, ppp);
         let toolbar_rect = self.toolbar(&ctx, screen)?;
         let panel_rect = self.file_panel(&ctx)?;
+        let chat_rect = self.chat_panel(&ctx)?;
         self.upload_overlay(&ctx, screen);
-        let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(panel_rect).collect();
+        let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(panel_rect).chain(chat_rect).collect();
         self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
             self.set_fullscreen(&ctx, !self.fullscreen);
@@ -625,6 +640,22 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
+                Ok(Ev::Net(ToClient::Snapshot(png))) => {
+                    let path = crate::shot::save_path();
+                    let msg = match std::fs::write(&path, &png) {
+                        Ok(()) => format!("Screenshot saved to {}", path.display()),
+                        Err(e) => format!("Screenshot: {e}"),
+                    };
+                    self.notify(&msg);
+                }
+                Ok(Ev::Net(ToClient::Chat(t))) => match self.chat.as_mut() {
+                    Some((lines, _)) => lines.push((true, t)),
+                    None => {
+                        self.notify(&format!("Message: {t}"));
+                        self.chat_lines.push((true, t));
+                        self.unread += 1;
+                    }
+                },
                 Ok(Ev::Net(ToClient::Monitors { list, current })) => {
                     (self.monitors, self.monitor) = (list, current as usize)
                 }
@@ -764,6 +795,37 @@ impl Remote {
         }
     }
 
+    /// The chat panel; returns its rectangle while open.
+    fn chat_panel(&mut self, ctx: &egui::Context) -> Result<Option<Rect>, String> {
+        let Some((lines, input)) = self.chat.as_mut() else { return Ok(None) };
+        let mut open = true;
+        let mut sent = None;
+        let resp = egui::Window::new("Chat")
+            .open(&mut open)
+            .default_pos(ctx.content_rect().left_top() + Vec2::new(20.0, 70.0))
+            .default_size([340.0, 420.0])
+            .show(ctx, |ui| {
+                let h = ui.available_height().max(120.0) - 64.0;
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .max_height(h)
+                    .show(ui, |ui| crate::chat::show_lines(ui, lines, "Remote", "You"));
+                sent = crate::chat::input_row(ui, input, true);
+            });
+        let rect = resp.map(|r| r.response.rect);
+        if let Some(text) = sent {
+            if let Some((lines, _)) = self.chat.as_mut() {
+                lines.push((false, text.clone()));
+            }
+            self.send(ToAgent::Chat(text))?;
+        }
+        if !open && let Some((lines, _)) = self.chat.take() {
+            self.chat_lines = lines;
+        }
+        Ok(rect)
+    }
+
     /// The remote file browser; returns its rectangle while open.
     fn file_panel(&mut self, ctx: &egui::Context) -> Result<Option<Rect>, String> {
         let Some(p) = self.panel.as_mut() else { return Ok(None) };
@@ -897,8 +959,12 @@ impl Remote {
     /// Asks the agent for a capture that fits the window, once resizing has settled.
     fn resize(&mut self, px: Vec2) -> Result<(), String> {
         let want = match self.fit {
-            Fit::Window => (px.x.max(64.0) as u16, px.y.max(64.0) as u16),
-            Fit::Original => self.sess.desk,
+            Fit::Window | Fit::Stretch => (px.x.max(64.0) as u16, px.y.max(64.0) as u16),
+            // Below 100% the agent sends fewer pixels; above, the full resolution is enlarged here.
+            Fit::Fixed(p) => {
+                let k = p.min(100) as f32 / 100.0;
+                ((self.sess.desk.0 as f32 * k) as u16, (self.sess.desk.1 as f32 * k) as u16)
+            }
         };
         if want != self.view {
             self.view = want;
@@ -924,10 +990,70 @@ impl Remote {
                 let k = (area.width() / size.x).min(area.height() / size.y);
                 Rect::from_center_size(area.center(), size * k)
             }
-            Fit::Original => Rect::from_center_size(area.center(), size),
+            Fit::Stretch => area,
+            Fit::Fixed(p) => {
+                let full = Vec2::new(self.sess.desk.0 as f32, self.sess.desk.1 as f32) * (p as f32 / 100.0) / ppp;
+                let over = (full - area.size()).max(Vec2::ZERO);
+                self.pan = self.pan.clamp(Vec2::ZERO, over);
+                // Centred along an axis where it fits, panned along one where it does not.
+                let min = Pos2::new(
+                    if over.x > 0.0 { area.min.x - self.pan.x } else { area.center().x - full.x / 2.0 },
+                    if over.y > 0.0 { area.min.y - self.pan.y } else { area.center().y - full.y / 2.0 },
+                );
+                Rect::from_min_size(min, full)
+            }
         };
-        ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        let painter = ui.painter().with_clip_rect(area);
+        painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        // Where the visible part lies, when the picture is larger than the window.
+        let bar = Color32::from_white_alpha(70);
+        if rect.width() > area.width() + 0.5 {
+            let (a, w) = ((area.min.x - rect.min.x) / rect.width(), area.width() / rect.width());
+            let x0 = area.min.x + a * area.width();
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(x0, area.max.y - 5.0), Pos2::new(x0 + w * area.width(), area.max.y - 1.0)),
+                CornerRadius::same(2),
+                bar,
+            );
+        }
+        if rect.height() > area.height() + 0.5 {
+            let (a, h) = ((area.min.y - rect.min.y) / rect.height(), area.height() / rect.height());
+            let y0 = area.min.y + a * area.height();
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(area.max.x - 5.0, y0),
+                    Pos2::new(area.max.x - 1.0, y0 + h * area.height()),
+                ),
+                CornerRadius::same(2),
+                bar,
+            );
+        }
         Some(rect)
+    }
+
+    /// Moves a picture larger than the window when the pointer rests near an edge.
+    fn edge_pan(&mut self, ctx: &egui::Context, area: Rect) {
+        if !matches!(self.fit, Fit::Fixed(_)) {
+            return;
+        }
+        let Some(p) = ctx.pointer_hover_pos().filter(|p| area.contains(*p)) else { return };
+        const EDGE: f32 = 28.0;
+        let dt = ctx.input(|i| i.stable_dt).min(0.05);
+        let mut d = Vec2::ZERO;
+        if p.x < area.min.x + EDGE {
+            d.x = -1.0;
+        } else if p.x > area.max.x - EDGE {
+            d.x = 1.0;
+        }
+        if p.y < area.min.y + EDGE {
+            d.y = -1.0;
+        } else if p.y > area.max.y - EDGE {
+            d.y = 1.0;
+        }
+        if d != Vec2::ZERO {
+            self.pan += d * 900.0 * dt;
+            ctx.request_repaint();
+        }
     }
 
     fn remote_point(&self, rect: Rect, pos: Pos2) -> Option<(u16, u16)> {
@@ -980,7 +1106,11 @@ impl Remote {
         if !focused {
             return self.release_all();
         }
-        let over_toolbar = |p: Pos2| ui_rects.iter().any(|t| t.contains(p));
+        // Pointer events over any of this window's own controls (toolbar, menus, panels) stay here.
+        let over_toolbar = |p: Pos2| {
+            ui_rects.iter().any(|t| t.contains(p))
+                || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background)
+        };
         // Keys go to the remote unless a toolbar widget (a slider, a menu) has focus.
         let local = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open();
         if let Some(rect) = shown {
@@ -1165,13 +1295,24 @@ impl Remote {
                 }
             });
         }
-        let fit_label = if self.fit == Fit::Window { "Fit" } else { "1:1" };
-        if ui.button(fit_label).on_hover_text("Fit to the window or show at original size").clicked() {
-            *action = Some(Box::new(|r, _| {
-                r.fit = if r.fit == Fit::Window { Fit::Original } else { Fit::Window };
-                Ok(())
-            }));
-        }
+        ui.menu_button(format!("View: {}", self.fit.label()), |ui| {
+            let mut pick = |ui: &mut egui::Ui, fit: Fit, text: &str| {
+                if ui.selectable_label(self.fit == fit, text).clicked() {
+                    *action = Some(Box::new(move |r, _| {
+                        (r.fit, r.pan) = (fit, Vec2::ZERO);
+                        Ok(())
+                    }));
+                    ui.close();
+                }
+            };
+            pick(ui, Fit::Window, "Fit to window");
+            pick(ui, Fit::Stretch, "Stretch to fill");
+            ui.separator();
+            for p in [50, 75, 100, 125, 150, 200] {
+                let text = if p == 100 { "100%  original size".to_string() } else { format!("{p}%") };
+                pick(ui, Fit::Fixed(p), &text);
+            }
+        });
         let fs = if self.fullscreen { "Exit full screen" } else { "Full screen" };
         if ui.button(fs).on_hover_text("F11").clicked() {
             *action = Some(Box::new(|r, c| {
@@ -1209,9 +1350,17 @@ impl Remote {
                 ui.close();
             }
         });
-        ui.toggle_value(&mut self.share_clipboard, "Clipboard").on_hover_text("Share copied text both ways");
         let mut sound = self.sound.is_some();
-        if ui.toggle_value(&mut sound, "Sound").on_hover_text("Play the remote host's sound (about 8 KB/s)").clicked() {
+        let mut sound_clicked = false;
+        ui.menu_button("Options", |ui| {
+            ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
+            sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
+            if cfg!(windows) {
+                let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
+                ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
+            }
+        });
+        if sound_clicked {
             *action = Some(Box::new(move |r, _| {
                 if sound {
                     match crate::audio::Player::new() {
@@ -1227,10 +1376,6 @@ impl Remote {
                 r.send(ToAgent::Audio(sound))
             }));
         }
-        if cfg!(windows) {
-            let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
-            ui.toggle_value(&mut self.grab_keys, "System keys").on_hover_text(tip);
-        }
         let files_tip = "Browse and download remote files; drop files or folders on the window to upload";
         if ui.button("Files").on_hover_text(files_tip).clicked() {
             *action = Some(Box::new(|r, _| {
@@ -1239,6 +1384,30 @@ impl Remote {
                 }
                 Ok(())
             }));
+        }
+        let chat = if self.unread > 0 { format!("Chat ({})", self.unread) } else { "Chat".into() };
+        if ui.button(chat).on_hover_text("Talk to the person at the remote screen").clicked() {
+            *action = Some(Box::new(|r, _| {
+                match r.chat.take() {
+                    Some((lines, _)) => r.chat_lines = lines,
+                    None => {
+                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
+                        r.unread = 0;
+                    }
+                }
+                Ok(())
+            }));
+        }
+        if ui.button("Screenshot").on_hover_text("Save the remote screen as a PNG in Pictures").clicked() {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
+        }
+        let tip = "Stop the picture to save traffic; Update fetches one frame when you need it";
+        if ui.toggle_value(&mut self.paused, "Pause").on_hover_text(tip).changed() {
+            let on = self.paused;
+            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
+        }
+        if self.paused && ui.button("Update").on_hover_text("Fetch one frame").clicked() {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
         }
         if ui.button("Refresh").clicked() {
             *action = Some(Box::new(|r, _| r.menu('r')));

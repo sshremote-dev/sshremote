@@ -494,8 +494,6 @@ impl Control {
         Action::Settings
     }
 
-    pub const MENU_HELP: &str = "q quit | 0-4 preset | a auto | m colour | +/- scale | f fps | z zoom | w Win key | s screen | r refresh | ] send Ctrl+]";
-
     /// `full` marks a frame that resent most of the screen; such bursts come from
     /// starting, resizing or a mode change, not from what the screen is doing, so auto waits them out.
     pub fn frame_done(&mut self, full: bool) {

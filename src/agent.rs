@@ -93,12 +93,16 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut reducer: Option<Reducer> = None;
     let mut last: Option<Image> = None;
     let mut fresh = false;
+    // Paused: no frames unless the viewer asks for one with Refresh.
+    let (mut paused, mut one_shot) = (false, false);
     let mut prev: Option<Plane> = None;
     let mut vid = video::Video::new();
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
     let mut outbox = crate::files::Outbox::default();
     let mut sound: Option<crate::audio::Capture> = None;
+    let mut chat = crate::chat::Window::default();
+    let mut pending = String::new();
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
@@ -116,6 +120,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         msgs.extend(rx.try_iter());
         for m in msgs {
+            // Text waiting to be pasted goes in before any later input, so the order is kept.
+            let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if keysym & 0xff00_0000 == 0x0100_0000);
+            if !typed_text && matches!(m, ToAgent::Key { .. } | ToAgent::KeyState { .. } | ToAgent::Button { .. }) {
+                paste(&mut pending, &mut clip, cap.as_mut());
+            }
             match m {
                 ToAgent::Settings(s) => {
                     let t = target(desk, &s);
@@ -135,9 +144,41 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 ToAgent::Ack(_) => in_flight = in_flight.saturating_sub(1),
                 ToAgent::Refresh => {
                     prev = None;
+                    one_shot = true;
                     vid.restart();
                 }
+                ToAgent::Pause(on) => {
+                    paused = on;
+                    if !on {
+                        prev = None;
+                    }
+                }
+                ToAgent::Snapshot => {
+                    // Some backends only deliver a picture when the screen changes; wait a little for one.
+                    for _ in 0..40 {
+                        if let Some(img) = cap.grab()? {
+                            last = Some(img);
+                            fresh = true;
+                        }
+                        if last.as_ref().is_some_and(|i| (i.w, i.h) == size) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    let m = match last.as_ref().map(crate::shot::png_from_bgrx) {
+                        Some(Ok(png)) => ToClient::Snapshot(png),
+                        Some(Err(e)) => ToClient::Notice(format!("Screenshot: {e}")),
+                        None => ToClient::Notice("Screenshot: no picture yet".into()),
+                    };
+                    send(enc, &m).map_err(io_err)?;
+                }
                 ToAgent::Ping(t) => send(enc, &ToClient::Pong(t)).map_err(io_err)?,
+                // GNOME types only what its keyboard layout has; other text (Korean, emoji...) is pasted.
+                ToAgent::Key { keysym, mods: 0 } if keysym & 0xff00_0000 == 0x0100_0000 && cap.name() == "gnome" => {
+                    if let Some(c) = char::from_u32(keysym & 0x00ff_ffff) {
+                        pending.push(c);
+                    }
+                }
                 ToAgent::Key { keysym, mods } => report(cap.input(Input::Key { keysym, mods })),
                 ToAgent::Pointer { x, y } => {
                     let img = last.as_ref().map_or(desk, |i| (i.w, i.h));
@@ -173,6 +214,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                 }
                 ToAgent::FetchAck { id, received } => outbox.ack(id, received),
+                ToAgent::Chat(text) => {
+                    if let Err(e) = chat.show(&text) {
+                        send(enc, &ToClient::Notice(format!("Chat: {e}"))).map_err(io_err)?;
+                    }
+                }
                 ToAgent::Audio(on) => {
                     sound = None;
                     if on {
@@ -200,6 +246,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 }
             }
         }
+        paste(&mut pending, &mut clip, cap.as_mut());
+        for text in chat.replies() {
+            send(enc, &ToClient::Chat(text)).map_err(io_err)?;
+        }
         if let Some(c) = &sound {
             for p in c.packets.try_iter() {
                 send(enc, &ToClient::Audio(p)).map_err(io_err)?;
@@ -217,7 +267,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         };
         let now = Instant::now();
         // Grab only when a frame may go out: some backends copy the whole screen per grab.
-        if in_flight >= IN_FLIGHT || now < due {
+        if in_flight >= IN_FLIGHT || now < due || (paused && !one_shot) {
             continue;
         }
         if let Some(img) = cap.grab()? {
@@ -231,6 +281,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             continue;
         }
         fresh = false;
+        one_shot = false;
         let plane = red.reduce(img);
         let mut rects = diff(prev.as_ref(), &plane);
         let mut moves = Vec::new();
@@ -288,6 +339,22 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         in_flight += 1;
         due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
     }
+}
+
+/// Pastes text the backend cannot type, through the clipboard and Ctrl+V.
+fn paste(pending: &mut String, clip: &mut crate::clip::Clip, cap: &mut dyn capture::Capture) {
+    if pending.is_empty() {
+        return;
+    }
+    if !clip.stage_paste(std::mem::take(pending)) {
+        report(Err("text outside the keyboard layout needs the clipboard, which is unavailable".into()));
+        return;
+    }
+    for (k, down) in [(0xffe3, true), ('v' as u32, true), ('v' as u32, false), (0xffe3, false)] {
+        report(cap.input(Input::KeyState { keysym: k, down }));
+    }
+    // Applications fetch pasted text asynchronously; let it land before the next keys.
+    thread::sleep(Duration::from_millis(150));
 }
 
 fn monitors(cap: &dyn capture::Capture) -> ToClient {

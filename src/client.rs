@@ -16,6 +16,9 @@ use crate::quant;
 use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
+const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
+p pause | u one frame | o sound | c chat | g get file | l send file | w Win | r refresh";
+
 struct Viewer {
     out: Box<dyn Write>,
     probe: Option<(u16, u16)>,
@@ -40,6 +43,15 @@ struct Viewer {
     dirty: Vec<bool>,
     menu: bool,
     win_next: bool,
+    player: Option<crate::audio::Player>,
+    inbox: crate::files::Inbox,
+    /// A message shown in the status line for a few seconds.
+    note: Option<(String, Instant)>,
+    /// A line being typed in the status line: c chat, g get a remote file, l send a local file.
+    prompt: Option<(char, String)>,
+    paused: bool,
+    next_upload: u32,
+    audio_bytes: usize,
     /// Number of remote monitors and the one shown.
     monitors: (usize, usize),
     /// Enlarge a reduced capture to the terminal; off where the terminal output itself crosses the network.
@@ -180,8 +192,22 @@ impl Viewer {
     }
 
     fn status(&mut self) -> io::Result<()> {
-        let text = if self.menu {
-            format!(" menu: {} ", Control::MENU_HELP)
+        let text = if let Some((kind, buf)) = &self.prompt {
+            let what = match kind {
+                'c' => "message",
+                'g' => "remote path to download",
+                _ => "local file to send",
+            };
+            format!(" {what} (Enter sends, Esc cancels)> {buf}_ ")
+        } else if self.menu {
+            format!(" menu: {MENU} ")
+        } else if let Some((n, _)) = self.note.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(6)) {
+            format!(" {n} ")
+        } else if self.paused {
+            format!(
+                " PAUSED (Ctrl+] u: one frame, p: resume) | {} ",
+                self.ctl.status(&self.label, self.fb.w, self.fb.h)
+            )
         } else if self.win_next {
             " Win+: press a key (Space: Win alone) ".to_string()
         } else {
@@ -245,17 +271,180 @@ impl Viewer {
         }
     }
 
+    /// Shows a message in the status line (on stderr in a headless probe).
+    fn notify(&mut self, text: &str) -> io::Result<()> {
+        if self.probe.is_some() {
+            eprintln!("probe: {text}");
+            return Ok(());
+        }
+        self.note = Some((text.to_string(), Instant::now()));
+        self.status()
+    }
+
+    /// Menu keys beyond the shared ones: screenshot, pause, sound, chat and files.
+    fn menu_extra(&mut self, c: char) -> io::Result<()> {
+        match c {
+            'x' => {
+                self.sess.send(ToAgent::Snapshot)?;
+                self.notify("Taking a screenshot...")
+            }
+            'p' => {
+                self.paused = !self.paused;
+                self.sess.send(ToAgent::Pause(self.paused))?;
+                self.status()
+            }
+            'u' => {
+                self.sess.send(ToAgent::Refresh)?;
+                self.status()
+            }
+            'o' => {
+                if self.player.take().is_some() {
+                    self.sess.send(ToAgent::Audio(false))?;
+                    return self.notify("Sound off");
+                }
+                match crate::audio::Player::new() {
+                    Ok(p) => {
+                        self.player = Some(p);
+                        self.sess.send(ToAgent::Audio(true))?;
+                        self.notify("Sound on")
+                    }
+                    Err(e) => self.notify(&format!("Sound: {e}")),
+                }
+            }
+            'c' | 'g' | 'l' => {
+                self.prompt = Some((c, String::new()));
+                self.status()
+            }
+            _ => {
+                let a = self.ctl.menu(c);
+                self.run_action(a)
+            }
+        }
+    }
+
+    fn prompt_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
+        use event::KeyCode;
+        let Some((kind, buf)) = self.prompt.as_mut() else { return Ok(()) };
+        match k.code {
+            KeyCode::Char(c) if !k.modifiers.contains(event::KeyModifiers::CONTROL) => buf.push(c),
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Enter => {
+                let (kind, text) = (*kind, buf.trim().to_string());
+                self.prompt = None;
+                if !text.is_empty() {
+                    return self.run_prompt(kind, text);
+                }
+            }
+            _ => {}
+        }
+        self.status()
+    }
+
+    fn run_prompt(&mut self, kind: char, text: String) -> io::Result<()> {
+        match kind {
+            'c' => {
+                self.sess.send(ToAgent::Chat(text.clone()))?;
+                self.notify(&format!("You: {text}"))
+            }
+            'g' => {
+                self.sess.send(ToAgent::Fetch { path: text.clone() })?;
+                self.notify(&format!("Downloading {text}..."))
+            }
+            _ => self.upload(&text),
+        }
+    }
+
+    /// Sends a local file to the remote Downloads folder; the link paces the writes.
+    fn upload(&mut self, path: &str) -> io::Result<()> {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => return self.notify(&format!("{path}: {e}")),
+        };
+        let name = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
+        let id = self.next_upload;
+        self.next_upload += 1;
+        self.sess.send(ToAgent::FileStart { id, size: data.len() as u64, name: name.clone() })?;
+        for chunk in data.chunks(64 << 10) {
+            self.sess.send(ToAgent::FileData { id, data: chunk.to_vec() })?;
+        }
+        self.sess.send(ToAgent::FileEnd { id })?;
+        self.notify(&format!("Sending {name}..."))
+    }
+
+    /// Messages other than frames.
+    fn on_message(&mut self, m: ToClient) -> io::Result<()> {
+        match m {
+            ToClient::Pong(t) => self.ctl.pong(t),
+            ToClient::Audio(p) => {
+                self.audio_bytes += p.len();
+                if let Some(pl) = self.player.as_mut() {
+                    pl.push(&p);
+                }
+            }
+            ToClient::Notice(t) => self.notify(&t)?,
+            ToClient::Chat(t) => {
+                // A bell, so a message is noticed while looking elsewhere.
+                if self.probe.is_none() {
+                    self.out.write_all(b"\x07")?;
+                }
+                self.notify(&format!("Remote: {t}"))?
+            }
+            ToClient::Snapshot(png) => {
+                let path = crate::shot::save_path();
+                match std::fs::write(&path, &png) {
+                    Ok(()) => self.notify(&format!("Screenshot saved to {}", path.display()))?,
+                    Err(e) => self.notify(&format!("Screenshot: {e}"))?,
+                }
+            }
+            ToClient::Monitors { list, current } => {
+                if self.probe.is_some() {
+                    let names: Vec<String> = list.iter().map(|m| format!("{} {}x{}", m.name, m.w, m.h)).collect();
+                    eprintln!("probe: monitors {names:?}, showing {current}");
+                }
+                self.monitors = (list.len(), current as usize);
+            }
+            ToClient::FileDone { ok, text, .. } => {
+                let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
+                self.notify(&t)?
+            }
+            ToClient::FetchStart { id, size, name } => {
+                if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
+                    self.notify(&format!("download {name}: {text}"))?;
+                }
+            }
+            ToClient::FetchData { id, data } => {
+                if let Some(crate::files::Note::Progress { id, received }) = self.inbox.data(id, &data) {
+                    self.sess.send(ToAgent::FetchAck { id, received })?;
+                }
+            }
+            ToClient::FetchEnd { id, ok, text } => match self.inbox.end(id, ok, &text) {
+                Some(crate::files::Note::Done { ok, text, .. }) => {
+                    let t = if ok { format!("download ok={ok} {text}") } else { format!("download failed: {text}") };
+                    self.notify(&t)?
+                }
+                _ => self.notify(&format!("download failed: {text}"))?,
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn on_term(&mut self, e: Event) -> io::Result<()> {
         match e {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                if self.prompt.is_some() {
+                    return self.prompt_key(&k);
+                }
                 if self.menu {
                     self.menu = false;
                     let c = match k.code {
                         event::KeyCode::Char(c) => c,
                         _ => '\0',
                     };
-                    let a = self.ctl.menu(c);
-                    return self.run_action(a);
+                    return self.menu_extra(c);
                 }
                 if keys::is_menu(&k) {
                     self.menu = true;
@@ -342,6 +531,13 @@ pub fn run(opt: Options) -> Result<(), String> {
         dirty: Vec::new(),
         menu: false,
         win_next: false,
+        player: None,
+        inbox: crate::files::Inbox::default(),
+        note: None,
+        prompt: None,
+        paused: false,
+        next_upload: 1,
+        audio_bytes: 0,
         monitors: (1, 0),
         // A viewer run inside an ssh session sends its sixel output over that session.
         stretch: !(opt.local && std::env::var_os("SSH_CONNECTION").is_some()),
@@ -394,14 +590,11 @@ pub fn run(opt: Options) -> Result<(), String> {
     let keys_total = typing.len();
     let mut next_key = Instant::now() + Duration::from_secs(2);
     let mut type_start = (0u64, 0u32);
-    let mut inbox = crate::files::Inbox::default();
-    let mut player: Option<crate::audio::Player> = None;
-    let mut audio_bytes = 0usize;
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
         if opt.sound {
             match crate::audio::Player::new() {
-                Ok(p) => player = Some(p),
+                Ok(p) => v.player = Some(p),
                 Err(e) => eprintln!("desk: sound: {e}"),
             }
             v.sess.send(ToAgent::Audio(true))?;
@@ -425,44 +618,11 @@ pub fn run(opt: Options) -> Result<(), String> {
         while !v.quit && deadline.is_none_or(|d| Instant::now() < d) {
             match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
-                Ok(Ev::Net(ToClient::Pong(t))) => v.ctl.pong(t),
-                Ok(Ev::Net(ToClient::Audio(p))) => {
-                    audio_bytes += p.len();
-                    if let Some(pl) = player.as_mut() {
-                        pl.push(&p);
-                    }
-                }
-                Ok(Ev::Net(ToClient::Notice(t))) => eprintln!("desk: {t}"),
-                Ok(Ev::Net(ToClient::Monitors { list, current })) => {
-                    if v.probe.is_some() {
-                        let names: Vec<String> = list.iter().map(|m| format!("{} {}x{}", m.name, m.w, m.h)).collect();
-                        eprintln!("probe: monitors {names:?}, showing {current}");
-                    }
-                    v.monitors = (list.len(), current as usize);
-                }
-                Ok(Ev::Net(ToClient::FileDone { ok, text, .. })) => eprintln!("probe: upload ok={ok} {text}"),
-                Ok(Ev::Net(ToClient::FetchStart { id, size, name })) => {
-                    if let Some(crate::files::Note::Done { text, .. }) = inbox.start(id, size, &name) {
-                        eprintln!("probe: download {name}: {text}");
-                    }
-                }
-                Ok(Ev::Net(ToClient::FetchData { id, data })) => {
-                    if let Some(crate::files::Note::Progress { id, received }) = inbox.data(id, &data) {
-                        v.sess.send(ToAgent::FetchAck { id, received })?;
-                    }
-                }
-                Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
-                    if let Some(crate::files::Note::Done { ok, text, .. }) = inbox.end(id, ok, &text) {
-                        eprintln!("probe: download ok={ok} {text}");
-                    } else {
-                        eprintln!("probe: download failed: {text}");
-                    }
-                }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     failure = Some(e);
                     break;
                 }
-                Ok(Ev::Net(_)) => {}
+                Ok(Ev::Net(m)) => v.on_message(m)?,
                 Ok(Ev::Term(e)) => v.on_term(e)?,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
@@ -479,7 +639,7 @@ pub fn run(opt: Options) -> Result<(), String> {
             }
         }
         if opt.sound && v.probe.is_some() {
-            eprintln!("probe: sound {:.1} KB", audio_bytes as f64 / 1024.0);
+            eprintln!("probe: sound {:.1} KB", v.audio_bytes as f64 / 1024.0);
         }
         if keys_total > 0 {
             let rx = v.sess.rx() - type_start.0;

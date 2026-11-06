@@ -1,6 +1,7 @@
 mod agent;
 mod audio;
 mod capture;
+mod chat;
 mod client;
 mod clip;
 mod color;
@@ -8,9 +9,11 @@ mod color;
 mod conpty;
 mod files;
 mod gui;
+mod hosts;
 #[cfg(windows)]
 mod keygrab;
 mod keys;
+mod mcp;
 mod net;
 mod proto;
 mod quant;
@@ -20,6 +23,7 @@ mod scroll;
 #[cfg(windows)]
 mod service;
 mod session;
+mod shot;
 mod sixel;
 mod transport;
 mod video;
@@ -30,6 +34,8 @@ const USAGE: &str = "\
 usage: desk                       open the window: connect screen, recent hosts
        desk [options] HOST        view HOST's desktop over ssh in this terminal
        desk --gui [options] [HOST] the same in a window
+       desk --term [options]      choose a recent or ~/.ssh/config host, then view it here
+       desk mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
        desk --local [options]     view a built-in test desktop (no ssh)
        desk --agent [--capture B] remote side, started by the viewer
        desk --serve [--listen ADDR] [--via RELAY] [--password P]
@@ -85,6 +91,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         match a.as_str() {
             "--local" => o.local = true,
             "--gui" => o.gui = true,
+            "--term" => {}
             "--preset" => {
                 let v = val()?;
                 o.preset = if v == "auto" { None } else { Some(v.parse().map_err(|_| "bad --preset")?) };
@@ -125,7 +132,14 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         o.capture = if o.local { "synthetic" } else { "auto" }.into();
     }
     if !o.local && !o.gui && o.host.is_none() {
-        return Err(USAGE.into());
+        // `desk --term` without a host: choose one in the terminal.
+        if !args.iter().any(|a| a == "--term") {
+            return Err(USAGE.into());
+        }
+        o.host = Some(hosts::pick().ok_or("no host chosen")?);
+    }
+    if let Some(h) = o.host.as_deref().filter(|_| !o.local && o.probe.is_none()) {
+        hosts::remember(h);
     }
     Ok(o)
 }
@@ -176,6 +190,22 @@ fn main() {
     if args.first().is_some_and(|a| a == "--serve") {
         let r = net::serve(opt("--listen"), opt("--via"), opt("--password"), opt("--capture").unwrap_or("auto"));
         if let Err(e) = r {
+            eprintln!("desk: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.first().is_some_and(|a| a == "mcp") {
+        // stdout carries JSON-RPC only; everything else goes to stderr.
+        let r = parse_client(&args[1..]).and_then(|o| mcp::run(&o));
+        if let Err(e) = r {
+            eprintln!("desk mcp: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.first().is_some_and(|a| a == "--chat-window") {
+        if let Err(e) = chat::run_window() {
             eprintln!("desk: {e}");
             std::process::exit(1);
         }
