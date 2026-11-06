@@ -24,6 +24,9 @@ pub(crate) mod ic {
     pub const ARROW_LEFT: &str = "\u{E058}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const ARROW_UP: &str = "\u{E08E}";
+    pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
+    pub const MINUS: &str = "\u{E32A}";
+    pub const PLUS: &str = "\u{E3D4}";
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP: &str = "\u{E13C}";
@@ -219,6 +222,9 @@ struct Remote {
     downloads: Vec<(u32, String, u32)>,
     /// The file transfer window, while open.
     files: Option<crate::filewin::FileWindow>,
+    /// The terminal window, while open.
+    terms: Option<crate::termwin::TermWindow>,
+    ssh_cmd: Option<Vec<String>>,
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
@@ -251,6 +257,8 @@ pub struct App {
     favorites: Vec<String>,
     /// Host and port of the connection in progress.
     pending_host: Option<(String, String)>,
+    /// The ssh command for the connection in progress, to open the host in a system terminal.
+    pending_ssh: Option<Vec<String>>,
     seen: std::collections::HashMap<String, u64>,
     search: String,
     error: Option<String>,
@@ -288,6 +296,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 ssh_hosts: crate::hosts::ssh_config_hosts(),
                 favorites: crate::hosts::favorites(),
                 pending_host: None,
+                pending_ssh: None,
                 seen: crate::hosts::last_seen(),
                 search: String::new(),
                 error: None,
@@ -497,6 +506,18 @@ impl App {
         let local = matches!(target, Target::Local { .. });
         // Remembered once the connection works, so typos do not pile up in the list.
         self.pending_host = (!local).then(|| (f.host.trim().to_string(), f.port.trim().to_string()));
+        self.pending_ssh = match &target {
+            Target::Ssh { host, port, args, .. } => {
+                let mut cmd = vec!["ssh".to_string()];
+                if let Some(p) = port {
+                    cmd.extend(["-p".into(), p.to_string()]);
+                }
+                cmd.extend(args.iter().cloned());
+                cmd.push(host.clone());
+                Some(cmd)
+            }
+            _ => None,
+        };
         let (tx, rx) = mpsc::channel();
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
@@ -771,7 +792,10 @@ impl eframe::App for App {
                     sess.on_message(move || waker.request_repaint());
                     let desk = sess.desk;
                     ctx.send_viewport_cmd(ViewportCommand::Title(format!("desk - {label}")));
+                    let ssh_cmd = self.pending_ssh.take();
                     next = Some(Screen::Remote(Box::new(Remote {
+                        ssh_cmd,
+                        terms: None,
                         label: format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend),
                         sess,
                         rx,
@@ -923,6 +947,7 @@ impl Remote {
         self.upload_overlay(&ctx, screen);
         self.draw_toasts(&ctx, screen);
         self.file_window(&ctx)?;
+        self.term_window(&ctx)?;
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
         self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
@@ -990,6 +1015,15 @@ impl Remote {
                         f.remote.set_list(path, entries, error);
                     }
                 }
+                Ok(Ev::Net(ToClient::TermOutput { id, data })) => {
+                    if let Some(t) = self.terms.as_mut() {
+                        t.output(id, &data);
+                    }
+                }
+                Ok(Ev::Net(ToClient::TermExit { id, text })) => match self.terms.as_mut() {
+                    Some(t) => t.exited(id, text),
+                    None => self.notify(&format!("Terminal: {text}")),
+                },
                 Ok(Ev::Net(ToClient::OpDone { ok, text })) => match self.files.as_mut() {
                     Some(f) => {
                         let cmd = f.op_done(ok, &text);
@@ -1205,6 +1239,20 @@ impl Remote {
         self.files = Some(f);
         for c in cmds {
             self.file_cmd(c)?;
+        }
+        Ok(())
+    }
+
+    fn term_window(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let Some(mut t) = self.terms.take() else { return Ok(()) };
+        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let cmds = t.show(ctx, &host);
+        self.terms = Some(t);
+        for c in cmds {
+            match c {
+                crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Close => self.terms = None,
+            }
         }
         Ok(())
     }
@@ -1734,6 +1782,21 @@ impl Remote {
                 if r.files.take().is_none() {
                     r.files = Some(crate::filewin::FileWindow::new());
                     r.send(ToAgent::ListDir { path: String::new() })?;
+                }
+                Ok(())
+            }));
+        }
+        if icon(ui, ic::TERMINAL, "Terminal: a shell on the remote host", self.terms.is_some()).clicked() {
+            *action = Some(Box::new(|r, _| {
+                match r.terms.take() {
+                    Some(t) => {
+                        for c in t.close_all() {
+                            if let crate::termwin::Cmd::Send(m) = c {
+                                r.send(m)?;
+                            }
+                        }
+                    }
+                    None => r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone())),
                 }
                 Ok(())
             }));

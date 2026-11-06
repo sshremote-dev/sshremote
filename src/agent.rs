@@ -99,6 +99,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut vid = video::Video::new();
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
+    let mut terms = crate::pty::Terms::default();
     let mut outbox = crate::files::Outbox::default();
     let mut sound: Option<crate::audio::Capture> = None;
     let mut chat = crate::chat::Window::default();
@@ -225,6 +226,14 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         send(enc, &m).map_err(io_err)?;
                     }
                 }
+                ToAgent::TermOpen { id, cols, rows } => {
+                    if let Some(m) = terms.open(id, cols, rows) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                }
+                ToAgent::TermInput { id, data } => terms.input(id, &data),
+                ToAgent::TermResize { id, cols, rows } => terms.resize(id, cols, rows),
+                ToAgent::TermClose { id } => terms.close(id),
                 ToAgent::FetchCancel { id, tag } => {
                     for m in outbox.cancel(id, tag) {
                         send(enc, &m).map_err(io_err)?;
@@ -270,6 +279,9 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             for p in c.packets.try_iter() {
                 send(enc, &ToClient::Audio(p)).map_err(io_err)?;
             }
+        }
+        for m in terms.poll() {
+            send(enc, &m).map_err(io_err)?;
         }
         // Downloads share the stream with the screen, a slice per turn.
         for m in outbox.pump(256 << 10) {

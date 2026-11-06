@@ -17,7 +17,7 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
 const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
-p pause | u one frame | o sound | c chat | g get file | l send file | w Win | r refresh";
+p pause | u one frame | o sound | c chat | g get file | l send file | t shell | w Win | r refresh";
 
 struct Viewer {
     out: Box<dyn Write>,
@@ -59,6 +59,9 @@ struct Viewer {
     pointer: (u16, u16),
     quit: bool,
     paint_ms: f64,
+    /// The remote shell shown instead of the picture, while open.
+    shell: Option<u32>,
+    next_shell: u32,
 }
 
 impl Viewer {
@@ -93,6 +96,11 @@ impl Viewer {
     }
 
     fn apply(&mut self, f: Frame) -> io::Result<()> {
+        if self.shell.is_some() {
+            // Frames still in flight when the shell opened; the screen is redrawn after it.
+            self.ctl.frame_done(false);
+            return self.sess.send(ToAgent::Ack(f.id));
+        }
         let started = Instant::now();
         let mut out = Vec::with_capacity(1 << 16);
         out.extend_from_slice(b"\x1b[?2026h");
@@ -192,6 +200,9 @@ impl Viewer {
     }
 
     fn status(&mut self) -> io::Result<()> {
+        if self.shell.is_some() {
+            return Ok(());
+        }
         let text = if let Some((kind, buf)) = &self.prompt {
             let what = match kind {
                 'c' => "message",
@@ -311,6 +322,7 @@ impl Viewer {
                     Err(e) => self.notify(&format!("Sound: {e}")),
                 }
             }
+            't' => self.open_shell(),
             'c' | 'g' | 'l' => {
                 self.prompt = Some((c, String::new()));
                 self.status()
@@ -320,6 +332,75 @@ impl Viewer {
                 self.run_action(a)
             }
         }
+    }
+
+    /// Leaves the picture for a shell on the remote host; this terminal emulates it directly.
+    fn open_shell(&mut self) -> io::Result<()> {
+        if self.probe.is_some() {
+            return Ok(());
+        }
+        let id = self.next_shell;
+        self.next_shell += 1;
+        self.sess.send(ToAgent::Pause(true))?;
+        let _ = execute!(self.out, event::DisableMouseCapture, terminal::LeaveAlternateScreen, cursor::Show);
+        write!(self.out, "\x1b[0m\r\ndesk: remote shell. Type exit, or press Ctrl+] to return to the screen.\r\n")?;
+        self.out.flush()?;
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        self.shell = Some(id);
+        self.sess.send(ToAgent::TermOpen { id, cols, rows })
+    }
+
+    /// Back from the shell to the picture.
+    fn close_shell(&mut self, why: &str) -> io::Result<()> {
+        let Some(id) = self.shell.take() else { return Ok(()) };
+        self.sess.send(ToAgent::TermClose { id })?;
+        let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
+        self.dirty.clear();
+        self.full_redraw()?;
+        self.sess.send(ToAgent::Pause(self.paused))?;
+        self.sess.send(ToAgent::Refresh)?;
+        self.notify(why)
+    }
+
+    /// Keys typed while the shell is shown, as the bytes a terminal sends.
+    fn shell_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
+        use event::{KeyCode, KeyModifiers};
+        let Some(id) = self.shell else { return Ok(()) };
+        if keys::is_menu(k) {
+            return self.close_shell("Shell closed");
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let mut b: Vec<u8> = match k.code {
+            KeyCode::Char(c) if ctrl && c.is_ascii_alphabetic() => vec![c.to_ascii_lowercase() as u8 - b'a' + 1],
+            KeyCode::Char(' ') if ctrl => vec![0],
+            KeyCode::Char(c) => c.to_string().into_bytes(),
+            KeyCode::Enter => b"\r".to_vec(),
+            KeyCode::Backspace => b"\x7f".to_vec(),
+            KeyCode::Tab => b"\t".to_vec(),
+            KeyCode::BackTab => b"\x1b[Z".to_vec(),
+            KeyCode::Esc => b"\x1b".to_vec(),
+            KeyCode::Up => b"\x1b[A".to_vec(),
+            KeyCode::Down => b"\x1b[B".to_vec(),
+            KeyCode::Right => b"\x1b[C".to_vec(),
+            KeyCode::Left => b"\x1b[D".to_vec(),
+            KeyCode::Home => b"\x1b[H".to_vec(),
+            KeyCode::End => b"\x1b[F".to_vec(),
+            KeyCode::Insert => b"\x1b[2~".to_vec(),
+            KeyCode::Delete => b"\x1b[3~".to_vec(),
+            KeyCode::PageUp => b"\x1b[5~".to_vec(),
+            KeyCode::PageDown => b"\x1b[6~".to_vec(),
+            KeyCode::F(n @ 1..=4) => format!("\x1bO{}", (b'P' + n - 1) as char).into_bytes(),
+            KeyCode::F(n @ 5..=12) => {
+                let code = [15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5];
+                format!("\x1b[{code}~").into_bytes()
+            }
+            _ => return Ok(()),
+        };
+        if alt && !ctrl {
+            b.insert(0, 0x1b);
+        }
+        self.sess.send(ToAgent::TermInput { id, data: b })
     }
 
     fn prompt_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
@@ -406,6 +487,13 @@ impl Viewer {
                 }
                 self.monitors = (list.len(), current as usize);
             }
+            ToClient::TermOutput { id, data } if self.shell == Some(id) => {
+                self.out.write_all(&data)?;
+                self.out.flush()?;
+            }
+            ToClient::TermExit { id, text } if self.shell == Some(id) => {
+                self.close_shell(&format!("Shell: {text}"))?;
+            }
             ToClient::FileDone { ok, text, .. } => {
                 let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
                 self.notify(&t)?
@@ -434,6 +522,19 @@ impl Viewer {
 
     fn on_term(&mut self, e: Event) -> io::Result<()> {
         match e {
+            Event::Key(k) if k.kind != KeyEventKind::Release && self.shell.is_some() => self.shell_key(&k)?,
+            Event::Paste(text) if self.shell.is_some() => {
+                if let Some(id) = self.shell {
+                    self.sess.send(ToAgent::TermInput { id, data: text.into_bytes() })?;
+                }
+            }
+            Event::Resize(cols, rows) if self.shell.is_some() => {
+                if let Some(id) = self.shell {
+                    self.sess.send(ToAgent::TermResize { id, cols, rows })?;
+                }
+                self.measure();
+            }
+            Event::Mouse(_) if self.shell.is_some() => {}
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if self.prompt.is_some() {
                     return self.prompt_key(&k);
@@ -544,6 +645,8 @@ pub fn run(opt: Options) -> Result<(), String> {
         pointer: (u16::MAX, u16::MAX),
         quit: false,
         paint_ms: 0.0,
+        shell: None,
+        next_shell: 1,
     };
 
     let interactive = opt.probe.is_none();

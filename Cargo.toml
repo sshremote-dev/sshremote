@@ -6,6 +6,7 @@ description = "Remote desktop over SSH, viewed in a terminal or a window"
 license = "MIT"
 
 [dependencies]
+alacritty_terminal = { version = "0.25", default-features = false }
 arboard = { version = "3", default-features = false }
 chacha20poly1305 = "0.10"
 cpal = "0.18.2"

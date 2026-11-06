@@ -131,6 +131,26 @@ pub enum ToAgent {
         id: u32,
         tag: u32,
     },
+    /// Starts a shell on the remote host in a terminal of this size.
+    TermOpen {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    /// Keystrokes and pasted text for a shell.
+    TermInput {
+        id: u32,
+        data: Vec<u8>,
+    },
+    TermResize {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    /// Ends a shell.
+    TermClose {
+        id: u32,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -265,6 +285,16 @@ pub enum ToClient {
         size: u64,
         tag: u32,
         name: String,
+    },
+    /// What a shell wrote to its terminal.
+    TermOutput {
+        id: u32,
+        data: Vec<u8>,
+    },
+    /// A shell ended, or could not start: why.
+    TermExit {
+        id: u32,
+        text: String,
     },
 }
 
@@ -457,6 +487,27 @@ impl ToAgent {
                 b.extend_from_slice(&tag.to_le_bytes());
                 27
             }
+            ToAgent::TermOpen { id, cols, rows } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&cols.to_le_bytes());
+                b.extend_from_slice(&rows.to_le_bytes());
+                28
+            }
+            ToAgent::TermInput { id, data } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(data);
+                29
+            }
+            ToAgent::TermResize { id, cols, rows } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&cols.to_le_bytes());
+                b.extend_from_slice(&rows.to_le_bytes());
+                30
+            }
+            ToAgent::TermClose { id } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                31
+            }
         };
         (kind, b)
     }
@@ -510,6 +561,10 @@ impl ToAgent {
             },
             26 => ToAgent::FetchTagged { tag: c.u32()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             27 => ToAgent::FetchCancel { id: c.u32()?, tag: c.u32()? },
+            28 => ToAgent::TermOpen { id: c.u32()?, cols: c.u16()?, rows: c.u16()? },
+            29 => ToAgent::TermInput { id: c.u32()?, data: c.rest().to_vec() },
+            30 => ToAgent::TermResize { id: c.u32()?, cols: c.u16()?, rows: c.u16()? },
+            31 => ToAgent::TermClose { id: c.u32()? },
             _ => return Err(bad()),
         })
     }
@@ -630,6 +685,16 @@ impl ToClient {
                 b.extend_from_slice(name.as_bytes());
                 118
             }
+            ToClient::TermOutput { id, data } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(data);
+                119
+            }
+            ToClient::TermExit { id, text } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(text.as_bytes());
+                120
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -728,6 +793,8 @@ impl ToClient {
             115 => ToClient::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             116 => ToClient::Snapshot(c.rest().to_vec()),
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            119 => ToClient::TermOutput { id: c.u32()?, data: c.rest().to_vec() },
+            120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchBegin {
                 id: c.u32()?,
                 size: c.u64()?,
@@ -782,6 +849,10 @@ mod tests {
             ToAgent::FileOp { op: FileOp::Rename, path: "/tmp/a".into(), arg: "b".into() },
             ToAgent::FetchTagged { tag: 5, path: "/x".into() },
             ToAgent::FetchCancel { id: 6, tag: 5 },
+            ToAgent::TermOpen { id: 1, cols: 80, rows: 24 },
+            ToAgent::TermInput { id: 1, data: b"ls\r".to_vec() },
+            ToAgent::TermResize { id: 1, cols: 120, rows: 40 },
+            ToAgent::TermClose { id: 1 },
         ];
         for m in [
             ToClient::DirList {
@@ -794,6 +865,8 @@ mod tests {
             ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
             ToClient::OpDone { ok: false, text: "denied".into() },
             ToClient::FetchBegin { id: 3, size: 4, tag: 5, name: "d/y".into() },
+            ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
+            ToClient::TermExit { id: 1, text: "exit 0".into() },
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

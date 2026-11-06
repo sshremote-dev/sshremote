@@ -17,6 +17,7 @@ mod keys;
 mod mcp;
 mod net;
 mod proto;
+mod pty;
 mod quant;
 #[cfg(windows)]
 mod relay;
@@ -26,6 +27,7 @@ mod service;
 mod session;
 mod shot;
 mod sixel;
+mod termwin;
 mod transport;
 mod video;
 
