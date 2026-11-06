@@ -17,7 +17,7 @@ use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
 const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
-p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v active window/screen | w Win | r refresh";
+p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v share window/app/screen | w Win | r refresh";
 
 struct Viewer {
     out: Box<dyn Write>,
@@ -62,8 +62,10 @@ struct Viewer {
     /// The remote shell shown instead of the picture, while open.
     shell: Option<u32>,
     next_shell: u32,
-    /// Whether one window is shared instead of the screen.
-    window_only: bool,
+    /// What is shared: kind as in `Share` (0 the whole screen) and a description.
+    sharing: (u8, String),
+    /// The shareable windows, while the chooser is open (or why there is no list).
+    share_list: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
 }
 
 impl Viewer {
@@ -209,6 +211,7 @@ impl Viewer {
             let what = match kind {
                 'c' => "message",
                 'g' => "remote path to download",
+                'v' => "share (number, A+number, a, p, or Enter for the whole screen)",
                 _ => "local file to send",
             };
             format!(" {what} (Enter sends, Esc cancels)> {buf}_ ")
@@ -223,6 +226,12 @@ impl Viewer {
             )
         } else if self.win_next {
             " Win+: press a key (Space: Win alone) ".to_string()
+        } else if self.sharing.0 != 0 {
+            format!(
+                " SHARING {} (Ctrl+] v: whole screen) | {} ",
+                self.sharing.1,
+                self.ctl.status(&self.label, self.fb.w, self.fb.h)
+            )
         } else {
             format!(
                 " {} | paint {:.1} ms | Ctrl+] menu ",
@@ -326,9 +335,15 @@ impl Viewer {
             }
             't' => self.open_shell(),
             'v' => {
-                let kind = if self.window_only { 0 } else { 3 };
-                self.sess.send(ToAgent::Share { kind, id: 0 })?;
-                self.notify(if kind == 3 { "Sharing the active window..." } else { "Sharing the whole screen..." })
+                // Sharing part of the screen: the same key leads straight back to all of it.
+                if self.sharing.0 != 0 {
+                    self.sess.send(ToAgent::Share { kind: 0, id: 0 })?;
+                    return self.notify("Sharing the whole screen...");
+                }
+                self.share_list = None;
+                self.sess.send(ToAgent::ListWindows)?;
+                self.prompt = Some(('v', String::new()));
+                self.draw_share_list()
             }
             'c' | 'g' | 'l' => {
                 self.prompt = Some((c, String::new()));
@@ -421,7 +436,13 @@ impl Viewer {
             KeyCode::Backspace => {
                 buf.pop();
             }
-            KeyCode::Esc => self.prompt = None,
+            KeyCode::Esc => {
+                if matches!(self.prompt, Some(('v', _))) {
+                    self.prompt = None;
+                    return self.close_share_list().and_then(|_| self.status());
+                }
+                self.prompt = None
+            }
             KeyCode::Enter => {
                 let (kind, text) = (*kind, buf.trim().to_string());
                 self.prompt = None;
@@ -434,8 +455,72 @@ impl Viewer {
         self.status()
     }
 
+    /// The share chooser drawn over the picture: what can be shared, by number.
+    fn draw_share_list(&mut self) -> io::Result<()> {
+        let mut lines = vec![
+            " Share: type a number, a, p or nothing, then Enter (Esc cancels) ".to_string(),
+            "   Enter  the whole screen".to_string(),
+            "   a      the active window".to_string(),
+            "   p      the active application (every window of it)".to_string(),
+        ];
+        match &self.share_list {
+            None => lines.push("   ...asking the SSH host for its windows".into()),
+            Some(Err(e)) => lines.push(format!("   ({e})")),
+            Some(Ok(list)) => {
+                for (i, w) in list.iter().enumerate() {
+                    lines.push(format!("   {:<6} {}: {}  {}x{}", i + 1, w.app, w.title, w.w, w.h));
+                }
+                if !list.is_empty() {
+                    lines.push(
+                        "   A number shares that window; A and a number (A3) shares its whole application.".into(),
+                    );
+                }
+            }
+        }
+        let width = self.cols.min(100);
+        let mut out = String::new();
+        for (i, l) in lines.iter().take(self.rows.saturating_sub(2)).enumerate() {
+            let l: String = l.chars().take(width).collect();
+            let pad = width.saturating_sub(l.chars().count());
+            out.push_str(&format!("\x1b[{};1H\x1b[0;48;5;236;97m{l}{}\x1b[0m", i + 1, " ".repeat(pad)));
+        }
+        self.out.write_all(out.as_bytes())?;
+        self.status()
+    }
+
+    /// Ends the chooser: the picture under the list is painted again.
+    fn close_share_list(&mut self) -> io::Result<()> {
+        self.share_list = None;
+        self.dirty.clear();
+        self.full_redraw()?;
+        self.sess.send(ToAgent::Refresh)
+    }
+
     fn run_prompt(&mut self, kind: char, text: String) -> io::Result<()> {
         match kind {
+            'v' => {
+                let t = text.trim().to_string();
+                let list = match &self.share_list {
+                    Some(Ok(l)) => l.clone(),
+                    _ => Vec::new(),
+                };
+                let pick = |n: &str| n.parse::<usize>().ok().and_then(|i| list.get(i.wrapping_sub(1))).map(|w| w.id);
+                let (kind, id) = match t.as_str() {
+                    "" => (0, 0),
+                    "a" => (3, 0),
+                    "p" => (4, 0),
+                    n if n.starts_with(['A', 'P']) => match pick(&n[1..]) {
+                        Some(id) => (2, id),
+                        None => return self.close_share_list().and_then(|_| self.notify(&format!("No window {n}"))),
+                    },
+                    n => match pick(n) {
+                        Some(id) => (1, id),
+                        None => return self.close_share_list().and_then(|_| self.notify(&format!("No window {n}"))),
+                    },
+                };
+                self.close_share_list()?;
+                self.sess.send(ToAgent::Share { kind, id })
+            }
             'c' => {
                 self.sess.send(ToAgent::Chat(text.clone()))?;
                 self.notify(&format!("You: {text}"))
@@ -498,8 +583,14 @@ impl Viewer {
                 self.monitors = (list.len(), current as usize);
             }
             ToClient::Sharing { kind, text } => {
-                self.window_only = kind != 0;
-                self.notify(&format!("Sharing {text}"))?
+                self.notify(&format!("Sharing {text}"))?;
+                self.sharing = (kind, text);
+            }
+            ToClient::WindowList { list, error } => {
+                self.share_list = Some(if error.is_empty() { Ok(list) } else { Err(error) });
+                if matches!(self.prompt, Some(('v', _))) {
+                    self.draw_share_list()?;
+                }
             }
             ToClient::TermOutput { id, data } if self.shell == Some(id) => {
                 self.out.write_all(&data)?;
@@ -661,7 +752,8 @@ pub fn run(opt: Options) -> Result<(), String> {
         paint_ms: 0.0,
         shell: None,
         next_shell: 1,
-        window_only: false,
+        sharing: (0, String::new()),
+        share_list: None,
     };
 
     let interactive = opt.probe.is_none();

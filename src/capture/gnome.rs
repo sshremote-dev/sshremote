@@ -764,9 +764,8 @@ impl Capture for Gnome {
         if let Some(a) = self.app.as_mut() {
             match &ev {
                 Input::Move { x, y } => a.inside = a.shown.iter().any(|r| r.contains(*x as i32, *y as i32)),
-                Input::Button { pressed: true, .. } | Input::Scroll { .. } | Input::HScroll { .. } if !a.inside => {
-                    return Ok(());
-                }
+                Input::Button { pressed: true, .. } if !a.inside => return Err(super::OUTSIDE.into()),
+                Input::Scroll { .. } | Input::HScroll { .. } if !a.inside => return Ok(()),
                 Input::Key { .. } | Input::KeyState { down: true, .. } if !a.focused => {
                     return Err("keys go only to the shared program; click it first".into());
                 }

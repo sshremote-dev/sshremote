@@ -9,7 +9,7 @@ use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows_sys::Win32::Foundation::HWND;
 
-use super::{Outcome, clip, short_role};
+use super::{Outcome, Scope, clip, short_role};
 use crate::capture::winlist;
 use crate::proto::{
     ToClient, UI_CHECKED, UI_DISABLED, UI_EDITABLE, UI_EXPANDED, UI_FOCUSED, UI_SELECTED, UiAction, UiElem,
@@ -20,6 +20,8 @@ pub struct Ui {
     /// The elements of the last listing, by number - 1, with their centre in captured pixels.
     elems: Vec<(UIElement, i32, i32)>,
     size: (usize, usize),
+    /// A window or program is shared: only it is listed and operated.
+    scoped: Option<Scope>,
 }
 
 fn interactive(ct: ControlType) -> bool {
@@ -54,7 +56,25 @@ fn err(e: uiautomation::Error) -> String {
 
 impl Ui {
     pub fn new() -> Self {
-        Ui { auto: None, elems: Vec::new(), size: (0, 0) }
+        Ui { auto: None, elems: Vec::new(), size: (0, 0), scoped: None }
+    }
+
+    /// Windows knows what is shared from the capture; nothing to remember here.
+    pub fn pin(&mut self, _: u8) {}
+
+    /// The window to list: the shared one, the shared program's front window, or the one in front.
+    fn target(scope: &Scope) -> HWND {
+        let front = winlist::foreground();
+        if let Some(w) = scope.window {
+            return w as HWND;
+        }
+        if let Some(exe) = &scope.app {
+            if winlist::exe_of(winlist::pid_of(front)).eq_ignore_ascii_case(exe) {
+                return front;
+            }
+            return winlist::top_window_of(exe).unwrap_or(front);
+        }
+        front
     }
 
     fn auto(&mut self) -> Result<&UIAutomation, String> {
@@ -70,19 +90,32 @@ impl Ui {
         &mut self,
         origin: (i32, i32),
         size: (usize, usize),
-        shared: Option<u64>,
+        scope: &Scope,
         text: bool,
         max: usize,
     ) -> ToClient {
-        let hwnd = shared.map(|h| h as HWND).unwrap_or_else(winlist::foreground);
+        let hwnd = Self::target(scope);
         let title = winlist::title_of(hwnd);
-        let windows: Vec<(u64, String)> = winlist::shareable()
-            .into_iter()
-            .filter(|w| w.id != hwnd as u64)
-            .take(20)
-            .map(|w| (w.id, clip(&format!("{}: {}", w.app, w.title), 60)))
-            .collect();
+        // While one window is shared there is nothing else to go to; a shared program offers its own windows.
+        let windows: Vec<(u64, String)> = if scope.window.is_some() {
+            Vec::new()
+        } else {
+            winlist::shareable()
+                .into_iter()
+                .filter(|w| w.id != hwnd as u64)
+                .filter(|w| {
+                    scope
+                        .app
+                        .as_ref()
+                        .is_none_or(|exe| winlist::exe_of(winlist::pid_of(w.id as HWND)).eq_ignore_ascii_case(exe))
+                })
+                .take(20)
+                .map(|w| (w.id, clip(&format!("{}: {}", w.app, w.title), 60)))
+                .collect()
+        };
         self.size = size;
+        self.scoped = (scope.window.is_some() || scope.app.is_some())
+            .then(|| Scope { window: scope.window, app: scope.app.clone() });
         let (elems, more, note) = match self.list(hwnd, origin, text, max) {
             Ok((e, m)) => (e, m, String::new()),
             Err(e) => (Vec::new(), 0, e),
@@ -133,12 +166,16 @@ impl Ui {
             if r.get_width() <= 0 || r.get_height() <= 0 {
                 continue;
             }
+            let cx = (r.get_left() + r.get_right()) / 2 - origin.0;
+            let cy = (r.get_top() + r.get_bottom()) / 2 - origin.1;
+            // Sharing part of the screen: what lies outside it is not offered.
+            if self.scoped.is_some() && !self.on_screen(cx, cy) {
+                continue;
+            }
             if out.len() >= max {
                 more += 1;
                 continue;
             }
-            let cx = (r.get_left() + r.get_right()) / 2 - origin.0;
-            let cy = (r.get_top() + r.get_bottom()) / 2 - origin.1;
             let get_bool =
                 |p: UIProperty| e.get_cached_property_value(p).ok().and_then(|v| v.try_into().ok()).unwrap_or(false);
             let get_i32 =
@@ -202,12 +239,22 @@ impl Ui {
             if !winlist::exists(hwnd) {
                 return Err("no such window; call state again".into());
             }
+            if let Some(s) = &self.scoped {
+                let same_app =
+                    s.app.as_ref().is_some_and(|exe| winlist::exe_of(winlist::pid_of(hwnd)).eq_ignore_ascii_case(exe));
+                if !same_app {
+                    return Err("only the shared window or program can be used; share the whole screen first".into());
+                }
+            }
             winlist::raise(hwnd);
             return Ok(Outcome::Done(format!("brought \"{}\" to the front", winlist::title_of(hwnd))));
         }
         let (e, x, y) =
             self.elems.get((target as usize).wrapping_sub(1)).cloned().ok_or("no such element; call state again")?;
         let here = self.on_screen(x, y);
+        if self.scoped.is_some() && !here {
+            return Err("that control is outside the shared window; share the whole screen first".into());
+        }
         match act {
             UiAction::Click | UiAction::DoubleClick | UiAction::RightClick if here => Ok(Outcome::ClickAt {
                 x: x as f64,

@@ -77,6 +77,9 @@ impl Share {
     }
 }
 
+/// What a click outside the shared window or program answers, so the viewer can tell the way out.
+pub const OUTSIDE: &str = "That is outside the shared window. To reach other windows, share the whole screen (the Share button, or Ctrl+] v in a terminal).";
+
 /// Shown in the window chooser when GNOME Shell lacks the sshremote helper; the viewer offers to install it.
 pub const NEEDS_HELPER: &str =
     "Picking from a list on GNOME needs the sshremote helper, a small GNOME Shell extension.";
@@ -127,6 +130,10 @@ pub trait Capture {
     }
     /// The shared window, if one is shared on its own (an id as in `WindowInfo`).
     fn shared_window(&self) -> Option<u64> {
+        None
+    }
+    /// The shared program's file, if a whole program is shared (Windows).
+    fn shared_app(&self) -> Option<String> {
         None
     }
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String>;

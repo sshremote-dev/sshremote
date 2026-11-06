@@ -7,7 +7,7 @@ use std::time::Duration;
 use zbus::blocking::{Connection, Proxy, connection};
 use zbus::zvariant::OwnedObjectPath;
 
-use super::{Outcome, clip, short_role};
+use super::{Outcome, Scope, clip, short_role};
 use crate::proto::{
     ToClient, UI_CHECKED, UI_DISABLED, UI_EDITABLE, UI_EXPANDED, UI_FOCUSED, UI_SELECTED, UiAction, UiElem,
 };
@@ -36,6 +36,8 @@ pub struct Ui {
     windows: Vec<Ref>,
     /// Applications were asked to expose their content (Chrome and Electron wait for that).
     enabled: bool,
+    /// While a window or program is shared: that window, or that application, as it was in front then.
+    pinned: Option<(Ref, Option<Ref>)>,
 }
 
 fn err(e: zbus::Error) -> String {
@@ -77,7 +79,27 @@ fn informative(role: &str) -> bool {
 
 impl Ui {
     pub fn new() -> Self {
-        Ui { conn: None, elems: Vec::new(), windows: Vec::new(), enabled: false }
+        Ui { conn: None, elems: Vec::new(), windows: Vec::new(), enabled: false, pinned: None }
+    }
+
+    /// Follows what is shared: 1 and 3 a window, 2 and 4 a program, 0 the whole screen.
+    pub fn pin(&mut self, kind: u8) {
+        self.pinned = None;
+        if kind == 0 {
+            return;
+        }
+        let Ok(conn) = self.conn().cloned() else { return };
+        let root: Ref =
+            ("org.a11y.atspi.Registry".into(), OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root").unwrap());
+        for app in Self::children(&conn, &root) {
+            for frame in Self::children(&conn, &app) {
+                if Self::states(&conn, &frame) & ACTIVE != 0 {
+                    let window = matches!(kind, 1 | 3).then_some(frame);
+                    self.pinned = Some((app, window));
+                    return;
+                }
+            }
+        }
     }
 
     fn conn(&mut self) -> Result<&Connection, String> {
@@ -130,7 +152,7 @@ impl Ui {
             .unwrap_or_default()
     }
 
-    pub fn state(&mut self, _: (i32, i32), _: (usize, usize), _: Option<u64>, text: bool, max: usize) -> ToClient {
+    pub fn state(&mut self, _: (i32, i32), _: (usize, usize), _: &Scope, text: bool, max: usize) -> ToClient {
         match self.list(text, max) {
             Ok(t) => t,
             Err(note) => {
@@ -146,9 +168,14 @@ impl Ui {
         // Every application's top-level windows; the active one is listed in full.
         let mut active: Option<Ref> = None;
         let mut windows = Vec::new();
+        let pinned = self.pinned.clone();
         for app in Self::children(&conn, &root) {
             // The shell's own panels and overlays are not application windows.
             if Self::name(&conn, &app) == "gnome-shell" {
+                continue;
+            }
+            // Sharing a program: only its windows.
+            if pinned.as_ref().is_some_and(|p| p.0 != app) {
                 continue;
             }
             for frame in Self::children(&conn, &app) {
@@ -163,6 +190,11 @@ impl Ui {
         // Nothing marked active (no focus yet): the most recently opened window on screen.
         if active.is_none() {
             active = windows.pop();
+        }
+        // Sharing one window: that window, and nothing else to go to.
+        if let Some((_, Some(w))) = &pinned {
+            active = Some(w.clone());
+            windows.clear();
         }
         let names: Vec<(u64, String)> = windows
             .iter()

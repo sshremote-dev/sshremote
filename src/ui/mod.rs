@@ -15,6 +15,12 @@ pub use atspi::Ui;
 #[cfg(windows)]
 pub use win::Ui;
 
+/// What is shared, as the capture knows it (Windows); GNOME pins its own when sharing starts.
+pub struct Scope {
+    pub window: Option<u64>,
+    pub app: Option<String>,
+}
+
 /// What the agent still has to do after the accessibility side did its part.
 pub enum Outcome {
     Done(String),
@@ -70,14 +76,8 @@ impl Ui {
     pub fn new() -> Self {
         Ui
     }
-    pub fn state(
-        &mut self,
-        _: (i32, i32),
-        _: (usize, usize),
-        _: Option<u64>,
-        _: bool,
-        _: usize,
-    ) -> crate::proto::ToClient {
+    pub fn pin(&mut self, _: u8) {}
+    pub fn state(&mut self, _: (i32, i32), _: (usize, usize), _: &Scope, _: bool, _: usize) -> crate::proto::ToClient {
         crate::proto::ToClient::UiTree {
             title: String::new(),
             windows: Vec::new(),

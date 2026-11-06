@@ -285,6 +285,13 @@ impl Capture for Gdi {
         }
     }
 
+    fn shared_app(&self) -> Option<String> {
+        match &self.scope {
+            Scope::App(exe) => Some(exe.clone()),
+            _ => None,
+        }
+    }
+
     fn monitors(&self) -> Vec<Monitor> {
         self.screens.iter().map(|s| s.info.clone()).collect()
     }
@@ -401,11 +408,8 @@ impl Capture for Gdi {
                 Input::Move { x, y } => {
                     self.pointer_inside = self.shown.iter().any(|r| r.contains(*x as i32, *y as i32));
                 }
-                Input::Button { pressed: true, .. } | Input::Scroll { .. } | Input::HScroll { .. }
-                    if !self.pointer_inside =>
-                {
-                    return Ok(());
-                }
+                Input::Button { pressed: true, .. } if !self.pointer_inside => return Err(super::OUTSIDE.into()),
+                Input::Scroll { .. } | Input::HScroll { .. } if !self.pointer_inside => return Ok(()),
                 Input::Key { .. } | Input::KeyState { down: true, .. } if !winlist::focus_inside(&self.scope) => {
                     return Err("keys go only to the shared window; click it first".into());
                 }

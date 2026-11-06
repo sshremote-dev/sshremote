@@ -151,6 +151,12 @@ recorded by Mutter on its own (its content shows even when covered), and an appl
 the monitor picture. In a terminal viewer `Ctrl+] v` switches between the focused window and the whole
 screen; MCP has `windows` and `share`.
 
+While part of the screen is shared, a click outside it is answered with a notice that says how to get
+back to the whole screen, and the terminal viewer's status line shows what is shared. In a terminal
+viewer `Ctrl+] v` opens the same chooser as a numbered list over the picture (a number shares a
+window, `A` and a number its whole application, `a` and `p` the active window or application, Enter
+the whole screen); while something is shared, `Ctrl+] v` goes straight back to the whole screen.
+
 ## Viewing modes, screenshots and saving traffic
 
 The View menu fits the SSH host's screen to the window (proportions kept), stretches it to fill the
@@ -191,8 +197,10 @@ works from text and looks at pictures only when it has to.
   where controls are, controls are pressed and filled through AT-SPI's actions and text interfaces.
 - `screenshot` (1024 px wide by default, a `region` to zoom in), `click`, `move`, `drag`, `type`,
   `key`, `scroll` and `wait` are for what has no text: pictures, charts, canvas apps and games.
-- `monitors`, `select_monitor`, `windows` and `share` choose what is looked at; sharing one window
-  makes screenshots smaller. `clipboard_get` and `clipboard_set` reach the remote clipboard.
+- `monitors`, `select_monitor`, `windows` and `share` choose what is looked at. While a window or a
+  program is shared, `state` lists only it, controls outside it are left out, `focus_window` offers
+  only that program's windows, and screenshots cover only it, so every call costs fewer tokens and
+  nothing outside it is operated. `clipboard_get` and `clipboard_set` reach the remote clipboard.
 
 The picture stream stays paused; coordinates passed to the tools are in the latest screenshot's
 pixels and are mapped back to the screen by the server. On GNOME the first `state` switches on the
@@ -237,7 +245,7 @@ sshremote HOST --probe 5 --dump out.ppm   # headless: print traffic, save the re
 
 Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`/`-` scale, `f` fps,
 `z` zoom (enlarge a reduced capture to the terminal; off by default inside an ssh session, where the
-terminal output itself crosses the network), `t` remote shell, `v` active window or whole screen,
+terminal output itself crosses the network), `t` remote shell, `v` share a window, an application or the whole screen,
 `r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
 
 | Key | Resolution | Colours | fps |

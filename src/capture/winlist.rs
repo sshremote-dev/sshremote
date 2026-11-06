@@ -244,6 +244,11 @@ pub fn title_of(hwnd: HWND) -> String {
     text(hwnd)
 }
 
+/// The program's window nearest the top of the stack.
+pub fn top_window_of(exe: &str) -> Option<HWND> {
+    z_order().into_iter().find(|w| !w.transient && exe_of(w.pid).eq_ignore_ascii_case(exe)).map(|w| w.hwnd)
+}
+
 pub fn foreground() -> HWND {
     unsafe { GetForegroundWindow() }
 }

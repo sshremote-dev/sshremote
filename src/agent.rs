@@ -101,6 +101,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut inbox = crate::files::Inbox::default();
     let mut terms = crate::pty::Terms::default();
     let mut ui = crate::ui::Ui::new();
+    let mut told_outside = Instant::now() - Duration::from_secs(60);
     // Keys an accessibility action leaves to be typed, handled like the viewer's own.
     let mut queued: Vec<ToAgent> = Vec::new();
     let mut outbox = crate::files::Outbox::default();
@@ -199,7 +200,17 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     let sy = (y as f64 + 0.5) * desk.1 as f64 / img.1.max(1) as f64;
                     report(cap.input(Input::Move { x: sx, y: sy }));
                 }
-                ToAgent::Button { button, pressed } => report(cap.input(Input::Button { button, pressed })),
+                ToAgent::Button { button, pressed } => {
+                    // A click the shared window does not take: say once in a while how to get out.
+                    if let Err(e) = cap.input(Input::Button { button, pressed }) {
+                        if e == crate::capture::OUTSIDE && told_outside.elapsed() > Duration::from_secs(4) {
+                            told_outside = Instant::now();
+                            send(enc, &ToClient::Notice(e)).map_err(io_err)?;
+                        } else {
+                            report(Err(e));
+                        }
+                    }
+                }
                 ToAgent::Scroll { steps } => report(cap.input(Input::Scroll { steps: steps as i32 })),
                 ToAgent::HScroll { steps } => report(cap.input(Input::HScroll { steps: steps as i32 })),
                 ToAgent::KeyState { keysym, down } => report(cap.input(Input::KeyState { keysym, down })),
@@ -286,8 +297,8 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     send(enc, &m).map_err(io_err)?;
                 }
                 ToAgent::UiState { text, max } => {
-                    let tree =
-                        ui.state(cap.origin(), cap.desktop_size(), cap.shared_window(), text, max.max(1) as usize);
+                    let scope = crate::ui::Scope { window: cap.shared_window(), app: cap.shared_app() };
+                    let tree = ui.state(cap.origin(), cap.desktop_size(), &scope, text, max.max(1) as usize);
                     send(enc, &tree).map_err(io_err)?;
                 }
                 ToAgent::UiAct { target, act, text } => {
@@ -347,6 +358,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     match cap.share(scope) {
                         Ok(text) => {
                             send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
+                            ui.pin(kind);
                             desk = cap.desktop_size();
                             announce(enc, cap.as_mut(), desk, settings, &mut size)?;
                             (prev, last) = (None, None);
@@ -378,7 +390,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         // The choice made in the desktop's sharing dialog, even while the picture is paused.
         match cap.poll_share() {
-            Some(Ok((kind, text))) => send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?,
+            Some(Ok((kind, text))) => {
+                send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
+                ui.pin(kind);
+            }
             Some(Err(e)) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
             None => {}
         }
