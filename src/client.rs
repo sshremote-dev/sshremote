@@ -384,8 +384,12 @@ pub fn run(opt: Options) -> Result<(), String> {
     let keys_total = typing.len();
     let mut next_key = Instant::now() + Duration::from_secs(2);
     let mut type_start = (0u64, 0u32);
+    let mut inbox = crate::files::Inbox::default();
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
+        if let Some(path) = &opt.probe_fetch {
+            v.sess.send(ToAgent::Fetch { path: path.clone() })?;
+        }
         if let Some(path) = &opt.probe_send {
             let data = std::fs::read(path)?;
             let name =
@@ -401,6 +405,23 @@ pub fn run(opt: Options) -> Result<(), String> {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
                 Ok(Ev::Net(ToClient::Pong(t))) => v.ctl.pong(t),
                 Ok(Ev::Net(ToClient::FileDone { ok, text, .. })) => eprintln!("probe: upload ok={ok} {text}"),
+                Ok(Ev::Net(ToClient::FetchStart { id, size, name })) => {
+                    if let Some(crate::files::Note::Done { text, .. }) = inbox.start(id, size, &name) {
+                        eprintln!("probe: download {name}: {text}");
+                    }
+                }
+                Ok(Ev::Net(ToClient::FetchData { id, data })) => {
+                    if let Some(crate::files::Note::Progress { id, received }) = inbox.data(id, &data) {
+                        v.sess.send(ToAgent::FetchAck { id, received })?;
+                    }
+                }
+                Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
+                    if let Some(crate::files::Note::Done { ok, text, .. }) = inbox.end(id, ok, &text) {
+                        eprintln!("probe: download ok={ok} {text}");
+                    } else {
+                        eprintln!("probe: download failed: {text}");
+                    }
+                }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     failure = Some(e);
                     break;

@@ -149,6 +149,43 @@ struct Remote {
     grab_keys: bool,
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
+    inbox: crate::files::Inbox,
+    /// Downloads in progress: id and name.
+    downloads: Vec<(u32, String)>,
+    panel: Option<Panel>,
+}
+
+/// The remote file browser.
+struct Panel {
+    path: String,
+    typed: String,
+    entries: Vec<crate::proto::DirEntry>,
+    error: String,
+    selected: Option<usize>,
+    hidden: bool,
+}
+
+impl Panel {
+    fn sep(&self) -> char {
+        if self.path.contains('\\') && !self.path.contains('/') { '\\' } else { '/' }
+    }
+
+    fn child(&self, name: &str) -> String {
+        let sep = self.sep();
+        if self.path.ends_with(sep) { format!("{}{name}", self.path) } else { format!("{}{sep}{name}", self.path) }
+    }
+
+    fn parent(&self) -> String {
+        let sep = self.sep();
+        let trimmed = self.path.trim_end_matches(sep);
+        match trimmed.rfind(sep) {
+            Some(0) => sep.to_string(),
+            // "C:" needs its separator to mean the drive root.
+            Some(i) if trimmed[..i].ends_with(':') => format!("{}{sep}", &trimmed[..i]),
+            Some(i) => trimmed[..i].to_string(),
+            None => self.path.clone(),
+        }
+    }
 }
 
 /// A file being sent to the remote Downloads folder.
@@ -299,6 +336,7 @@ impl App {
             probe_type: String::new(),
             probe_scroll: 0,
             probe_send: None,
+            probe_fetch: None,
         }
     }
 
@@ -441,6 +479,9 @@ impl eframe::App for App {
                         grab_keys: true,
                         uploads: std::collections::VecDeque::new(),
                         next_upload: 1,
+                        inbox: crate::files::Inbox::default(),
+                        downloads: Vec::new(),
+                        panel: None,
                     })));
                 }
                 Ok(Err(e)) => {
@@ -530,8 +571,10 @@ impl Remote {
         self.resize(area.size() * ppp)?;
         let shown = self.picture(ui, area, ppp);
         let toolbar_rect = self.toolbar(&ctx, screen)?;
+        let panel_rect = self.file_panel(&ctx)?;
         self.upload_overlay(&ctx, screen);
-        self.input(&ctx, shown, toolbar_rect)?;
+        let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(panel_rect).collect();
+        self.input(&ctx, shown, &ui_rects)?;
         if ctx.input(|i| i.key_pressed(Key::F11)) {
             self.set_fullscreen(&ctx, !self.fullscreen);
         }
@@ -559,6 +602,44 @@ impl Remote {
                     if let Some(u) = self.uploads.iter_mut().find(|u| u.id == id) {
                         u.acked = received;
                     }
+                }
+                Ok(Ev::Net(ToClient::DirList { path, entries, error })) => {
+                    let p = self.panel.get_or_insert_with(|| Panel {
+                        path: String::new(),
+                        typed: String::new(),
+                        entries: Vec::new(),
+                        error: String::new(),
+                        selected: None,
+                        hidden: false,
+                    });
+                    (p.typed, p.path, p.entries, p.error, p.selected) = (path.clone(), path, entries, error, None);
+                }
+                Ok(Ev::Net(ToClient::FetchStart { id, size, name })) => {
+                    if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
+                        self.notify(&format!("{name}: {text}"));
+                    } else {
+                        self.downloads.push((id, name));
+                    }
+                }
+                Ok(Ev::Net(ToClient::FetchData { id, data })) => match self.inbox.data(id, &data) {
+                    Some(crate::files::Note::Progress { id, received }) => {
+                        self.send(ToAgent::FetchAck { id, received })?
+                    }
+                    Some(crate::files::Note::Done { text, .. }) => {
+                        self.downloads.retain(|d| d.0 != id);
+                        self.notify(&text);
+                    }
+                    None => {}
+                },
+                Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
+                    let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
+                    self.downloads.retain(|d| d.0 != id);
+                    let msg = match self.inbox.end(id, ok, &text) {
+                        Some(crate::files::Note::Done { ok: true, text, .. }) => format!("Downloaded {name} to {text}"),
+                        Some(crate::files::Note::Done { text, .. }) => format!("{name} failed: {text}"),
+                        _ => format!("Download failed: {text}"),
+                    };
+                    self.notify(&msg);
                 }
                 Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
                     let name = self.uploads.iter().find(|u| u.id == id).map(|u| u.name.clone()).unwrap_or_default();
@@ -589,24 +670,34 @@ impl Remote {
             if path.as_os_str().is_empty() {
                 continue;
             }
-            if path.is_dir() {
-                self.notify("Folders cannot be sent yet; drop the files inside");
-                continue;
-            }
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-            let file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    self.notify(&format!("{name}: {e}"));
-                    continue;
-                }
-            };
-            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let id = self.next_upload;
-            self.next_upload += 1;
-            self.send(ToAgent::FileStart { id, size, name: name.clone() })?;
-            self.uploads.push_back(Upload { id, name, file, size, sent: 0, acked: 0, ended: false });
+            let mut files = Vec::new();
+            if path.is_dir() {
+                // The folder is recreated on the remote host, "name/sub/file".
+                crate::files::walk(&path, &name, &mut files);
+            } else {
+                files.push((path, name));
+            }
+            for (path, name) in files {
+                self.queue_upload(&path, name)?;
+            }
         }
+        Ok(())
+    }
+
+    fn queue_upload(&mut self, path: &std::path::Path, name: String) -> Result<(), String> {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.notify(&format!("{name}: {e}"));
+                return Ok(());
+            }
+        };
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let id = self.next_upload;
+        self.next_upload += 1;
+        self.send(ToAgent::FileStart { id, size, name: name.clone() })?;
+        self.uploads.push_back(Upload { id, name, file, size, sent: 0, acked: 0, ended: false });
         Ok(())
     }
 
@@ -631,6 +722,87 @@ impl Remote {
         }
     }
 
+    /// The remote file browser; returns its rectangle while open.
+    fn file_panel(&mut self, ctx: &egui::Context) -> Result<Option<Rect>, String> {
+        let Some(p) = self.panel.as_mut() else { return Ok(None) };
+        let mut request: Option<ToAgent> = None;
+        let mut open = true;
+        let resp = egui::Window::new("Remote files")
+            .open(&mut open)
+            .default_pos(ctx.content_rect().right_top() + Vec2::new(-440.0, 70.0))
+            .default_size([420.0, 480.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Up").clicked() {
+                        request = Some(ToAgent::ListDir { path: p.parent() });
+                    }
+                    if ui.button("Home").clicked() {
+                        request = Some(ToAgent::ListDir { path: String::new() });
+                    }
+                    let edit = ui.add(egui::TextEdit::singleline(&mut p.typed).desired_width(f32::INFINITY));
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        request = Some(ToAgent::ListDir { path: p.typed.clone() });
+                    }
+                });
+                if !p.error.is_empty() {
+                    ui.colored_label(Color32::from_rgb(240, 110, 100), &p.error);
+                }
+                let selected = p.selected.and_then(|i| p.entries.get(i));
+                let label = match selected {
+                    Some(e) if e.dir => format!("Download folder {}", e.name),
+                    Some(e) => format!("Download {}", e.name),
+                    None => "Select a file or folder".into(),
+                };
+                if ui.add_enabled(selected.is_some(), egui::Button::new(label).fill(ACCENT)).clicked()
+                    && let Some(e) = selected
+                {
+                    request = Some(ToAgent::Fetch { path: p.child(&e.name) });
+                }
+                let hint = "Downloads go to this PC's Downloads folder. Drop files or folders on the window to upload.";
+                ui.label(RichText::new(hint).small().color(Color32::GRAY));
+                ui.separator();
+                ui.checkbox(&mut p.hidden, "Show hidden files");
+                let mut clicked = None;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (i, e) in p.entries.iter().enumerate() {
+                        if !p.hidden && e.name.starts_with('.') {
+                            continue;
+                        }
+                        let icon = if e.dir { "📁" } else { "📄" };
+                        let size = if e.dir { String::new() } else { human(e.size) };
+                        ui.horizontal(|ui| {
+                            let r = ui.selectable_label(p.selected == Some(i), format!("{icon} {}", e.name));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(size).color(Color32::GRAY));
+                            });
+                            if r.clicked() {
+                                clicked = Some(i);
+                            }
+                            if r.double_clicked() {
+                                request = Some(if e.dir {
+                                    ToAgent::ListDir { path: p.child(&e.name) }
+                                } else {
+                                    ToAgent::Fetch { path: p.child(&e.name) }
+                                });
+                            }
+                        });
+                    }
+                });
+                if clicked.is_some() {
+                    p.selected = clicked;
+                }
+            });
+        let rect = resp.map(|r| r.response.rect);
+        if !open {
+            self.panel = None;
+        }
+        if let Some(m) = request {
+            self.send(m)?;
+        }
+        Ok(rect)
+    }
+
     /// Progress of uploads and the drop hint, bottom left over the remote screen.
     fn upload_overlay(&self, ctx: &egui::Context, screen: Rect) {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
@@ -639,6 +811,11 @@ impl Remote {
             .iter()
             .map(|u| format!("Sending {}  {}%", u.name, if u.size == 0 { 100 } else { u.acked * 100 / u.size }))
             .collect();
+        for (id, name) in &self.downloads {
+            if let Some((got, size)) = self.inbox.received(*id) {
+                lines.push(format!("Receiving {name}  {}%", if size == 0 { 100 } else { got * 100 / size }));
+            }
+        }
         if hovering {
             lines.push("Drop to send to the remote Downloads folder".into());
         }
@@ -756,12 +933,12 @@ impl Remote {
         Ok(())
     }
 
-    fn input(&mut self, ctx: &egui::Context, shown: Option<Rect>, toolbar: Option<Rect>) -> Result<(), String> {
+    fn input(&mut self, ctx: &egui::Context, shown: Option<Rect>, ui_rects: &[Rect]) -> Result<(), String> {
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.focused));
         if !focused {
             return self.release_all();
         }
-        let over_toolbar = |p: Pos2| toolbar.is_some_and(|t| t.contains(p));
+        let over_toolbar = |p: Pos2| ui_rects.iter().any(|t| t.contains(p));
         // Keys go to the remote unless a toolbar widget (a slider, a menu) has focus.
         let local = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open();
         if let Some(rect) = shown {
@@ -903,9 +1080,11 @@ impl Remote {
 
     fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
         ui.label(RichText::new("●").color(Color32::from_rgb(80, 200, 120)));
-        ui.label(RichText::new(&self.label).strong());
+        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        ui.label(RichText::new(host).strong()).on_hover_text(&self.label);
         ui.separator();
-        ui.menu_button(format!("Quality: {}", self.ctl.preset_label()), |ui| {
+        let quality = self.ctl.preset_label().replace(" crisp", "").replace(" exact", "").replace(" balanced", "");
+        ui.menu_button(format!("Quality: {quality}"), |ui| {
             if ui.button("Auto").clicked() {
                 *action = Some(Box::new(|r, _| r.menu('a')));
                 ui.close();
@@ -976,34 +1155,28 @@ impl Remote {
                 ui.close();
             }
         });
-        let clip = if self.share_clipboard { "Clipboard: on" } else { "Clipboard: off" };
-        if ui.button(clip).on_hover_text("Share copied text both ways").clicked() {
+        ui.toggle_value(&mut self.share_clipboard, "Clipboard").on_hover_text("Share copied text both ways");
+        if cfg!(windows) {
+            let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
+            ui.toggle_value(&mut self.grab_keys, "System keys").on_hover_text(tip);
+        }
+        let files_tip = "Browse and download remote files; drop files or folders on the window to upload";
+        if ui.button("Files").on_hover_text(files_tip).clicked() {
             *action = Some(Box::new(|r, _| {
-                r.share_clipboard = !r.share_clipboard;
+                if r.panel.take().is_none() {
+                    r.send(ToAgent::ListDir { path: String::new() })?;
+                }
                 Ok(())
             }));
-        }
-        if cfg!(windows) {
-            let grab = if self.grab_keys { "System keys: on" } else { "System keys: off" };
-            let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
-            if ui.button(grab).on_hover_text(tip).clicked() {
-                *action = Some(Box::new(|r, _| {
-                    r.grab_keys = !r.grab_keys;
-                    Ok(())
-                }));
-            }
         }
         if ui.button("Refresh").clicked() {
             *action = Some(Box::new(|r, _| r.menu('r')));
         }
         ui.separator();
         ui.label(
-            RichText::new(format!(
-                "{:.0} KB/s  {:.0} ms  {:.0} fps  {}x{}",
-                self.ctl.kbps, self.ctl.rtt, self.ctl.fps_now, self.fb.w, self.fb.h
-            ))
-            .font(FontId::monospace(12.0))
-            .color(Color32::GRAY),
+            RichText::new(format!("{:.0} KB/s  {:.0} ms", self.ctl.kbps, self.ctl.rtt))
+                .font(FontId::monospace(12.0))
+                .color(Color32::GRAY),
         );
         let pin = if self.pinned { "Auto-hide" } else { "Pin" };
         if ui
@@ -1058,6 +1231,15 @@ impl Remote {
     }
 }
 
+fn human(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MB", n as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1070,5 +1252,26 @@ mod tests {
         assert_eq!(keysym(Key::F12), Some(0xffc9));
         assert_eq!(keysym(Key::Enter), Some(0xff0d));
         assert_eq!(keysym(Key::Quote), Some('\'' as u32));
+    }
+
+    fn panel(path: &str) -> Panel {
+        Panel {
+            path: path.into(),
+            typed: String::new(),
+            entries: Vec::new(),
+            error: String::new(),
+            selected: None,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn panel_paths_follow_the_remote_os() {
+        assert_eq!(panel("/home/a").child("x"), "/home/a/x");
+        assert_eq!(panel("/home/a").parent(), "/home");
+        assert_eq!(panel("/home").parent(), "/");
+        assert_eq!(panel(r"C:\Users\a").child("x"), r"C:\Users\a\x");
+        assert_eq!(panel(r"C:\Users").parent(), r"C:\");
+        assert_eq!(panel(r"C:\").child("x"), r"C:\x");
     }
 }

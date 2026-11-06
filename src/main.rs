@@ -61,6 +61,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         probe_type: String::new(),
         probe_scroll: 0,
         probe_send: None,
+        probe_fetch: None,
     };
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
@@ -96,6 +97,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             "--dump" => dump = Some(val()?),
             "--type" => o.probe_type = val()?,
             "--send" => o.probe_send = Some(val()?),
+            "--fetch" => o.probe_fetch = Some(val()?),
             "--scroll" => o.probe_scroll = val()?.parse().map_err(|_| "bad --scroll")?,
             "-h" | "--help" => return Err(USAGE.into()),
             s if s.starts_with('-') => return Err(format!("unknown option {s}\n\n{USAGE}")),

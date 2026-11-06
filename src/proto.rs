@@ -85,6 +85,26 @@ pub enum ToAgent {
     FileEnd {
         id: u32,
     },
+    /// Lists a remote folder; an empty path is the remote user's home.
+    ListDir {
+        path: String,
+    },
+    /// Sends a remote file, or every file under a remote folder, to the viewer.
+    Fetch {
+        path: String,
+    },
+    /// Bytes of a download the viewer has written, so the agent can send more.
+    FetchAck {
+        id: u32,
+        received: u64,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub dir: bool,
+    pub size: u64,
 }
 
 #[derive(Debug, PartialEq)]
@@ -146,6 +166,28 @@ pub enum ToClient {
         ok: bool,
         text: String,
     },
+    /// A remote folder: its full path and entries, or why it could not be read.
+    DirList {
+        path: String,
+        entries: Vec<DirEntry>,
+        error: String,
+    },
+    /// A download begins; `name` is relative ("folder/sub/file.txt" for a folder).
+    FetchStart {
+        id: u32,
+        size: u64,
+        name: String,
+    },
+    FetchData {
+        id: u32,
+        data: Vec<u8>,
+    },
+    /// A download finished, or failed with `text`.
+    FetchEnd {
+        id: u32,
+        ok: bool,
+        text: String,
+    },
 }
 
 fn bad() -> io::Error {
@@ -172,6 +214,14 @@ impl<'a> Cur<'a> {
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    /// A string prefixed by its u32 length.
+    fn str(&mut self) -> io::Result<String> {
+        let n = self.u32()? as usize;
+        Ok(String::from_utf8_lossy(self.take(n)?).into_owned())
+    }
     fn mode(&mut self) -> io::Result<Mode> {
         Mode::from_u8(self.u8()?).ok_or_else(bad)
     }
@@ -180,6 +230,11 @@ impl<'a> Cur<'a> {
         self.p = self.d.len();
         s
     }
+}
+
+fn put_str(b: &mut Vec<u8>, s: &str) {
+    b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    b.extend_from_slice(s.as_bytes());
 }
 
 pub fn write_msg(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -271,6 +326,19 @@ impl ToAgent {
                 b.extend_from_slice(&id.to_le_bytes());
                 15
             }
+            ToAgent::ListDir { path } => {
+                b.extend_from_slice(path.as_bytes());
+                16
+            }
+            ToAgent::Fetch { path } => {
+                b.extend_from_slice(path.as_bytes());
+                17
+            }
+            ToAgent::FetchAck { id, received } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&received.to_le_bytes());
+                18
+            }
         };
         (kind, b)
     }
@@ -303,6 +371,9 @@ impl ToAgent {
             },
             14 => ToAgent::FileData { id: c.u32()?, data: c.rest().to_vec() },
             15 => ToAgent::FileEnd { id: c.u32()? },
+            16 => ToAgent::ListDir { path: String::from_utf8_lossy(c.rest()).into_owned() },
+            17 => ToAgent::Fetch { path: String::from_utf8_lossy(c.rest()).into_owned() },
+            18 => ToAgent::FetchAck { id: c.u32()?, received: c.u64()? },
             _ => return Err(bad()),
         })
     }
@@ -363,6 +434,34 @@ impl ToClient {
                 b.extend_from_slice(&received.to_le_bytes());
                 106
             }
+            ToClient::DirList { path, entries, error } => {
+                put_str(&mut b, path);
+                put_str(&mut b, error);
+                b.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+                for e in entries {
+                    put_str(&mut b, &e.name);
+                    b.push(e.dir as u8);
+                    b.extend_from_slice(&e.size.to_le_bytes());
+                }
+                108
+            }
+            ToClient::FetchStart { id, size, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                109
+            }
+            ToClient::FetchData { id, data } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(data);
+                110
+            }
+            ToClient::FetchEnd { id, ok, text } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                111
+            }
             ToClient::FileDone { id, ok, text } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.push(*ok as u8);
@@ -420,6 +519,26 @@ impl ToClient {
             106 => {
                 ToClient::FileProgress { id: c.u32()?, received: u64::from_le_bytes(c.take(8)?.try_into().unwrap()) }
             }
+            108 => {
+                let (path, error) = (c.str()?, c.str()?);
+                let n = c.u32()? as usize;
+                let mut entries = Vec::with_capacity(n.min(1 << 16));
+                for _ in 0..n {
+                    entries.push(DirEntry { name: c.str()?, dir: c.u8()? != 0, size: c.u64()? });
+                }
+                ToClient::DirList { path, entries, error }
+            }
+            109 => ToClient::FetchStart {
+                id: c.u32()?,
+                size: c.u64()?,
+                name: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
+            110 => ToClient::FetchData { id: c.u32()?, data: c.rest().to_vec() },
+            111 => ToClient::FetchEnd {
+                id: c.u32()?,
+                ok: c.u8()? != 0,
+                text: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             107 => ToClient::FileDone {
                 id: c.u32()?,
                 ok: c.u8()? != 0,
@@ -452,7 +571,23 @@ mod tests {
             ToAgent::FileStart { id: 1, size: 3, name: "a.txt".into() },
             ToAgent::FileData { id: 1, data: vec![1, 2, 3] },
             ToAgent::FileEnd { id: 1 },
+            ToAgent::ListDir { path: "/home".into() },
+            ToAgent::Fetch { path: "C:/x".into() },
+            ToAgent::FetchAck { id: 3, received: 1 << 40 },
         ];
+        for m in [
+            ToClient::DirList {
+                path: "/h".into(),
+                entries: vec![DirEntry { name: "a".into(), dir: true, size: 0 }],
+                error: String::new(),
+            },
+            ToClient::FetchStart { id: 2, size: 9, name: "d/x.txt".into() },
+            ToClient::FetchData { id: 2, data: vec![1] },
+            ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
+        ] {
+            let (k, p) = m.encode();
+            assert_eq!(ToClient::decode(k, &p).unwrap(), m);
+        }
         for m in msgs {
             let (k, p) = m.encode();
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);

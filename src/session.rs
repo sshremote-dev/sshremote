@@ -33,6 +33,8 @@ pub struct Options {
     pub probe_scroll: usize,
     /// Probe only: a file uploaded at the start, to check transfers end to end.
     pub probe_send: Option<String>,
+    /// Probe only: a remote file or folder downloaded at the start.
+    pub probe_fetch: Option<String>,
 }
 
 pub enum Ev {

@@ -91,12 +91,16 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut vid = video::Video::new();
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
+    let mut outbox = crate::files::Outbox::default();
     let mut in_flight = 0u32;
     let mut next_id = 1u32;
     let mut due = Instant::now();
     loop {
-        let wait =
-            due.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(8));
+        // A download in progress keeps the loop turning; otherwise wait for input or the next frame.
+        let longest = if outbox.busy() { 1 } else { 8 };
+        let wait = due
+            .saturating_duration_since(Instant::now())
+            .clamp(Duration::from_millis(1), Duration::from_millis(longest));
         let mut msgs = Vec::new();
         match rx.recv_timeout(wait) {
             Ok(m) => msgs.push(m),
@@ -142,20 +146,31 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 ToAgent::Clipboard(text) => clip.set(text),
                 ToAgent::FileStart { id, size, name } => {
                     if let Some(m) = inbox.start(id, size, &name) {
-                        send(enc, &m).map_err(io_err)?;
+                        send(enc, &m.to_client()).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileData { id, data } => {
                     if let Some(m) = inbox.data(id, &data) {
-                        send(enc, &m).map_err(io_err)?;
+                        send(enc, &m.to_client()).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileEnd { id } => {
-                    if let Some(m) = inbox.end(id) {
+                    if let Some(m) = inbox.end(id, true, "") {
+                        send(enc, &m.to_client()).map_err(io_err)?;
+                    }
+                }
+                ToAgent::ListDir { path } => send(enc, &crate::files::list(&path)).map_err(io_err)?,
+                ToAgent::Fetch { path } => {
+                    if let Some(m) = outbox.fetch(&path) {
                         send(enc, &m).map_err(io_err)?;
                     }
                 }
+                ToAgent::FetchAck { id, received } => outbox.ack(id, received),
             }
+        }
+        // Downloads share the stream with the screen, a slice per turn.
+        for m in outbox.pump(256 << 10) {
+            send(enc, &m).map_err(io_err)?;
         }
         if let Some(text) = clip.poll() {
             send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
