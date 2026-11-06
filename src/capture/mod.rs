@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 mod gnome;
+pub mod region;
 mod synthetic;
 #[cfg(windows)]
 pub mod windows;
@@ -71,7 +72,14 @@ impl Share {
     }
 }
 
+/// Shown in the window chooser when GNOME Shell lacks the desk helper; the viewer offers to install it.
+pub const NEEDS_HELPER: &str = "The window list on GNOME needs the desk helper, a small GNOME Shell extension.";
+
 pub trait Capture {
+    /// Installs what listing windows needs (the GNOME Shell helper); returns what to tell the viewer.
+    fn install_helper(&mut self) -> Result<String, String> {
+        Err("nothing to install for this desktop".into())
+    }
     /// The windows that could be shared on their own.
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         Err("This desktop can only share whole screens.".into())

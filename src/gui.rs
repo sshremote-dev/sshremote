@@ -25,7 +25,6 @@ pub(crate) mod ic {
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const ARROW_UP: &str = "\u{E08E}";
     pub const APP_WINDOW: &str = "\u{E5DA}";
-    pub const BROWSER: &str = "\u{E0F4}";
     pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const MINUS: &str = "\u{E32A}";
@@ -1352,55 +1351,67 @@ impl Remote {
                         }
                     }
                 }
-                t => {
-                    let active_sub = "The window that has the focus on the remote host; click it there first";
-                    if row(ui, ic::BROWSER, "Active window", active_sub, false) {
-                        pick = Some(ToAgent::Share { kind: 3, id: 0 });
+                t => match list {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Asking the remote host for its windows...");
+                        });
                     }
-                    ui.separator();
-                    match list {
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Asking the remote host for its windows...");
-                            });
-                        }
-                        Some(Err(e)) => {
-                            ui.label(RichText::new(e.as_str()).weak());
-                        }
-                        Some(Ok(wins)) if t == 1 => {
-                            for w in wins {
-                                let sub = format!("{}  {}x{}", w.app, w.w, w.h);
-                                if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
-                                    pick = Some(ToAgent::Share { kind: 1, id: w.id });
-                                }
-                            }
-                        }
-                        Some(Ok(wins)) => {
-                            let mut apps: Vec<(String, u64, usize)> = Vec::new();
-                            for w in wins {
-                                match apps.iter_mut().find(|a| a.0 == w.app) {
-                                    Some(a) => a.2 += 1,
-                                    None => apps.push((w.app.clone(), w.id, 1)),
-                                }
-                            }
-                            for (app, id, n) in apps {
-                                let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
-                                if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
-                                    pick = Some(ToAgent::Share { kind: 2, id });
-                                }
+                    Some(Err(e)) => {
+                        ui.add_space(8.0);
+                        ui.label(e.as_str());
+                        if e.starts_with(crate::capture::NEEDS_HELPER) && e.contains("Install it") {
+                            ui.add_space(6.0);
+                            let b = egui::Button::new(
+                                RichText::new("Install the helper on the remote host").color(Color32::WHITE),
+                            )
+                            .fill(ACCENT);
+                            if ui.add(b).clicked() {
+                                pick = Some(ToAgent::InstallHelper);
                             }
                         }
                     }
-                }
+                    Some(Ok(wins)) if wins.is_empty() => {
+                        ui.label(RichText::new("No windows are open on the remote host.").weak());
+                    }
+                    Some(Ok(wins)) if t == 1 => {
+                        for w in wins {
+                            let sub = format!("{}  {}x{}", w.app, w.w, w.h);
+                            if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
+                                pick = Some(ToAgent::Share { kind: 1, id: w.id });
+                            }
+                        }
+                    }
+                    Some(Ok(wins)) => {
+                        let mut apps: Vec<(String, u64, usize)> = Vec::new();
+                        for w in wins {
+                            match apps.iter_mut().find(|a| a.0 == w.app) {
+                                Some(a) => a.2 += 1,
+                                None => apps.push((w.app.clone(), w.id, 1)),
+                            }
+                        }
+                        for (app, id, n) in apps {
+                            let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
+                            if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
+                                pick = Some(ToAgent::Share { kind: 2, id });
+                            }
+                        }
+                    }
+                },
             });
         });
         if modal.should_close() {
             close = true;
         }
         if let Some(m) = pick {
+            // The install answer comes back as the list's message, so the chooser stays open for it.
+            let installing = m == ToAgent::InstallHelper;
             self.send(m)?;
-            close = true;
+            close = !installing;
+            if installing && let Some(p) = self.picker.as_mut() {
+                p.0 = None;
+            }
         }
         if close {
             self.picker = None;

@@ -127,16 +127,19 @@ Windows agent running as the service (SYSTEM) refuses shells; connect over ssh f
 
 ## Sharing a window or an application
 
-As in a video call, the Share button chooses what the remote host sends: an entire screen, one
-window, or every window of one application (all Chrome windows, say), or simply the window that has
-the focus. The picture is then only that window or application, so it is smaller and cheaper;
-anything covering it is greyed out, clicks outside it are dropped, and keys go only while it has the
-focus. A chip in the toolbar shows what is shared and returns to the whole screen when clicked.
+As in a video call (Meet, Loom), the Share button lists what the remote host can send: its screens,
+its open windows, and its applications (all Chrome windows, say). The picture is then only that
+window or application, so it is smaller and cheaper; anything covering it is greyed out, clicks
+outside it are dropped, and keys go only while it has the focus. A chip in the toolbar shows what is
+shared and returns to the whole screen when clicked.
 
 On Windows the list comes from the desktop's top-level windows, and the chosen window is brought to
-the front. GNOME does not let other programs read its window list, so there only "Active window" is
-offered: Mutter records the window that has the focus (click it first). In a terminal viewer
-`Ctrl+] v` switches between the active window and the whole screen; MCP has `windows` and `share`.
+the front. GNOME Shell gives its window list only to its own screen-sharing portal, so on GNOME the
+list comes from the desk helper, a small GNOME Shell extension (`assets/gnome-helper`) that the
+chooser offers to install; GNOME loads it at the next login on the remote host. A window is then
+recorded by Mutter on its own (its content shows even when covered), and an application is cut out of
+the monitor picture. In a terminal viewer `Ctrl+] v` switches between the focused window and the whole
+screen; MCP has `windows` and `share`.
 
 ## Viewing modes, screenshots and saving traffic
 

@@ -273,6 +273,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     };
                     send(enc, &m).map_err(io_err)?;
                 }
+                ToAgent::InstallHelper => {
+                    let error = match cap.install_helper() {
+                        Ok(text) => text,
+                        Err(e) => format!("Could not install the helper: {e}"),
+                    };
+                    send(enc, &ToClient::WindowList { list: Vec::new(), error }).map_err(io_err)?;
+                }
                 ToAgent::Share { kind, id } => {
                     let Some(scope) = crate::capture::Share::from_wire(kind, id) else { continue };
                     match cap.share(scope) {

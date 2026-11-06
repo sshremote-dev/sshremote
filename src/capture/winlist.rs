@@ -14,52 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::BOOL;
 
 use super::WindowInfo;
-
-/// A rectangle in virtual-desktop pixels, right and bottom exclusive.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct R {
-    pub l: i32,
-    pub t: i32,
-    pub r: i32,
-    pub b: i32,
-}
-
-impl R {
-    pub fn empty(&self) -> bool {
-        self.r <= self.l || self.b <= self.t
-    }
-
-    pub fn and(&self, o: &R) -> R {
-        R { l: self.l.max(o.l), t: self.t.max(o.t), r: self.r.min(o.r), b: self.b.min(o.b) }
-    }
-
-    pub fn union(&self, o: &R) -> R {
-        R { l: self.l.min(o.l), t: self.t.min(o.t), r: self.r.max(o.r), b: self.b.max(o.b) }
-    }
-
-    pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.l && x < self.r && y >= self.t && y < self.b
-    }
-
-    /// The parts of `self` outside `o`: at most four rectangles.
-    pub fn minus(&self, o: &R) -> Vec<R> {
-        let i = self.and(o);
-        if i.empty() {
-            return vec![*self];
-        }
-        let mut out = Vec::with_capacity(4);
-        let mut push = |r: R| {
-            if !r.empty() {
-                out.push(r)
-            }
-        };
-        push(R { l: self.l, t: self.t, r: self.r, b: i.t });
-        push(R { l: self.l, t: i.b, r: self.r, b: self.b });
-        push(R { l: self.l, t: i.t, r: i.l, b: i.b });
-        push(R { l: i.r, t: i.t, r: self.r, b: i.b });
-        out
-    }
-}
+pub use super::region::R;
 
 /// A visible top-level window, in z-order from the top.
 pub struct Win {
@@ -236,27 +191,8 @@ pub fn layout(scope: &Scope, screen: R) -> Option<Layout> {
     if area.empty() {
         return None;
     }
-    // From the top down: a shared window shows where nothing above it covers it.
-    let mut covered: Vec<R> = Vec::new();
-    let mut shown = Vec::new();
-    for (w, &m) in wins.iter().zip(&mine) {
-        let r = w.rect.and(&area);
-        if r.empty() {
-            continue;
-        }
-        if m {
-            let mut parts = vec![r];
-            for c in &covered {
-                parts = parts.iter().flat_map(|p| p.minus(c)).collect();
-                if parts.is_empty() || parts.len() > 256 {
-                    break;
-                }
-            }
-            shown.extend(parts);
-        }
-        covered.push(r);
-    }
-    Some(Layout { area, shown })
+    let stack: Vec<(R, bool)> = wins.iter().zip(&mine).map(|(w, &m)| (w.rect, m)).collect();
+    Some(Layout { area, shown: super::region::shown_parts(&stack, area) })
 }
 
 /// Whether the focused window belongs to what is shared, so keys may go to it.
@@ -295,13 +231,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subtracting_rectangles_leaves_the_rest() {
-        let a = R { l: 0, t: 0, r: 100, b: 100 };
-        let parts = a.minus(&R { l: 25, t: 25, r: 75, b: 75 });
-        let area: i32 = parts.iter().map(|p| (p.r - p.l) * (p.b - p.t)).sum();
-        assert_eq!(area, 100 * 100 - 50 * 50);
-        assert_eq!(a.minus(&R { l: 200, t: 0, r: 300, b: 50 }), vec![a]);
-        assert!(a.minus(&R { l: -1, t: -1, r: 101, b: 101 }).is_empty());
+    fn program_names_drop_the_folder_and_extension() {
         assert_eq!(app_name(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), "chrome");
     }
 }

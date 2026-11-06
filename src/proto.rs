@@ -158,6 +158,8 @@ pub enum ToAgent {
         kind: u8,
         id: u64,
     },
+    /// Installs what the window list needs on the host (the GNOME Shell helper).
+    InstallHelper,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -526,6 +528,7 @@ impl ToAgent {
                 31
             }
             ToAgent::ListWindows => 32,
+            ToAgent::InstallHelper => 34,
             ToAgent::Share { kind, id } => {
                 b.push(*kind);
                 b.extend_from_slice(&id.to_le_bytes());
@@ -589,6 +592,7 @@ impl ToAgent {
             30 => ToAgent::TermResize { id: c.u32()?, cols: c.u16()?, rows: c.u16()? },
             31 => ToAgent::TermClose { id: c.u32()? },
             32 => ToAgent::ListWindows,
+            34 => ToAgent::InstallHelper,
             33 => ToAgent::Share { kind: c.u8()?, id: c.u64()? },
             _ => return Err(bad()),
         })
@@ -913,6 +917,7 @@ mod tests {
             ToAgent::TermClose { id: 1 },
             ToAgent::ListWindows,
             ToAgent::Share { kind: 2, id: 0x1234 },
+            ToAgent::InstallHelper,
         ];
         for m in [
             ToClient::DirList {

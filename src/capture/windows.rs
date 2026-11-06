@@ -193,7 +193,7 @@ impl Gdi {
             let mut x = 0;
             for &(a, b) in spans.iter().chain(std::iter::once(&(tw, tw))) {
                 for px in row[x * 4..a.max(x) * 4].chunks_exact_mut(4) {
-                    px.copy_from_slice(&[38, 34, 34, 0]);
+                    px.copy_from_slice(&super::region::HIDDEN);
                 }
                 x = x.max(b);
             }
