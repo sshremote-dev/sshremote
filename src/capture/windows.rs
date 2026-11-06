@@ -83,7 +83,7 @@ pub struct Gdi {
     bits: *mut u8,
     /// The whole monitor, or a window or program on it.
     scope: Scope,
-    /// The monitor's place, kept while a window decides `origin` and `desk`.
+    /// The monitor's place, kept while a window decides `origin` and `sshremote`.
     monitor: ((i32, i32), (usize, usize)),
     /// Where the shared windows show, in captured pixels; empty when hidden.
     shown: Vec<R>,
@@ -420,9 +420,10 @@ impl Capture for Gdi {
             Input::SecureAttention => {
                 return match crate::service::ask("sas") {
                     Some(r) => r,
-                    None => {
-                        Err("Ctrl+Alt+Del needs the desk service: run `desk --install-service` as administrator".into())
-                    }
+                    None => Err(
+                        "Ctrl+Alt+Del needs the sshremote service: run `sshremote --install-service` as administrator"
+                            .into(),
+                    ),
                 };
             }
         }

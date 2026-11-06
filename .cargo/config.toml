@@ -1,5 +1,5 @@
 # openh264 is C++; link its runtime statically on the Windows GNU target so
-# desk.exe runs without MinGW DLLs. The cc crate's dynamic libstdc++ is turned
+# sshremote.exe runs without MinGW DLLs. The cc crate's dynamic libstdc++ is turned
 # off and the static one is added after Rust's own libraries, followed by the
 # C runtime and kernel32 it needs.
 [env]

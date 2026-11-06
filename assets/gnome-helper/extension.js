@@ -1,4 +1,4 @@
-// desk helper: lets the desk agent list windows and bring one forward, which
+// sshremote helper: lets the sshremote agent list windows and bring one forward, which
 // GNOME Shell otherwise allows only its own screen-sharing portal to do.
 
 import Gio from 'gi://Gio';
@@ -7,8 +7,8 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const NAME = 'io.github.thinkbigx.Desk.Windows';
-const PATH = '/io/github/thinkbigx/Desk/Windows';
+const NAME = 'io.github.thinkbigx.SshRemote.Windows';
+const PATH = '/io/github/thinkbigx/SshRemote/Windows';
 const IFACE = `
 <node>
   <interface name="${NAME}">

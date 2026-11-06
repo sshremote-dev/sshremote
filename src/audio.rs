@@ -92,7 +92,7 @@ pub fn capture() -> Result<Capture, String> {
                     pcm.drain(..FRAME * 2);
                 }
             },
-            |e| eprintln!("desk: audio capture: {e}"),
+            |e| eprintln!("sshremote: audio capture: {e}"),
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -172,7 +172,7 @@ impl Player {
                         *s = q.pop_front().unwrap_or(0.0);
                     }
                 },
-                |e| eprintln!("desk: audio playback: {e}"),
+                |e| eprintln!("sshremote: audio playback: {e}"),
                 None,
             )
             .map_err(|e| e.to_string())?;

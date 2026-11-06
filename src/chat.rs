@@ -1,5 +1,5 @@
 //! Text chat between the viewer and the person at the remote screen. The agent
-//! has no window of its own, so it starts `desk --chat-window` on the remote
+//! has no window of its own, so it starts `sshremote --chat-window` on the remote
 //! desktop and talks to it over stdin/stdout, one escaped line per message.
 //! Nothing is stored.
 
@@ -103,7 +103,7 @@ impl Drop for Window {
     }
 }
 
-/// `desk --chat-window`: the small window shown on the remote desktop.
+/// `sshremote --chat-window`: the small window shown on the remote desktop.
 pub fn run_window() -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -115,10 +115,10 @@ pub fn run_window() -> Result<(), String> {
         // The agent went away with the session.
         let _ = tx.send(String::from("\u{0}"));
     });
-    let mut native = crate::gui::native_options("desk chat", [380.0, 460.0]);
+    let mut native = crate::gui::native_options("SSH Remote chat", [380.0, 460.0]);
     native.viewport = native.viewport.with_always_on_top();
     eframe::run_native(
-        "desk chat",
+        "sshremote chat",
         native,
         Box::new(move |cc| {
             crate::gui::style(&cc.egui_ctx);

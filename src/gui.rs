@@ -32,6 +32,7 @@ pub(crate) mod ic {
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP: &str = "\u{E13C}";
+    pub const CURSOR_CLICK: &str = "\u{E7C8}";
     pub const GRIP: &str = "\u{EAE2}";
     pub const DOWNLOAD: &str = "\u{E20C}";
     pub const EYE: &str = "\u{E220}";
@@ -92,7 +93,7 @@ fn install_fonts(ctx: &egui::Context) {
 /// The logo, for the window and the task bar.
 pub(crate) fn app_icon() -> Option<egui::IconData> {
     let mut reader =
-        png::Decoder::new(std::io::Cursor::new(&include_bytes!("../assets/desk.png")[..])).read_info().ok()?;
+        png::Decoder::new(std::io::Cursor::new(&include_bytes!("../assets/sshremote.png")[..])).read_info().ok()?;
     let mut rgba = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut rgba).ok()?;
     rgba.truncate(info.buffer_size());
@@ -293,9 +294,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let auto_start = opt.host.is_some() || opt.local;
     let local = opt.local;
     let budget = opt.budget;
-    let native = native_options("desk", [1280.0, 800.0]);
+    let native = native_options("SSH Remote", [1280.0, 800.0]);
     eframe::run_native(
-        "desk",
+        "sshremote",
         native,
         Box::new(move |cc| {
             style(&cc.egui_ctx);
@@ -411,13 +412,13 @@ fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) 
     if inner.is_some() {
         // Remembered for the next frame, so an auto-hidden toolbar stays while its menu is open.
         let pass = ui.ctx().cumulative_pass_nr();
-        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("desk-menu-open"), pass));
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("sshremote-menu-open"), pass));
     }
     r
 }
 
 fn menu_open(ctx: &egui::Context) -> bool {
-    let last = ctx.data(|d| d.get_temp::<u64>(egui::Id::unique("desk-menu-open")));
+    let last = ctx.data(|d| d.get_temp::<u64>(egui::Id::unique("sshremote-menu-open")));
     last.is_some_and(|p| p + 2 >= ctx.cumulative_pass_nr())
 }
 
@@ -436,7 +437,7 @@ fn badge(ui: &mut egui::Ui, name: &str) {
         Color32::from_rgb(200, 80, 120),
         Color32::from_rgb(60, 150, 180),
     ];
-    let bare = name.trim_start_matches("desk://");
+    let bare = name.trim_start_matches("sshremote://");
     let bare = bare.rsplit('@').next().unwrap_or(bare);
     let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
@@ -454,21 +455,21 @@ fn friendly(e: &str) -> (String, &'static str) {
     } else if l.contains("could not resolve") || l.contains("name or service not known") || l.contains("no such host") {
         "The host name is unknown. Check the spelling, or use the IP address."
     } else if l.contains("connection refused") || l.contains("actively refused") {
-        "Nothing answered on that port. Is the SSH server (or desk --serve) running there?"
+        "Nothing answered on that port. Is the SSH server (or sshremote --serve) running there?"
     } else if l.contains("timed out") || l.contains("no route") || l.contains("unreachable") {
         "The host did not answer. Check the address, the network and any firewall."
     } else if l.contains("command not found") || l.contains("not recognized") || l.contains("no such file") {
-        "desk is not installed on the host. Copy it to ~/.local/bin/desk (Windows: anywhere on PATH)."
+        "sshremote is not installed on the host. Copy it to ~/.local/bin/sshremote (Windows: anywhere on PATH)."
     } else if l.contains("host key verification failed") {
         "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
     } else if l.contains("wrong password") {
-        "The password does not match the one shown by desk --serve on the host."
+        "The password does not match the one shown by sshremote --serve on the host."
     } else if l.contains("no agent with that id") {
-        "No desk --serve with that ID is waiting at the relay."
+        "No sshremote --serve with that ID is waiting at the relay."
     } else if l.contains("no frame") || l.contains("no interactive desktop") || l.contains("logged") {
-        "Nobody is signed in to the remote desktop, or it is locked."
+        "Nobody is signed in to the SSH host's desktop, or it is locked."
     } else if l.contains("did not answer within") {
-        "The remote agent did not start in time. Try again, or check that desk runs on the host."
+        "The remote agent did not start in time. Try again, or check that sshremote runs on the host."
     } else {
         ""
     };
@@ -495,7 +496,7 @@ impl App {
             }
             if let Some(addr) = crate::net::Address::parse(&host) {
                 if f.password.is_empty() {
-                    self.error = Some("Enter the one-time password shown by desk --serve".into());
+                    self.error = Some("Enter the one-time password shown by sshremote --serve".into());
                     return;
                 }
                 let target = Target::Direct { addr, password: f.password.clone() };
@@ -610,8 +611,8 @@ impl App {
                     ui.painter().rect_filled(logo, CornerRadius::same(16), ACCENT);
                     ui.painter().text(logo.center(), Align2::CENTER_CENTER, ic::TERMINAL, FontId::proportional(34.0), Color32::WHITE);
                     ui.add_space(4.0);
-                    ui.label(RichText::new("desk").size(30.0).strong());
-                    ui.label(RichText::new("Remote desktop over SSH").size(15.0).weak());
+                    ui.label(RichText::new("SSH Remote").size(30.0).strong());
+                    ui.label(RichText::new("Remote control over SSH").size(15.0).weak());
                     ui.add_space(18.0);
                     let card = ui.visuals().window_fill;
                     egui::Frame::new().fill(card).corner_radius(CornerRadius::same(14)).inner_margin(22.0).show(ui, |ui| {
@@ -620,7 +621,7 @@ impl App {
                             ui.label(RichText::new("Host").weak());
                             let host = ui.add(
                                 egui::TextEdit::singleline(&mut self.form.host)
-                                    .hint_text("user@host,  an ~/.ssh/config alias,  or desk://host")
+                                    .hint_text("user@host,  an ~/.ssh/config alias,  or sshremote://host")
                                     .desired_width(f32::INFINITY),
                             );
                             ui.horizontal(|ui| {
@@ -630,7 +631,7 @@ impl App {
                                 });
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new("Password").weak())
-                                        .on_hover_text("Leave empty to sign in with your SSH keys. desk:// addresses need the password desk --serve shows.");
+                                        .on_hover_text("Leave empty to sign in with your SSH keys. sshremote:// addresses need the password sshremote --serve shows.");
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.form.password)
                                             .password(true)
@@ -733,7 +734,7 @@ impl App {
                                                 ui.vertical(|ui| {
                                                     let name = if p.is_empty() { h.clone() } else { format!("{h}:{p}") };
                                                     ui.label(RichText::new(name).strong());
-                                                    let (kind, how) = if h.starts_with("desk://") { (ic::LINK, "direct") } else { (ic::TERMINAL, "SSH") };
+                                                    let (kind, how) = if h.starts_with("sshremote://") { (ic::LINK, "direct") } else { (ic::TERMINAL, "SSH") };
                                                     let when = match (src, self.seen.get(h)) {
                                                         (_, Some(t)) => crate::hosts::ago(*t),
                                                         (Source::SshConfig, None) => "from ~/.ssh/config".into(),
@@ -805,7 +806,7 @@ impl eframe::App for App {
                     let waker = ctx.clone();
                     sess.on_message(move || waker.request_repaint());
                     let desk = sess.desk;
-                    ctx.send_viewport_cmd(ViewportCommand::Title(format!("desk - {label}")));
+                    ctx.send_viewport_cmd(ViewportCommand::Title(format!("SSH Remote - {label}")));
                     let ssh_cmd = self.pending_ssh.take();
                     next = Some(Screen::Remote(Box::new(Remote {
                         ssh_cmd,
@@ -906,7 +907,7 @@ impl eframe::App for App {
                     if r.fullscreen {
                         ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                     }
-                    ctx.send_viewport_cmd(ViewportCommand::Title("desk".into()));
+                    ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
                     self.error = (e != "disconnected").then_some(e);
                     next = Some(Screen::Connect);
                 }
@@ -1118,7 +1119,7 @@ impl Remote {
                     let msg = if cancelled {
                         format!("{name}: upload cancelled")
                     } else if ok {
-                        format!("{name} saved on the remote host: {text}")
+                        format!("{name} saved on the SSH host: {text}")
                     } else {
                         format!("{name} failed: {text}")
                     };
@@ -1281,7 +1282,7 @@ impl Remote {
         let mut close = false;
         let monitors = self.monitors.clone();
         let current = self.monitor;
-        let modal = egui::Modal::new(egui::Id::unique("desk-share-picker")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("sshremote-share-picker")).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.set_min_height(440.0);
             ui.horizontal(|ui| {
@@ -1292,9 +1293,7 @@ impl Remote {
                     }
                 });
             });
-            ui.label(
-                RichText::new("The remote host sends only what you choose; clicks and keys reach only that.").weak(),
-            );
+            ui.label(RichText::new("The SSH host sends only what you choose; clicks and keys reach only that.").weak());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 for (i, (g, name)) in
@@ -1366,16 +1365,29 @@ impl Remote {
                     // The window in front, or its program: no list needed.
                     let no_helper = matches!(list, Some(Err(e)) if e.starts_with(crate::capture::NEEDS_HELPER));
                     if t == 1 {
-                        let sub = "The window in front on the remote host; click it there first";
+                        let sub = "The window in front on the SSH host; click it there first";
                         if row(ui, ic::APP_WINDOW, "Active window", sub, false) {
                             pick = Some(ToAgent::Share { kind: 3, id: 0 });
                         }
+                        if no_helper {
+                            // GNOME's own sharing dialog, opened on the remote screen and answered there.
+                            let sub = "Opens GNOME's sharing dialog on the SSH host's screen; pick a window there";
+                            if row(ui, ic::CURSOR_CLICK, "Choose on the SSH host", sub, false) {
+                                pick = Some(ToAgent::PickOnRemote);
+                            }
+                        }
                     } else if no_helper {
                         ui.add_enabled_ui(false, |ui| {
-                            row(ui, ic::SQUARES_FOUR, "Active application", "Needs the desk helper on GNOME", false)
+                            row(
+                                ui,
+                                ic::SQUARES_FOUR,
+                                "Active application",
+                                "Needs the sshremote helper on GNOME",
+                                false,
+                            )
                         });
                     } else {
-                        let sub = "Every window of the program in front on the remote host";
+                        let sub = "Every window of the program in front on the SSH host";
                         if row(ui, ic::SQUARES_FOUR, "Active application", sub, false) {
                             pick = Some(ToAgent::Share { kind: 4, id: 0 });
                         }
@@ -2035,7 +2047,7 @@ impl Remote {
         keys.on_hover_text("Send special keys");
         ui.separator();
 
-        let files_tip = "File transfer: this computer and the remote host side by side";
+        let files_tip = "File transfer: this computer and the SSH host side by side";
         if icon(ui, ic::FOLDER, files_tip, self.files.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {
                 if r.files.take().is_none() {
@@ -2045,7 +2057,7 @@ impl Remote {
                 Ok(())
             }));
         }
-        if icon(ui, ic::TERMINAL, "Terminal: a shell on the remote host", self.terms.is_some()).clicked() {
+        if icon(ui, ic::TERMINAL, "Terminal: a shell on the SSH host", self.terms.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {
                 match r.terms.take() {
                     Some(t) => {
@@ -2061,7 +2073,7 @@ impl Remote {
             }));
         }
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
-        if icon(ui, &chat_glyph, "Chat with the person at the remote screen", self.chat.is_some()).clicked() {
+        if icon(ui, &chat_glyph, "Chat with the person at the SSH host's screen", self.chat.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {
                 match r.chat.take() {
                     Some((lines, _)) => r.chat_lines = lines,
@@ -2073,7 +2085,7 @@ impl Remote {
                 Ok(())
             }));
         }
-        if icon(ui, ic::CAMERA, "Screenshot: save the remote screen as a PNG in Pictures", false).clicked() {
+        if icon(ui, ic::CAMERA, "Screenshot: save the SSH host's screen as a PNG in Pictures", false).clicked() {
             *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
         }
         let (glyph, tip) = if self.paused {
@@ -2098,7 +2110,7 @@ impl Remote {
             ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
             sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
             if cfg!(windows) {
-                let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
+                let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the SSH host instead of this PC";
                 ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
             }
             theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
@@ -2215,7 +2227,7 @@ fn share_list(
         None => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Asking the remote host for its windows...");
+                ui.label("Asking the SSH host for its windows...");
             });
         }
         Some(Err(e)) => {
@@ -2223,7 +2235,7 @@ fn share_list(
             ui.label(e.as_str());
             if e.starts_with(crate::capture::NEEDS_HELPER) && e.contains("Install it") {
                 ui.add_space(6.0);
-                let b = egui::Button::new(RichText::new("Install the helper on the remote host").color(Color32::WHITE))
+                let b = egui::Button::new(RichText::new("Install the helper on the SSH host").color(Color32::WHITE))
                     .fill(ACCENT);
                 if ui.add(b).clicked() {
                     *pick = Some(ToAgent::InstallHelper);
@@ -2231,7 +2243,7 @@ fn share_list(
             }
         }
         Some(Ok(wins)) if wins.is_empty() => {
-            ui.label(RichText::new("No windows are open on the remote host.").weak());
+            ui.label(RichText::new("No windows are open on the SSH host.").weak());
         }
         Some(Ok(wins)) if t == 1 => {
             for w in wins {

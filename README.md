@@ -1,7 +1,8 @@
-# desk
+# sshremote
 
-Remote desktop over plain SSH, viewed inside a terminal or a window. No relay, ID server or
-open port: the viewer runs `ssh -T HOST desk --agent`, the agent sends only changed rectangles
+Remote control of an SSH host: its screen, keyboard and mouse, files, shell and sound, from a
+terminal or a window, over the same SSH login you already use. No relay, ID server or open port: the
+viewer runs `ssh -T HOST sshremote --agent`, the agent sends only changed rectangles
 in one long-lived zstd stream, and the viewer keeps an exact framebuffer copy and repaints
 damaged cells locally (sixel in a terminal, a native window with `--gui`).
 
@@ -24,8 +25,8 @@ cargo build --release
 On Linux the agent needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config libopus-dev
 libasound2-dev` and a C++ compiler for the bundled OpenH264. On Windows libopus is built from source
 with CMake (WinLibs ships one). On Windows the GNU toolchain links the C++ runtime statically
-(`.cargo/config.toml`), so `desk.exe` needs no MinGW DLLs.
-Install the binary on the remote host as `~/.local/bin/desk` (on Windows, anywhere on `PATH`).
+(`.cargo/config.toml`), so `sshremote.exe` needs no MinGW DLLs.
+Install the binary on the SSH host as `~/.local/bin/sshremote` (on Windows, anywhere on `PATH`).
 
 ## Windows hosts
 
@@ -33,16 +34,16 @@ The OpenSSH service runs sessions outside the console session, where the screen 
 The agent notices this and starts a helper in the console session of the same user through a
 one-shot scheduled task (`schtasks /it`), then relays the stream over two named pipes that only
 that user and SYSTEM may open. The user must be logged on at the console. A helper that fails
-writes its error to `%TEMP%\desk-agent.log`.
+writes its error to `%TEMP%\sshremote-agent.log`.
 
-For unattended access, `desk --install-service` (elevated) installs an optional LocalSystem service.
+For unattended access, `sshremote --install-service` (elevated) installs an optional LocalSystem service.
 The relay then asks it, over a pipe only Administrators and SYSTEM may open, to start the helper as
 SYSTEM in the console session, which also works at the sign-in and lock screens when nobody is
 logged on; the scheduled task remains the fallback. The service also raises Ctrl+Alt+Del (it sets
-the SoftwareSASGeneration policy to allow services to). `desk --uninstall-service` removes both.
+the SoftwareSASGeneration policy to allow services to). `sshremote --uninstall-service` removes both.
 Users who are not administrators keep the scheduled-task path.
 
-The viewer also runs inside a Windows ssh session (`desk --local --capture windows` typed in the
+The viewer also runs inside a Windows ssh session (`sshremote --local --capture windows` typed in the
 remote shell). There every byte normally passes through a pseudo console (ConPTY) that re-renders
 text and drops sixel images, so the viewer duplicates the write end of the pseudo console host's
 output pipe, which leads straight to sshd, and writes its images there. Keys still arrive through
@@ -50,10 +51,10 @@ the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20
 
 ## Window mode
 
-`desk` with no arguments (or a double click on `desk.exe`) opens the window: a connect screen with
+`sshremote` with no arguments (or a double click on `sshremote.exe`) opens the window: a connect screen with
 host, port, an optional password (handed to ssh through its askpass hook, never stored), the
 quality, and host cards. A failed connection is explained with its likely cause and what to try.
-The window has a dark and a light theme, remembered between runs. `desk --gui HOST` connects
+The window has a dark and a light theme, remembered between runs. `sshremote --gui HOST` connects
 straight away.
 
 In a session the toolbar at the top shows the connection state (a green, yellow or red dot with the
@@ -77,21 +78,21 @@ The host name and round trip take fixed widths, so the buttons do not shift as t
 
 Messages such as saved screenshots and finished downloads appear as notifications at the bottom right.
 
-Every key goes to the remote host as a separate press and release by its position, so held
+Every key goes to the SSH host as a separate press and release by its position, so held
 modifiers, Shift+click, Ctrl+drag and games behave as on a local keyboard, and the remote keyboard
 layout decides the characters. Text from input methods (Korean, Japanese, Chinese) is sent as it
 is committed. Mouse back and forward buttons and horizontal wheels are passed through. Copied text
 is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME, and on Windows
-with the desk service installed.
+with the sshremote service installed.
 
 On a Windows viewer, while the session window is in front, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
 Print Screen are taken with a low-level keyboard hook (on a thread of its own, since Windows skips a
-hook whose thread is busy) and go to the remote host instead of this PC; the toolbar's "System keys"
+hook whose thread is busy) and go to the SSH host instead of this PC; the toolbar's "System keys"
 switch turns this off.
 
 ## File transfer
 
-The Files button opens a window of its own with this computer on the left and the remote host on the
+The Files button opens a window of its own with this computer on the left and the SSH host on the
 right. Each side has a path bar, Up, Home and Drives, a list sortable by name, size and modification
 time, multiple selection (Ctrl, Shift, Ctrl+A) and hidden files on request. Files and whole folders
 go across with the arrow buttons, by dragging from one side to the other, by double click, or by
@@ -107,7 +108,7 @@ headless.
 On Windows the window renders with Direct3D 12 (`WGPU_BACKEND` overrides it), which also works where
 a GPU driver's Vulkan or OpenGL does not.
 
-With several monitors on the remote host the toolbar shows a Screen menu (`Ctrl+] s` steps through
+With several monitors on the SSH host the toolbar shows a Screen menu (`Ctrl+] s` steps through
 them in a terminal). On Windows each monitor is captured and the pointer placed on the whole virtual
 desktop; on GNOME the agent records the chosen connector from Mutter's DisplayConfig.
 
@@ -118,9 +119,9 @@ capped at 300 ms so the sound stays live. It is off until asked for.
 
 ## Terminal
 
-The Terminal button opens shells on the remote host in a window with tabs. The agent starts the
+The Terminal button opens shells on the SSH host in a window with tabs. The agent starts the
 user's login shell on a pseudo-terminal (PowerShell or cmd in a pseudo console on Windows) and the
-bytes travel over the same connection, so it needs no second login and also works over `desk://`.
+bytes travel over the same connection, so it needs no second login and also works over `sshremote://`.
 The window emulates xterm with Alacritty's terminal engine: colours, full-screen programs such as
 vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with copy (Ctrl+C
 with a selection, otherwise it interrupts) and paste, and text size buttons. For ssh hosts a button
@@ -130,7 +131,7 @@ Windows agent running as the service (SYSTEM) refuses shells; connect over ssh f
 
 ## Sharing a window or an application
 
-As in a video call (Meet, Loom), the Share button lists what the remote host can send: its screens,
+As in a video call (Meet, Loom), the Share button lists what the SSH host can send: its screens,
 its open windows, and its applications (all Chrome windows, say). "Active window" and "Active
 application" at the top of the lists share the window in front, or every window of its program,
 without picking from a list. The picture is then only that
@@ -140,8 +141,8 @@ shared and returns to the whole screen when clicked.
 
 On Windows the list comes from the desktop's top-level windows, and the chosen window is brought to
 the front. GNOME Shell gives its window list only to its own screen-sharing portal, so on GNOME the
-list comes from the desk helper, a small GNOME Shell extension (`assets/gnome-helper`) that the
-chooser offers to install; GNOME loads it at the next login on the remote host. The helper is
+list comes from the sshremote helper, a small GNOME Shell extension (`assets/gnome-helper`) that the
+chooser offers to install; GNOME loads it at the next login on the SSH host. The helper is
 optional: without it GNOME offers the active window, while the active application and the lists need
 it, because only it can tell where a program's other windows are. A window is then
 recorded by Mutter on its own (its content shows even when covered), and an application is cut out of
@@ -150,9 +151,9 @@ screen; MCP has `windows` and `share`.
 
 ## Viewing modes, screenshots and saving traffic
 
-The View menu fits the remote screen to the window (proportions kept), stretches it to fill the
+The View menu fits the SSH host's screen to the window (proportions kept), stretches it to fill the
 window, or shows it at a fixed 50-200% of its resolution; a fixed size larger than the window scrolls
-when the pointer rests near an edge. Screenshot saves the remote screen as a PNG in Pictures. Pause
+when the pointer rests near an edge. Screenshot saves the SSH host's screen as a PNG in Pictures. Pause
 stops the picture (input still works) and Update fetches a single frame, so a slow link can be used
 picture by picture. In a terminal the menu (Ctrl+]) offers the same: `x` screenshot, `p` pause,
 `u` one frame, `o` sound, `c` chat, `g` download a remote path, `l` send a local file, `s` next screen,
@@ -160,7 +161,7 @@ picture by picture. In a terminal the menu (Ctrl+]) offers the same: `x` screens
 
 ## Chat
 
-Chat (toolbar, or `Ctrl+] c` in a terminal) opens a small always-on-top window on the remote desktop
+Chat (toolbar, or `Ctrl+] c` in a terminal) opens a small always-on-top window on the SSH host's desktop
 for the person sitting there; their replies come back to the viewer. Nothing is stored, and the remote
 window closes itself shortly after the viewer leaves.
 
@@ -169,12 +170,12 @@ window closes itself shortly after the viewer leaves.
 The connect screen shows favorites, recent hosts and the `Host` aliases of `~/.ssh/config` as
 cards with the time of the last connection, a search box and a star to pin a host; ssh applies
 their user, port and keys as usual. A click fills in the form, a double click connects. Hosts are
-remembered only after a successful connection. `desk --term` offers the same list in a terminal.
+remembered only after a successful connection. `sshremote --term` offers the same list in a terminal.
 
 ## MCP
 
-`desk mcp HOST` (or `desk mcp --local`, `desk mcp desk://...`) is a Model Context Protocol server on
-stdio that lets an AI agent see and operate the remote desktop. Tools: `screenshot`, `click`, `move`,
+`sshremote mcp HOST` (or `sshremote mcp --local`, `sshremote mcp sshremote://...`) is a Model Context Protocol server on
+stdio that lets an AI agent see and operate the SSH host's desktop. Tools: `screenshot`, `click`, `move`,
 `drag`, `type`, `key`, `scroll`, `wait`, `monitors`, `select_monitor`, `windows`, `share`,
 `clipboard_get`, `clipboard_set`. Sharing just the window being worked on keeps screenshots small. To keep tokens low the picture stream stays paused and a screenshot is taken only on
 request, 1024 px wide by default, optionally a region and in grey; coordinates passed to the other
@@ -182,7 +183,7 @@ tools are in the latest screenshot's pixels and are mapped back to the screen by
 client configuration:
 
 ```json
-{"mcpServers": {"desk": {"command": "desk", "args": ["mcp", "user@host"]}}}
+{"mcpServers": {"sshremote": {"command": "sshremote", "args": ["mcp", "user@host"]}}}
 ```
 
 On GNOME, text the keyboard layout cannot produce (Korean, emoji) is pasted through the clipboard;
@@ -193,10 +194,10 @@ the previous clipboard text is put back a second later unless something new was 
 `src/transport.rs` is the only place that knows how a viewer reaches an agent: a local child process,
 `ssh -T`, or a direct link. Everything above it sees two byte streams.
 
-Without ssh, `desk --serve` waits for viewers on TCP port 7070 and prints a one-time password; a viewer
-connects with `desk://HOST` and that password (`--password` in a terminal, the password field in the
-window). For a host behind NAT, `desk --relay` on any reachable machine pairs the two sides by an ID:
-the host runs `desk --serve --via RELAY` and is reached as `desk://ID@RELAY` (port 7071).
+Without ssh, `sshremote --serve` waits for viewers on TCP port 7070 and prints a one-time password; a viewer
+connects with `sshremote://HOST` and that password (`--password` in a terminal, the password field in the
+window). For a host behind NAT, `sshremote --relay` on any reachable machine pairs the two sides by an ID:
+the host runs `sshremote --serve --via RELAY` and is reached as `sshremote://ID@RELAY` (port 7071).
 
 Both ends run SPAKE2 on the password, so neither an eavesdropper nor the relay learns anything to
 guess offline, and every byte after that is sealed with ChaCha20-Poly1305 under keys derived from the
@@ -207,14 +208,14 @@ copies bytes.
 ## Use
 
 ```sh
-desk HOST                 # auto preset, under 100 KB/s
-desk HOST --gui           # the same in a window, up to true colour
-desk HOST --preset 2      # fixed: full size, 256 colours, 20 fps
-desk HOST --preset 0      # half size, 1-bit, 5 fps
-desk HOST --budget 30     # auto, under 30 KB/s
-desk HOST --mode gray16 --scale 60 --fps 10
-desk --local              # built-in test desktop, no ssh
-desk HOST --probe 5 --dump out.ppm   # headless: print traffic, save the reconstructed screen
+sshremote HOST                 # auto preset, under 100 KB/s
+sshremote HOST --gui           # the same in a window, up to true colour
+sshremote HOST --preset 2      # fixed: full size, 256 colours, 20 fps
+sshremote HOST --preset 0      # half size, 1-bit, 5 fps
+sshremote HOST --budget 30     # auto, under 30 KB/s
+sshremote HOST --mode gray16 --scale 60 --fps 10
+sshremote --local              # built-in test desktop, no ssh
+sshremote HOST --probe 5 --dump out.ppm   # headless: print traffic, save the reconstructed screen
 ```
 
 Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`/`-` scale, `f` fps,

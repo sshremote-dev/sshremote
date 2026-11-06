@@ -35,8 +35,8 @@ pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
     #[cfg(windows)]
     if pipe.is_none()
         && matches!(backend, "auto" | "windows")
-        // DESK_RELAY forces the relay path so it can be tested from a console session.
-        && (crate::capture::windows::needs_relay() || std::env::var_os("DESK_RELAY").is_some())
+        // SSHREMOTE_RELAY forces the relay path so it can be tested from a console session.
+        && (crate::capture::windows::needs_relay() || std::env::var_os("SSHREMOTE_RELAY").is_some())
     {
         return crate::relay::run(backend);
     }
@@ -273,6 +273,17 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     };
                     send(enc, &m).map_err(io_err)?;
                 }
+                ToAgent::PickOnRemote => match cap.pick() {
+                    Ok(text) => {
+                        send(enc, &ToClient::Sharing { kind: 0, text: "the whole screen".into() }).map_err(io_err)?;
+                        desk = cap.desktop_size();
+                        announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+                        (prev, last) = (None, None);
+                        vid.reset();
+                        send(enc, &ToClient::Notice(text)).map_err(io_err)?;
+                    }
+                    Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+                },
                 ToAgent::InstallHelper => {
                     let error = match cap.install_helper() {
                         Ok(text) => text,
@@ -313,6 +324,12 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         if let Some(text) = clip.poll() {
             send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
+        }
+        // The choice made in the desktop's sharing dialog, even while the picture is paused.
+        match cap.poll_share() {
+            Some(Ok(text)) => send(enc, &ToClient::Sharing { kind: 1, text }).map_err(io_err)?,
+            Some(Err(e)) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+            None => {}
         }
         let (Some(s), Some(red)) = (settings, reducer.as_ref()) else {
             continue;
@@ -447,6 +464,6 @@ fn announce(
 
 fn report(r: Result<(), String>) {
     if let Err(e) = r {
-        eprintln!("desk agent: {e}");
+        eprintln!("sshremote agent: {e}");
     }
 }

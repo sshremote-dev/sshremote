@@ -34,18 +34,18 @@ mod video;
 use color::Mode;
 
 const USAGE: &str = "\
-usage: desk                       open the window: connect screen, recent hosts
-       desk [options] HOST        view HOST's desktop over ssh in this terminal
-       desk --gui [options] [HOST] the same in a window
-       desk --term [options]      choose a recent or ~/.ssh/config host, then view it here
-       desk mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
-       desk --local [options]     view a built-in test desktop (no ssh)
-       desk --agent [--capture B] remote side, started by the viewer
-       desk --serve [--listen ADDR] [--via RELAY] [--password P]
+usage: sshremote                       open the window: connect screen, recent hosts
+       sshremote [options] HOST        view HOST's desktop over ssh in this terminal
+       sshremote --gui [options] [HOST] the same in a window
+       sshremote --term [options]      choose a recent or ~/.ssh/config host, then view it here
+       sshremote mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
+       sshremote --local [options]     view a built-in test desktop (no ssh)
+       sshremote --agent [--capture B] remote side, started by the viewer
+       sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
                                   wait for viewers without ssh (prints a one-time password)
-       desk --relay [--listen ADDR]  pair agents and viewers behind NAT
-       desk desk://HOST[:PORT] --password P     view a --serve agent directly
-       desk desk://ID@RELAY[:PORT] --password P view one through a relay
+       sshremote --relay [--listen ADDR]  pair agents and viewers behind NAT
+       sshremote sshremote://HOST[:PORT] --password P     view a --serve agent directly
+       sshremote sshremote://ID@RELAY[:PORT] --password P view one through a relay
 
 options:
   --preset P      auto (default), or 0 (black and white, 50%, 5 fps) .. 4 (full colour, 60 fps)
@@ -55,7 +55,7 @@ options:
   --fps N         frame rate cap, 1-60
   --cell WxH      terminal cell size in pixels (default: ask the terminal, else 10x20)
   --capture B     agent capture backend: auto gnome windows synthetic
-  --remote CMD    agent command on HOST (default: desk --agent)
+  --remote CMD    agent command on HOST (default: sshremote --agent)
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
   --sound         play the host's sound (about 8 KB/s)
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
@@ -135,7 +135,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         o.capture = if o.local { "synthetic" } else { "auto" }.into();
     }
     if !o.local && !o.gui && o.host.is_none() {
-        // `desk --term` without a host: choose one in the terminal.
+        // `sshremote --term` without a host: choose one in the terminal.
         if !args.iter().any(|a| a == "--term") {
             return Err(USAGE.into());
         }
@@ -170,7 +170,7 @@ fn main() {
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");
         if let Err(e) = client::run(opt) {
-            eprintln!("desk: {e}");
+            eprintln!("sshremote: {e}");
             std::process::exit(1);
         }
         return;
@@ -183,7 +183,7 @@ fn main() {
     ] {
         if args.first().is_some_and(|a| a == flag) {
             if let Err(e) = f() {
-                eprintln!("desk: {e}");
+                eprintln!("sshremote: {e}");
                 std::process::exit(1);
             }
             return;
@@ -193,7 +193,7 @@ fn main() {
     if args.first().is_some_and(|a| a == "--serve") {
         let r = net::serve(opt("--listen"), opt("--via"), opt("--password"), opt("--capture").unwrap_or("auto"));
         if let Err(e) = r {
-            eprintln!("desk: {e}");
+            eprintln!("sshremote: {e}");
             std::process::exit(1);
         }
         return;
@@ -202,21 +202,21 @@ fn main() {
         // stdout carries JSON-RPC only; everything else goes to stderr.
         let r = parse_client(&args[1..]).and_then(|o| mcp::run(&o));
         if let Err(e) = r {
-            eprintln!("desk mcp: {e}");
+            eprintln!("sshremote mcp: {e}");
             std::process::exit(1);
         }
         return;
     }
     if args.first().is_some_and(|a| a == "--chat-window") {
         if let Err(e) = chat::run_window() {
-            eprintln!("desk: {e}");
+            eprintln!("sshremote: {e}");
             std::process::exit(1);
         }
         return;
     }
     if args.first().is_some_and(|a| a == "--relay") {
         if let Err(e) = net::relay(opt("--listen")) {
-            eprintln!("desk: {e}");
+            eprintln!("sshremote: {e}");
             std::process::exit(1);
         }
         return;
@@ -226,14 +226,14 @@ fn main() {
         let r = agent::run(opt("--capture").unwrap_or("auto"), opt("--pipe"));
         // A relay helper has no visible stderr; keep its failure where it can be found.
         if let (Err(e), Some(_)) = (&r, opt("--pipe")) {
-            let _ = std::fs::write(std::env::temp_dir().join("desk-agent.log"), e);
+            let _ = std::fs::write(std::env::temp_dir().join("sshremote-agent.log"), e);
         }
         r
     } else {
         parse_client(&args).and_then(client::run)
     };
     if let Err(e) = result {
-        eprintln!("desk: {e}");
+        eprintln!("sshremote: {e}");
         std::process::exit(1);
     }
 }

@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn file_ops_work_and_report() {
-        let dir = std::env::temp_dir().join(format!("desk-ops-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sshremote-ops-{}", std::process::id()));
         let d = dir.to_str().unwrap();
         assert!(matches!(op(FileOp::Mkdir, d, ""), ToClient::OpDone { ok: true, .. }));
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn existing_files_are_not_overwritten() {
-        let dir = std::env::temp_dir().join(format!("desk-files-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sshremote-files-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("r.txt"), b"x").unwrap();
         assert_eq!(free_path(&dir, "r.txt"), dir.join("r (2).txt"));
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn a_folder_streams_every_file() {
-        let dir = std::env::temp_dir().join(format!("desk-out-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sshremote-out-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), vec![1u8; 100_000]).unwrap();
         std::fs::write(dir.join("sub").join("b.txt"), b"bb").unwrap();

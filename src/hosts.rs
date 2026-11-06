@@ -35,7 +35,14 @@ fn config_dir() -> Option<std::path::PathBuf> {
             .map(Into::into)
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))
     };
-    base.map(|b| b.join("desk"))
+    let base = base?;
+    let dir = base.join("sshremote");
+    // Hosts, favorites and settings kept under the program's former name move over once.
+    let old = base.join("desk");
+    if !dir.exists() && old.join("recent.txt").exists() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    Some(dir)
 }
 
 /// Recent connections as `host port` lines; passwords are never stored.
@@ -69,12 +76,12 @@ pub fn pick() -> Option<String> {
         }
     }
     let mut out = std::io::stderr();
-    let _ = writeln!(out, "desk: choose a host");
+    let _ = writeln!(out, "sshremote: choose a host");
     for (i, h) in all.iter().enumerate() {
         let tag = if recent.contains(h) { "recent" } else { "~/.ssh/config" };
         let _ = writeln!(out, "  {:>2}  {h:<32} {tag}", i + 1);
     }
-    let _ = write!(out, "number, or user@host / desk://host: ");
+    let _ = write!(out, "number, or user@host / sshremote://host: ");
     let _ = out.flush();
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line).ok()?;

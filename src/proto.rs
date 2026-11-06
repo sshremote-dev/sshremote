@@ -160,6 +160,8 @@ pub enum ToAgent {
     },
     /// Installs what the window list needs on the host (the GNOME Shell helper).
     InstallHelper,
+    /// Opens the desktop's own sharing dialog on the remote screen to choose there.
+    PickOnRemote,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -529,6 +531,7 @@ impl ToAgent {
             }
             ToAgent::ListWindows => 32,
             ToAgent::InstallHelper => 34,
+            ToAgent::PickOnRemote => 35,
             ToAgent::Share { kind, id } => {
                 b.push(*kind);
                 b.extend_from_slice(&id.to_le_bytes());
@@ -593,6 +596,7 @@ impl ToAgent {
             31 => ToAgent::TermClose { id: c.u32()? },
             32 => ToAgent::ListWindows,
             34 => ToAgent::InstallHelper,
+            35 => ToAgent::PickOnRemote,
             33 => ToAgent::Share { kind: c.u8()?, id: c.u64()? },
             _ => return Err(bad()),
         })
@@ -918,6 +922,7 @@ mod tests {
             ToAgent::ListWindows,
             ToAgent::Share { kind: 2, id: 0x1234 },
             ToAgent::InstallHelper,
+            ToAgent::PickOnRemote,
         ];
         for m in [
             ToClient::DirList {

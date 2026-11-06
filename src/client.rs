@@ -350,7 +350,10 @@ impl Viewer {
         self.next_shell += 1;
         self.sess.send(ToAgent::Pause(true))?;
         let _ = execute!(self.out, event::DisableMouseCapture, terminal::LeaveAlternateScreen, cursor::Show);
-        write!(self.out, "\x1b[0m\r\ndesk: remote shell. Type exit, or press Ctrl+] to return to the screen.\r\n")?;
+        write!(
+            self.out,
+            "\x1b[0m\r\nsshremote: shell on the SSH host. Type exit, or press Ctrl+] to return to the screen.\r\n"
+        )?;
         self.out.flush()?;
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         self.shell = Some(id);
@@ -710,7 +713,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         if opt.sound {
             match crate::audio::Player::new() {
                 Ok(p) => v.player = Some(p),
-                Err(e) => eprintln!("desk: sound: {e}"),
+                Err(e) => eprintln!("sshremote: sound: {e}"),
             }
             v.sess.send(ToAgent::Audio(true))?;
         }
@@ -786,7 +789,7 @@ pub fn run(opt: Options) -> Result<(), String> {
     }
     v.sess.close();
     eprintln!(
-        "desk: {} frames, received {:.1} KB, sent {:.1} KB",
+        "sshremote: {} frames, received {:.1} KB, sent {:.1} KB",
         v.ctl.frames,
         v.sess.rx() as f64 / 1024.0,
         v.sess.tx_bytes as f64 / 1024.0
@@ -804,7 +807,7 @@ pub fn run(opt: Options) -> Result<(), String> {
 const WINDOWS_SSH: &str = "this is a Windows ssh session, whose console layer drops sixel graphics,
 and its output pipe could not be reached directly.
 Run the viewer on the computer you are sitting at instead, for example:
-  desk USER@THIS-PC --remote \"D:\\Projects\\desk.exe --agent\"
+  sshremote USER@THIS-PC --remote \"D:\\Projects\\sshremote.exe --agent\"
 or add --gui to open a window there.";
 
 /// The viewer runs inside a Windows OpenSSH session, where output through the pseudo console cannot carry images.

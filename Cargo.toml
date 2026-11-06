@@ -1,8 +1,8 @@
 [package]
-name = "desk"
+name = "sshremote"
 version = "0.1.0"
 edition = "2024"
-description = "Remote desktop over SSH, viewed in a terminal or a window"
+description = "Remote control over SSH, in a terminal or a window"
 license = "MIT"
 
 [dependencies]

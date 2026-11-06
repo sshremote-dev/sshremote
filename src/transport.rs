@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 pub enum Target {
     /// A child process on this machine.
     Local { capture: String },
-    /// `ssh -T` to a host that runs `desk --agent`.
+    /// `ssh -T` to a host that runs `sshremote --agent`.
     Ssh {
         /// `[user@]host` as ssh takes it.
         host: String,
@@ -25,7 +25,7 @@ pub enum Target {
         /// No terminal to ask on: trust a host key the first time, fail instead of prompting.
         unattended: bool,
     },
-    /// A `desk --serve` agent reached directly or through a relay, sealed with a one-time password.
+    /// A `sshremote --serve` agent reached directly or through a relay, sealed with a one-time password.
     Direct { addr: crate::net::Address, password: String },
 }
 
@@ -53,8 +53,8 @@ impl Link {
     }
 }
 
-/// Environment variable through which `desk` answers ssh's askpass call.
-pub const ASKPASS_SECRET: &str = "DESK_SSH_SECRET";
+/// Environment variable through which `sshremote` answers ssh's askpass call.
+pub const ASKPASS_SECRET: &str = "SSHREMOTE_SSH_SECRET";
 
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {

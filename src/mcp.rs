@@ -1,5 +1,5 @@
-//! `desk mcp HOST`: a Model Context Protocol server on stdio that lets an AI
-//! agent see and operate a remote desktop over the same ssh (or desk://) link.
+//! `sshremote mcp HOST`: a Model Context Protocol server on stdio that lets an AI
+//! agent see and operate a remote desktop over the same ssh (or sshremote://) link.
 //!
 //! Built to be cheap in tokens: the picture stream is paused and a screenshot is
 //! taken only when asked, scaled to `max_width` (1024 by default), optionally a
@@ -45,7 +45,7 @@ fn tools() -> Value {
     };
     json!([
         {"name": "screenshot",
-         "description": "Capture the remote screen as a PNG. Coordinates for the other tools refer to the pixels of the most recent screenshot. Keep max_width small and use region to zoom in; that saves tokens.",
+         "description": "Capture the SSH host's screen as a PNG. Coordinates for the other tools refer to the pixels of the most recent screenshot. Keep max_width small and use region to zoom in; that saves tokens.",
          "inputSchema": {"type": "object", "properties": {
             "max_width": {"type": "integer", "description": "Scale down to at most this width (default 1024, 0 = full size)."},
             "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
@@ -77,7 +77,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "share", "description": "Limit the picture, clicks and keys to one window or program, which makes screenshots smaller and cheaper. target: \"screen\", \"active\" (the focused window), \"active-app\" (every window of its program), a window id from windows, or \"app:<window id>\" for every window of that program.",
          "inputSchema": {"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}}},
-        {"name": "clipboard_get", "description": "Text last copied on the remote host.",
+        {"name": "clipboard_get", "description": "Text last copied on the SSH host.",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "clipboard_set", "description": "Put text on the remote clipboard.",
          "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}}
@@ -345,6 +345,12 @@ impl Server {
                     "screen" => (0, 0),
                     "active" => (3, 0),
                     "active-app" => (4, 0),
+                    "pick" => {
+                        self.send(ToAgent::PickOnRemote)?;
+                        return Ok(text_result(
+                            "the sharing dialog is open on the SSH host's screen; take a screenshot, click a window and Share there",
+                        ));
+                    }
                     _ => match t.strip_prefix("app:") {
                         Some(id) => (2, id.trim().parse::<u64>().map_err(|_| "bad window id")?),
                         None => (1, t.parse::<u64>().map_err(|_| "target is screen, active, a window id or app:<id>")?),
@@ -359,7 +365,7 @@ impl Server {
                 self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
                 match self.sharing.clone() {
                     Some(text) => Ok(text_result(format!("sharing {text}; take a screenshot"))),
-                    None => Ok(error_result("the remote host did not confirm")),
+                    None => Ok(error_result("the SSH host did not confirm")),
                 }
             }
             "clipboard_get" => {
@@ -409,7 +415,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
             "initialize" => Ok(json!({
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "desk", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "sshremote", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": "Remote desktop control. Take a screenshot first; give coordinates in the latest screenshot's pixels. Prefer a small max_width and a region to read details."
             })),
             "ping" => Ok(json!({})),

@@ -250,7 +250,7 @@ impl FileWindow {
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("desk-files"), builder, |ui, _| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sshremote-files"), builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 out.push(Cmd::Close);
             }
@@ -327,7 +327,7 @@ impl FileWindow {
                     });
                 });
                 ui.allocate_ui_with_layout(Vec2::new(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.pane_ui(ui, true, &format!("Remote: {host}"), out)
+                    self.pane_ui(ui, true, &format!("SSH host: {host}"), out)
                 });
             });
         });
@@ -650,7 +650,7 @@ impl FileWindow {
     fn dialog_ui(&mut self, ctx: &egui::Context, out: &mut Vec<Cmd>) {
         let Some(d) = self.dialog.as_mut() else { return };
         let mut done: Option<bool> = None;
-        let modal = egui::Modal::new(egui::Id::unique("desk-file-dialog")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("sshremote-file-dialog")).show(ctx, |ui| {
             ui.set_width(360.0);
             let deleting = matches!(d, Dialog::Delete { .. });
             let title = if matches!(d, Dialog::NewFolder { .. }) { "New folder" } else { "Rename" };

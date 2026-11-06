@@ -22,10 +22,10 @@ macro_rules! notify {
 }
 
 const RD: &str = "org.gnome.Mutter.RemoteDesktop";
-/// The desk helper extension, which lists windows (GNOME Shell keeps its own list to its portal).
-const HELPER: &str = "io.github.thinkbigx.Desk.Windows";
-const HELPER_PATH: &str = "/io/github/thinkbigx/Desk/Windows";
-const HELPER_UUID: &str = "desk-helper@thinkbigx.github.io";
+/// The sshremote helper extension, which lists windows (GNOME Shell keeps its own list to its portal).
+const HELPER: &str = "io.github.thinkbigx.SshRemote.Windows";
+const HELPER_PATH: &str = "/io/github/thinkbigx/SshRemote/Windows";
+const HELPER_UUID: &str = "sshremote-helper@thinkbigx.github.io";
 
 /// id, title, program, x, y, width, height (stage coordinates), minimized, shareable, focused, owner id.
 type HelperWin = (u64, String, String, i32, i32, i32, i32, bool, bool, bool, u64);
@@ -37,6 +37,8 @@ enum Src {
     /// The focused window.
     Focused,
     Window(u64),
+    /// Whatever was chosen in GNOME's screen-sharing dialog on the remote screen.
+    Portal,
 }
 
 /// Sharing one program: its windows' part of the monitor, the rest greyed out.
@@ -62,6 +64,10 @@ pub struct Gnome {
     pipe: Option<(gst::Pipeline, gst_app::AppSink)>,
     src: Src,
     app: Option<AppShare>,
+    /// The stream chosen in GNOME's own sharing dialog, and its input session.
+    portal: Option<super::portal::Portal>,
+    /// The dialog is open on the remote screen; its answer arrives here.
+    picking: Option<std::sync::mpsc::Receiver<Result<super::portal::Portal, String>>>,
     /// For a shared window: whether it had the focus when last asked, and when that was.
     window_focus: (bool, std::time::Instant),
 }
@@ -105,13 +111,14 @@ pub fn ensure_env() {
     }
 }
 
-fn pipeline(node: u32, size: Option<(usize, usize)>) -> Result<(gst::Pipeline, gst_app::AppSink), String> {
+/// `source` is what pipewiresrc reads: "path=NODE", or "fd=FD path=NODE" for a portal stream.
+fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<(gst::Pipeline, gst_app::AppSink), String> {
     let caps = match size {
         Some((w, h)) => format!(",width={w},height={h},pixel-aspect-ratio=1/1"),
         None => String::new(),
     };
     let desc = format!(
-        "pipewiresrc path={node} do-timestamp=true keepalive-time=250 \
+        "pipewiresrc {source} do-timestamp=true keepalive-time=250 \
          ! queue leaky=downstream max-size-buffers=1 \
          ! videoconvert n-threads=2 ! videoscale method=1 n-threads=2 \
          ! video/x-raw,format=BGRx{caps} \
@@ -220,6 +227,7 @@ impl Gnome {
         let stream: OwnedObjectPath = match src {
             Src::Monitor => cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?,
             Src::Focused => cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?,
+            Src::Portal => unreachable!("portal streams come from pick"),
             Src::Window(id) => {
                 sprops.insert("window-id", Value::U64(id));
                 cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?
@@ -232,7 +240,7 @@ impl Gnome {
         let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
         let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
 
-        let (p, sink) = pipeline(node, None)?;
+        let (p, sink) = pipeline(&format!("path={node}"), None)?;
         let first = sink
             .try_pull_sample(gst::ClockTime::from_seconds(5))
             .ok_or("no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)")?;
@@ -250,6 +258,8 @@ impl Gnome {
             pipe: Some((p, sink)),
             src,
             app: None,
+            portal: None,
+            picking: None,
             window_focus: (true, std::time::Instant::now()),
         })
     }
@@ -264,6 +274,71 @@ impl Gnome {
     }
 
     /// Frames at their own size, cut and scaled here: windows change size, programs are cut out.
+    fn source(&self) -> String {
+        match &self.portal {
+            Some(p) => p.source(),
+            None => format!("path={}", self.node),
+        }
+    }
+
+    /// Starts reading the stream chosen in the portal dialog; its first frame gives the size.
+    fn use_portal(&mut self, portal: super::portal::Portal) -> Result<(), String> {
+        if let Some((p, _)) = self.pipe.take() {
+            let _ = p.set_state(gst::State::Null);
+        }
+        self.app = None;
+        let (p, sink) = pipeline(&portal.source(), None)?;
+        let first = sink
+            .try_pull_sample(gst::ClockTime::from_seconds(5))
+            .ok_or("no picture from the chosen window within 5 s")?;
+        let img = to_image(&first)?;
+        (self.desk, self.target) = ((img.w, img.h), (img.w, img.h));
+        self.pipe = Some((p, sink));
+        self.portal = Some(portal);
+        self.src = Src::Portal;
+        Ok(())
+    }
+
+    /// Input for a stream chosen in the portal dialog goes through the portal.
+    fn portal_input(&self, ev: Input) -> Result<(), String> {
+        let Some(p) = &self.portal else { return Ok(()) };
+        match ev {
+            Input::Move { x, y } => {
+                p.motion(x.clamp(0.0, self.desk.0 as f64 - 1.0), y.clamp(0.0, self.desk.1 as f64 - 1.0))
+            }
+            Input::Button { button, pressed } => {
+                let code = match button {
+                    1 => 0x110,
+                    2 => 0x112,
+                    3 => 0x111,
+                    8 => 0x113,
+                    9 => 0x114,
+                    _ => return Ok(()),
+                };
+                p.button(code, pressed)
+            }
+            Input::Scroll { steps } => p.axis(0, steps),
+            Input::HScroll { steps } => p.axis(1, steps),
+            Input::KeyState { keysym, down } => p.keysym(keysym, down),
+            Input::SecureAttention => Ok(()),
+            Input::Key { keysym, mods } => {
+                let held: Vec<u32> = [(MOD_CTRL, 29), (MOD_SHIFT, 42), (MOD_ALT, 56), (MOD_SUPER, 125)]
+                    .into_iter()
+                    .filter(|(m, _)| mods & m != 0)
+                    .map(|(_, c)| c)
+                    .collect();
+                for &c in &held {
+                    p.keycode(c, true)?;
+                }
+                let r = p.keysym(keysym, true).and_then(|_| p.keysym(keysym, false));
+                for &c in held.iter().rev() {
+                    p.keycode(c, false)?;
+                }
+                r
+            }
+        }
+    }
+
     fn native(&self) -> bool {
         self.src != Src::Monitor || self.app.is_some()
     }
@@ -274,11 +349,13 @@ impl Gnome {
             let e = e.to_string();
             if e.contains("ServiceUnknown") || e.contains("NameHasNoOwner") || e.contains("UnknownObject") {
                 if helper_dir().join("extension.js").exists() {
-                    format!("{NEEDS_HELPER} It is installed but not running yet: log out and back in on the remote host once.")
+                    format!(
+                        "{NEEDS_HELPER} It is installed but not running yet: log out and back in on the SSH host once."
+                    )
                 } else {
                     format!(
                         "{NEEDS_HELPER} Install it from here if you like; GNOME loads it at the next login on the \
-                         remote host. Without it, share the active window."
+                         SSH host. Without it, share the active window."
                     )
                 }
             } else {
@@ -397,6 +474,36 @@ impl Capture for Gnome {
         self.monitors.iter().map(|m| m.1.clone()).collect()
     }
 
+    fn pick(&mut self) -> Result<String, String> {
+        // The whole screen first, so the dialog can be seen and clicked from the viewer.
+        if self.src != Src::Monitor || self.app.is_some() {
+            self.share(Share::Screen)?;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::portal::pick());
+        });
+        self.picking = Some(rx);
+        Ok("A sharing dialog is open on the SSH host: switch on Allow Remote Interaction (needed to control it), \
+            choose a window under Window, then click Share."
+            .into())
+    }
+
+    fn poll_share(&mut self) -> Option<Result<String, String>> {
+        let answer = self.picking.as_ref()?.try_recv();
+        match answer {
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(_) => {
+                self.picking = None;
+                Some(Err("the sharing dialog went away".into()))
+            }
+            Ok(r) => {
+                self.picking = None;
+                Some(r.and_then(|p| self.use_portal(p)).map(|_| "the window chosen on the SSH host's screen".into()))
+            }
+        }
+    }
+
     fn install_helper(&mut self) -> Result<String, String> {
         let dir = helper_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -425,7 +532,7 @@ impl Capture for Gnome {
                 return Err("installed the helper, but could not enable it with gsettings".into());
             }
         }
-        let mut text = "The desk helper is installed on the remote host. GNOME loads it at the next login: log out \
+        let mut text = "The sshremote helper is installed on the SSH host. GNOME loads it at the next login: log out \
                         and back in there once, then the window list appears here."
             .to_string();
         if get("disable-user-extensions") == "true" {
@@ -481,7 +588,7 @@ impl Capture for Gnome {
             Share::ActiveApp => {
                 // Cutting a program out needs to know where its other windows are, which only the helper tells.
                 let list = self.helper_list().map_err(|_| {
-                    "On GNOME the active application needs the desk helper, which tells where the program's \
+                    "On GNOME the active application needs the sshremote helper, which tells where the program's \
                      other windows are. The active window works without it."
                         .to_string()
                 })?;
@@ -523,7 +630,7 @@ impl Capture for Gnome {
         if self.native() {
             // A window stream stays at its own size, which follows the window; it is scaled here.
             if self.pipe.is_none() {
-                self.pipe = Some(pipeline(self.node, None)?);
+                self.pipe = Some(pipeline(&self.source(), None)?);
             }
             self.target = t;
             return Ok(());
@@ -532,7 +639,7 @@ impl Capture for Gnome {
             if let Some((p, _)) = self.pipe.take() {
                 let _ = p.set_state(gst::State::Null);
             }
-            self.pipe = Some(pipeline(self.node, (t != self.desk).then_some(t))?);
+            self.pipe = Some(pipeline(&self.source(), (t != self.desk).then_some(t))?);
             self.target = t;
         }
         Ok(())
@@ -591,6 +698,9 @@ impl Capture for Gnome {
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
+        if self.portal.is_some() {
+            return self.portal_input(ev);
+        }
         // Sharing a program or a window: clicks only on it, keys only while it has the focus.
         if let Some(a) = self.app.as_mut() {
             match &ev {

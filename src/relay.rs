@@ -89,13 +89,13 @@ pub fn pipe_names(base: &str) -> (String, String) {
 }
 
 pub fn run(backend: &str) -> Result<(), String> {
-    let base = format!(r"\\.\pipe\desk-{}", std::process::id());
+    let base = format!(r"\\.\pipe\sshremote-{}", std::process::id());
     let (down_name, up_name) = pipe_names(&base);
     let sddl = user_only_sddl()?;
     let mut down = pipe(&down_name, PIPE_ACCESS_OUTBOUND, &sddl)?;
     let mut up = pipe(&up_name, PIPE_ACCESS_INBOUND, &sddl)?;
 
-    // The desk service starts the helper as SYSTEM, which also works at the sign-in and lock screens;
+    // The sshremote service starts the helper as SYSTEM, which also works at the sign-in and lock screens;
     // without it a one-shot scheduled task starts it as the logged-on user.
     match crate::service::ask(&format!("spawn {base} {backend}")) {
         Some(Ok(())) => {}
@@ -103,13 +103,13 @@ pub fn run(backend: &str) -> Result<(), String> {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // A headless console host keeps a console window from appearing on the remote screen.
             let cmd = format!("conhost.exe --headless \"{}\" --agent --capture {backend} --pipe {base}", exe.display());
-            let task = format!("desk-agent-{}", std::process::id());
+            let task = format!("sshremote-agent-{}", std::process::id());
             schtasks(&["/create", "/tn", &task, "/tr", &cmd, "/sc", "once", "/st", "00:00", "/it", "/f"])?;
             let started = schtasks(&["/run", "/tn", &task]);
             let _ = schtasks(&["/delete", "/tn", &task, "/f"]);
             started.map_err(|e| match service {
-                Some(Err(s)) => format!("{e}; desk service: {s}"),
-                _ => format!("{e} (nobody logged on at the console? the desk service covers that)"),
+                Some(Err(s)) => format!("{e}; sshremote service: {s}"),
+                _ => format!("{e} (nobody logged on at the console? the sshremote service covers that)"),
             })?;
         }
     }

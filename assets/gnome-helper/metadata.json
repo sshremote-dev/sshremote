@@ -1,7 +1,7 @@
 {
-  "uuid": "desk-helper@thinkbigx.github.io",
-  "name": "desk helper",
-  "description": "Lets the desk remote desktop agent list windows so a viewer can share one window or application.",
+  "uuid": "sshremote-helper@thinkbigx.github.io",
+  "name": "sshremote helper",
+  "description": "Lets the sshremote agent list windows so a viewer can share one window or application.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51", "52"],
-  "url": "https://github.com/thinkbigx/desk"
+  "url": "https://github.com/thinkbigx/sshremote"
 }

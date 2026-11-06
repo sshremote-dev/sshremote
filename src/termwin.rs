@@ -256,7 +256,7 @@ impl TermWindow {
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("desk-terminal"), builder, |ui, _| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sshremote-terminal"), builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 out.extend(self.close_all());
                 out.push(Cmd::Close);

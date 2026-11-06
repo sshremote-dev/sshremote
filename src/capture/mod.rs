@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 mod gnome;
+#[cfg(target_os = "linux")]
+mod portal;
 pub mod region;
 mod synthetic;
 #[cfg(windows)]
@@ -75,10 +77,20 @@ impl Share {
     }
 }
 
-/// Shown in the window chooser when GNOME Shell lacks the desk helper; the viewer offers to install it.
-pub const NEEDS_HELPER: &str = "Picking from a list on GNOME needs the desk helper, a small GNOME Shell extension.";
+/// Shown in the window chooser when GNOME Shell lacks the sshremote helper; the viewer offers to install it.
+pub const NEEDS_HELPER: &str =
+    "Picking from a list on GNOME needs the sshremote helper, a small GNOME Shell extension.";
 
 pub trait Capture {
+    /// Opens the desktop's own "choose what to share" dialog on the remote screen; returns what to
+    /// tell the viewer. The choice arrives later through `poll_share`.
+    fn pick(&mut self) -> Result<String, String> {
+        Err("this desktop has no sharing dialog of its own; pick from the list".into())
+    }
+    /// The outcome of `pick` once someone chose (or cancelled) on the remote screen.
+    fn poll_share(&mut self) -> Option<Result<String, String>> {
+        None
+    }
     /// Installs what listing windows needs (the GNOME Shell helper); returns what to tell the viewer.
     fn install_helper(&mut self) -> Result<String, String> {
         Err("nothing to install for this desktop".into())

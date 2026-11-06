@@ -35,8 +35,8 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
-pub const NAME: &str = "desk";
-const PIPE: &str = r"\\.\pipe\desk-service";
+pub const NAME: &str = "sshremote";
+const PIPE: &str = r"\\.\pipe\sshremote-service";
 const POLICY_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
 
 fn wide(s: &str) -> Vec<u16> {
@@ -72,18 +72,18 @@ pub fn install() -> Result<(), String> {
             "obj=",
             "LocalSystem",
             "DisplayName=",
-            "desk remote desktop",
+            "sshremote remote desktop",
         ],
     )
     .map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run(
         "sc",
-        &["description", NAME, "Starts the desk screen helper in the console session and sends Ctrl+Alt+Del"],
+        &["description", NAME, "Starts the sshremote screen helper in the console session and sends Ctrl+Alt+Del"],
     );
     // SoftwareSASGeneration = 1: services may simulate Ctrl+Alt+Del.
     run("reg", &["add", POLICY_KEY, "/v", "SoftwareSASGeneration", "/t", "REG_DWORD", "/d", "1", "/f"])?;
     run("sc", &["start", NAME])?;
-    println!("desk service installed and started ({bin})");
+    println!("sshremote service installed and started ({bin})");
     Ok(())
 }
 
@@ -91,7 +91,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = run("sc", &["stop", NAME]);
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
-    println!("desk service removed");
+    println!("sshremote service removed");
     Ok(())
 }
 
@@ -126,7 +126,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     report(SERVICE_STOPPED);
 }
 
-/// Entry point for `desk --service`, run by the service control manager.
+/// Entry point for `sshremote --service`, run by the service control manager.
 pub fn dispatch() -> Result<(), String> {
     let mut name = wide(NAME);
     let table = [
@@ -190,9 +190,9 @@ fn send_sas() -> Result<(), String> {
     Ok(())
 }
 
-/// Starts `desk --agent --pipe BASE` as SYSTEM in the active console session.
+/// Starts `sshremote --agent --pipe BASE` as SYSTEM in the active console session.
 fn spawn_helper(base: &str, capture: &str) -> Result<(), String> {
-    if !base.starts_with(r"\\.\pipe\desk-") || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !base.starts_with(r"\\.\pipe\sshremote-") || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("bad request".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

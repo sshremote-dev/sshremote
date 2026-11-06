@@ -22,7 +22,7 @@ pub const PORT: u16 = 7070;
 pub const RELAY_PORT: u16 = 7071;
 const MAX_FRAME: usize = 1 << 20;
 
-/// Where a viewer finds an agent: `desk://host[:port]` or `desk://ID@relay[:port]`.
+/// Where a viewer finds an agent: `sshremote://host[:port]` or `sshremote://ID@relay[:port]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Address {
     pub host: String,
@@ -32,7 +32,7 @@ pub struct Address {
 
 impl Address {
     pub fn parse(s: &str) -> Option<Address> {
-        let rest = s.strip_prefix("desk://")?;
+        let rest = s.strip_prefix("sshremote://")?;
         let (id, hostport) = match rest.split_once('@') {
             Some((id, hp)) => (Some(id.to_string()), hp),
             None => (None, rest),
@@ -140,11 +140,11 @@ impl Read for SealedReader {
     }
 }
 
-const CONFIRM: &[u8] = b"desk/1 ready";
+const CONFIRM: &[u8] = b"sshremote/1 ready";
 
 /// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here.
 fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(SealedReader, SealedWriter)> {
-    let (a, b) = (Identity::new(b"desk viewer"), Identity::new(b"desk agent"));
+    let (a, b) = (Identity::new(b"sshremote viewer"), Identity::new(b"sshremote agent"));
     let pw = Password::new(password.trim().as_bytes());
     let (state, msg) = if viewer {
         Spake2::<Ed25519Group>::start_a(&pw, &a, &b)
@@ -194,15 +194,15 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     handshake(s, password, true).map_err(|e| e.to_string())
 }
 
-/// Agent side of `desk --serve`: waits for viewers, one at a time, and serves each.
+/// Agent side of `sshremote --serve`: waits for viewers, one at a time, and serves each.
 pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, backend: &str) -> Result<(), String> {
     let password = password.map(str::to_string).unwrap_or_else(|| random_digits(9));
     let id = random_digits(9);
     match via {
         Some(r) => println!(
-            "desk is waiting through relay {r}\n  ID:       {id}\n  password: {password}\n  connect with: desk --gui desk://{id}@{r}"
+            "sshremote is waiting through relay {r}\n  ID:       {id}\n  password: {password}\n  connect with: sshremote --gui sshremote://{id}@{r}"
         ),
-        None => println!("desk is listening on {}\n  password: {password}", listen.unwrap_or("0.0.0.0:7070")),
+        None => println!("sshremote is listening on {}\n  password: {password}", listen.unwrap_or("0.0.0.0:7070")),
     }
     let listener = match via {
         None => Some(TcpListener::bind(listen.unwrap_or("0.0.0.0:7070")).map_err(|e| e.to_string())?),
@@ -213,17 +213,17 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
         let stream = match (&listener, via) {
             (Some(l), _) => l.accept().map_err(|e| e.to_string())?.0,
             (None, Some(r)) => {
-                let addr = Address::parse(&format!("desk://{id}@{r}")).ok_or("bad relay address")?;
+                let addr = Address::parse(&format!("sshremote://{id}@{r}")).ok_or("bad relay address")?;
                 let mut s = match TcpStream::connect((addr.host.as_str(), addr.port)) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("desk: relay {r}: {e}; retrying");
+                        eprintln!("sshremote: relay {r}: {e}; retrying");
                         thread::sleep(Duration::from_secs(5));
                         continue;
                     }
                 };
                 if let Err(e) = relay_hello(&mut s, "agent", &id) {
-                    eprintln!("desk: {e}; retrying");
+                    eprintln!("sshremote: {e}; retrying");
                     thread::sleep(Duration::from_secs(5));
                     continue;
                 }
@@ -235,15 +235,15 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
         match handshake(stream, &password, false) {
             Ok((r, w)) => {
                 failures = 0;
-                eprintln!("desk: viewer connected from {peer}");
+                eprintln!("sshremote: viewer connected from {peer}");
                 if let Err(e) = crate::agent::run_on(backend, Box::new(r), Box::new(w)) {
-                    eprintln!("desk: session ended: {e}");
+                    eprintln!("sshremote: session ended: {e}");
                 }
-                eprintln!("desk: viewer disconnected");
+                eprintln!("sshremote: viewer disconnected");
             }
             Err(e) => {
                 failures += 1;
-                eprintln!("desk: rejected {peer}: {e}");
+                eprintln!("sshremote: rejected {peer}: {e}");
                 // Each wrong guess costs time; many end the server so the password cannot be ground down.
                 if failures >= 10 {
                     return Err("too many failed attempts; start again for a new password".into());
@@ -254,11 +254,11 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
     }
 }
 
-/// `desk --relay`: pairs agents and viewers by ID and copies bytes between them.
+/// `sshremote --relay`: pairs agents and viewers by ID and copies bytes between them.
 pub fn relay(listen: Option<&str>) -> Result<(), String> {
     let addr = listen.unwrap_or("0.0.0.0:7071");
     let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
-    println!("desk relay listening on {addr}");
+    println!("sshremote relay listening on {addr}");
     let waiting: Arc<Mutex<HashMap<String, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
     for s in listener.incoming().flatten() {
         let waiting = waiting.clone();
@@ -303,9 +303,12 @@ mod tests {
 
     #[test]
     fn addresses() {
-        assert_eq!(Address::parse("desk://10.0.0.5"), Some(Address { host: "10.0.0.5".into(), port: PORT, id: None }));
         assert_eq!(
-            Address::parse("desk://123456789@relay.example:9000"),
+            Address::parse("sshremote://10.0.0.5"),
+            Some(Address { host: "10.0.0.5".into(), port: PORT, id: None })
+        );
+        assert_eq!(
+            Address::parse("sshremote://123456789@relay.example:9000"),
             Some(Address { host: "relay.example".into(), port: 9000, id: Some("123456789".into()) })
         );
         assert_eq!(Address::parse("user@host"), None);

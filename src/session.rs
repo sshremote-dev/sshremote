@@ -18,7 +18,7 @@ pub struct Options {
     pub remote: String,
     pub capture: String,
     pub ssh_args: Vec<String>,
-    /// One-time password of a `desk --serve` agent.
+    /// One-time password of a `sshremote --serve` agent.
     pub password: Option<String>,
     /// `None` is the auto preset.
     pub preset: Option<usize>,
@@ -81,7 +81,7 @@ impl Options {
             return Ok(Target::Local { capture: self.capture.clone() });
         }
         if let Some(addr) = self.host.as_deref().and_then(crate::net::Address::parse) {
-            let password = self.password.clone().ok_or("a desk:// address needs --password")?;
+            let password = self.password.clone().ok_or("a sshremote:// address needs --password")?;
             return Ok(Target::Direct { addr, password });
         }
         Ok(Target::Ssh {
@@ -97,7 +97,7 @@ impl Options {
 }
 
 /// Command that starts the agent on a host, finding it in the usual install places.
-pub const REMOTE: &str = "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" desk --agent";
+pub const REMOTE: &str = "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" sshremote --agent";
 
 impl Session {
     /// Starts the agent and waits for its hello.

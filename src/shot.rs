@@ -105,7 +105,7 @@ pub fn base64(data: &[u8]) -> String {
     s
 }
 
-/// `desk-YYYYMMDD-HHMMSS.png` in UTC, under the user's Pictures folder (Downloads if there is none).
+/// `sshremote-YYYYMMDD-HHMMSS.png` in UTC, under the user's Pictures folder (Downloads if there is none).
 pub fn save_path() -> std::path::PathBuf {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (days, rem) = (secs / 86_400, secs % 86_400);
@@ -119,7 +119,7 @@ pub fn save_path() -> std::path::PathBuf {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    let name = format!("desk-{y:04}{m:02}{d:02}-{:02}{:02}{:02}.png", rem / 3600, rem % 3600 / 60, rem % 60);
+    let name = format!("sshremote-{y:04}{m:02}{d:02}-{:02}{:02}{:02}.png", rem / 3600, rem % 3600 / 60, rem % 60);
     let downloads = crate::files::downloads();
     let pictures = downloads.parent().map(|h| h.join("Pictures")).filter(|p| p.is_dir());
     pictures.unwrap_or(downloads).join(name)
