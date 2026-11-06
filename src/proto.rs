@@ -23,11 +23,11 @@ pub struct Preset {
 }
 
 pub const PRESETS: [Preset; 5] = [
-    Preset { name: "P0 glance", scale: 50, mode: Mode::Mono, fps: 5 },
-    Preset { name: "P1 lean", scale: 75, mode: Mode::Gray16, fps: 10 },
-    Preset { name: "P2 balanced", scale: 100, mode: Mode::Color256, fps: 20 },
-    Preset { name: "P3 crisp", scale: 100, mode: Mode::True, fps: 30 },
-    Preset { name: "P4 exact", scale: 100, mode: Mode::True, fps: 60 },
+    Preset { name: "glance", scale: 50, mode: Mode::Mono, fps: 5 },
+    Preset { name: "lean", scale: 75, mode: Mode::Gray16, fps: 10 },
+    Preset { name: "balanced", scale: 100, mode: Mode::Color256, fps: 20 },
+    Preset { name: "crisp", scale: 100, mode: Mode::True, fps: 30 },
+    Preset { name: "exact", scale: 100, mode: Mode::True, fps: 60 },
 ];
 
 pub const MOD_SHIFT: u8 = 1;

@@ -47,6 +47,18 @@ impl Mode {
         }
     }
 
+    /// The colour depth in words, for menus.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Mono => "Black and white",
+            Mode::Gray4 => "4 greys",
+            Mode::Gray16 => "16 greys",
+            Mode::Color16 => "16 colours",
+            Mode::Color256 => "256 colours",
+            Mode::True => "Full colour",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Mode> {
         Self::ALL.iter().copied().find(|m| m.name() == s)
     }

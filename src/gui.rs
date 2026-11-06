@@ -35,6 +35,7 @@ mod ic {
     pub const MOON: &str = "\u{E330}";
     pub const PAUSE: &str = "\u{E39E}";
     pub const PLAY: &str = "\u{E3D0}";
+    pub const PUSH_PIN: &str = "\u{E3E2}";
     pub const STAR: &str = "\u{E46A}";
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";
@@ -388,7 +389,26 @@ fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
 
 /// An icon button that opens a menu.
 fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
-    egui::containers::menu::MenuButton::from_button(tool_button(glyph, false)).ui(ui, add).0
+    let config =
+        egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let (r, inner) =
+        egui::containers::menu::MenuButton::from_button(tool_button(glyph, false)).config(config).ui(ui, add);
+    if inner.is_some() {
+        // Remembered for the next frame, so an auto-hidden toolbar stays while its menu is open.
+        let pass = ui.ctx().cumulative_pass_nr();
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("desk-menu-open"), pass));
+    }
+    r
+}
+
+fn menu_open(ctx: &egui::Context) -> bool {
+    let last = ctx.data(|d| d.get_temp::<u64>(egui::Id::unique("desk-menu-open")));
+    last.is_some_and(|p| p + 2 >= ctx.cumulative_pass_nr())
+}
+
+/// A preset's real settings, e.g. "256 colours, 100%, 20 fps".
+fn preset_text(p: &crate::proto::Preset) -> String {
+    format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps)
 }
 
 /// A circle with the host's initial, coloured by its name.
@@ -593,13 +613,11 @@ impl App {
                                 });
                             });
                             ui.label(RichText::new("Quality").weak());
-                            ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut self.form.preset, None, "Auto")
-                                    .on_hover_text("Adapts to the link");
+                            let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
+                            egui::ComboBox::from_id_salt("quality").selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
                                 for (i, p) in PRESETS.iter().enumerate() {
-                                    let name = p.name.split_once(' ').map_or(p.name, |(_, n)| n);
-                                    ui.selectable_value(&mut self.form.preset, Some(i), name)
-                                        .on_hover_text(format!("{}, {}%, {} fps", p.mode.name(), p.scale, p.fps));
+                                    ui.selectable_value(&mut self.form.preset, Some(i), preset_text(p));
                                 }
                             });
                             ui.collapsing("Advanced", |ui| {
@@ -1531,7 +1549,7 @@ impl Remote {
         let id = egui::Id::unique("toolbar");
         let near_top = ctx.pointer_hover_pos().is_some_and(|p| p.y < screen.top() + 56.0);
         let was_hovered = ctx.memory(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
-        if !(self.pinned || near_top || was_hovered || ctx.any_popup_open()) {
+        if !(self.pinned || near_top || was_hovered || menu_open(ctx) || ctx.any_popup_open()) {
             let r = Rect::from_center_size(Pos2::new(screen.center().x, screen.top() + 4.0), Vec2::new(90.0, 4.0));
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id)).rect_filled(
                 r,
@@ -1569,14 +1587,12 @@ impl Remote {
             _ => (BAD, "poor"),
         };
         let details = format!(
-            "Connection {state}\nRound trip {:.0} ms, {:.0} KB/s, {:.0} fps\n{}\nQuality {} ({}, {}%)",
+            "Connection {state}\nRound trip {:.0} ms, {:.0} KB/s, {:.0} fps\n{}\n{}",
             self.ctl.rtt,
             self.ctl.kbps,
             self.ctl.fps_now,
             self.label,
-            self.ctl.preset_label(),
-            self.ctl.s.mode.name(),
-            self.ctl.s.scale
+            self.ctl.describe()
         );
         ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
@@ -1587,14 +1603,13 @@ impl Remote {
         let display = icon_menu(ui, ic::MONITOR, |ui| {
             ui.label(RichText::new("Quality").strong());
             let auto = self.ctl.auto.is_some();
-            if ui.selectable_label(auto, "Auto  (adapts to the link)").clicked() {
+            if ui.selectable_label(auto, "Auto (adapts to the connection)").clicked() {
                 *action = Some(Box::new(|r, _| r.menu('a')));
                 ui.close();
             }
             for (i, p) in PRESETS.iter().enumerate() {
                 let on = !auto && self.ctl.preset == p.name;
-                let text = format!("{}  ({}, {}%, {} fps)", p.name, p.mode.name(), p.scale, p.fps);
-                if ui.selectable_label(on, text).clicked() {
+                if ui.selectable_label(on, preset_text(p)).clicked() {
                     let c = char::from(b'0' + i as u8);
                     *action = Some(Box::new(move |r, _| r.menu(c)));
                     ui.close();
@@ -1602,15 +1617,16 @@ impl Remote {
             }
             ui.collapsing("Custom", |ui| {
                 let mut mode = self.ctl.s.mode;
-                egui::ComboBox::from_label("Colours").selected_text(mode.name()).show_ui(ui, |ui| {
+                ui.label(RichText::new("Colours").weak());
+                ui.horizontal_wrapped(|ui| {
                     for m in Mode::ALL {
-                        ui.selectable_value(&mut mode, m, m.name());
+                        ui.selectable_value(&mut mode, m, m.label());
                     }
                 });
                 let mut scale = self.ctl.s.scale;
-                ui.add(egui::Slider::new(&mut scale, 20..=100).text("Scale %"));
+                ui.add(egui::Slider::new(&mut scale, 20..=100).text("Resolution %"));
                 let mut fps = self.ctl.s.fps;
-                ui.add(egui::Slider::new(&mut fps, 1..=60).text("FPS"));
+                ui.add(egui::Slider::new(&mut fps, 1..=60).text("Frames per second"));
                 if (mode, scale, fps) != (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) {
                     *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
                 }
@@ -1646,7 +1662,7 @@ impl Remote {
                 }
             }
         });
-        display.on_hover_text(format!("Display: quality {}, view {}", self.ctl.preset_label(), self.fit.label()));
+        display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
 
         let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
         let fs_glyph = if self.fullscreen { ic::CORNERS_IN } else { ic::CORNERS_OUT };
@@ -1739,10 +1755,6 @@ impl Remote {
                 let tip = "Send Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen to the remote host instead of this PC";
                 ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
             }
-            let mut hide = !self.pinned;
-            if ui.checkbox(&mut hide, "Hide this toolbar until the pointer reaches the top").changed() {
-                self.pinned = !hide;
-            }
             theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
             ui.separator();
             if ui.button("Repaint the whole screen").clicked() {
@@ -1769,6 +1781,14 @@ impl Remote {
                 }
                 r.send(ToAgent::Audio(sound))
             }));
+        }
+        let pin_tip = if self.pinned {
+            "Toolbar locked: click to let it hide until the pointer reaches the top"
+        } else {
+            "Lock the toolbar so it stays shown"
+        };
+        if icon(ui, ic::PUSH_PIN, pin_tip, self.pinned).clicked() {
+            self.pinned = !self.pinned;
         }
         ui.separator();
         let end = egui::Button::new(RichText::new(ic::X).size(17.0).color(Color32::WHITE))

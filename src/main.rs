@@ -45,7 +45,7 @@ usage: desk                       open the window: connect screen, recent hosts
        desk desk://ID@RELAY[:PORT] --password P view one through a relay
 
 options:
-  --preset P      auto (default), or 0 glance (mono) .. 4 exact
+  --preset P      auto (default), or 0 (black and white, 50%, 5 fps) .. 4 (full colour, 60 fps)
   --budget KB/s   traffic auto stays under; default 100
   --mode M        mono gray4 gray16 16c 256c true
   --scale P       capture scale in percent, 10-100

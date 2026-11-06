@@ -173,13 +173,13 @@ Ctrl+] opens the menu: `q` quit, `0`-`4` presets, `a` auto, `m` colour mode, `+`
 `z` zoom (enlarge a reduced capture to the terminal; off by default inside an ssh session, where the
 terminal output itself crosses the network), `r` refresh. The status line (window title in `--gui`) shows traffic and round-trip time.
 
-| Preset | Scale | Colour | fps |
+| Key | Resolution | Colours | fps |
 |---|---|---|---|
-| 0 glance | 50% | mono | 5 |
-| 1 lean | 75% | gray16 | 10 |
-| 2 balanced | 100% | 256c | 20 |
-| 3 crisp | 100% | true | 30 |
-| 4 exact | 100% | true | 60 |
+| 0 | 50% | black and white | 5 |
+| 1 | 75% | 16 greys | 10 |
+| 2 | 100% | 256 colours | 20 |
+| 3 | 100% | full colour | 30 |
+| 4 | 100% | full colour | 60 |
 
 Sixel allows 256 colours per image, so in a terminal true colour is drawn with a palette made
 for each repainted rectangle: exact when it has at most 256 colours, median cut otherwise.

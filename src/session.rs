@@ -445,6 +445,12 @@ impl Control {
         self.auto = None;
     }
 
+    /// The settings in effect, e.g. "Auto: 256 colours, 100%, 20 fps".
+    pub fn describe(&self) -> String {
+        let s = format!("{}, {}%, {} fps", self.s.mode.label(), self.s.scale, self.s.fps);
+        if self.auto.is_some() { format!("Auto: {s}") } else { s }
+    }
+
     pub fn preset_label(&self) -> String {
         match &self.auto {
             Some(_) => format!("auto {}", self.preset),
