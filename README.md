@@ -32,6 +32,13 @@ one-shot scheduled task (`schtasks /it`), then relays the stream over two named 
 that user and SYSTEM may open. The user must be logged on at the console. A helper that fails
 writes its error to `%TEMP%\desk-agent.log`.
 
+For unattended access, `desk --install-service` (elevated) installs an optional LocalSystem service.
+The relay then asks it, over a pipe only Administrators and SYSTEM may open, to start the helper as
+SYSTEM in the console session, which also works at the sign-in and lock screens when nobody is
+logged on; the scheduled task remains the fallback. The service also raises Ctrl+Alt+Del (it sets
+the SoftwareSASGeneration policy to allow services to). `desk --uninstall-service` removes both.
+Users who are not administrators keep the scheduled-task path.
+
 The viewer also runs inside a Windows ssh session (`desk --local --capture windows` typed in the
 remote shell). There every byte normally passes through a pseudo console (ConPTY) that re-renders
 text and drops sixel images, so the viewer duplicates the write end of the pseudo console host's
@@ -53,8 +60,8 @@ Every key goes to the remote host as a separate press and release by its positio
 modifiers, Shift+click, Ctrl+drag and games behave as on a local keyboard, and the remote keyboard
 layout decides the characters. Text from input methods (Korean, Japanese, Chinese) is sent as it
 is committed. Mouse back and forward buttons and horizontal wheels are passed through. Copied text
-is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME; on Windows it
-needs a service, which desk does not install yet.
+is shared both ways while the clipboard switch is on. Ctrl+Alt+Del works on GNOME, and on Windows
+with the desk service installed.
 
 On a Windows viewer, while the session window is in front, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and
 Print Screen are taken with a low-level keyboard hook (on a thread of its own, since Windows skips a

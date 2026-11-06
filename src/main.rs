@@ -15,6 +15,8 @@ mod quant;
 #[cfg(windows)]
 mod relay;
 mod scroll;
+#[cfg(windows)]
+mod service;
 mod session;
 mod sixel;
 mod transport;
@@ -143,6 +145,20 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    #[cfg(windows)]
+    for (flag, f) in [
+        ("--install-service", service::install as fn() -> Result<(), String>),
+        ("--uninstall-service", service::uninstall),
+        ("--service", service::dispatch),
+    ] {
+        if args.first().is_some_and(|a| a == flag) {
+            if let Err(e) = f() {
+                eprintln!("desk: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
     }
     let result = if args.iter().any(|a| a == "--agent") {
         let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());

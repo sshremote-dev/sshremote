@@ -297,7 +297,12 @@ impl Capture for Gdi {
             Input::Key { keysym, mods } => key_events(keysym, mods, &mut seq),
             Input::KeyState { keysym, down } => key_state(keysym, down, &mut seq),
             Input::SecureAttention => {
-                return Err("Ctrl+Alt+Del can only be raised by a Windows service, which desk does not install".into());
+                return match crate::service::ask("sas") {
+                    Some(r) => r,
+                    None => {
+                        Err("Ctrl+Alt+Del needs the desk service: run `desk --install-service` as administrator".into())
+                    }
+                };
             }
         }
         if seq.is_empty() {
