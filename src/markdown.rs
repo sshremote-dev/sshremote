@@ -104,6 +104,17 @@ fn glyphs(text: &str) -> String {
             if let Some(g) = MARKS.iter().find(|g| t.starts_with(**g)) {
                 return format!("{indent}{}{}", " ".repeat(g.chars().count()), &t[g.len()..]);
             }
+            // Any other symbol a program sets before a line ("✻ Worked", "⎿ Read"): a marker, not
+            // text. Letters of any script, Markdown's own marks, and box and block characters
+            // (frames, quote bars) are kept.
+            let mut chars = t.chars();
+            if let (Some(c), Some(' ')) = (chars.next(), chars.next())
+                && !c.is_ascii()
+                && !c.is_alphanumeric()
+                && !('\u{2500}'..='\u{259f}').contains(&c)
+            {
+                return format!("{indent}  {}", &t[c.len_utf8() + 1..]);
+            }
             line.to_string()
         })
         .collect::<Vec<_>>()
@@ -263,8 +274,35 @@ fn list_marker(t: &str) -> Option<(String, &str)> {
 /// A line laid out with spaces rather than written as prose: a gap of several spaces or a tab
 /// between words, as in `dir`, `ls -l` or a table of numbers. Indentation alone is not enough.
 pub fn columned(line: &str) -> bool {
-    let t = line.trim();
-    t.contains('\t') || t.contains("  ")
+    line.trim().contains('\t') || gaps(line).len() >= 2
+}
+
+/// Where columns start on a line: after each run of two or more spaces past the indent.
+fn gaps(line: &str) -> Vec<usize> {
+    let chars: Vec<char> = line.chars().collect();
+    let start = chars.iter().position(|c| !c.is_whitespace()).unwrap_or(chars.len());
+    let (mut out, mut run) = (Vec::new(), 0);
+    for (i, &c) in chars.iter().enumerate().skip(start) {
+        if c == ' ' {
+            run += 1;
+        } else {
+            if run >= 2 {
+                out.push(i);
+            }
+            run = 0;
+        }
+    }
+    out
+}
+
+/// Lines laid out in columns (`ls`, `ps`, aligned settings): a line with several columns, or
+/// columns that start at the same place on two lines. A sentence with one double space is not.
+pub fn columned_block(lines: &[&str]) -> bool {
+    if lines.iter().any(|l| columned(l)) {
+        return true;
+    }
+    let mut seen = std::collections::HashSet::new();
+    lines.iter().flat_map(|l| gaps(l)).any(|p| !seen.insert(p))
 }
 
 /// Text in the terminal's own font with each character on the grid: wide characters (Korean,
@@ -284,11 +322,16 @@ pub fn mono_job(text: &str, font: &FontId, color: Color32, fonts: &mut egui::epa
     let mut job = LayoutJob::default();
     let mut run_start = 0;
     for (i, c) in text.char_indices() {
-        if c.width().unwrap_or(1) == 2 {
+        if c.is_ascii() {
+            continue;
+        }
+        // A symbol from a fallback font is often narrower or wider than the cell; it is spaced to
+        // take exactly its one or two cells, so the columns after it stay in line.
+        let gap = c.width().unwrap_or(1).max(1) as f32 * cell - fonts.glyph_width(font, c);
+        if gap.abs() > 0.25 {
             if run_start < i {
                 job.append(&text[run_start..i], 0.0, plain.clone());
             }
-            let gap = (2.0 * cell - fonts.glyph_width(font, c)).max(0.0);
             job.append(&text[i..i + c.len_utf8()], 0.0, TextFormat { extra_letter_spacing: gap, ..plain.clone() });
             run_start = i + c.len_utf8();
         }
@@ -307,7 +350,7 @@ pub fn parse(text: &str) -> Vec<Block> {
     let mut para: Vec<&str> = Vec::new();
     let flush_part = |para: &mut Vec<&str>, blocks: &mut Vec<Block>, more: bool| {
         if !para.is_empty() {
-            let b = if para.iter().any(|l| columned(l)) {
+            let b = if columned_block(para) {
                 Block::Pre(para.join("\n"))
             } else {
                 // Lines of a paragraph join up, as in the preview: the terminal broke them only to fit.
@@ -1194,6 +1237,20 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a program prints around its answer reads as Markdown in general, whichever program:
+    /// a symbol before a line is a marker, a sentence with one double space is prose.
+    #[test]
+    fn program_output_reads_as_markdown() {
+        let raw = "\u{273b} Worked for 9s\n  - first\n  - second\n\n  Created in 2004.[^1]  [^1]: by Gruber.";
+        let b = Doc::new(raw).blocks;
+        assert_eq!(b[0], Block::Para("Worked for 9s".into()));
+        assert!(matches!(&b[1], Block::Item { depth: 0, .. }), "{:?}", b[1]);
+        assert!(matches!(&b[3], Block::Para(t) if t.contains("[^1]: by Gruber")), "{:?}", b[3]);
+        // Real columns stay preformatted.
+        let b = Doc::new("NAME    SIZE  DATE\nfile.txt  12  May 3\nlib.rs  4096  May 4").blocks;
+        assert!(matches!(&b[0], Block::Pre(_)), "{:?}", b[0]);
+    }
 
     #[test]
     fn split_paragraphs_end_and_go_on_as_paragraphs() {

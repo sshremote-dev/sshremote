@@ -130,7 +130,21 @@ pub(super) fn input_rows(t: &Tab) -> (i32, i32) {
     let written = |row: i32| (0..cols).any(|c| !matches!(grid[Line(row)][Column(c)].c, ' ' | '\0'));
     let last = (cursor..screen).rev().find(|&r| written(r)).unwrap_or(cursor).max(cursor);
     // From the cursor's row down: what is above it is already output, read as the document.
-    let first = cursor.max(last - 9);
+    let mut first = cursor.max(last - 9);
+    // A frame a program draws around its input (a rule or the top of a box right above the
+    // prompt) belongs with it.
+    let rule = |row: i32| {
+        let mut n = 0;
+        let only_frame = (0..cols).all(|c| {
+            let ch = grid[Line(row)][Column(c)].c;
+            n += ('\u{2500}'..='\u{257f}').contains(&ch) as usize;
+            matches!(ch, ' ' | '\0') || ('\u{2500}'..='\u{257f}').contains(&ch)
+        });
+        only_frame && n * 2 >= cols
+    };
+    while first > 0 && last - first < 12 && rule(first - 1) {
+        first -= 1;
+    }
     (first, last)
 }
 
@@ -425,12 +439,74 @@ pub(super) fn join_rows(rows: impl IntoIterator<Item = (String, bool)>) -> Strin
     let mut join = false;
     for (text, wraps) in rows {
         match lines.last_mut() {
-            Some(last) if join => last.push_str(&text),
+            Some(last) if join => last.push_str(match text.split_once(SPLIT) {
+                Some((_, md)) => md,
+                None => text.trim_start_matches(CODE),
+            }),
             _ => lines.push(text),
         }
         join = wraps;
     }
-    lines.join("\n").trim_end().to_string()
+    fence_code(lines).join("\n").trim_end().to_string()
+}
+
+/// Mark a row read as code (see `row_markdown`), and one with a single colour that may be code
+/// beside it; `join_rows` turns runs of them into fences and drops the marks.
+const CODE: char = '\u{E000}';
+const TINT: char = '\u{E001}';
+const SPLIT: char = '\u{E002}';
+
+/// Runs of code rows become fenced blocks with their indentation kept: blank rows inside a run
+/// and lines of only closing brackets after one belong to it.
+fn fence_code(mut lines: Vec<String>) -> Vec<String> {
+    // A single-coloured row right next to code is code too ("else:", "}" in a keyword colour).
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for i in 0..lines.len() {
+            let near = |j: Option<usize>| j.and_then(|j| lines.get(j)).is_some_and(|l| l.starts_with(CODE));
+            if lines[i].starts_with(TINT) && (near(i.checked_sub(1)) || near(Some(i + 1))) {
+                let raw = lines[i][TINT.len_utf8()..].split(SPLIT).next().unwrap_or("").to_string();
+                lines[i] = format!("{CODE}{raw}");
+                grew = true;
+            }
+        }
+    }
+    for l in lines.iter_mut().filter(|l| l.starts_with(TINT)) {
+        *l = l.split_once(SPLIT).map_or(String::new(), |(_, md)| md.to_string());
+    }
+    let is_code = |l: &str| l.starts_with(CODE);
+    let closer = |l: &str| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().count() <= 3 && t.chars().all(|c| "{}[]()<>;,".contains(c))
+    };
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if !is_code(&lines[i]) {
+            out.push(lines[i].clone());
+            i += 1;
+            continue;
+        }
+        let (mut j, mut end) = (i, i);
+        while j < lines.len() {
+            let l = &lines[j];
+            if is_code(l) || closer(l) {
+                end = j + 1;
+            } else if !l.trim().is_empty() {
+                break;
+            }
+            j += 1;
+        }
+        let block: Vec<String> = lines[i..end].iter().map(|l| l.trim_start_matches(CODE).to_string()).collect();
+        let indent = block.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+        let pad = " ".repeat(indent);
+        out.push(format!("{pad}```"));
+        out.extend(block);
+        out.push(format!("{pad}```"));
+        i = end;
+    }
+    out
 }
 
 /// One row as Markdown (see [`screen_markdown`]), and whether the terminal wrapped it into the next.
@@ -454,6 +530,32 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
         cells.pop();
     }
     let plain: String = cells.iter().map(|c| c.0).collect();
+    // Code as programs print it, coloured by its syntax and without fences: several colours
+    // taking turns on one row. It is kept as it is, to be fenced with its neighbours; a row with
+    // one colour is marked too, and joins code right next to it.
+    let mut colours: Vec<Color> = Vec::new();
+    if !plain.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)) {
+        for c in 0..cols {
+            let cell = &row[Column(c)];
+            let plain_fg = matches!(cell.fg, Color::Named(NamedColor::Foreground | NamedColor::DimForeground));
+            if !matches!(cell.c, ' ' | '\0') && !plain_fg && !colours.contains(&cell.fg) {
+                colours.push(cell.fg);
+            }
+        }
+        if colours.len() >= 2 {
+            return (format!("{CODE}{plain}"), wrapped);
+        }
+    }
+    let (text, wraps) = row_markdown_styled(&cells, &plain, wrapped);
+    if colours.len() == 1 {
+        // Both readings: as code if it joins code, as Markdown if not.
+        return (format!("{TINT}{plain}{SPLIT}{text}"), wraps);
+    }
+    (text, wraps)
+}
+
+/// A row without code colours as Markdown: headings, bold and italic.
+fn row_markdown_styled(cells: &[(char, bool, bool, bool)], plain: &str, wrapped: bool) -> (String, bool) {
     // Leading spaces and an agent's marker stay as they are.
     let indent = plain.len() - plain.trim_start().len();
     let mut start = plain[..indent].chars().count();
