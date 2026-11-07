@@ -4,7 +4,7 @@ use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER, SUPER_L};
 
 /// Maps a terminal key event to an X11 keysym plus modifier bits.
 pub fn keysym(ev: &KeyEvent) -> Option<(u32, u8)> {
-    let m = ev.modifiers;
+    let m = altgr_free(ev);
     let mut mods = 0;
     if m.contains(KeyModifiers::CONTROL) {
         mods |= MOD_CTRL;
@@ -52,6 +52,18 @@ pub fn is_menu(ev: &KeyEvent) -> bool {
 /// Modifier bits and the keys that hold them on the host.
 pub const MODIFIERS: [(u8, u32); 4] = [(MOD_SHIFT, 0xffe1), (MOD_CTRL, 0xffe3), (MOD_ALT, 0xffe9), (MOD_SUPER, SUPER_L)];
 
+/// AltGr arrives as Ctrl+Alt with the character it made ('@', '{' on European layouts); the
+/// character is what was meant, so the two modifiers are dropped.
+pub fn altgr_free(ev: &KeyEvent) -> KeyModifiers {
+    let m = ev.modifiers;
+    match ev.code {
+        KeyCode::Char(c) if m.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_ascii_alphanumeric() => {
+            m - KeyModifiers::CONTROL - KeyModifiers::ALT
+        }
+        _ => m,
+    }
+}
+
 pub fn mod_bits(m: KeyModifiers) -> u8 {
     let mut bits = 0;
     for (flag, bit) in [
@@ -85,5 +97,13 @@ mod tests {
         let (sym, _) = keysym(&ev).unwrap();
         assert_eq!(base(sym), 'a' as u32);
         assert_eq!(mod_bits(ev.modifiers), MOD_SHIFT);
+    }
+
+    #[test]
+    fn altgr_characters_lose_ctrl_and_alt() {
+        let at = KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert_eq!(keysym(&at), Some(('@' as u32, 0)));
+        let del = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert_eq!(keysym(&del), Some(('t' as u32, MOD_CTRL | MOD_ALT)));
     }
 }

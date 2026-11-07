@@ -304,7 +304,9 @@ presses Ctrl+V there; text copied on the host reaches this computer's clipboard 
 Inside tmux the viewer turns on `allow-passthrough` for its pane and sends its images straight to the
 outer terminal at the pane's position, because tmux's own sixel support scales images by the cell size
 it believes, which is wrong behind ssh clients that report a fixed 640x480 window (Windows OpenSSH).
-`Ctrl+] r` repaints after tmux redraws the pane.
+`Ctrl+] r` repaints after tmux redraws the pane. To watch the screen and work in a shell at the same
+time in one terminal, split tmux: `sshremote HOST` in one pane and `ssh HOST` in the other. In the
+window, the Terminal button opens shells beside the picture.
 
 | Key | Resolution | Colours | fps |
 |---|---|---|---|

@@ -328,7 +328,7 @@ impl Viewer {
     fn key_state(&mut self, k: &event::KeyEvent) -> io::Result<()> {
         let Some((keysym, _)) = keys::keysym(k) else { return Ok(()) };
         let keysym = keys::base(keysym);
-        let mods = keys::mod_bits(k.modifiers);
+        let mods = keys::mod_bits(keys::altgr_free(k));
         if k.kind != KeyEventKind::Release {
             self.sync_mods(mods)?;
             self.held.insert(keysym);
