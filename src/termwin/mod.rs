@@ -1691,6 +1691,76 @@ mod tests {
         assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Text("ls".into())])), "ls");
     }
 
+    /// In the text and Markdown views, Ctrl+C copies text selected with the mouse and sends
+    /// nothing to the shell; with nothing selected it interrupts, as in the terminal.
+    #[test]
+    fn ctrl_c_copies_a_mouse_selection_in_the_reading_views() {
+        for view in [View::Text, View::Markdown] {
+            let ctx = egui::Context::default();
+            let mut w = TermWindow::new(None);
+            frame(&ctx, &mut w, Vec::new());
+            let t = &mut w.tabs[0];
+            t.parser.advance(&mut t.term, b"alpha beta gamma\r\n\r\n$ ");
+            t.rev += 1;
+            w.tabs[0].view = view;
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                    focused: true,
+                    ..Default::default()
+                };
+                shapes = ctx.run_ui(input, |ui| { w.embedded(ui); }).shapes;
+            }
+            // Where "alpha beta gamma" was drawn.
+            fn find(s: &egui::Shape, out: &mut Option<Rect>) {
+                match s {
+                    egui::Shape::Text(t) if t.galley.job.text.contains("alpha beta gamma") => {
+                        let row = t.galley.rows.iter().find(|r| r.text().contains("alpha")).map(|r| r.rect()).unwrap_or(t.galley.rect);
+                        *out = Some(row.translate(t.pos.to_vec2()));
+                    }
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| find(s, out)),
+                    _ => {}
+                }
+            }
+            let mut at = None;
+            shapes.iter().for_each(|c| find(&c.shape, &mut at));
+            let r = at.unwrap_or_else(|| panic!("{view:?}: the text is drawn"));
+            let (from, to) = (Pos2::new(r.left() + 1.0, r.center().y), Pos2::new(r.left() + 60.0, r.center().y));
+            let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            frame(&ctx, &mut w, vec![Event::PointerMoved(from)]);
+            frame(&ctx, &mut w, vec![button(from, true)]);
+            frame(&ctx, &mut w, vec![Event::PointerMoved(to)]);
+            frame(&ctx, &mut w, vec![button(to, false)]);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                focused: true,
+                events: vec![Event::Copy],
+                ..Default::default()
+            };
+            let mut cmds = Vec::new();
+            let out = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+            assert_eq!(typed(&cmds), "", "{view:?}: Ctrl+C with a selection does not interrupt");
+            let copied: Vec<&String> = out
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::CopyText(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            assert!(copied.iter().any(|s| s.contains("alpha")), "{view:?}: the selection is copied: {copied:?}");
+            // A click elsewhere ends the selection; then Ctrl+C interrupts.
+            let away = Pos2::new(700.0, 450.0);
+            frame(&ctx, &mut w, vec![Event::PointerMoved(away)]);
+            frame(&ctx, &mut w, vec![button(away, true)]);
+            frame(&ctx, &mut w, vec![button(away, false)]);
+            frame(&ctx, &mut w, Vec::new());
+            assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Copy])), "\u{3}", "{view:?}: Ctrl+C without a selection interrupts");
+        }
+    }
+
     #[test]
     fn styles_on_screen_come_back_as_markdown() {
         let ctx = egui::Context::default();

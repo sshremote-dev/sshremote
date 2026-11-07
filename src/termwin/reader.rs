@@ -107,7 +107,14 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     let full = resp.rect;
     let at = Pos2::new(full.left() + c.column.0 as f32 * cw, full.top() + (c.line.0 - first) as f32 * ch);
     if keys {
-        keyboard(ui, t, id, rect, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, out);
+        // Ctrl+C copies text selected in the document (egui copies it); with nothing selected it
+        // interrupts the program, as in the terminal.
+        let selected = ui
+            .ctx()
+            .plugin_opt::<egui::text_selection::LabelSelectionState>()
+            .is_some_and(|p| p.lock().has_selection());
+        let skip = KeySkip { select_all: false, copy: selected };
+        keyboard_with(ui, t, id, rect, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, skip, out);
     }
     let focused = ui.memory(|m| m.has_focus(id));
     let mut clip = ui.new_child(egui::UiBuilder::new().max_rect(shown.inner_rect));
