@@ -109,10 +109,20 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     if keys {
         // Ctrl+C copies text selected in the document (egui copies it); with nothing selected it
         // interrupts the program, as in the terminal.
-        let selected = ui
-            .ctx()
-            .plugin_opt::<egui::text_selection::LabelSelectionState>()
-            .is_some_and(|p| p.lock().has_selection());
+        let selection = ui.ctx().plugin_opt::<egui::text_selection::LabelSelectionState>();
+        let copied = egui::Id::unique(("copied", t.id));
+        // Copied the frame before: the selection goes, so the next Ctrl+C interrupts, as in
+        // Windows Terminal. (Cleared any earlier, the copy itself would be lost.)
+        if ui.ctx().data_mut(|d| d.remove_temp::<bool>(copied)).is_some()
+            && let Some(p) = &selection
+        {
+            p.lock().clear_selection();
+        }
+        let selected = selection.is_some_and(|p| p.lock().has_selection());
+        if selected && ui.input(|i| i.events.contains(&Event::Copy)) {
+            ui.ctx().data_mut(|d| d.insert_temp(copied, true));
+            ui.ctx().request_repaint();
+        }
         let skip = KeySkip { select_all: false, copy: selected };
         keyboard_with(ui, t, id, rect, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, skip, out);
     }
@@ -406,6 +416,14 @@ pub(super) fn text_editor(
     if keys {
         let skip = KeySkip { select_all: true, copy: selecting };
         keyboard_with(ui, t, id, shown.inner_rect, caret, grab, skip, out);
+        // Copied: the selection goes, so the next Ctrl+C interrupts, as in Windows Terminal.
+        if selecting
+            && ui.input(|i| i.events.contains(&Event::Copy))
+            && let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id)
+        {
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+            state.store(ui.ctx(), id);
+        }
     }
     let focused = ui.memory(|m| m.has_focus(id));
     let painter = ui.painter_at(shown.inner_rect);

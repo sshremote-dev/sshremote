@@ -1751,13 +1751,9 @@ mod tests {
                 })
                 .collect();
             assert!(copied.iter().any(|s| s.contains("alpha")), "{view:?}: the selection is copied: {copied:?}");
-            // A click elsewhere ends the selection; then Ctrl+C interrupts.
-            let away = Pos2::new(700.0, 450.0);
-            frame(&ctx, &mut w, vec![Event::PointerMoved(away)]);
-            frame(&ctx, &mut w, vec![button(away, true)]);
-            frame(&ctx, &mut w, vec![button(away, false)]);
+            // Copying ends the selection, so the next Ctrl+C interrupts, as in Windows Terminal.
             frame(&ctx, &mut w, Vec::new());
-            assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Copy])), "\u{3}", "{view:?}: Ctrl+C without a selection interrupts");
+            assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Copy])), "\u{3}", "{view:?}: the next Ctrl+C interrupts");
         }
     }
 
