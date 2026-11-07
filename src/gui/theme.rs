@@ -16,14 +16,13 @@ pub(super) fn filled() -> FontFamily {
 /// Font files to try, best first, with the face to use in a .ttc collection.
 type FontFiles = Vec<(&'static str, u32)>;
 
-/// Fonts that may be on this system: for text, then for code.
-
 /// Corners, slightly squared rather than round: controls and highlights, cards and menus, and
 /// dialogs and floating bars.
 pub const R_SM: u8 = 3;
 pub const R_MD: u8 = 4;
 pub const R_LG: u8 = 6;
 
+/// Fonts that may be on this system: for text, then for code.
 fn system_fonts() -> (FontFiles, FontFiles) {
     if cfg!(windows) {
         (
