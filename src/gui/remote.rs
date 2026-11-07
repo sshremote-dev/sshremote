@@ -1335,6 +1335,9 @@ impl Remote {
     }
 
     pub(super) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
+        // A narrow window keeps every button within reach: the least used go into the options
+        // menu and Disconnect becomes an icon.
+        let compact = ui.available_width() < 640.0;
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Connection quality at a glance; details on hover.
@@ -1362,7 +1365,8 @@ impl Remote {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(RichText::new("●").size(10.0).color(dot));
                 let width = ui.fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(13.0), Color32::WHITE).size().x);
-                ui.add_sized([width.min(160.0), 18.0], egui::Label::new(RichText::new(&host).strong().size(13.0)).truncate());
+                let room = if compact { 90.0 } else { 160.0 };
+                ui.add_sized([width.min(room), 18.0], egui::Label::new(RichText::new(&host).strong().size(13.0)).truncate());
                 // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
                 ui.add_sized([44.0, 18.0], egui::Label::new(RichText::new(rtt).small().color(dot)));
             })
@@ -1555,41 +1559,28 @@ impl Remote {
             }
         });
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
-        if icon(ui, &chat_glyph, "Chat with the person at the SSH host's screen", self.chat.is_some()).clicked() {
-            *action = Some(Box::new(|r, _| {
-                match r.chat.take() {
-                    Some((lines, _)) => r.chat_lines = lines,
-                    None => {
-                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
-                        r.unread = 0;
-                    }
-                }
-                Ok(())
-            }));
-        }
-        if icon(ui, ic::CAMERA, "Screenshot: save the SSH host's screen as a PNG in Pictures", false).clicked() {
-            *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
-        }
-        let (glyph, tip) = if self.paused {
+        let chat_tip = "Chat with the person at the SSH host's screen";
+        let shot_tip = "Screenshot: save the SSH host's screen as a PNG in Pictures";
+        let (pause_glyph, pause_tip) = if self.paused {
             (ic::PLAY, "Resume the picture")
         } else {
             (ic::PAUSE, "Pause the picture to save traffic; fetch single frames when needed")
         };
-        // Paused: a filled blue play button, so the frozen state is plain to see.
-        let b = if self.paused {
-            egui::Button::new(RichText::new(glyph).size(16.0).color(Color32::WHITE))
-                .fill(ACCENT)
-                .min_size(Vec2::splat(28.0))
-        } else {
-            tool_button(glyph, false)
-        };
-        if ui.add(b).on_hover_text(tip).clicked() {
-            let on = !self.paused;
-            self.paused = on;
-            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
-        }
-        if self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked() {
-            *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
+        // Which of chat, screenshot, pause and one frame were asked for, from the bar or the menu.
+        let (mut chat, mut shot, mut pause, mut frame) = (false, false, false, false);
+        if !compact {
+            chat = icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
+            shot = icon(ui, ic::CAMERA, shot_tip, false).clicked();
+            // Paused: a filled blue play button, so the frozen state is plain to see.
+            let b = if self.paused {
+                egui::Button::new(RichText::new(pause_glyph).size(16.0).color(Color32::WHITE))
+                    .fill(ACCENT)
+                    .min_size(Vec2::splat(28.0))
+            } else {
+                tool_button(pause_glyph, false)
+            };
+            pause = ui.add(b).on_hover_text(pause_tip).clicked();
+            frame = self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked();
         }
 
         let mut sound = self.sound.is_some();
@@ -1611,8 +1602,47 @@ impl Remote {
                 *action = Some(Box::new(|r, _| r.menu('r')));
                 ui.close();
             }
+            if compact {
+                ui.separator();
+                let item = |ui: &mut egui::Ui, glyph: &str, text: &str, tip: &str| {
+                    let clicked = ui.button(format!("{glyph}  {text}")).on_hover_text(tip).clicked();
+                    if clicked {
+                        ui.close();
+                    }
+                    clicked
+                };
+                chat = item(ui, &chat_glyph, "Chat", chat_tip);
+                shot = item(ui, ic::CAMERA, "Screenshot", shot_tip);
+                pause = item(ui, pause_glyph, if self.paused { "Resume" } else { "Pause" }, pause_tip);
+                frame = self.paused && item(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", "Fetch one frame");
+            }
         });
+        // A paused picture shows on the menu button too when its own button is folded away.
+        let more = if compact && self.paused { more.highlight() } else { more };
         more.on_hover_text("Options");
+        if chat {
+            *action = Some(Box::new(|r, _| {
+                match r.chat.take() {
+                    Some((lines, _)) => r.chat_lines = lines,
+                    None => {
+                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
+                        r.unread = 0;
+                    }
+                }
+                Ok(())
+            }));
+        }
+        if shot {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Snapshot)));
+        }
+        if pause {
+            let on = !self.paused;
+            self.paused = on;
+            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
+        }
+        if frame {
+            *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
+        }
         if theme_clicked {
             set_theme(ui.ctx(), dark);
         }
@@ -1664,6 +1694,8 @@ impl Remote {
             egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
                 .fill(BAD)
                 .min_size(Vec2::splat(28.0))
+        } else if compact {
+            tool_button(ic::LINK_BREAK, false)
         } else {
             egui::Button::new(RichText::new(format!("{}  Disconnect", ic::LINK_BREAK)).size(13.0))
                 .frame_when_inactive(false)

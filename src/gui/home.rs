@@ -369,7 +369,8 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("Connect to a host").strong());
                 ui.horizontal(|ui| {
-                    let field_w = ui.available_width() - 190.0;
+                    // Room for Terminal (112), the menu and the options (32 each) and the gaps between.
+                    let field_w = (ui.available_width() - 2.0 * 32.0 - 112.0 - 4.0 * ui.spacing().item_spacing.x).max(80.0);
                     let host = ui.add(
                         egui::TextEdit::singleline(&mut self.form.host)
                             .hint_text("user@host  or an ~/.ssh/config alias")
@@ -551,7 +552,9 @@ impl App {
                                 go = Some((h.clone(), p.clone(), How::Screen));
                             }
                             if !direct {
-                                let b = egui::Button::new(format!("{}  Terminal", ic::TERMINAL)).min_size(Vec2::new(0.0, 28.0));
+                                // A narrow window keeps the name readable: the button loses its word.
+                                let text = if rect.width() < 560.0 { ic::TERMINAL.to_string() } else { format!("{}  Terminal", ic::TERMINAL) };
+                                let b = egui::Button::new(text).min_size(Vec2::new(0.0, 28.0));
                                 if ui.add(b).on_hover_text("Open an SSH terminal").clicked() {
                                     go = Some((h.clone(), p.clone(), How::Terminal));
                                 }

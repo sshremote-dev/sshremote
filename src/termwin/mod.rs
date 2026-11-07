@@ -828,8 +828,16 @@ impl TermWindow {
         let groups = self.groups();
         let current = self.tabs.get(self.active).map(|t| t.group);
         let n = groups.len().max(1) as f32;
-        let room = (ui.available_width() - 150.0).max(120.0);
-        let tab_w = (room / n).clamp(110.0, 220.0);
+        // What the tabs leave: new tab and profiles (58), the view switch (3 buttons of 30 in its
+        // track), the settings (28), the system terminal button when there is one, and the gaps.
+        let mut controls = 58.0 + 96.0 + 28.0 + if self.system.is_some() { 30.0 } else { 0.0 } + 24.0;
+        // Too narrow for that and a tab: the view switch folds into one button with a menu.
+        let fold_views = ui.available_width() < controls + 64.0;
+        if fold_views {
+            controls -= 96.0 - 30.0;
+        }
+        let room = (ui.available_width() - controls).max(64.0);
+        let tab_w = (room / n).clamp(64.0, 220.0);
         let mut tab_rects: Vec<(u32, Rect)> = Vec::new();
         let mut drag_end: Option<(u32, Pos2)> = None;
         for (gi, &(group, i)) in groups.iter().enumerate() {
@@ -1054,27 +1062,45 @@ impl TermWindow {
             ui.add_space(6.0);
             // How the active tab is shown: a segmented control, as in Windows 11.
             if let Some(t) = self.tabs.get_mut(self.active) {
-                let track =
-                    if ui.visuals().dark_mode { Color32::from_white_alpha(10) } else { Color32::from_black_alpha(10) };
-                egui::Frame::new().fill(track).corner_radius(8).inner_margin(2).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (v, glyph, tip) in [
-                        (
-                            View::Markdown,
-                            ic::ARTICLE,
-                            "Read the output as Markdown, with copy buttons on code (agent replies)",
-                        ),
-                        (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
-                        (View::Terminal, ic::TERMINAL, "Terminal"),
-                    ] {
-                        if small(ui, glyph, tip, t.view == v) {
-                            t.view = v;
-                            if v == View::Terminal {
-                                t.forget_reading();
+                let views = [
+                    (View::Markdown, ic::ARTICLE, "Markdown", "Read the output as Markdown, with copy buttons on code (agent replies)"),
+                    (View::Text, ic::TEXT_T, "Text", "Plain text of the whole buffer, to select and copy"),
+                    (View::Terminal, ic::TERMINAL, "Terminal", "Terminal"),
+                ];
+                let mut pick = None;
+                if fold_views {
+                    let glyph = views.iter().find(|v| v.0 == t.view).map_or(ic::TERMINAL, |v| v.1);
+                    egui::containers::menu::MenuButton::from_button(crate::gui::tool_button(glyph, false))
+                        .ui(ui, |ui| {
+                            ui.set_min_width(160.0);
+                            for &(v, glyph, name, tip) in views.iter().rev() {
+                                let b = egui::Button::selectable(t.view == v, format!("{glyph}  {name}"));
+                                if ui.add(b).on_hover_text(tip).clicked() {
+                                    pick = Some(v);
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .0
+                        .on_hover_text("How this tab is shown");
+                } else {
+                    let track =
+                        if ui.visuals().dark_mode { Color32::from_white_alpha(10) } else { Color32::from_black_alpha(10) };
+                    egui::Frame::new().fill(track).corner_radius(8).inner_margin(2).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for &(v, glyph, _, tip) in &views {
+                            if small(ui, glyph, tip, t.view == v) {
+                                pick = Some(v);
                             }
                         }
+                    });
+                }
+                if let Some(v) = pick {
+                    t.view = v;
+                    if v == View::Terminal {
+                        t.forget_reading();
                     }
-                });
+                }
             }
         });
     }
