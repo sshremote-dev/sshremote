@@ -37,6 +37,8 @@ mod tools;
 mod transport;
 mod ui;
 mod vault;
+// Some keys are only sent on to Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod xk;
 mod video;
 

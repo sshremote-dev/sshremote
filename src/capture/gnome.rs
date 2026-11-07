@@ -834,6 +834,6 @@ impl Drop for Gnome {
         if let Some((p, _)) = self.pipe.take() {
             let _ = p.set_state(gst::State::Null);
         }
-        let _ = self.session.call::<_, _, ()>("Stop", &());
+        let _ = self.session.call_noreply("Stop", &());
     }
 }

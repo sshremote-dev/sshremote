@@ -163,7 +163,7 @@ impl Drop for Portal {
     fn drop(&mut self) {
         // Ends the sharing, and GNOME's "screen is shared" indicator with it.
         if let Ok(p) = Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session") {
-            let _ = p.call::<_, _, ()>("Close", &());
+            let _ = p.call_noreply("Close", &());
         }
     }
 }

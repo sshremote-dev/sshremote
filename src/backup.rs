@@ -62,6 +62,7 @@ fn legacy_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     h
 }
 
+#[cfg(test)]
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
