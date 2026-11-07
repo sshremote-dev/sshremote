@@ -772,6 +772,7 @@ pub fn highlight(code: &str, lang: &str, th: &Theme, size: f32) -> LayoutJob {
     let hash_comment = matches!(
         lang.as_str(),
         "sh" | "bash"
+            | "ssh-config"
             | "zsh"
             | "shell"
             | "console"
