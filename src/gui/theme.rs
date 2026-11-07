@@ -1,5 +1,5 @@
 //! The look shared by every window: the system's own UI and code fonts, text sizes, colours,
-//! rounded widgets and soft shadows, in a dark and a light variant.
+//! slightly squared widgets and soft shadows, in a dark and a light variant.
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Vec2,
@@ -117,8 +117,9 @@ pub fn style(ctx: &egui::Context) {
     install_fonts(ctx);
     // Ctrl+plus and Ctrl+minus belong to the remote host and the terminal, not to zooming this window.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
-    let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
-    set_theme(ctx, dark);
+    // SSHREMOTE_THEME (dark or light) picks one for this run without changing the remembered one.
+    let theme = std::env::var("SSHREMOTE_THEME").ok().or_else(|| crate::hosts::setting("theme"));
+    apply_theme(ctx, theme.is_none_or(|t| t != "light"));
     ctx.all_styles_mut(|s| {
         s.text_styles = [
             (TextStyle::Small, FontId::proportional(11.5)),
@@ -142,6 +143,16 @@ pub fn style(ctx: &egui::Context) {
 
 /// Dark or light, remembered between runs.
 pub fn set_theme(ctx: &egui::Context, dark: bool) {
+    apply_theme(ctx, dark);
+    crate::hosts::set_setting("theme", if dark { "dark" } else { "light" });
+}
+
+/// Whether the windows are dark now, for colours chosen away from a `Context`.
+pub static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Dark or light for the windows now.
+fn apply_theme(ctx: &egui::Context, dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
     let (text, weak_line) = if dark {
         v.panel_fill = Color32::from_rgb(20, 21, 25);
@@ -214,7 +225,6 @@ pub fn set_theme(ctx: &egui::Context, dark: bool) {
     let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
     ctx.set_visuals_of(theme, v);
     ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
-    crate::hosts::set_setting("theme", if dark { "dark" } else { "light" });
 }
 
 /// A filled accent button for the main action of a window or form.

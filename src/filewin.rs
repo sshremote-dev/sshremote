@@ -515,7 +515,9 @@ impl FileWindow {
                     } else {
                         ic::FILE
                     };
-                    let glyph_color = if e.dir { Color32::from_rgb(230, 180, 70) } else { weak };
+                    // Folders in amber, deeper on a light background so they still stand out.
+                    let folder = if ui.visuals().dark_mode { Color32::from_rgb(230, 180, 70) } else { Color32::from_rgb(196, 134, 18) };
+                    let glyph_color = if e.dir { folder } else { weak };
                     painter.text(
                         rect.left_center() + Vec2::new(8.0, 0.0),
                         Align2::LEFT_CENTER,

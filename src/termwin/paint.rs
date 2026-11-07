@@ -113,7 +113,7 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
             std::mem::swap(&mut fg, &mut bg);
         }
         if sel.is_some_and(|s| s.contains(cell.point)) {
-            bg = SELECTION;
+            bg = selection();
         }
         let at_cursor = show_cursor && cell.point == cursor;
         let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
