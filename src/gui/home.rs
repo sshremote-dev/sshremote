@@ -217,7 +217,7 @@ impl App {
     /// Administrator or standard user; a click on the latter asks for the rights.
     pub(super) fn admin_badge(&mut self, ui: &mut egui::Ui) {
         let (glyph, text, color) = if crate::admin::elevated() {
-            (ic::SHIELD_CHECK, "Administrator", GOOD)
+            (ic::SHIELD_CHECK, "Administrator", good())
         } else {
             (ic::SHIELD, "Standard user", ui.visuals().weak_text_color())
         };
@@ -447,13 +447,13 @@ impl App {
                     let (what, hint) = friendly(e);
                     ui.add_space(4.0);
                     egui::Frame::new()
-                        .fill(BAD.gamma_multiply(0.15))
-                        .stroke(Stroke::new(1.0, BAD.gamma_multiply(0.6)))
+                        .fill(bad().gamma_multiply(0.15))
+                        .stroke(Stroke::new(1.0, bad().gamma_multiply(0.6)))
                         .corner_radius(CornerRadius::same(crate::gui::theme::R_MD))
                         .inner_margin(10.0)
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(RichText::new("Could not connect").strong().color(BAD));
+                            ui.label(RichText::new("Could not connect").strong().color(bad()));
                             ui.label(&what).on_hover_text(e.as_str());
                             if !hint.is_empty() {
                                 ui.label(RichText::new(hint).weak());
@@ -540,7 +540,7 @@ impl App {
                             });
                             let fav = *src == Source::Favorite;
                             let mut star = RichText::new(ic::STAR).size(16.0);
-                            star = if fav { star.family(filled()).color(WARN) } else { star.color(ui.visuals().weak_text_color()) };
+                            star = if fav { star.family(filled()).color(warn()) } else { star.color(ui.visuals().weak_text_color()) };
                             let tip = if fav { "Remove from favorites" } else { "Add to favorites" };
                             if ui.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
                                 starred = Some((h.clone(), !fav));

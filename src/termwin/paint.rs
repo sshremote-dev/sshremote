@@ -358,7 +358,7 @@ pub(super) fn screen(
                         search_step = Some(alacritty_terminal::index::Direction::Right);
                     }
                     if search.missing {
-                        ui.label(RichText::new("none").small().color(Color32::from_rgb(240, 120, 110)));
+                        ui.label(RichText::new("none").small().color(crate::gui::bad()));
                     }
                     if ui.small_button(ic::X).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         close_search = true;

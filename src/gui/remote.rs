@@ -219,9 +219,9 @@ impl Remote {
         let mut disconnect = false;
         let bar = super::chrome::title_bar(ui, |ui| {
             let dot = match self.ctl.rtt {
-                r if r < 80.0 => GOOD,
-                r if r < 250.0 => WARN,
-                _ => BAD,
+                r if r < 80.0 => good(),
+                r if r < 250.0 => warn(),
+                _ => bad(),
             };
             let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
             ui.painter().circle_filled(r.center(), 4.0, dot);
@@ -1073,7 +1073,7 @@ impl Remote {
                 Color32::from_rgba_unmultiplied(32, 34, 41, (235.0 * fade) as u8),
             );
             let bar = Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height()));
-            painter.rect_filled(bar, CornerRadius::same(2), (if *warn { WARN } else { ACCENT }).gamma_multiply(fade));
+            painter.rect_filled(bar, CornerRadius::same(2), (if *warn { super::warn() } else { ACCENT }).gamma_multiply(fade));
             painter.galley(rect.min + Vec2::new(18.0, 10.0), galley, Color32::WHITE.gamma_multiply(fade));
             y = rect.top() - 8.0;
         }
@@ -1501,9 +1501,9 @@ impl Remote {
         ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Connection quality at a glance; details on hover.
         let (dot, state) = match self.ctl.rtt {
-            r if r < 80.0 => (GOOD, "good"),
-            r if r < 250.0 => (WARN, "slow"),
-            _ => (BAD, "poor"),
+            r if r < 80.0 => (good(), "good"),
+            r if r < 250.0 => (warn(), "slow"),
+            _ => (bad(), "poor"),
         };
         let details = format!(
             "Connection {state}\nRound trip {:.0} ms, {:.0} KB/s, {:.0} fps\n{}\n{}",
@@ -1866,7 +1866,7 @@ impl Remote {
         // reads as text; the full-screen dock keeps the compact red button.
         let end = if self.fullscreen {
             egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
-                .fill(BAD)
+                .fill(DANGER_FILL)
                 .min_size(Vec2::splat(28.0))
         } else if compact {
             tool_button(ic::LINK_BREAK, false)

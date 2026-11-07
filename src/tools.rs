@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 
-use crate::gui::{ic, primary};
+use crate::gui::{bad, good, ic, primary};
 
 use crate::sys::{quiet, ssh_dir};
 
@@ -571,7 +571,7 @@ impl VaultTool {
             let Some(store) = crate::vault::backend() else {
                 ui.label(
                     RichText::new("This system has no password store sshremote can use. On Linux, install secret-tool (libsecret-tools).")
-                        .color(BAD),
+                        .color(bad()),
                 );
                 return;
             };
@@ -751,12 +751,10 @@ impl BackupTool {
     }
 }
 
-const GOOD: Color32 = Color32::from_rgb(90, 200, 120);
-const BAD: Color32 = Color32::from_rgb(240, 110, 100);
 
 fn status(ui: &mut egui::Ui, s: &Option<(bool, String)>) {
     if let Some((ok, text)) = s {
-        ui.label(RichText::new(text).color(if *ok { GOOD } else { BAD }));
+        ui.label(RichText::new(text).color(if *ok { good() } else { bad() }));
     }
 }
 

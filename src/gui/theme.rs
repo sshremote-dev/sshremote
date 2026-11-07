@@ -149,6 +149,10 @@ pub fn set_theme(ctx: &egui::Context, dark: bool) {
 /// Whether the windows are dark now, for colours chosen away from a `Context`.
 pub static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+pub fn dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Dark or light for the windows now.
 fn apply_theme(ctx: &egui::Context, dark: bool) {
     DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
@@ -202,7 +206,9 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
     // Selected text and items in VS Code's selection colours, readable in both themes.
     v.selection.bg_fill = if dark { Color32::from_rgb(38, 79, 120) } else { Color32::from_rgb(173, 214, 255) };
     v.selection.stroke = Stroke::new(1.0, text);
-    v.hyperlink_color = Color32::from_rgb(90, 160, 255);
+    v.hyperlink_color = if dark { Color32::from_rgb(110, 168, 255) } else { Color32::from_rgb(29, 78, 216) };
+    // Secondary text (hints, times, captions) dimmer than text but still easy to read.
+    v.weak_text_color = Some(if dark { Color32::from_rgb(150, 155, 166) } else { Color32::from_rgb(92, 97, 110) });
     for w in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -231,4 +237,86 @@ pub(crate) fn primary(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(Color32::WHITE))
         .fill(ACCENT)
         .min_size(Vec2::new(0.0, 32.0))
+}
+
+#[cfg(test)]
+mod contrast {
+    use super::*;
+    use crate::gui::{ACCENT, DANGER_FILL, accent_text, bad, good, selected_fill, warn};
+
+    /// A colour over `bg`, its alpha blended in as egui paints it.
+    fn over(c: Color32, bg: Color32) -> Color32 {
+        let a = c.a() as f32 / 255.0;
+        let mix = |f: u8, b: u8| (f as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+        if c.a() == 255 { c } else { Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b())) }
+    }
+
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    /// WCAG contrast ratio of `fg` on `bg`.
+    fn ratio(fg: Color32, bg: Color32) -> f32 {
+        let (a, b) = (luminance(over(fg, bg)), luminance(bg));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Every pairing of text or icon and background the windows use, in both themes: text at
+    /// least 4.5 (WCAG AA), large icons and outlines at least 3.
+    #[test]
+    fn every_pairing_reads_in_both_themes() {
+        let mut failures = Vec::new();
+        for dark in [true, false] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx, dark);
+            let v = ctx.style_of(if dark { egui::Theme::Dark } else { egui::Theme::Light }).visuals.clone();
+            let text = v.widgets.inactive.fg_stroke.color;
+            let weak = v.weak_text_color();
+            let bar = crate::gui::chrome::bar_fill(&v);
+            let on_tint = over(selected_fill(), bar);
+            let hover = over(v.widgets.hovered.weak_bg_fill, bar);
+            let pairs: Vec<(&str, Color32, Color32, f32)> = vec![
+                ("text on panel", text, v.panel_fill, 4.5),
+                ("text on window", text, v.window_fill, 4.5),
+                ("text on field", text, v.extreme_bg_color, 4.5),
+                ("text on code", text, v.code_bg_color, 4.5),
+                ("text on title bar", text, bar, 4.5),
+                ("text on button", text, v.widgets.inactive.bg_fill, 4.5),
+                ("text on hovered button", text, v.widgets.hovered.bg_fill, 4.5),
+                ("text on hovered icon", text, hover, 4.5),
+                ("text on selection", text, v.selection.bg_fill, 4.5),
+                ("weak text on panel", weak, v.panel_fill, 4.5),
+                ("weak text on title bar", weak, bar, 4.5),
+                ("weak text on field", weak, v.extreme_bg_color, 4.5),
+                ("white on accent button", Color32::WHITE, ACCENT, 4.5),
+                ("selected icon on its tint", accent_text(), on_tint, 4.5),
+                ("white on a danger button", Color32::WHITE, DANGER_FILL, 4.5),
+                ("link on panel", v.hyperlink_color, v.panel_fill, 4.5),
+                ("good text on panel", good(), v.panel_fill, 4.5),
+                ("warning text on panel", warn(), v.panel_fill, 4.5),
+                ("error text on panel", bad(), v.panel_fill, 4.5),
+                ("good on title bar", good(), bar, 4.5),
+                ("error text on its notice", bad(), over(bad().gamma_multiply(0.15), v.panel_fill), 4.5),
+                ("focus outline on panel", ACCENT, v.panel_fill, 3.0),
+                ("own chat bubble", Color32::WHITE, ACCENT, 4.5),
+            ];
+            let mut pairs = pairs;
+            for c in crate::gui::AVATAR_COLORS {
+                // A large letter: 3 is enough (WCAG AA for large text), 4.5 is kept anyway.
+                pairs.push(("initial on its square", Color32::WHITE, c, 4.5));
+            }
+            for (name, fg, bg, need) in pairs {
+                let r = ratio(fg, bg);
+                eprintln!("{} {name:28} {r:5.2} (needs {need})", if dark { "dark " } else { "light" });
+                if r < need {
+                    failures.push(format!("{} {name}: {r:.2} < {need}", if dark { "dark" } else { "light" }));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
 }

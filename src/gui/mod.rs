@@ -26,7 +26,7 @@ use theme::filled;
 pub(crate) use theme::primary;
 pub use theme::{set_theme, style};
 
-pub(crate) const ACCENT: Color32 = Color32::from_rgb(64, 132, 245);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
 
 /// Phosphor icon codepoints (assets/fonts, MIT licensed).
 pub(crate) mod ic {
@@ -348,9 +348,21 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
     native
 }
 
-const GOOD: Color32 = Color32::from_rgb(70, 190, 110);
-const WARN: Color32 = Color32::from_rgb(230, 170, 50);
-const BAD: Color32 = Color32::from_rgb(225, 85, 75);
+/// Status colours for text and icons, a shade for each theme so they read on its background.
+pub(crate) fn good() -> Color32 {
+    if theme::dark() { Color32::from_rgb(70, 190, 110) } else { Color32::from_rgb(16, 112, 52) }
+}
+
+pub(crate) fn warn() -> Color32 {
+    if theme::dark() { Color32::from_rgb(230, 170, 50) } else { Color32::from_rgb(161, 98, 7) }
+}
+
+pub(crate) fn bad() -> Color32 {
+    if theme::dark() { Color32::from_rgb(240, 110, 100) } else { Color32::from_rgb(168, 24, 24) }
+}
+
+/// The fill of a button that ends something, with white on it (as the window's close button).
+pub(crate) const DANGER_FILL: Color32 = Color32::from_rgb(196, 43, 28);
 
 /// An icon button with a tooltip; `on` shows it pressed.
 pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
@@ -360,15 +372,22 @@ pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui:
 /// A square, borderless icon button that shows its frame on hover or while on.
 pub(crate) fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
     let text = RichText::new(glyph).size(16.0);
-    let b = egui::Button::new(if on { text.color(ACCENT_TEXT) } else { text })
+    let b = egui::Button::new(if on { text.color(accent_text()) } else { text })
         .min_size(Vec2::splat(30.0))
         .corner_radius(crate::gui::theme::R_SM)
         .frame_when_inactive(on);
-    if on { b.fill(ACCENT.gamma_multiply(0.22)) } else { b }
+    if on { b.fill(selected_fill()) } else { b }
 }
 
-/// Accent-coloured text and icons that read on dark and light backgrounds.
-pub(crate) const ACCENT_TEXT: Color32 = Color32::from_rgb(96, 160, 255);
+/// The tint behind a selected icon button: light enough on a light bar for its blue icon.
+pub(crate) fn selected_fill() -> Color32 {
+    ACCENT.gamma_multiply(if theme::dark() { 0.22 } else { 0.12 })
+}
+
+/// Accent-coloured text and icons, a lighter blue on dark backgrounds and a deeper one on light.
+pub(crate) fn accent_text() -> Color32 {
+    if theme::dark() { Color32::from_rgb(110, 168, 255) } else { Color32::from_rgb(30, 64, 175) }
+}
 
 /// An icon button that opens a menu.
 fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
@@ -394,21 +413,23 @@ fn preset_text(p: &crate::proto::Preset) -> String {
     format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps)
 }
 
-/// A circle with the host's initial, coloured by its name.
+/// The colours of the hosts' initials, deep enough for their white letter.
+pub(crate) const AVATAR_COLORS: [Color32; 6] = [
+    Color32::from_rgb(37, 99, 235),
+    Color32::from_rgb(21, 128, 90),
+    Color32::from_rgb(124, 72, 200),
+    Color32::from_rgb(194, 85, 20),
+    Color32::from_rgb(190, 50, 100),
+    Color32::from_rgb(20, 113, 150),
+];
+
+/// A square with the host's initial, coloured by its name.
 fn badge(ui: &mut egui::Ui, name: &str) {
-    const COLORS: [Color32; 6] = [
-        Color32::from_rgb(64, 132, 245),
-        Color32::from_rgb(46, 160, 120),
-        Color32::from_rgb(150, 100, 220),
-        Color32::from_rgb(220, 120, 60),
-        Color32::from_rgb(200, 80, 120),
-        Color32::from_rgb(60, 150, 180),
-    ];
     let bare = name.trim_start_matches("sshremote://");
     let bare = bare.rsplit('@').next().unwrap_or(bare);
     let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, theme::R_LG, COLORS[hash as usize % COLORS.len()]);
+    ui.painter().rect_filled(rect, theme::R_LG, AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()]);
     let initial = bare.chars().next().unwrap_or('?').to_uppercase().to_string();
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), Color32::WHITE);
 }

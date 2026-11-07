@@ -410,7 +410,7 @@ impl FileWindow {
                 });
                 let p = self.pane(remote);
                 if !p.error.is_empty() {
-                    ui.colored_label(Color32::from_rgb(235, 100, 90), &p.error);
+                    ui.colored_label(crate::gui::bad(), &p.error);
                 }
                 let footer = 26.0;
                 let table_frame = egui::Frame::new()
