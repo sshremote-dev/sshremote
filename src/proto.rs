@@ -72,10 +72,12 @@ pub enum ToAgent {
     Clipboard(String),
     /// Ctrl+Alt+Del, which no viewer can capture locally.
     SecureAttention,
-    /// A file upload begins; it lands in the remote user's Downloads folder.
+    /// A file upload begins, into `dir` (empty: the remote user's Downloads folder); `name` may
+    /// be relative ("folder/file.txt").
     FileStart {
         id: u32,
         size: u64,
+        dir: String,
         name: String,
     },
     FileData {
@@ -89,8 +91,10 @@ pub enum ToAgent {
     ListDir {
         path: String,
     },
-    /// Sends a remote file, or every file under a remote folder, to the viewer.
+    /// Sends a remote file, or every file under a remote folder, to the viewer; each file is
+    /// announced with `FetchStart` carrying `tag`.
     Fetch {
+        tag: u32,
         path: String,
     },
     /// Bytes of a download the viewer has written, so the agent can send more.
@@ -108,23 +112,11 @@ pub enum ToAgent {
     Pause(bool),
     /// Asks for the current screen as a full-colour PNG.
     Snapshot,
-    /// An upload into a chosen remote folder; `name` may be relative ("folder/file.txt").
-    FileStartIn {
-        id: u32,
-        size: u64,
-        dir: String,
-        name: String,
-    },
     /// Changes the remote file system, answered with `OpDone`.
     FileOp {
         op: FileOp,
         path: String,
         arg: String,
-    },
-    /// Like `Fetch`, but each file is announced with `FetchBegin` carrying `tag`.
-    FetchTagged {
-        tag: u32,
-        path: String,
     },
     /// Stops a download; the rest of its folder too, if `tag` is not 0.
     FetchCancel {
@@ -153,11 +145,8 @@ pub enum ToAgent {
     },
     /// Asks for the windows that can be shared on their own.
     ListWindows,
-    /// Shares the screen, a window or a program (see `capture::Share`).
-    Share {
-        kind: u8,
-        id: u64,
-    },
+    /// Shares the screen, a window or a program.
+    Share(crate::capture::Share),
     /// Installs what the window list needs on the host (the GNOME Shell helper).
     InstallHelper,
     /// Opens the desktop's own sharing dialog on the remote screen to choose there.
@@ -303,10 +292,12 @@ pub enum ToClient {
         entries: Vec<DirEntry>,
         error: String,
     },
-    /// A download begins; `name` is relative ("folder/sub/file.txt" for a folder).
+    /// A download of the `Fetch` with `tag` begins; `name` is relative ("folder/sub/file.txt" for
+    /// a folder).
     FetchStart {
         id: u32,
         size: u64,
+        tag: u32,
         name: String,
     },
     FetchData {
@@ -337,13 +328,6 @@ pub enum ToClient {
         ok: bool,
         text: String,
     },
-    /// A download of a `FetchTagged` request begins.
-    FetchBegin {
-        id: u32,
-        size: u64,
-        tag: u32,
-        name: String,
-    },
     /// What a shell wrote to its terminal.
     TermOutput {
         id: u32,
@@ -359,7 +343,7 @@ pub enum ToClient {
         list: Vec<crate::capture::WindowInfo>,
         error: String,
     },
-    /// What is shared now; `kind` as in `Share`.
+    /// What is shared now; `kind` is `Share`'s number on the wire (0: the whole screen).
     Sharing {
         kind: u8,
         text: String,
@@ -502,11 +486,19 @@ impl ToAgent {
                 11
             }
             ToAgent::SecureAttention => 12,
-            ToAgent::FileStart { id, size, name } => {
+            // The short forms (Downloads, tag 0) keep their first codes, which every agent knows.
+            ToAgent::FileStart { id, size, dir, name } if dir.is_empty() => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
                 b.extend_from_slice(name.as_bytes());
                 13
+            }
+            ToAgent::FileStart { id, size, dir, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                put_str(&mut b, dir);
+                put_str(&mut b, name);
+                24
             }
             ToAgent::FileData { id, data } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -521,9 +513,14 @@ impl ToAgent {
                 b.extend_from_slice(path.as_bytes());
                 16
             }
-            ToAgent::Fetch { path } => {
+            ToAgent::Fetch { tag: 0, path } => {
                 b.extend_from_slice(path.as_bytes());
                 17
+            }
+            ToAgent::Fetch { tag, path } => {
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(path.as_bytes());
+                26
             }
             ToAgent::FetchAck { id, received } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -547,23 +544,11 @@ impl ToAgent {
                 22
             }
             ToAgent::Snapshot => 23,
-            ToAgent::FileStartIn { id, size, dir, name } => {
-                b.extend_from_slice(&id.to_le_bytes());
-                b.extend_from_slice(&size.to_le_bytes());
-                put_str(&mut b, dir);
-                put_str(&mut b, name);
-                24
-            }
             ToAgent::FileOp { op, path, arg } => {
                 b.push(*op as u8);
                 put_str(&mut b, path);
                 put_str(&mut b, arg);
                 25
-            }
-            ToAgent::FetchTagged { tag, path } => {
-                b.extend_from_slice(&tag.to_le_bytes());
-                b.extend_from_slice(path.as_bytes());
-                26
             }
             ToAgent::FetchCancel { id, tag } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -605,8 +590,9 @@ impl ToAgent {
                 b.extend_from_slice(text.as_bytes());
                 37
             }
-            ToAgent::Share { kind, id } => {
-                b.push(*kind);
+            ToAgent::Share(share) => {
+                let (kind, id) = share.to_wire();
+                b.push(kind);
                 b.extend_from_slice(&id.to_le_bytes());
                 33
             }
@@ -637,20 +623,21 @@ impl ToAgent {
             12 => ToAgent::SecureAttention,
             13 => ToAgent::FileStart {
                 id: c.u32()?,
-                size: u64::from_le_bytes(c.take(8)?.try_into().unwrap()),
+                size: c.u64()?,
+                dir: String::new(),
                 name: String::from_utf8_lossy(c.rest()).into_owned(),
             },
             14 => ToAgent::FileData { id: c.u32()?, data: c.rest().to_vec() },
             15 => ToAgent::FileEnd { id: c.u32()? },
             16 => ToAgent::ListDir { path: String::from_utf8_lossy(c.rest()).into_owned() },
-            17 => ToAgent::Fetch { path: String::from_utf8_lossy(c.rest()).into_owned() },
+            17 => ToAgent::Fetch { tag: 0, path: String::from_utf8_lossy(c.rest()).into_owned() },
             18 => ToAgent::FetchAck { id: c.u32()?, received: c.u64()? },
             19 => ToAgent::SelectMonitor(c.u8()?),
             20 => ToAgent::Audio(c.u8()? != 0),
             21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             22 => ToAgent::Pause(c.u8()? != 0),
             23 => ToAgent::Snapshot,
-            24 => ToAgent::FileStartIn { id: c.u32()?, size: c.u64()?, dir: c.str()?, name: c.str()? },
+            24 => ToAgent::FileStart { id: c.u32()?, size: c.u64()?, dir: c.str()?, name: c.str()? },
             25 => ToAgent::FileOp {
                 op: match c.u8()? {
                     1 => FileOp::Mkdir,
@@ -661,7 +648,7 @@ impl ToAgent {
                 path: c.str()?,
                 arg: c.str()?,
             },
-            26 => ToAgent::FetchTagged { tag: c.u32()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
+            26 => ToAgent::Fetch { tag: c.u32()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             27 => ToAgent::FetchCancel { id: c.u32()?, tag: c.u32()? },
             28 => ToAgent::TermOpen { id: c.u32()?, cols: c.u16()?, rows: c.u16()? },
             29 => ToAgent::TermInput { id: c.u32()?, data: c.rest().to_vec() },
@@ -685,7 +672,7 @@ impl ToAgent {
                 },
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
-            33 => ToAgent::Share { kind: c.u8()?, id: c.u64()? },
+            33 => ToAgent::Share(crate::capture::Share::from_wire(c.u8()?, c.u64()?).ok_or_else(bad)?),
             _ => return Err(bad()),
         })
     }
@@ -761,11 +748,18 @@ impl ToClient {
                 }
                 108
             }
-            ToClient::FetchStart { id, size, name } => {
+            ToClient::FetchStart { id, size, tag: 0, name } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
                 b.extend_from_slice(name.as_bytes());
                 109
+            }
+            ToClient::FetchStart { id, size, tag, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                118
             }
             ToClient::FetchData { id, data } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -798,13 +792,6 @@ impl ToClient {
                 b.push(*ok as u8);
                 b.extend_from_slice(text.as_bytes());
                 117
-            }
-            ToClient::FetchBegin { id, size, tag, name } => {
-                b.extend_from_slice(&id.to_le_bytes());
-                b.extend_from_slice(&size.to_le_bytes());
-                b.extend_from_slice(&tag.to_le_bytes());
-                b.extend_from_slice(name.as_bytes());
-                118
             }
             ToClient::TermOutput { id, data } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -944,6 +931,7 @@ impl ToClient {
             109 => ToClient::FetchStart {
                 id: c.u32()?,
                 size: c.u64()?,
+                tag: 0,
                 name: String::from_utf8_lossy(c.rest()).into_owned(),
             },
             110 => ToClient::FetchData { id: c.u32()?, data: c.rest().to_vec() },
@@ -998,7 +986,7 @@ impl ToClient {
             }
             124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
-            118 => ToClient::FetchBegin {
+            118 => ToClient::FetchStart {
                 id: c.u32()?,
                 size: c.u64()?,
                 tag: c.u32()?,
@@ -1042,22 +1030,22 @@ mod tests {
             ToAgent::HScroll { steps: -3 },
             ToAgent::Clipboard("hello".into()),
             ToAgent::SecureAttention,
-            ToAgent::FileStart { id: 1, size: 3, name: "a.txt".into() },
+            ToAgent::FileStart { id: 1, size: 3, dir: String::new(), name: "a.txt".into() },
             ToAgent::FileData { id: 1, data: vec![1, 2, 3] },
             ToAgent::FileEnd { id: 1 },
             ToAgent::ListDir { path: "/home".into() },
-            ToAgent::Fetch { path: "C:/x".into() },
+            ToAgent::Fetch { tag: 0, path: "C:/x".into() },
             ToAgent::FetchAck { id: 3, received: 1 << 40 },
-            ToAgent::FileStartIn { id: 4, size: 10, dir: "/tmp".into(), name: "a/b.txt".into() },
+            ToAgent::FileStart { id: 4, size: 10, dir: "/tmp".into(), name: "a/b.txt".into() },
             ToAgent::FileOp { op: FileOp::Rename, path: "/tmp/a".into(), arg: "b".into() },
-            ToAgent::FetchTagged { tag: 5, path: "/x".into() },
+            ToAgent::Fetch { tag: 5, path: "/x".into() },
             ToAgent::FetchCancel { id: 6, tag: 5 },
             ToAgent::TermOpen { id: 1, cols: 80, rows: 24 },
             ToAgent::TermInput { id: 1, data: b"ls\r".to_vec() },
             ToAgent::TermResize { id: 1, cols: 120, rows: 40 },
             ToAgent::TermClose { id: 1 },
             ToAgent::ListWindows,
-            ToAgent::Share { kind: 2, id: 0x1234 },
+            ToAgent::Share(crate::capture::Share::App(0x1234)),
             ToAgent::InstallHelper,
             ToAgent::PickOnRemote,
             ToAgent::UiState { text: true, max: 150 },
@@ -1069,11 +1057,11 @@ mod tests {
                 entries: vec![DirEntry { name: "a".into(), dir: true, size: 0, mtime: 1_700_000_000 }],
                 error: String::new(),
             },
-            ToClient::FetchStart { id: 2, size: 9, name: "d/x.txt".into() },
+            ToClient::FetchStart { id: 2, size: 9, tag: 0, name: "d/x.txt".into() },
             ToClient::FetchData { id: 2, data: vec![1] },
             ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
             ToClient::OpDone { ok: false, text: "denied".into() },
-            ToClient::FetchBegin { id: 3, size: 4, tag: 5, name: "d/y".into() },
+            ToClient::FetchStart { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },
             ToClient::WindowList {

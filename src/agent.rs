@@ -257,8 +257,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 ToAgent::KeyState { keysym, down } => report(cap.input(Input::KeyState { keysym, down })),
                 ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
                 ToAgent::Clipboard(text) => clip.set(text),
-                ToAgent::FileStart { id, size, name } => {
-                    if let Some(m) = inbox.start(id, size, &name) {
+                ToAgent::FileStart { id, size, dir, name } => {
+                    let note = if dir.is_empty() {
+                        inbox.start(id, size, &name)
+                    } else {
+                        inbox.start_in(id, size, std::path::Path::new(&dir), &name)
+                    };
+                    if let Some(m) = note {
                         send(enc, &m.to_client()).map_err(io_err)?;
                     }
                 }
@@ -273,23 +278,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                 }
                 ToAgent::ListDir { path } => send(enc, &crate::files::list(&path)).map_err(io_err)?,
-                ToAgent::Fetch { path } => {
-                    if let Some(m) = outbox.fetch(&path) {
+                ToAgent::Fetch { tag, path } => {
+                    if let Some(m) = outbox.fetch(&path, tag) {
                         send(enc, &m).map_err(io_err)?;
                     }
                 }
                 ToAgent::FetchAck { id, received } => outbox.ack(id, received),
-                ToAgent::FileStartIn { id, size, dir, name } => {
-                    if let Some(m) = inbox.start_in(id, size, std::path::Path::new(&dir), &name) {
-                        send(enc, &m.to_client()).map_err(io_err)?;
-                    }
-                }
                 ToAgent::FileOp { op, path, arg } => send(enc, &crate::files::op(op, &path, &arg)).map_err(io_err)?,
-                ToAgent::FetchTagged { tag, path } => {
-                    if let Some(m) = outbox.fetch_tagged(&path, tag) {
-                        send(enc, &m).map_err(io_err)?;
-                    }
-                }
                 ToAgent::TermOpen { id, cols, rows } => {
                     if let Some(m) = terms.open(id, cols, rows) {
                         send(enc, &m).map_err(io_err)?;
@@ -394,8 +389,8 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     };
                     send(enc, &ToClient::WindowList { list: Vec::new(), error }).map_err(io_err)?;
                 }
-                ToAgent::Share { kind, id } => {
-                    let Some(scope) = crate::capture::Share::from_wire(kind, id) else { continue };
+                ToAgent::Share(scope) => {
+                    let kind = scope.to_wire().0;
                     match cap.share(scope) {
                         Ok(text) => {
                             send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;

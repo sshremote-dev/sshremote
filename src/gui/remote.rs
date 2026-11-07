@@ -1,6 +1,7 @@
 //! A connected host: its screen, the toolbar, input, files, terminal and chat.
 
 use super::*;
+use crate::capture::Share;
 
 /// Windows or programs offered for sharing, or why there are none.
 type WindowList = Result<Vec<crate::capture::WindowInfo>, String>;
@@ -321,7 +322,7 @@ impl Remote {
         self.share_picker(&ctx)?;
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
             self.pick_at = None;
-            self.send(ToAgent::Share { kind: 3, id: 0 })?;
+            self.send(ToAgent::Share(Share::ActiveWindow))?;
         }
         if self.paused || self.view_only {
             // A badge on the picture: it is a still image until resumed, or input is off.
@@ -454,14 +455,7 @@ impl Remote {
                     }
                     None => self.notify(&text),
                 },
-                Ok(Ev::Net(ToClient::FetchStart { id, size, name })) => {
-                    if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
-                        self.notify(&format!("{name}: {text}"));
-                    } else {
-                        self.downloads.push((id, name, 0));
-                    }
-                }
-                Ok(Ev::Net(ToClient::FetchBegin { id, size, tag, name })) => {
+                Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => {
                     let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
                     if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start_in(id, size, &dir, &name) {
                         self.notify(&format!("{name}: {text}"));
@@ -583,10 +577,7 @@ impl Remote {
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let id = self.next_upload;
         self.next_upload += 1;
-        match &dir {
-            Some(d) => self.send(ToAgent::FileStartIn { id, size, dir: d.clone(), name: name.clone() })?,
-            None => self.send(ToAgent::FileStart { id, size, name: name.clone() })?,
-        }
+        self.send(ToAgent::FileStart { id, size, dir: dir.clone().unwrap_or_default(), name: name.clone() })?;
         self.uploads.push_back(Upload { id, name, dir, cancelled: false, file, size, sent: 0, acked: 0, ended: false });
         Ok(())
     }
@@ -765,7 +756,7 @@ impl Remote {
                         let on = self.sharing.0 == 0 && i == current;
                         if row(ui, ic::MONITOR, format!("Screen {}  {name}", i + 1).trim(), sub, on) {
                             pick = Some(if i == current || monitors.len() < 2 {
-                                ToAgent::Share { kind: 0, id: 0 }
+                                ToAgent::Share(Share::Screen)
                             } else {
                                 ToAgent::SelectMonitor(i as u8)
                             });
@@ -778,7 +769,7 @@ impl Remote {
                     if t == 1 {
                         let sub = "The window in front on the SSH host; click it there first";
                         if row(ui, ic::APP_WINDOW, "Active window", sub, false) {
-                            pick = Some(ToAgent::Share { kind: 3, id: 0 });
+                            pick = Some(ToAgent::Share(Share::ActiveWindow));
                         }
                         // Pointing at the window itself: the click brings it to the front, then it is shared.
                         let sub = "Click the window you want in the picture of the SSH host";
@@ -798,7 +789,7 @@ impl Remote {
                     } else {
                         let sub = "Every window of the program in front on the SSH host";
                         if row(ui, ic::SQUARES_FOUR, "Active application", sub, false) {
-                            pick = Some(ToAgent::Share { kind: 4, id: 0 });
+                            pick = Some(ToAgent::Share(Share::ActiveApp));
                         }
                     }
                     ui.separator();
@@ -815,7 +806,7 @@ impl Remote {
             close = true;
             if self.sharing.0 != 0 {
                 // The whole screen first, so every window can be seen and clicked.
-                self.send(ToAgent::Share { kind: 0, id: 0 })?;
+                self.send(ToAgent::Share(Share::Screen))?;
             }
         }
         if let Some(m) = pick {
@@ -881,7 +872,7 @@ impl Remote {
                     let tag = self.next_tag;
                     self.next_tag += 1;
                     self.fetch_dirs.insert(tag, to.clone());
-                    self.send(ToAgent::FetchTagged { tag, path })?;
+                    self.send(ToAgent::Fetch { tag, path })?;
                 }
             }
             Cmd::Cancel(true, id) => {
@@ -1380,7 +1371,7 @@ impl Remote {
                 .on_hover_text(format!("Sharing {}. Click to share the whole screen again.", self.sharing.1))
                 .clicked()
             {
-                *action = Some(Box::new(|r, _| r.send(ToAgent::Share { kind: 0, id: 0 })));
+                *action = Some(Box::new(|r, _| r.send(ToAgent::Share(Share::Screen))));
             }
         }
         ui.separator();
@@ -1743,7 +1734,7 @@ fn share_list(
             for w in wins {
                 let sub = format!("{}  {}x{}", w.app, w.w, w.h);
                 if row(ui, ic::APP_WINDOW, &w.title, &sub, false) {
-                    *pick = Some(ToAgent::Share { kind: 1, id: w.id });
+                    *pick = Some(ToAgent::Share(Share::Window(w.id)));
                 }
             }
         }
@@ -1758,7 +1749,7 @@ fn share_list(
             for (app, id, n) in apps {
                 let sub = if n == 1 { "1 window".to_string() } else { format!("{n} windows") };
                 if row(ui, ic::SQUARES_FOUR, &app, &sub, false) {
-                    *pick = Some(ToAgent::Share { kind: 2, id });
+                    *pick = Some(ToAgent::Share(Share::App(id)));
                 }
             }
         }

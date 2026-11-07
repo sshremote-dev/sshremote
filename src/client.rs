@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::{cursor, execute, terminal};
 
+use crate::capture::Share;
 use crate::color::{Lut, Mode};
 use crate::keys;
 use crate::proto::{Frame, MOD_SUPER, SUPER_L, ToAgent, ToClient};
@@ -406,7 +407,7 @@ impl Viewer {
             'v' => {
                 // Sharing part of the screen: the same key leads straight back to all of it.
                 if self.sharing.0 != 0 {
-                    self.sess.send(ToAgent::Share { kind: 0, id: 0 })?;
+                    self.sess.send(ToAgent::Share(Share::Screen))?;
                     return self.notify("Sharing the whole screen...");
                 }
                 self.share_list = None;
@@ -574,28 +575,28 @@ impl Viewer {
                     _ => Vec::new(),
                 };
                 let pick = |n: &str| n.parse::<usize>().ok().and_then(|i| list.get(i.wrapping_sub(1))).map(|w| w.id);
-                let (kind, id) = match t.as_str() {
-                    "" => (0, 0),
-                    "a" => (3, 0),
-                    "p" => (4, 0),
+                let share = match t.as_str() {
+                    "" => Share::Screen,
+                    "a" => Share::ActiveWindow,
+                    "p" => Share::ActiveApp,
                     n if n.starts_with(['A', 'P']) => match pick(&n[1..]) {
-                        Some(id) => (2, id),
+                        Some(id) => Share::App(id),
                         None => return self.close_share_list().and_then(|_| self.notify(&format!("No window {n}"))),
                     },
                     n => match pick(n) {
-                        Some(id) => (1, id),
+                        Some(id) => Share::Window(id),
                         None => return self.close_share_list().and_then(|_| self.notify(&format!("No window {n}"))),
                     },
                 };
                 self.close_share_list()?;
-                self.sess.send(ToAgent::Share { kind, id })
+                self.sess.send(ToAgent::Share(share))
             }
             'c' => {
                 self.sess.send(ToAgent::Chat(text.clone()))?;
                 self.notify(&format!("You: {text}"))
             }
             'g' => {
-                self.sess.send(ToAgent::Fetch { path: text.clone() })?;
+                self.sess.send(ToAgent::Fetch { tag: 0, path: text.clone() })?;
                 self.notify(&format!("Downloading {text}..."))
             }
             _ => self.upload(&text),
@@ -611,7 +612,7 @@ impl Viewer {
         let name = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
         let id = self.next_upload;
         self.next_upload += 1;
-        self.sess.send(ToAgent::FileStart { id, size: data.len() as u64, name: name.clone() })?;
+        self.sess.send(ToAgent::FileStart { id, size: data.len() as u64, dir: String::new(), name: name.clone() })?;
         for chunk in data.chunks(64 << 10) {
             self.sess.send(ToAgent::FileData { id, data: chunk.to_vec() })?;
         }
@@ -677,7 +678,7 @@ impl Viewer {
                 let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
                 self.notify(&t)?
             }
-            ToClient::FetchStart { id, size, name } => {
+            ToClient::FetchStart { id, size, name, .. } => {
                 if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
                     self.notify(&format!("download {name}: {text}"))?;
                 }
@@ -932,13 +933,13 @@ pub fn run(opt: Options) -> Result<(), String> {
             v.sess.send(ToAgent::SelectMonitor(m))?;
         }
         if let Some(path) = &opt.probe_fetch {
-            v.sess.send(ToAgent::Fetch { path: path.clone() })?;
+            v.sess.send(ToAgent::Fetch { tag: 0, path: path.clone() })?;
         }
         if let Some(path) = &opt.probe_send {
             let data = std::fs::read(path)?;
             let name =
                 std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
-            v.sess.send(ToAgent::FileStart { id: 1, size: data.len() as u64, name })?;
+            v.sess.send(ToAgent::FileStart { id: 1, size: data.len() as u64, dir: String::new(), name })?;
             for chunk in data.chunks(64 << 10) {
                 v.sess.send(ToAgent::FileData { id: 1, data: chunk.to_vec() })?;
             }

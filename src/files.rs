@@ -200,12 +200,8 @@ pub fn walk(dir: &Path, base: &str, out: &mut Vec<(PathBuf, String)>) {
 
 impl Outbox {
     /// Queues a file or a whole folder; returns an error message to send at once, if any.
-    pub fn fetch(&mut self, path: &str) -> Option<ToClient> {
-        self.fetch_tagged(path, 0)
-    }
-
-    /// Queues a download whose files are announced with `FetchBegin` and `tag`.
-    pub fn fetch_tagged(&mut self, path: &str, tag: u32) -> Option<ToClient> {
+    /// Each file is announced with `FetchStart` carrying `tag`.
+    pub fn fetch(&mut self, path: &str, tag: u32) -> Option<ToClient> {
         let p = PathBuf::from(path);
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         let mut files = Vec::new();
@@ -266,11 +262,7 @@ impl Outbox {
                     Ok(f) => {
                         o.size = f.metadata().map(|m| m.len()).unwrap_or(0);
                         o.file = Some(f);
-                        out.push(if o.tag == 0 {
-                            ToClient::FetchStart { id: o.id, size: o.size, name: o.name.clone() }
-                        } else {
-                            ToClient::FetchBegin { id: o.id, size: o.size, tag: o.tag, name: o.name.clone() }
-                        });
+                        out.push(ToClient::FetchStart { id: o.id, size: o.size, tag: o.tag, name: o.name.clone() });
                     }
                     Err(e) => {
                         out.push(ToClient::FetchEnd {
@@ -467,7 +459,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), vec![1u8; 100_000]).unwrap();
         std::fs::write(dir.join("sub").join("b.txt"), b"bb").unwrap();
         let mut out = Outbox::default();
-        assert!(out.fetch(dir.to_str().unwrap()).is_none());
+        assert!(out.fetch(dir.to_str().unwrap(), 0).is_none());
         let mut names = Vec::new();
         let mut bytes = 0;
         for _ in 0..10 {

@@ -479,10 +479,11 @@ impl Server {
             }
             "share" => {
                 let t = args.get("target").and_then(Value::as_str).ok_or("missing target")?.trim();
-                let (kind, id) = match t {
-                    "screen" => (0, 0),
-                    "active" => (3, 0),
-                    "active-app" => (4, 0),
+                use crate::capture::Share;
+                let share = match t {
+                    "screen" => Share::Screen,
+                    "active" => Share::ActiveWindow,
+                    "active-app" => Share::ActiveApp,
                     "pick" => {
                         self.send(ToAgent::PickOnRemote)?;
                         return Ok(text_result(
@@ -490,12 +491,12 @@ impl Server {
                         ));
                     }
                     _ => match t.strip_prefix("app:") {
-                        Some(id) => (2, id.trim().parse::<u64>().map_err(|_| "bad window id")?),
-                        None => (1, t.parse::<u64>().map_err(|_| "target is screen, active, a window id or app:<id>")?),
+                        Some(id) => Share::App(id.trim().parse::<u64>().map_err(|_| "bad window id")?),
+                        None => Share::Window(t.parse::<u64>().map_err(|_| "target is screen, active, a window id or app:<id>")?),
                     },
                 };
                 self.sharing = None;
-                self.send(ToAgent::Share { kind, id })?;
+                self.send(ToAgent::Share(share))?;
                 let until = Instant::now() + Duration::from_secs(5);
                 while self.sharing.is_none() && Instant::now() < until {
                     self.drain(Some(Instant::now() + Duration::from_millis(100)))?;

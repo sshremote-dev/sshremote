@@ -67,6 +67,17 @@ pub enum Share {
 }
 
 impl Share {
+    /// Its number on the wire and the window it names (0 for none).
+    pub fn to_wire(self) -> (u8, u64) {
+        match self {
+            Share::Screen => (0, 0),
+            Share::Window(id) => (1, id),
+            Share::App(id) => (2, id),
+            Share::ActiveWindow => (3, 0),
+            Share::ActiveApp => (4, 0),
+        }
+    }
+
     pub fn from_wire(kind: u8, id: u64) -> Option<Share> {
         Some(match kind {
             0 => Share::Screen,
