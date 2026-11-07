@@ -423,12 +423,13 @@ pub fn parse(text: &str) -> Vec<Block> {
             blocks.push(Block::Code { lang: String::new(), code: code.join("\n") });
             continue;
         } else {
-            para.push(line);
             // A very long paragraph (output without blank lines) goes in parts, so a long document
-            // is still drawn by the parts in view.
+            // is still drawn by the parts in view. A part is closed only when a line goes on after
+            // it, so the last part is a plain paragraph with its space below.
             if para.len() >= 40 {
                 flush_part(&mut para, &mut blocks, true);
             }
+            para.push(line);
         }
         i += 1;
     }
@@ -1193,6 +1194,19 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_paragraphs_end_and_go_on_as_paragraphs() {
+        let lines = |n: usize| (0..n).map(|k| format!("line {k}")).collect::<Vec<_>>().join("\n");
+        // Exactly 40 lines, then something else: one plain paragraph, with its space below.
+        let b = parse(&format!("{}\n\nother", lines(40)));
+        assert!(matches!(&b[0], Block::Para(_)), "{:?}", b[0]);
+        assert_eq!(b[1], Block::Para("other".into()));
+        // An indented line going on after 40 is still the paragraph, not a code block.
+        let b = parse(&format!("{}\n    at Foo.bar()\n    at Baz.qux()\nend", lines(40)));
+        assert!(b.iter().all(|b| !matches!(b, Block::Code { .. })), "{b:?}");
+        assert!(matches!(&b[1], Block::Para(t) if t.starts_with("at Foo.bar()")), "{:?}", b[1]);
+    }
 
     #[test]
     fn long_paragraphs_go_in_joined_parts() {
