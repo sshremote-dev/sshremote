@@ -831,4 +831,38 @@ Host *
         assert_eq!(remove_host(text, "web1"), "# mine\n\nHost *\n  ServerAliveInterval 30\n");
         assert_eq!(remove_host(text, "nothere"), text);
     }
+
+    /// Every tool window draws for a few frames, in both views of the hosts window, without
+    /// panicking (it reads ~/.ssh, the password store and the backup folders, and writes nothing).
+    #[test]
+    fn tool_windows_draw() {
+        let ctx = eframe::egui::Context::default();
+        crate::gui::style(&ctx);
+        let mut keys = super::KeyTool::new();
+        let mut config = super::ConfigTool::new();
+        let mut vault = super::VaultTool::new("user@host");
+        let mut backup = super::BackupTool::new();
+        for frame in 0..4 {
+            if frame == 2 {
+                config.view = super::ConfigView::File;
+            }
+            let input = eframe::egui::RawInput {
+                screen_rect: Some(eframe::egui::Rect::from_min_size(
+                    Default::default(),
+                    eframe::egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                let mut actions = Vec::new();
+                let mut changed = false;
+                assert!(keys.show(&ctx, &mut actions));
+                assert!(config.show(&ctx, &mut changed));
+                assert!(vault.show(&ctx, &["a".into(), "b".into()]));
+                assert!(backup.show(&ctx, &mut changed));
+                assert!(!changed, "drawing changes nothing");
+            });
+        }
+    }
 }

@@ -1183,7 +1183,8 @@ impl Remote {
                     }
                 }
                 Event::PointerButton { pos, button, pressed, .. } => {
-                    if pressed && (over_toolbar(pos) || local) {
+                    if pressed && (over_toolbar(pos) || local || (!self.fullscreen && super::chrome::on_edge(ctx, pos)))
+                    {
                         continue;
                     }
                     let Some(p) = shown.and_then(|r| self.remote_point(r, pos)) else { continue };
@@ -1628,9 +1629,17 @@ impl Remote {
             });
         }
         ui.separator();
-        let end = egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
-            .fill(BAD)
-            .min_size(Vec2::splat(28.0));
+        // In the title bar a red X would sit beside the window's own close button, so there it
+        // reads as text; the full-screen dock keeps the compact red button.
+        let end = if self.fullscreen {
+            egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
+                .fill(BAD)
+                .min_size(Vec2::splat(28.0))
+        } else {
+            egui::Button::new(RichText::new(format!("{}  Disconnect", ic::LINK_BREAK)).size(13.0))
+                .frame_when_inactive(false)
+                .min_size(Vec2::new(0.0, 28.0))
+        };
         if ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }

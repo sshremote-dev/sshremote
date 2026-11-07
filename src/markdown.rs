@@ -212,8 +212,9 @@ fn box_table(lines: &[&str]) -> (Vec<Vec<String>>, usize) {
 
 /// Removes the indentation all non-blank lines share.
 pub fn dedent(text: &str) -> String {
-    let n = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
-    text.lines().map(|l| l.get(n..).unwrap_or("").trim_end()).collect::<Vec<_>>().join("\n")
+    let indent = |l: &str| l.chars().take_while(|c| c.is_whitespace()).count();
+    let n = text.lines().filter(|l| !l.trim().is_empty()).map(indent).min().unwrap_or(0);
+    text.lines().map(|l| l.chars().skip(n).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
 }
 
 fn table_row(line: &str) -> Vec<String> {
@@ -1085,9 +1086,9 @@ pub fn blocks(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], id: egui::Id) {
 }
 
 /// Draws a document.
-pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id) {
-    let th = Theme::of(ui);
-    blocks(ui, &th, &doc.blocks, id);
+/// Draws a document in the colours of `th` (the background it is drawn on).
+pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
+    blocks(ui, th, &doc.blocks, id);
 }
 
 #[cfg(test)]

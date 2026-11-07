@@ -70,6 +70,7 @@ pub(crate) mod ic {
     pub const CORNERS_OUT: &str = "\u{E1D0}";
     pub const FILE: &str = "\u{E230}";
     pub const FOLDER: &str = "\u{E24A}";
+    pub const LINK_BREAK: &str = "\u{E2E4}";
     pub const ARCHIVE: &str = "\u{E00C}";
     pub const LOCK_KEY: &str = "\u{E2FE}";
     pub const SHIELD: &str = "\u{E40A}";
@@ -226,6 +227,8 @@ pub struct App {
     show_options: bool,
     /// What the next connection opens with: its screen, its terminal or its files.
     start_with: Start,
+    /// Why the password typed for this connection was not saved, shown once it starts.
+    save_error: Option<String>,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -275,6 +278,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 keys: None,
                 config: None,
                 show_options: false,
+                save_error: None,
                 start_with: match open.as_str() {
                     "terminal" => Start::Terminal,
                     "files" => Start::Files,
@@ -463,10 +467,12 @@ impl eframe::App for App {
                 Ok(Err(e)) => {
                     self.error = Some(e);
                     next = Some(Screen::Connect);
+                    self.start_with = Start::Screen;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.error = Some("connection failed".into());
                     next = Some(Screen::Connect);
+                    self.start_with = Start::Screen;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     let secs = started.elapsed().as_secs();
@@ -502,6 +508,7 @@ impl eframe::App for App {
                             ui.add_space(12.0);
                             if ui.button("Cancel").clicked() {
                                 next = Some(Screen::Connect);
+                                self.start_with = Start::Screen;
                             }
                         });
                     });

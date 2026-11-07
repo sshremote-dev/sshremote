@@ -319,7 +319,8 @@ pub fn list(path: &str) -> ToClient {
             let mut entries: Vec<DirEntry> = rd
                 .flatten()
                 .filter_map(|e| {
-                    let m = e.metadata().ok()?;
+                    // A link to a folder is shown and opened as the folder; a broken link as itself.
+                    let m = std::fs::metadata(e.path()).or_else(|_| e.metadata()).ok()?;
                     Some(DirEntry {
                         name: e.file_name().to_string_lossy().into_owned(),
                         dir: m.is_dir(),

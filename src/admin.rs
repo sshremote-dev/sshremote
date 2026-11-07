@@ -57,7 +57,12 @@ pub fn relaunch(args: &[String]) -> Result<bool, String> {
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let file = wide(&exe.to_string_lossy());
-    let params = wide(&args.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(" "));
+    // Quoted the way the C runtime reads a command line: backslashes before a quote are doubled.
+    let quote = |a: &String| {
+        let trailing = a.len() - a.trim_end_matches('\\').len();
+        format!("\"{}{}\"", a.replace('"', "\\\""), "\\".repeat(trailing))
+    };
+    let params = wide(&args.iter().map(quote).collect::<Vec<_>>().join(" "));
     let verb = wide("runas");
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;

@@ -233,12 +233,19 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
     if v.get("sshremote_backup").is_none() {
         return Err("not a sshremote backup".into());
     }
+    // A wrong passphrase stops the restore before anything has been changed.
+    let pass = passphrase.filter(|p| !p.is_empty());
+    for key in ["passwords", "secrets"] {
+        if let (Some(sealed), Some(p)) = (v.get(key), pass) {
+            open(sealed, p)?;
+        }
+    }
     let dir = crate::hosts::config_dir().ok_or("no settings folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut done = Vec::new();
     if let Some(files) = v["files"].as_object() {
         for (name, text) in files {
-            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !name.contains(['/', '\\'])) else {
+            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !name.contains(['/', '\\', ':'])) else {
                 continue;
             };
             let here = std::fs::read_to_string(dir.join(name)).unwrap_or_default();

@@ -16,8 +16,6 @@ use crate::gui::{ACCENT, ic};
 use crate::proto::ToAgent;
 
 const TAB_STRIP: Color32 = Color32::from_rgb(12, 13, 16);
-const TAB_HOVER: Color32 = Color32::from_rgb(34, 36, 43);
-const TAB_DIVIDER: Color32 = Color32::from_rgb(52, 55, 64);
 
 /// A colour scheme: name, background, foreground, the sixteen ANSI colours.
 struct Scheme(&'static str, [u8; 3], [u8; 3], [[u8; 3]; 16]);
@@ -265,6 +263,8 @@ struct Tab {
     reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
+    /// The text view's document as a layout job, for the same key, font size and colour.
+    editor_galley: Option<((u64, i32, usize), f32, Color32, std::sync::Arc<egui::text::LayoutJob>)>,
     /// The text view's document and the cursor's place in it, for an output revision and cursor.
     editor: Option<((u64, i32, usize), std::rc::Rc<(String, usize)>)>,
     /// The mouse button a program that asked for the mouse holds down, for its drag reports.
@@ -360,7 +360,7 @@ pub struct TermWindow {
     torn: Vec<TermWindow>,
     title: String,
     copy_on_select: bool,
-    renaming: Option<(usize, String)>,
+    renaming: Option<(u32, String)>,
     /// Tabs and panes to open on the next frame (the window's context is needed to wake it for output).
     pending: Vec<Pending>,
     /// The window closes with its last tab instead of opening a fresh shell.
@@ -432,6 +432,7 @@ fn key_bytes(key: Key, m: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> 
     Some(match key {
         Key::Enter => b"\r".to_vec(),
         Key::Backspace if m.ctrl => b"\x08".to_vec(),
+        Key::Backspace if m.alt => b"\x1b\x7f".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
         Key::Tab if m.shift => b"\x1b[Z".to_vec(),
         Key::Tab => b"\t".to_vec(),
@@ -625,7 +626,10 @@ impl TermWindow {
     /// Takes the tab `group` out into a new window at `at` (screen points). Shells on the SSH host
     /// of a remote-screen session stay with it, since that session carries their output.
     fn tear(&mut self, group: u32, at: Pos2) {
-        if !self.framed || self.tabs.iter().any(|t| t.group == group && matches!(t.backend, Backend::Agent)) {
+        if !self.framed
+            || !self.standalone
+            || self.tabs.iter().any(|t| t.group == group && matches!(t.backend, Backend::Agent))
+        {
             return;
         }
         let active = self.tabs.get(self.active).map(|t| t.id);
@@ -697,6 +701,7 @@ impl TermWindow {
             overlays: Vec::new(),
             mouse_held: None,
             editor: None,
+            editor_galley: None,
             rev: 0,
             reading: None,
             group: id,
@@ -766,6 +771,7 @@ impl TermWindow {
 
     /// The terminal drawn inside another window's area, as the remote screen window does.
     pub fn embedded(&mut self, ui: &mut egui::Ui) -> Vec<Cmd> {
+        self.framed = false;
         let mut out = Vec::new();
         let ctx = ui.ctx().clone();
         self.before(&ctx, &mut out);
@@ -861,6 +867,13 @@ impl TermWindow {
 
     /// The tabs, the new-tab button and menu, and the window's own buttons (views, settings).
     fn strip(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
+        // Colours of the bar the strip sits in: the title bar follows the app's light or dark theme.
+        let strong = ui.visuals().strong_text_color();
+        let weak = ui.visuals().text_color().gamma_multiply(0.75);
+        let hover_fill = ui.visuals().widgets.hovered.weak_bg_fill;
+        let divider = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        // The active tab joins the terminal, so its text follows the terminal's colours.
+        let tab_fg = scheme_fg();
         let mut close = None;
         let groups = self.groups();
         let current = self.tabs.get(self.active).map(|t| t.group);
@@ -872,7 +885,8 @@ impl TermWindow {
         for (gi, &(group, i)) in groups.iter().enumerate() {
             let active = Some(group) == current;
             let next_active = groups.get(gi + 1).is_some_and(|g| Some(g.0) == current);
-            let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click_and_drag());
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::hover());
+            let r = ui.interact(rect, ui.make_persistent_id(("term-tab", group)), Sense::click_and_drag());
             tab_rects.push((group, rect));
             let hovered = r.hovered();
             let p = ui.painter();
@@ -880,15 +894,15 @@ impl TermWindow {
             if active {
                 p.rect_filled(rect, top_round, scheme_bg());
             } else if hovered {
-                p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
+                p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), hover_fill);
             } else if !next_active && gi + 1 < groups.len() {
                 // A thin divider between two inactive tabs.
                 let x = rect.right() - 0.5;
-                p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, TAB_DIVIDER));
+                p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, divider));
             }
             let t = &self.tabs[i];
             let ended = t.exited.is_some();
-            let fg = if active { Color32::WHITE } else { Color32::from_gray(170) };
+            let fg = if active { tab_fg } else { weak };
             let fg = if ended { fg.gamma_multiply(0.5) } else { fg };
             p.text(
                 rect.left_center() + Vec2::new(12.0, 0.0),
@@ -919,9 +933,9 @@ impl TermWindow {
                 let bg = if active {
                     scheme_bg()
                 } else if hovered {
-                    TAB_HOVER
+                    hover_fill
                 } else {
-                    TAB_STRIP
+                    ui.visuals().panel_fill
                 };
                 let fade = Rect::from_min_max(
                     Pos2::new(title_rect.right() - 18.0, rect.top() + 6.0),
@@ -937,7 +951,7 @@ impl TermWindow {
             if show_close {
                 let cr = ui.interact(close_rect, ui.make_persistent_id(("close-tab", t.id)), Sense::click());
                 if cr.hovered() {
-                    ui.painter().circle_filled(close_rect.center(), 10.0, Color32::from_white_alpha(28));
+                    ui.painter().circle_filled(close_rect.center(), 10.0, fg.gamma_multiply(0.18));
                 }
                 ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
                 if cr.clicked() {
@@ -968,12 +982,13 @@ impl TermWindow {
             }
             if r.double_clicked() {
                 let name = self.tabs[i].custom.clone().unwrap_or_else(|| self.tabs[i].title.clone());
-                self.renaming = Some((i, name));
+                self.renaming = Some((self.tabs[i].id, name));
             }
             r.on_hover_text(&self.tabs[i].title);
         }
         // A dragged tab moves along the strip; dropped away from it, it opens in a window of its own.
         if let Some(group) = self.dragging
+            && ui.input(|i| i.pointer.primary_down())
             && let Some(p) = ui.ctx().pointer_interact_pos()
             && let Some(&(over, _)) = tab_rects.iter().find(|(g, r)| *g != group && r.x_range().contains(p.x))
         {
@@ -987,23 +1002,20 @@ impl TermWindow {
                 self.tear(group, origin + p.to_vec2() - Vec2::new(60.0, 16.0));
             }
         }
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.dragging = None;
+        }
         ui.add_space(4.0);
         let (plus, pr) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::click());
         if pr.hovered() {
-            ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), TAB_HOVER);
+            ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), hover_fill);
         }
-        ui.painter().text(
-            plus.center(),
-            Align2::CENTER_CENTER,
-            ic::PLUS,
-            FontId::proportional(15.0),
-            Color32::from_gray(200),
-        );
+        ui.painter().text(plus.center(), Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(15.0), strong);
         if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
             self.open_tab();
         }
         // The profiles: local shells, ssh hosts, the SSH host's own shell.
-        let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
+        let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(strong))
             .frame_when_inactive(false)
             .min_size(Vec2::new(22.0, 30.0));
         let profiles = self.profiles.clone();
@@ -1023,7 +1035,7 @@ impl TermWindow {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
-                let color = if on { Color32::WHITE } else { Color32::from_gray(170) };
+                let color = if on { strong } else { weak };
                 let b = egui::Button::new(RichText::new(glyph).size(14.0).color(color))
                     .frame_when_inactive(on)
                     .selected(on)
@@ -1038,7 +1050,7 @@ impl TermWindow {
             let font = &mut self.font_size;
             let mut copy_on_select = self.copy_on_select;
             let mut changed = false;
-            let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(Color32::from_gray(170)))
+            let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(weak))
                 .frame_when_inactive(false)
                 .min_size(Vec2::splat(28.0));
             egui::containers::menu::MenuButton::from_button(gear)
@@ -1136,7 +1148,11 @@ impl TermWindow {
             });
         }
         // Keyboard shortcuts of the window itself, as in other terminals.
+        let shortcuts = self.renaming.is_none();
         let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
+            if !shortcuts {
+                return (false, false, false, false, false);
+            }
             let cs = i.modifiers.ctrl && i.modifiers.shift;
             (
                 cs && i.key_pressed(Key::T),
@@ -1147,6 +1163,9 @@ impl TermWindow {
             )
         });
         let (split, step) = ui.ctx().input(|i| {
+            if !shortcuts {
+                return (None, 0);
+            }
             let alt_shift = i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl;
             let split = if alt_shift && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)) {
                 Some(Some(true))
@@ -1277,7 +1296,7 @@ impl TermWindow {
             });
             match done {
                 Some(true) => {
-                    if let Some(t) = self.tabs.get_mut(i) {
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.id == i) {
                         t.custom = (!name.trim().is_empty()).then(|| name.trim().to_string());
                     }
                 }
@@ -1317,6 +1336,7 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
         } else {
             t.stitched.clear();
             t.last_screen.clear();
+            t.overlays.clear();
             screen_markdown(t, -history, first)
         };
         let doc = crate::markdown::Doc::new(&text);
@@ -1348,7 +1368,7 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
                 |ui| {
                     ui.set_max_width(width - 40.0);
                     ui.spacing_mut().item_spacing.y = 6.0;
-                    crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
+                    crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)), &th);
                     live = Some(live_area(ui, id, cw, ch, live_rows));
                 },
             );
@@ -1464,7 +1484,7 @@ fn keyboard_with(
             },
             Event::Cut => send.push(0x18),
             Event::Paste(s) => {
-                let s = s.replace("\r\n", "\r").replace('\n', "\r");
+                let s = s.replace("\r\n", "\r").replace('\n', "\r").replace("\x1b[201~", "");
                 if mode.contains(TermMode::BRACKETED_PASTE) {
                     send.extend_from_slice(b"\x1b[200~");
                     send.extend_from_slice(s.as_bytes());
@@ -1472,6 +1492,14 @@ fn keyboard_with(
                 } else {
                     send.extend_from_slice(s.as_bytes());
                 }
+            }
+            Event::Key { key: Key::C, pressed: true, modifiers, .. } if modifiers.ctrl && modifiers.shift => {
+                if let Some(s) = t.term.selection_to_string().filter(|s| !s.is_empty()) {
+                    ui.ctx().copy_text(s);
+                }
+            }
+            Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.ctrl && modifiers.shift => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
             Event::Key { key, pressed: true, modifiers, .. } => {
                 // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
@@ -1693,6 +1721,18 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
         t.editor = Some((key, std::rc::Rc::new((text, at))));
     }
     let doc = t.editor.as_ref().expect("just built").1.clone();
+    // The laid-out text, made again only when the text, its font or its colour changes, not every
+    // frame (a long scrollback takes a while to lay out).
+    let fg_now = scheme_fg();
+    let stale = t.editor_galley.as_ref().is_none_or(|g| g.0 != key || g.1 != font.size || g.2 != fg_now);
+    if stale {
+        let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(&doc.0, font, fg_now, f));
+        t.editor_galley = Some((key, font.size, fg_now, std::sync::Arc::new(job)));
+    }
+    // egui lays the job out again only when it or the font atlas changed; a galley kept across
+    // frames would point into an atlas that may have been rebuilt.
+    let job = t.editor_galley.as_ref().expect("just made").3.clone();
+    let laid = ui.ctx().fonts_mut(|f| f.layout_job((*job).clone()));
     let (text, at) = (&doc.0, doc.1);
     let fg = scheme_fg();
     let id = egui::Id::unique(("text-view", t.id));
@@ -1728,19 +1768,10 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         ui.add_space(8.0);
         ui.horizontal_top(|ui| {
-            let top = ui.cursor().top();
-            let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, lines as f32 * ch), Sense::hover());
-            let clip = ui.clip_rect();
-            let from = ((clip.top() - top) / ch).floor().max(0.0) as usize;
-            let to = (((clip.bottom() - top) / ch).ceil().max(0.0) as usize).min(lines);
-            for n in from..to {
-                let pos = Pos2::new(g.right() - cw, top + n as f32 * ch);
-                ui.painter().text(pos, Align2::RIGHT_TOP, (n + 1).to_string(), font.clone(), fg.gamma_multiply(0.4));
-            }
-            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
-                let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(buf.as_str(), font, fg, f));
-                ui.ctx().fonts_mut(|f| f.layout_job(job))
-            };
+            // The numbers go where the text's rows are, which are not exactly the font's row height
+            // apart; computed positions would drift away from long text.
+            let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, ch), Sense::hover());
+            let mut layouter = |_: &egui::Ui, _: &dyn egui::TextBuffer, _: f32| laid.clone();
             let mut view: &str = text;
             let edit = egui::TextEdit::multiline(&mut view)
                 .id(id)
@@ -1761,6 +1792,21 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
                     ui.close();
                 }
             });
+            let clip = ui.clip_rect();
+            let number = fg.gamma_multiply(0.4);
+            let mut line = 0;
+            let mut new_line = true;
+            for row in &edit.galley.rows {
+                let r = row.rect().translate(edit.galley_pos.to_vec2());
+                if new_line {
+                    line += 1;
+                    if r.bottom() >= clip.top() && r.top() <= clip.bottom() {
+                        let pos = Pos2::new(g.right() - cw, r.top());
+                        ui.painter().text(pos, Align2::RIGHT_TOP, line.to_string(), font.clone(), number);
+                    }
+                }
+                new_line = row.ends_with_newline;
+            }
             let p = edit.galley.pos_from_cursor(egui::text::CCursor::new(at));
             caret_rect = Some(p.translate(edit.galley_pos.to_vec2()).with_max_x(p.min.x + edit.galley_pos.x + cw));
         });
@@ -1810,8 +1856,16 @@ fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
     let grid = t.term.grid();
     let cols = grid.columns();
     let mut lines: Vec<String> = Vec::new();
+    // A row the terminal wrapped goes on in the next one: they are one line of text.
+    let mut wrapped = false;
+    let add = |lines: &mut Vec<String>, text: String, join: bool| match lines.last_mut() {
+        Some(last) if join => last.push_str(&text),
+        _ => lines.push(text),
+    };
     for line in from..to {
         let row = &grid[Line(line)];
+        let join = wrapped;
+        wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
         let mut cells: Vec<(char, bool, bool, bool)> = Vec::new();
         for c in 0..cols {
             let cell = &row[Column(c)];
@@ -1841,12 +1895,12 @@ fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
         let words: String = body.iter().map(|c| c.0).collect();
         // Text laid out in columns stays as it is, without marks.
         if crate::markdown::columned(&words) {
-            lines.push(format!("{prefix}{words}"));
+            add(&mut lines, format!("{prefix}{words}"), join);
             continue;
         }
         if !text.is_empty() && !boxy && text.iter().all(|c| c.1) {
             let level = if text.iter().all(|c| c.2 || c.3) { "#" } else { "##" };
-            lines.push(format!("{prefix}{level} {}", words.trim()));
+            add(&mut lines, format!("{prefix}{level} {}", words.trim()), join);
             continue;
         }
         let mut out = prefix;
@@ -1875,9 +1929,6 @@ fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
                     }
                     (bold, italic) = (b, it);
                 }
-                if matches!(ch, '*' | '_' | '`') && !boxy {
-                    out.push('\\');
-                }
             } else if bold || italic {
                 // A style ends before the space when the next word is not in it.
                 match body[i..].iter().find(|c| !c.0.is_whitespace()) {
@@ -1904,7 +1955,7 @@ fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
         if bold {
             out.push_str("**");
         }
-        lines.push(out);
+        add(&mut lines, out, join);
     }
     lines.join("\n").trim_end().to_string()
 }
@@ -1944,17 +1995,28 @@ fn wheel_bytes(mode: TermMode, lines: i32, col: usize, row: usize) -> Vec<u8> {
 
 /// Wheel steps in lines from this frame's events, up positive.
 fn wheel_lines(ui: &egui::Ui, ch: f32, page: f32) -> i32 {
-    let mut total = 0;
+    // What is left of a line from earlier small steps (touchpads scroll by a few points).
+    let rest_id = egui::Id::unique("terminal-wheel-rest");
+    let mut total = ui.ctx().data(|d| d.get_temp::<f32>(rest_id)).unwrap_or(0.0);
+    let mut any = false;
     for e in ui.ctx().input(|i| i.events.clone()) {
         let Event::MouseWheel { unit, delta, .. } = e else { continue };
-        let lines = match unit {
+        if delta.y == 0.0 {
+            continue;
+        }
+        any = true;
+        total += match unit {
             egui::MouseWheelUnit::Point => delta.y / ch,
             egui::MouseWheelUnit::Line => delta.y,
             egui::MouseWheelUnit::Page => delta.y * page,
         };
-        total += if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
     }
-    total
+    if !any {
+        return 0;
+    }
+    let whole = total.trunc();
+    ui.ctx().data_mut(|d| d.insert_temp(rest_id, total - whole));
+    whole as i32
 }
 
 /// Whether the wheel belongs to the program rather than to the view: a full-screen program, or one
@@ -2112,7 +2174,8 @@ fn overlay_start(prev: &str, cur: &str) -> Option<usize> {
         p.chars().rev().zip(c.chars().rev()).take_while(|(a, b)| a == b).map(|(_, b)| b.len_utf8()).sum();
     let tail = &c[c.len() - common..];
     // At least a few words of it, and something else before it in both rows.
-    (tail.split_whitespace().count() >= 2 && tail.trim().len() >= 8 && common < c.len() && common < p.len())
+    let drawn = tail.chars().any(|ch| ('\u{2500}'..='\u{257f}').contains(&ch));
+    (!drawn && tail.split_whitespace().count() >= 2 && tail.trim().len() >= 8 && common < c.len() && common < p.len())
         .then(|| c.len() - common)
 }
 
@@ -2455,7 +2518,8 @@ fn screen(
     if keys {
         let c = t.term.grid().cursor.point;
         let at = Pos2::new(origin.x + c.column.0 as f32 * cw, origin.y + (c.line.0 + offset) as f32 * ch);
-        keyboard(ui, t, resp.id, area, Rect::from_min_size(at, Vec2::new(cw, ch)), true, out);
+        let grab = ask.focus || ui.memory(|m| m.focused().is_none_or(|f| f == resp.id));
+        keyboard(ui, t, resp.id, area, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, out);
     } else {
         t.preedit.clear();
     }

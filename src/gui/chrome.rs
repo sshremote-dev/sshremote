@@ -57,6 +57,13 @@ pub fn behaviour(ctx: &egui::Context) {
     }
 }
 
+/// Whether `p` is on the edge that resizes the window (not while it is maximized).
+pub fn on_edge(ctx: &egui::Context, p: Pos2) -> bool {
+    let r = ctx.content_rect();
+    !maximized(ctx)
+        && (p.x - r.left() < EDGE || r.right() - p.x < EDGE || p.y - r.top() < EDGE || r.bottom() - p.y < EDGE)
+}
+
 /// What the title bar asks for besides moving the window.
 #[derive(Default)]
 pub struct BarResponse {
@@ -96,9 +103,6 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         }
         if icon.clicked() {
             system_menu(&ctx, Pos2::new(icon_rect.left(), icon_rect.bottom()));
-        }
-        if icon.double_clicked() {
-            out.close = true;
         }
         let middle =
             Rect::from_min_max(Pos2::new(icon_rect.right(), bar.top()), Pos2::new(buttons.left() - 8.0, bar.bottom()));

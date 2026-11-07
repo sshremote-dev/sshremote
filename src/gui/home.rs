@@ -25,7 +25,7 @@ impl App {
                 && !f.password.is_empty()
                 && let Err(e) = crate::vault::set(&host, &f.password)
             {
-                self.error = Some(format!("The password was not saved: {e}"));
+                self.save_error = Some(format!("The password was not saved: {e}"));
             }
             // A password typed now wins over a saved one.
             let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
@@ -67,7 +67,7 @@ impl App {
             let _ = tx.send(r);
             ctx2.request_repaint();
         });
-        self.error = None;
+        self.error = self.save_error.take();
         self.form.password.clear();
         self.screen = Screen::Connecting { started: Instant::now(), rx, label };
     }
