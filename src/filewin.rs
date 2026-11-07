@@ -259,6 +259,13 @@ impl FileWindow {
         out
     }
 
+    /// The file manager drawn inside another window, as a connection made for files shows it.
+    pub fn embedded(&mut self, ui: &mut egui::Ui, host: &str, transfers: &[Transfer]) -> Vec<Cmd> {
+        let mut out = Vec::new();
+        self.body(ui, host, transfers, &mut out);
+        out
+    }
+
     fn body(&mut self, ui: &mut egui::Ui, host: &str, transfers: &[Transfer], out: &mut Vec<Cmd>) {
         // Files dropped from the desktop go to the remote folder shown.
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| {

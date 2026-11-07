@@ -60,6 +60,8 @@ pub(super) struct Remote {
     term_inline: bool,
     /// The terminal has a window of its own instead.
     term_detached: bool,
+    /// A connection made for its files: the window is the file manager alone, with no screen.
+    files_only: bool,
     ssh_cmd: Option<Vec<String>>,
     /// The "what to share" chooser while open: the window list once it arrived, and the tab shown.
     picker: Option<(Option<WindowList>, u8)>,
@@ -109,6 +111,7 @@ impl Remote {
             terms: terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone())),
             term_inline: terminal,
             term_detached: false,
+            files_only: false,
             picker: None,
             sharing: (0, String::new()),
             click_pick: false,
@@ -183,13 +186,59 @@ impl Remote {
 
     /// For a connection made for its files: the file window open and the screen paused, so
     /// almost no picture is sent until it is resumed.
+    /// For a connection made for its files: the window shows the file manager alone, and the
+    /// remote screen is paused, so no picture is sent unless "Show the screen" is chosen.
     pub(super) fn open_files_only(&mut self) -> Result<(), String> {
         self.files = Some(crate::filewin::FileWindow::new());
         self.send(ToAgent::ListDir { path: String::new() })?;
+        self.files_only = true;
         self.paused = true;
-        self.send(ToAgent::Pause(true))?;
-        // One still picture, so the window does not stay black.
-        self.send(ToAgent::Refresh)
+        self.send(ToAgent::Pause(true))
+    }
+
+    /// The file manager filling the window, under a bar with the host, the screen and disconnect.
+    fn files_view(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
+        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let mut show_screen = false;
+        let mut disconnect = false;
+        let bar = egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(14, 8));
+        egui::Panel::top("files-only-bar").frame(bar).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let dot = match self.ctl.rtt {
+                    r if r < 80.0 => GOOD,
+                    r if r < 250.0 => WARN,
+                    _ => BAD,
+                };
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, dot);
+                ui.label(RichText::new(format!("{}  Files on {host}", ic::FOLDER)).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(format!("{}  Disconnect", ic::X)).clicked() {
+                        disconnect = true;
+                    }
+                    if ui.button(format!("{}  Show the screen", ic::MONITOR)).on_hover_text("Open the remote screen; the file manager keeps a window of its own").clicked() {
+                        show_screen = true;
+                    }
+                });
+            });
+        });
+        let transfers = self.transfers();
+        let cmds = egui::CentralPanel::default()
+            .show(ui, |ui| self.files.as_mut().map(|f| f.embedded(ui, &host, &transfers)).unwrap_or_default())
+            .inner;
+        for c in cmds {
+            self.file_cmd(c)?;
+        }
+        if show_screen {
+            self.files_only = false;
+            self.paused = false;
+            self.send(ToAgent::Pause(false))?;
+        }
+        if disconnect {
+            return Err("disconnected".into());
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+        Ok(())
     }
 
     pub(super) fn send(&mut self, m: ToAgent) -> Result<(), String> {
@@ -216,6 +265,10 @@ impl Remote {
             self.send(ToAgent::Clipboard(text))?;
         }
         self.ctl.tick(&mut self.sess).map_err(|e| e.to_string())?;
+        if self.files_only {
+            self.feed_uploads()?;
+            return self.files_view(ui);
+        }
         self.take_drops(&ctx)?;
         self.feed_uploads()?;
         let screen = ui.max_rect();
@@ -572,8 +625,8 @@ impl Remote {
     }
 
     /// Shows the file transfer window and carries out what it asks for.
-    pub(super) fn file_window(&mut self, ctx: &egui::Context) -> Result<(), String> {
-        let Some(mut f) = self.files.take() else { return Ok(()) };
+    /// Uploads and downloads in progress, for the file manager's list.
+    fn transfers(&self) -> Vec<crate::filewin::Transfer> {
         let mut transfers: Vec<crate::filewin::Transfer> = self
             .uploads
             .iter()
@@ -590,6 +643,15 @@ impl Remote {
             let (done, size) = self.inbox.received(*id).unwrap_or((0, 0));
             transfers.push(crate::filewin::Transfer { upload: false, id: *id, name: name.clone(), done, size });
         }
+        transfers
+    }
+
+    pub(super) fn file_window(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        if self.files.is_none() {
+            return Ok(());
+        }
+        let transfers = self.transfers();
+        let Some(mut f) = self.files.take() else { return Ok(()) };
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
         let cmds = f.show(ctx, &host, &transfers);
         self.files = Some(f);
