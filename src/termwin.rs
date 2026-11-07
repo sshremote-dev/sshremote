@@ -548,6 +548,16 @@ impl TermWindow {
         self.tabs.iter().filter(|t| t.exited.is_none()).map(|t| Cmd::Send(ToAgent::TermClose { id: t.id })).collect()
     }
 
+    /// The terminal drawn inside another window's area, as the remote screen window does.
+    pub fn embedded(&mut self, ui: &mut egui::Ui) -> Vec<Cmd> {
+        let mut out = Vec::new();
+        let ctx = ui.ctx().clone();
+        self.before(&ctx, &mut out);
+        self.body(ui, &mut out);
+        self.after(&ctx, &mut out);
+        out
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, host: &str) -> Vec<Cmd> {
         let mut out = Vec::new();
         if !self.before(ctx, &mut out) {

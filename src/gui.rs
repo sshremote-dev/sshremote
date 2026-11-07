@@ -250,6 +250,10 @@ struct Remote {
     files: Option<crate::filewin::FileWindow>,
     /// The terminal window, while open.
     terms: Option<crate::termwin::TermWindow>,
+    /// The terminal takes the place of the remote screen in this window.
+    term_inline: bool,
+    /// The terminal has a window of its own instead.
+    term_detached: bool,
     ssh_cmd: Option<Vec<String>>,
     /// The "what to share" chooser while open: the window list once it arrived, and the tab shown.
     picker: Option<(Option<Result<Vec<crate::capture::WindowInfo>, String>>, u8)>,
@@ -309,6 +313,8 @@ pub struct App {
     config: Option<crate::tools::ConfigTool>,
     logo: Option<TextureHandle>,
     show_options: bool,
+    /// Show the host's terminal instead of its screen once connected.
+    start_terminal: bool,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -328,6 +334,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let auto_start = opt.host.is_some() || opt.local;
     let local = opt.local;
     let budget = opt.budget;
+    let opt_terminal = opt.terminal;
     let native = native_options("SSH Remote", [1280.0, 800.0]);
     eframe::run_native(
         "sshremote",
@@ -356,6 +363,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 config: None,
                 logo: None,
                 show_options: false,
+                start_terminal: opt_terminal,
                 vault: None,
                 backup: None,
                 service: None,
@@ -619,6 +627,7 @@ impl App {
             probe_fetch: None,
             probe_monitor: None,
             sound: false,
+            terminal: false,
         }
     }
 
@@ -1140,9 +1149,12 @@ impl eframe::App for App {
                     let desk = sess.desk;
                     ctx.send_viewport_cmd(ViewportCommand::Title(format!("SSH Remote - {label}")));
                     let ssh_cmd = self.pending_ssh.take();
+                    let terms = self.start_terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone()));
                     next = Some(Screen::Remote(Box::new(Remote {
                         ssh_cmd,
-                        terms: None,
+                        terms,
+                        term_inline: std::mem::take(&mut self.start_terminal),
+                        term_detached: false,
                         picker: None,
                         sharing: (0, String::new()),
                         click_pick: false,
@@ -1301,9 +1313,17 @@ impl Remote {
         let area = if self.pinned { screen.with_min_y(screen.top() + 42.0) } else { screen };
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
-        self.resize(area.size() * ppp)?;
-        self.edge_pan(&ctx, area);
-        let shown = self.picture(ui, area, ppp);
+        let inline = self.term_inline && self.terms.is_some();
+        let shown = if inline {
+            // The terminal fills the area below the toolbar; the remote screen waits behind it.
+            let area = screen.with_min_y(screen.top() + 42.0);
+            self.inline_terminal(ui, area)?;
+            None
+        } else {
+            self.resize(area.size() * ppp)?;
+            self.edge_pan(&ctx, area);
+            self.picture(ui, area, ppp)
+        };
         self.last_shown = shown;
         let toolbar_rect = self.toolbar(&ctx, screen)?;
         let chat_rect = self.chat_panel(&ctx)?;
@@ -1349,7 +1369,7 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
-        if self.view_only {
+        if self.view_only || inline {
             self.release_all()?;
         } else {
             self.input(&ctx, shown, &ui_rects)?;
@@ -1806,7 +1826,28 @@ impl Remote {
         Ok(())
     }
 
+    /// The terminal in this window, with a bar to go back to the screen or give it its own window.
+    fn inline_terminal(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<(), String> {
+        let Some(mut t) = self.terms.take() else { return Ok(()) };
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).id_salt("inline-terminal"));
+        let cmds = t.embedded(&mut child);
+        self.terms = Some(t);
+        for c in cmds {
+            match c {
+                crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Close => {
+                    self.terms = None;
+                    self.term_inline = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn term_window(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        if !self.term_detached {
+            return Ok(());
+        }
         let Some(mut t) = self.terms.take() else { return Ok(()) };
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
         let cmds = t.show(ctx, &host);
@@ -1814,7 +1855,10 @@ impl Remote {
         for c in cmds {
             match c {
                 crate::termwin::Cmd::Send(m) => self.send(m)?,
-                crate::termwin::Cmd::Close => self.terms = None,
+                crate::termwin::Cmd::Close => {
+                    self.terms = None;
+                    self.term_detached = false;
+                }
             }
         }
         Ok(())
@@ -2467,21 +2511,50 @@ impl Remote {
                 Ok(())
             }));
         }
-        if icon(ui, ic::TERMINAL, "Terminal: a shell on the SSH host", self.terms.is_some()).clicked() {
+        let (glyph, tip) = if self.term_inline && self.terms.is_some() {
+            (ic::MONITOR, "Back to the remote screen (the terminal keeps running)")
+        } else {
+            (ic::TERMINAL, "Terminal: a shell on the SSH host, in place of the screen")
+        };
+        let term = icon(ui, glyph, tip, self.terms.is_some());
+        if term.clicked() {
             *action = Some(Box::new(|r, _| {
-                match r.terms.take() {
-                    Some(t) => {
+                if r.terms.is_none() {
+                    r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
+                }
+                r.term_detached = false;
+                r.term_inline = !r.term_inline;
+                r.release_all()
+            }));
+        }
+        term.context_menu(|ui| {
+            if ui.button(format!("{}  Terminal in its own window", ic::TERMINAL)).clicked() {
+                *action = Some(Box::new(|r, _| {
+                    if r.terms.is_none() {
+                        r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
+                    }
+                    r.term_inline = false;
+                    r.term_detached = true;
+                    Ok(())
+                }));
+                ui.close();
+            }
+            if self.terms.is_some() && ui.button(format!("{}  Close all shells", ic::X)).clicked() {
+                *action = Some(Box::new(|r, _| {
+                    if let Some(t) = r.terms.take() {
                         for c in t.close_all() {
                             if let crate::termwin::Cmd::Send(m) = c {
                                 r.send(m)?;
                             }
                         }
                     }
-                    None => r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone())),
-                }
-                Ok(())
-            }));
-        }
+                    r.term_inline = false;
+                    r.term_detached = false;
+                    Ok(())
+                }));
+                ui.close();
+            }
+        });
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
         if icon(ui, &chat_glyph, "Chat with the person at the SSH host's screen", self.chat.is_some()).clicked() {
             *action = Some(Box::new(|r, _| {

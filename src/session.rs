@@ -41,6 +41,8 @@ pub struct Options {
     pub probe_monitor: Option<u8>,
     /// Plays the host's sound.
     pub sound: bool,
+    /// Window mode: start with the host's terminal shown in place of its screen.
+    pub terminal: bool,
 }
 
 pub enum Ev {

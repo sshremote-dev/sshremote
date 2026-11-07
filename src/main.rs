@@ -70,6 +70,7 @@ options:
   --remote CMD    agent command on HOST (default: sshremote --agent)
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
   --sound         play the host's sound (about 8 KB/s)
+  --terminal      window mode: start with the host's terminal in place of its screen
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
 
 keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, z zoom, r refresh)";
@@ -96,6 +97,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
         probe_fetch: None,
         probe_monitor: None,
         sound: false,
+        terminal: false,
     };
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
@@ -131,6 +133,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
             "--sound" => o.sound = true,
+            "--terminal" => o.terminal = true,
             "--probe" => probe = Some(val()?.parse::<f64>().map_err(|_| "bad --probe")?),
             "--view" => {
                 let v = val()?;
