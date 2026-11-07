@@ -72,37 +72,39 @@ pub enum Align {
     Right,
 }
 
-/// A piece of an agent session.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Part {
-    /// Text that is not part of an agent's conversation.
-    Doc(Vec<Block>),
-    /// What the user typed.
-    Prompt(String),
-    /// A reply, with its Markdown source for copying.
-    Reply { source: String, blocks: Vec<Block> },
-    /// A tool run: its title ("Bash(cargo test)") and output.
-    Tool { title: String, output: String },
-}
-
-/// A document prepared for drawing; `parts` is `Doc` alone for ordinary Markdown.
+/// A document prepared for drawing.
 pub struct Doc {
-    pub parts: Vec<Part>,
+    pub blocks: Vec<Block>,
 }
 
 impl Doc {
-    /// Reads Claude Code or Codex output as a session (frames removed, replies split out) when
-    /// their markers are there, and anything else as Markdown.
+    /// Any text as Markdown: a file shown with cat or less, a program's or an agent's output. What
+    /// terminal programs draw with box characters and bullet glyphs is made plain Markdown first.
     pub fn new(text: &str) -> Self {
-        let agent = text.lines().any(|l| l.starts_with("⏺ ") || l.starts_with("● ") || l.starts_with("❯ "))
-            || (text.lines().any(|l| l.starts_with("› ")) && text.lines().any(|l| l.starts_with("• ")));
-        let text = tidy(text);
-        if !agent {
-            // Text indented as a whole (an agent's reply scrolled past its marker) is not columns.
-            return Doc { parts: vec![Part::Doc(parse(&dedent(&text)))] };
-        }
-        Doc { parts: session(&text) }
+        Doc { blocks: parse(&dedent(&glyphs(&tidy(text)))) }
     }
+}
+
+/// Bullet glyphs that programs put before lines, read as Markdown: small bullets start list
+/// items, and other markers (prompts, reply dots, output corners) give way to spaces so the text
+/// keeps its column.
+fn glyphs(text: &str) -> String {
+    const ITEMS: [&str; 4] = ["• ", "◦ ", "▪ ", "‣ "];
+    const MARKS: [&str; 7] = ["● ", "⏺ ", "❯ ", "› ", "⎿ ", "└ ", "→ "];
+    text.lines()
+        .map(|line| {
+            let t = line.trim_start();
+            let indent = &line[..line.len() - t.len()];
+            if let Some(g) = ITEMS.iter().find(|g| t.starts_with(**g)) {
+                return format!("{indent}- {}", &t[g.len()..]);
+            }
+            if let Some(g) = MARKS.iter().find(|g| t.starts_with(**g)) {
+                return format!("{indent}{}{}", " ".repeat(g.chars().count()), &t[g.len()..]);
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Box-drawn tables become Markdown tables; frame lines and side borders go.
@@ -134,7 +136,7 @@ pub fn tidy(text: &str) -> String {
             i += 1;
             continue;
         }
-        if is_chrome(lines[i]) {
+        if lines[i].chars().filter(|c| ('\u{2580}'..='\u{259f}').contains(c)).count() >= 3 {
             i += 1;
             continue;
         }
@@ -208,100 +210,8 @@ fn box_table(lines: &[&str]) -> (Vec<Vec<String>>, usize) {
     if rows.is_empty() { (Vec::new(), 0) } else { (rows, used) }
 }
 
-/// Lines of an agent's screen that are its controls, not the conversation: the logo, spinners and
-/// "Worked for" lines, the mode and effort status, and the jump-to-bottom hint.
-pub fn is_chrome(line: &str) -> bool {
-    let t = line.trim();
-    let blocks = t.chars().filter(|c| ('\u{2580}'..='\u{259f}').contains(c)).count();
-    blocks >= 3
-        || t.contains("Jump to bottom")
-        || t.starts_with(['✻', '✶', '✢', '✳', '✽', '◉', '⏵'])
-        || t.starts_with("? for shortcuts")
-        || t.contains("esc to interrupt")
-}
-
-/// Codex's tool runs start with these words after its bullet.
-const CODEX_TOOLS: [&str; 8] = ["Ran ", "Explored", "Edited ", "Read ", "Updated Plan", "Search", "Added ", "Deleted "];
-
-/// Splits an agent session into prompts, replies and tool runs. Claude Code marks replies and
-/// tools with ⏺ (or ●) and tool output with ⎿; Codex uses • and └; prompts start with > or ›.
-pub fn session(text: &str) -> Vec<Part> {
-    #[derive(PartialEq)]
-    enum Kind {
-        Doc,
-        Prompt,
-        Reply,
-        Tool,
-    }
-    let mut parts = Vec::new();
-    let (mut kind, mut title, mut body) = (Kind::Doc, String::new(), Vec::<String>::new());
-    // Tool output continues at the column after its ⎿ or └.
-    let mut cut = 0;
-    let mut flush = |kind: &Kind, title: &mut String, body: &mut Vec<String>| {
-        let text = body.join("\n").trim_matches('\n').to_string();
-        match kind {
-            Kind::Doc if !text.trim().is_empty() => parts.push(Part::Doc(parse(&dedent(&text)))),
-            Kind::Prompt if !text.trim().is_empty() => parts.push(Part::Prompt(text.trim().to_string())),
-            Kind::Reply if !text.trim().is_empty() => parts.push(Part::Reply { blocks: parse(&text), source: text }),
-            Kind::Tool => parts.push(Part::Tool { title: std::mem::take(title), output: dedent(&text) }),
-            _ => {}
-        }
-        title.clear();
-        body.clear();
-    };
-    for line in text.lines() {
-        let marker = ["⏺ ", "● ", "• ", "> ", "› ", "❯ "].iter().find(|m| line.starts_with(**m));
-        if let Some(m) = marker {
-            let rest = line[m.len()..].trim_end();
-            flush(&kind, &mut title, &mut body);
-            if *m == "> " || *m == "› " || *m == "❯ " {
-                kind = Kind::Prompt;
-                body.push(rest.to_string());
-            } else if is_tool_call(rest) || (*m == "• " && CODEX_TOOLS.iter().any(|w| rest.starts_with(w))) {
-                kind = Kind::Tool;
-                title = rest.to_string();
-            } else {
-                kind = Kind::Reply;
-                body.push(rest.to_string());
-            }
-            continue;
-        }
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("⎿").or_else(|| t.strip_prefix("└")) {
-            if kind != Kind::Tool {
-                flush(&kind, &mut title, &mut body);
-                kind = Kind::Tool;
-            }
-            cut = line.chars().count() - rest.trim_start().chars().count();
-            body.push(rest.trim_start().to_string());
-            continue;
-        }
-        match kind {
-            // Replies and prompts are indented under their marker.
-            Kind::Reply | Kind::Prompt => body.push(line.strip_prefix("  ").unwrap_or(line).to_string()),
-            Kind::Tool => {
-                let n = (line.len() - line.trim_start().len()).min(cut);
-                body.push(line[n..].to_string());
-            }
-            _ => body.push(line.to_string()),
-        }
-    }
-    flush(&kind, &mut title, &mut body);
-    parts
-}
-
-/// "Bash(cargo test)", "Read(src/main.rs)", "Update(Cargo.toml)": a tool name and its argument.
-fn is_tool_call(s: &str) -> bool {
-    let Some((name, _)) = s.split_once('(') else { return false };
-    !name.is_empty()
-        && name.len() <= 24
-        && name.starts_with(|c: char| c.is_ascii_uppercase())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == ':' || c == '-')
-        && s.ends_with(')')
-}
-
 /// Removes the indentation all non-blank lines share.
-fn dedent(text: &str) -> String {
+pub fn dedent(text: &str) -> String {
     let n = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
     text.lines().map(|l| l.get(n..).unwrap_or("").trim_end()).collect::<Vec<_>>().join("\n")
 }
@@ -528,7 +438,6 @@ pub struct Theme {
     quote: Color32,
     table_head: Color32,
     table_alt: Color32,
-    prompt_bg: Color32,
     keyword: Color32,
     control: Color32,
     string: Color32,
@@ -571,7 +480,6 @@ impl Theme {
                 quote: Color32::from_rgb(70, 70, 70),
                 table_head: Color32::from_rgb(40, 40, 40),
                 table_alt: Color32::from_rgb(35, 35, 35),
-                prompt_bg: Color32::from_rgb(38, 44, 54),
                 keyword: Color32::from_rgb(86, 156, 214),
                 control: Color32::from_rgb(197, 134, 192),
                 string: Color32::from_rgb(206, 145, 120),
@@ -592,7 +500,6 @@ impl Theme {
                 quote: Color32::from_rgb(208, 215, 222),
                 table_head: Color32::from_rgb(246, 248, 250),
                 table_alt: Color32::from_rgb(250, 251, 252),
-                prompt_bg: Color32::from_rgb(232, 240, 252),
                 keyword: Color32::from_rgb(0, 0, 255),
                 control: Color32::from_rgb(175, 0, 219),
                 string: Color32::from_rgb(163, 21, 21),
@@ -1177,53 +1084,10 @@ pub fn blocks(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], id: egui::Id) {
     }
 }
 
-/// Draws a document: plain Markdown, or an agent session with its prompts, replies (each with a
-/// copy button for its Markdown) and tool runs.
+/// Draws a document.
 pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id) {
     let th = Theme::of(ui);
-    for (n, part) in doc.parts.iter().enumerate() {
-        let pid = id.with(("part", n));
-        match part {
-            Part::Doc(b) => blocks(ui, &th, b, pid),
-            Part::Prompt(text) => {
-                ui.add_space(6.0);
-                egui::Frame::new()
-                    .fill(th.prompt_bg)
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(text).size(BODY).color(th.fg)).selectable(true).wrap(),
-                        );
-                    });
-                ui.add_space(8.0);
-            }
-            Part::Reply { source, blocks: b } => {
-                let rect = ui.scope(|ui| blocks(ui, &th, b, pid)).response.rect;
-                // The reply's own Markdown, copied with the button at its corner.
-                hover_copy(ui, &th, rect.expand2(Vec2::new(4.0, 0.0)), pid.with("copy"), source);
-                ui.add_space(10.0);
-            }
-            Part::Tool { title, output } => {
-                let lines = output.lines().count();
-                let header = if title.is_empty() { "Output".to_string() } else { title.clone() };
-                let header = egui::RichText::new(format!("{}  {header}", crate::gui::ic::TERMINAL))
-                    .monospace()
-                    .size(12.5)
-                    .color(th.weak);
-                egui::CollapsingHeader::new(header).id_salt(pid).default_open(lines > 0 && lines <= 12).show(
-                    ui,
-                    |ui| {
-                        if !output.trim().is_empty() {
-                            code_block(ui, &th, "", output, pid.with("out"));
-                        }
-                    },
-                );
-                ui.add_space(4.0);
-            }
-        }
-    }
+    blocks(ui, &th, &doc.blocks, id);
 }
 
 #[cfg(test)]
@@ -1241,30 +1105,16 @@ mod tests {
     }
 
     #[test]
-    fn sessions_split_into_prompts_replies_and_tools() {
-        let raw = "╭──────────╮\n│ hello    │\n╰──────────╯\n> fix it\n\n⏺ Done. Run:\n  **all** tests\n\n⏺ Bash(cargo test)\n  ⎿  ok 1\n     ok 2\n\n• Ran ls\n  └ a.txt";
-        let parts = session(&tidy(raw));
-        assert_eq!(parts[0], Part::Doc(vec![Block::Para("hello".into())]));
-        assert_eq!(parts[1], Part::Prompt("fix it".into()));
-        match &parts[2] {
-            Part::Reply { source, .. } => assert_eq!(source, "Done. Run:\n**all** tests"),
-            p => panic!("{p:?}"),
-        }
-        assert_eq!(parts[3], Part::Tool { title: "Bash(cargo test)".into(), output: "ok 1\nok 2".into() });
-        assert_eq!(parts[4], Part::Tool { title: "Ran ls".into(), output: "a.txt".into() });
-    }
-
-    #[test]
-    fn claude_code_2_screens_read_as_a_session() {
-        let raw = " ▐▛███▛█   Claude Code v2\n\n❯ give me a story\n\n● # The Log\n\n  ▎ Three short.\n\n  ---\n\n  ┌──────┬──────┐\n  │ Time │ Note │\n  ├──────┼──────┤\n  │ 21:04│ SOS  │\n                Jump to bottom (ctrl+End) ↓\n✻ Worked for 12s";
-        let parts = Doc::new(raw).parts;
-        assert_eq!(parts[0], Part::Prompt("give me a story".into()));
-        let Part::Reply { blocks, .. } = &parts[1] else { panic!("{parts:?}") };
-        assert_eq!(blocks[0], Block::Heading(1, "The Log".into()));
-        assert_eq!(blocks[1], Block::Quote(vec![Block::Para("Three short.".into())]));
-        assert_eq!(blocks[2], Block::Rule);
-        assert!(matches!(&blocks[3], Block::Table { rows, .. } if rows.len() == 2), "{blocks:?}");
-        assert_eq!(parts.len(), 2, "{parts:?}");
+    fn drawn_markdown_reads_as_markdown() {
+        let raw = " ▐▛███▛█   Tool v2\n\n❯ give me a story\n\n● # The Log\n\n  ▎ Three short.\n\n  • first\n\n  ---\n\n  ┌──────┬──────┐\n  │ Time │ Note │\n  ├──────┼──────┤\n  │ 21:04│ SOS  │";
+        let b = Doc::new(raw).blocks;
+        assert_eq!(b[0], Block::Para("give me a story".into()));
+        assert_eq!(b[1], Block::Heading(1, "The Log".into()));
+        assert_eq!(b[2], Block::Quote(vec![Block::Para("Three short.".into())]));
+        assert_eq!(b[3], Block::Item { depth: 0, marker: "-".into(), text: "first".into() });
+        assert_eq!(b[4], Block::Rule);
+        assert!(matches!(&b[5], Block::Table { rows, .. } if rows.len() == 2), "{b:?}");
+        assert_eq!(b.len(), 6, "{b:?}");
     }
 
     #[test]
@@ -1303,7 +1153,6 @@ mod tests {
             quote: Color32::GRAY,
             table_head: Color32::BLACK,
             table_alt: Color32::BLACK,
-            prompt_bg: Color32::BLACK,
             keyword: Color32::BLUE,
             control: Color32::BLUE,
             string: Color32::RED,

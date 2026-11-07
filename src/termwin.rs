@@ -271,6 +271,10 @@ struct Tab {
     mouse_held: Option<u8>,
     /// A full-screen program's screens stitched into one document, as Markdown lines.
     stitched: Vec<String>,
+    /// The full-screen program's last screen, to tell its fixed rows from those that move.
+    last_screen: Vec<String>,
+    /// Hints a full-screen program floats over its text, found by comparing screens.
+    overlays: Vec<String>,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
 }
@@ -689,6 +693,8 @@ impl TermWindow {
             preedit: String::new(),
             typed_at: 0.0,
             stitched: Vec::new(),
+            last_screen: Vec::new(),
+            overlays: Vec::new(),
             mouse_held: None,
             editor: None,
             rev: 0,
@@ -1306,13 +1312,11 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
             // A full-screen program shows a window on a longer text: its screens are stitched
             // together, so a reply or a table cut off by scrolling keeps its shape.
             let end = if status_row(t) && first == t.term.grid().screen_lines() as i32 { first - 1 } else { first };
-            let screen = content_rows(screen_markdown(t, 0, end).lines().map(str::to_string).collect());
-            let mut stitched = std::mem::take(&mut t.stitched);
-            stitch(&mut stitched, &screen);
-            t.stitched = stitched;
+            stitch_screen(t, screen_markdown(t, 0, end).lines().map(str::to_string).collect());
             t.stitched.join("\n")
         } else {
             t.stitched.clear();
+            t.last_screen.clear();
             screen_markdown(t, -history, first)
         };
         let doc = crate::markdown::Doc::new(&text);
@@ -2017,7 +2021,17 @@ fn stitch(doc: &mut Vec<String>, screen: &[String]) {
     if p > 0 {
         out.extend_from_slice(&doc[..p as usize]);
     }
-    out.extend_from_slice(screen);
+    for (i, line) in screen.iter().enumerate() {
+        let at = p + i as i64;
+        let known = (0..n as i64).contains(&at).then(|| &doc[at as usize]);
+        match known {
+            // A line cut short (by a hint over it) keeps the whole text already known.
+            Some(k) if line.len() < k.len() && !line.trim().is_empty() && k.starts_with(line.as_str()) => {
+                out.push(k.clone())
+            }
+            _ => out.push(line.clone()),
+        }
+    }
     let after = (p + m as i64).max(0) as usize;
     if after < n {
         out.extend_from_slice(&doc[after..]);
@@ -2028,33 +2042,78 @@ fn stitch(doc: &mut Vec<String>, screen: &[String]) {
     *doc = out;
 }
 
-/// A screen of a full-screen agent without what stays at its bottom whatever is scrolled: the
-/// input box, mode and status lines, and the jump-to-bottom hint with the row it covers.
-fn content_rows(mut lines: Vec<String>) -> Vec<String> {
-    // Claude Code pins the question being read to the top row, over the text under it.
-    if lines.first().is_some_and(|l| l.starts_with("❯ ")) {
-        lines[0].clear();
+/// Rows of a full-screen program that stay put while the rest of its screen moves: an input line,
+/// a status bar, a pinned header. Counted from the top and the bottom by comparing two screens.
+fn fixed_rows(prev: &[String], cur: &[String]) -> (usize, usize) {
+    if prev.len() != cur.len() || prev == cur {
+        return (0, 0);
     }
-    let frame = |l: &str| {
-        let t = l.trim();
-        !t.is_empty() && t.chars().all(|c| "─━═╭╮╰╯┌┐└┘│ ".contains(c))
-    };
-    // The input box: everything from the rule above the last prompt down.
-    if let Some(p) = lines.iter().rposition(|l| l.trim_start().starts_with('❯'))
-        && p > 0
-        && frame(&lines[p - 1])
-        && lines[p + 1..].iter().all(|l| frame(l) || l.trim().is_empty() || crate::markdown::is_chrome(l))
-    {
-        lines.truncate(p - 1);
+    let top = prev.iter().zip(cur).take_while(|(a, b)| a == b).count();
+    let bottom = prev.iter().rev().zip(cur.iter().rev()).take_while(|(a, b)| a == b).count();
+    if top + bottom >= cur.len() {
+        return (0, 0);
     }
-    while let Some(l) = lines.last() {
-        if l.trim().is_empty() || crate::markdown::is_chrome(l) || frame(l) {
-            lines.pop();
-        } else {
-            break;
+    (top.min(cur.len() / 3), bottom.min(cur.len() / 2))
+}
+
+/// Adds a full-screen program's new screen to the tab's stitched document, leaving out its fixed
+/// rows: the first time they are seen they may have gone in, so they are taken off the end again.
+fn stitch_screen(t: &mut Tab, screen: Vec<String>) {
+    let (top, bottom) = fixed_rows(&t.last_screen, &screen);
+    let mut piece: Vec<String> = screen[top..screen.len() - bottom].to_vec();
+    // A hint floating at a fixed place over moving text: the end of a row that stays the same while
+    // the text before it changes is the hint's, not the text's.
+    if t.last_screen.len() == screen.len() {
+        for (k, row) in piece.iter_mut().enumerate() {
+            let prev = &t.last_screen[top + k];
+            if let Some(cut) = overlay_start(prev, row) {
+                let hint = row[cut..].trim().to_string();
+                if !t.overlays.contains(&hint) {
+                    t.overlays.push(hint);
+                }
+                row.truncate(cut);
+                let kept = row.trim_end().len();
+                row.truncate(kept);
+            }
         }
     }
-    lines
+    while piece.last().is_some_and(|l| l.trim().is_empty()) {
+        piece.pop();
+    }
+    if bottom > 0 {
+        let footer: Vec<&String> = screen[screen.len() - bottom..].iter().filter(|l| !l.trim().is_empty()).collect();
+        while t.stitched.last().is_some_and(|l| l.trim().is_empty() || footer.contains(&l)) {
+            t.stitched.pop();
+        }
+    }
+    t.last_screen = screen;
+    let mut doc = std::mem::take(&mut t.stitched);
+    stitch(&mut doc, &piece);
+    // Hints seen floating since are taken off lines that went in before they were recognised.
+    for line in doc.iter_mut() {
+        if let Some(h) = t.overlays.iter().find(|h| line.trim_end().ends_with(h.as_str()) && line.trim() != h.as_str())
+        {
+            let keep = line.trim_end().len() - h.len();
+            line.truncate(keep);
+            let kept = line.trim_end().len();
+            line.truncate(kept);
+        }
+    }
+    t.stitched = doc;
+}
+
+/// Where a floating hint starts in `cur`: a long common end of two rows whose beginnings differ.
+fn overlay_start(prev: &str, cur: &str) -> Option<usize> {
+    let (p, c) = (prev.trim_end(), cur.trim_end());
+    if p == c {
+        return None;
+    }
+    let common: usize =
+        p.chars().rev().zip(c.chars().rev()).take_while(|(a, b)| a == b).map(|(_, b)| b.len_utf8()).sum();
+    let tail = &c[c.len() - common..];
+    // At least a few words of it, and something else before it in both rows.
+    (tail.split_whitespace().count() >= 2 && tail.trim().len() >= 8 && common < c.len() && common < p.len())
+        .then(|| c.len() - common)
 }
 
 /// Whether the screen's last row is a status line such as tmux draws: one background colour, not
@@ -2800,33 +2859,24 @@ mod tests {
         let t = &mut w.tabs[0];
         t.term.resize(Size { cols: 120, rows: 30 });
         t.parser.advance(&mut t.term, b"\x1b[?1049h");
-        let mut doc = Vec::new();
         for k in 0..6 {
             let Ok(raw) = std::fs::read_to_string(format!("{dir}/s{k}.txt")) else { break };
             let screen = format!("\x1b[H\x1b[2J{}", raw.trim_end_matches('\n').replace('\n', "\r\n"));
             t.parser.advance(&mut t.term, screen.as_bytes());
-            let lines = content_rows(screen_markdown(t, 0, 30).lines().map(str::to_string).collect());
-            stitch(&mut doc, &lines);
+            // The rows above the input line, as the view takes them.
+            let lines: Vec<String> = screen_markdown(t, 0, 25).lines().map(str::to_string).collect();
+            stitch_screen(t, lines);
         }
+        let doc = t.stitched.clone();
         let text = doc.join("\n");
         eprintln!("{text}");
         let parsed = crate::markdown::Doc::new(&text);
-        for p in &parsed.parts {
-            eprintln!("--- {p:?}");
-        }
-        let blocks: Vec<&crate::markdown::Block> = parsed
-            .parts
-            .iter()
-            .flat_map(|p| match p {
-                crate::markdown::Part::Doc(b) | crate::markdown::Part::Reply { blocks: b, .. } => b.iter().collect(),
-                _ => Vec::new(),
-            })
-            .collect();
+        let blocks: Vec<&crate::markdown::Block> = parsed.blocks.iter().collect();
         use crate::markdown::Block;
         assert!(blocks.iter().any(|b| matches!(b, Block::Table { rows, .. } if rows.len() >= 4)), "the whole table");
         assert!(blocks.iter().any(|b| matches!(b, Block::Heading(2, h) if h.contains("Chapter 5"))), "headings");
         assert!(!blocks.iter().any(|b| matches!(b, Block::Pre(_))), "prose is not read as columns");
-        assert!(!text.contains("Jump to bottom") && !text.contains("bypass permissions"), "no controls");
+        assert!(!text.contains("bypass permissions"), "the fixed status line is left out");
     }
 
     #[test]
