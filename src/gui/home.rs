@@ -92,7 +92,7 @@ impl App {
             probe_fetch: None,
             probe_monitor: None,
             sound: false,
-            terminal: false,
+            open: String::new(),
         }
     }
 
@@ -288,6 +288,7 @@ impl App {
         enum How {
             Terminal,
             Screen,
+            Files,
             System,
             TestDesktop,
         }
@@ -410,13 +411,17 @@ impl App {
                             go = Some((self.form.host.clone(), self.form.port.clone(), How::Screen));
                             ui.close();
                         }
+                        if ui.button(format!("{}  Files", ic::FOLDER)).clicked() {
+                            go = Some((self.form.host.clone(), self.form.port.clone(), How::Files));
+                            ui.close();
+                        }
                         if ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
                             go = Some((self.form.host.clone(), self.form.port.clone(), How::System));
                             ui.close();
                         }
                     })
                     .0
-                    .on_hover_text("Remote screen and more");
+                    .on_hover_text("Remote screen, files and more");
                     let opts = ui.add(tool_button(ic::GEAR, self.show_options)).on_hover_text("Connection options");
                     if opts.clicked() {
                         self.show_options = !self.show_options;
@@ -538,6 +543,9 @@ impl App {
                                 if ui.button(format!("{}  Remote screen", ic::MONITOR)).clicked() {
                                     go = Some((h.clone(), p.clone(), How::Screen));
                                 }
+                                if ui.button(format!("{}  Files", ic::FOLDER)).clicked() {
+                                    go = Some((h.clone(), p.clone(), How::Files));
+                                }
                                 if !direct && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
                                     go = Some((h.clone(), p.clone(), How::System));
                                 }
@@ -555,6 +563,9 @@ impl App {
                             let tip = if fav { "Remove from favorites" } else { "Add to favorites" };
                             if ui.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
                                 starred = Some((h.clone(), !fav));
+                            }
+                            if icon(ui, ic::FOLDER, "Files: transfer files to and from the host", false).clicked() {
+                                go = Some((h.clone(), p.clone(), How::Files));
                             }
                             if icon(ui, ic::MONITOR, "Remote screen", false).clicked() {
                                 go = Some((h.clone(), p.clone(), How::Screen));
@@ -591,8 +602,9 @@ impl App {
             match how {
                 How::Terminal => self.open_terminal(&h, &p),
                 How::System => self.system_terminal(&h, &p),
-                How::Screen => {
+                How::Screen | How::Files => {
                     (self.form.host, self.form.port) = (h, p);
+                    self.start_with = if how == How::Files { Start::Files } else { Start::Screen };
                     self.connect(&ctx, false);
                 }
                 How::TestDesktop => self.connect(&ctx, true),

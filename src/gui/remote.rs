@@ -181,6 +181,17 @@ impl Remote {
         result
     }
 
+    /// For a connection made for its files: the file window open and the screen paused, so
+    /// almost no picture is sent until it is resumed.
+    pub(super) fn open_files_only(&mut self) -> Result<(), String> {
+        self.files = Some(crate::filewin::FileWindow::new());
+        self.send(ToAgent::ListDir { path: String::new() })?;
+        self.paused = true;
+        self.send(ToAgent::Pause(true))?;
+        // One still picture, so the window does not stay black.
+        self.send(ToAgent::Refresh)
+    }
+
     pub(super) fn send(&mut self, m: ToAgent) -> Result<(), String> {
         self.sess.send(m).map_err(|e| format!("connection lost: {e}"))
     }

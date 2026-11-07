@@ -41,8 +41,8 @@ pub struct Options {
     pub probe_monitor: Option<u8>,
     /// Plays the host's sound.
     pub sound: bool,
-    /// Window mode: start with the host's terminal shown in place of its screen.
-    pub terminal: bool,
+    /// Window mode: what the session opens with besides the screen: "terminal" or "files".
+    pub open: String,
 }
 
 pub enum Ev {

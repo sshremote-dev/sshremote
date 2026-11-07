@@ -227,8 +227,8 @@ pub struct App {
     config: Option<crate::tools::ConfigTool>,
     logo: Option<TextureHandle>,
     show_options: bool,
-    /// Show the host's terminal instead of its screen once connected.
-    start_terminal: bool,
+    /// What the next connection opens with: its screen, its terminal or its files.
+    start_with: Start,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -249,7 +249,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let auto_start = opt.host.is_some() || opt.local;
     let local = opt.local;
     let budget = opt.budget;
-    let opt_terminal = opt.terminal;
+    let open = opt.open.clone();
     let native = native_options("SSH Remote", [1280.0, 800.0]);
     eframe::run_native(
         "sshremote",
@@ -278,7 +278,11 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 config: None,
                 logo: None,
                 show_options: false,
-                start_terminal: opt_terminal,
+                start_with: match open.as_str() {
+                    "terminal" => Start::Terminal,
+                    "files" => Start::Files,
+                    _ => Start::Screen,
+                },
                 vault: None,
                 backup: None,
                 service: None,
@@ -444,6 +448,14 @@ fn friendly(e: &str) -> (String, &'static str) {
     (first, hint)
 }
 
+/// What a connection opens with.
+#[derive(Clone, Copy, PartialEq)]
+enum Start {
+    Screen,
+    Terminal,
+    Files,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
     Favorite,
@@ -474,9 +486,13 @@ impl eframe::App for App {
                     let desk = sess.desk;
                     ctx.send_viewport_cmd(ViewportCommand::Title(format!("SSH Remote - {label}")));
                     let ssh_cmd = self.pending_ssh.take();
-                    let terminal = std::mem::take(&mut self.start_terminal);
+                    let start = std::mem::replace(&mut self.start_with, Start::Screen);
                     let label = format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend);
-                    next = Some(Screen::Remote(Box::new(Remote::new(sess, rx, ctl, label, ssh_cmd, terminal))));
+                    let mut remote = Remote::new(sess, rx, ctl, label, ssh_cmd, start == Start::Terminal);
+                    if start == Start::Files && let Err(e) = remote.open_files_only() {
+                        self.error = Some(e);
+                    }
+                    next = Some(Screen::Remote(Box::new(remote)));
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);

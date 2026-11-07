@@ -63,7 +63,8 @@ remote screen (handed to ssh through its askpass hook; "Remember" keeps it in th
 store), the screen quality, the agent command and the capture backend. A failed connection is explained with its likely cause and what to
 try. The header holds a local terminal button, the tools menu (SSH keys, SSH hosts, local shells,
 the built-in test desktop) and the dark or light theme, remembered between runs. `sshremote --gui
-HOST` opens the remote screen straight away; `--terminal` opens it with the host's terminal shown.
+HOST` opens the remote screen straight away; `--open terminal` opens it with the host's terminal shown, `--open files` with the file window
+and the screen paused.
 
 ### Administrator rights
 
