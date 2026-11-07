@@ -361,7 +361,8 @@ impl Remote {
         } else {
             self.input(&ctx, shown, &ui_rects)?;
         }
-        if ctx.input(|i| i.key_pressed(Key::F11)) {
+        let toggle = ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter));
+        if toggle {
             self.set_fullscreen(&ctx, !self.fullscreen);
         }
         // Network messages wake the window themselves; this only keeps statistics and pings going.
@@ -1178,7 +1179,8 @@ impl Remote {
                 continue;
             }
             match e {
-                Event::Key { key: Key::F11, .. } => {}
+                // Full screen here: the host does not see this one key.
+                Event::Key { key: Key::Enter, modifiers, .. } if modifiers.ctrl && modifiers.alt => {}
                 Event::Key { key, physical_key, pressed, modifiers, .. } if !local => {
                     self.sync_mods(modifiers)?;
                     let Some(sym) = keysym(physical_key.unwrap_or(key)) else { continue };
@@ -1307,10 +1309,11 @@ impl Remote {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(ctx.global_style().visuals.window_fill.gamma_multiply(0.96))
-                    .stroke(Stroke::new(1.0, Color32::from_white_alpha(25)))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .fill(ctx.global_style().visuals.window_fill)
+                    .stroke(ctx.global_style().visuals.window_stroke)
+                    .corner_radius(CornerRadius::same(10))
+                    .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(90) })
+                    .inner_margin(egui::Margin::symmetric(6, 4))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let g = ui.add(
@@ -1454,7 +1457,8 @@ impl Remote {
                 r.send(ToAgent::ListWindows)
             }));
         }
-        let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
+        let fs_tip =
+            if self.fullscreen { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
         let fs_glyph = if self.fullscreen { ic::CORNERS_IN } else { ic::CORNERS_OUT };
         if icon(ui, fs_glyph, fs_tip, self.fullscreen).clicked() {
             *action = Some(Box::new(|r, c| {

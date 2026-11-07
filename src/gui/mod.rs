@@ -234,6 +234,8 @@ pub struct App {
     start_with: Start,
     /// Why the password typed for this connection was not saved, shown once it starts.
     save_error: Option<String>,
+    /// The first connection opens in full screen (--fullscreen).
+    start_fullscreen: bool,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -284,11 +286,14 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 config: None,
                 show_options: false,
                 save_error: None,
-                start_with: match open.as_str() {
-                    "terminal" => Start::Terminal,
-                    "files" => Start::Files,
-                    _ => Start::Screen,
+                start_with: if open.split_whitespace().any(|w| w == "terminal") {
+                    Start::Terminal
+                } else if open.split_whitespace().any(|w| w == "files") {
+                    Start::Files
+                } else {
+                    Start::Screen
                 },
+                start_fullscreen: open.split_whitespace().any(|w| w == "fullscreen"),
                 vault: None,
                 backup: None,
                 service: None,
@@ -337,12 +342,17 @@ pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui:
 }
 
 /// A square, borderless icon button that shows its frame on hover or while on.
-fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(glyph).size(16.0))
-        .min_size(Vec2::splat(28.0))
-        .frame_when_inactive(false)
-        .selected(on)
+pub(crate) fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
+    let text = RichText::new(glyph).size(16.0);
+    let b = egui::Button::new(if on { text.color(ACCENT_TEXT) } else { text })
+        .min_size(Vec2::splat(30.0))
+        .corner_radius(6)
+        .frame_when_inactive(on);
+    if on { b.fill(ACCENT.gamma_multiply(0.22)) } else { b }
 }
+
+/// Accent-coloured text and icons that read on dark and light backgrounds.
+pub(crate) const ACCENT_TEXT: Color32 = Color32::from_rgb(96, 160, 255);
 
 /// An icon button that opens a menu.
 fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
@@ -462,6 +472,9 @@ impl eframe::App for App {
                     let start = std::mem::replace(&mut self.start_with, Start::Screen);
                     let label = format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend);
                     let mut remote = Remote::new(sess, rx, ctl, label, ssh_cmd, start == Start::Terminal);
+                    if std::mem::take(&mut self.start_fullscreen) {
+                        remote.set_fullscreen(&ctx, true);
+                    }
                     if start == Start::Files
                         && let Err(e) = remote.open_files_only()
                     {

@@ -169,6 +169,12 @@ pub fn set_theme(ctx: &egui::Context, dark: bool) {
         }
         (Color32::from_rgb(28, 30, 36), Color32::from_black_alpha(22))
     };
+    // Frameless buttons (icons, tabs, menu items) show a translucent tint when hovered or pressed,
+    // as Windows 11 and VS Code do, so they sit well on any background.
+    let tint = |a: u8| if dark { Color32::from_white_alpha(a) } else { Color32::from_black_alpha(a) };
+    v.widgets.hovered.weak_bg_fill = tint(18);
+    v.widgets.active.weak_bg_fill = tint(10);
+    v.widgets.open.weak_bg_fill = tint(14);
     v.override_text_color = None;
     v.widgets.noninteractive.fg_stroke.color = text;
     v.widgets.inactive.fg_stroke.color = text;

@@ -71,6 +71,7 @@ options:
   --remote CMD    agent command on HOST (default: sshremote --agent)
   --ssh ARG       extra ssh argument, repeatable (e.g. --ssh -p --ssh 2222)
   --sound         play the host's sound (about 8 KB/s)
+  --fullscreen    window mode: start in full screen (Ctrl+Alt+Enter leaves it)
   --open WHAT     window mode: start with the host's terminal in place of its screen (terminal),
                   or with its files and the screen paused (files)
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
@@ -135,6 +136,7 @@ fn parse_client(args: &[String]) -> Result<session::Options, String> {
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
             "--sound" => o.sound = true,
+            "--fullscreen" => o.open.push_str(" fullscreen"),
             "--open" => o.open = val()?,
             "--probe" => probe = Some(val()?.parse::<f64>().map_err(|_| "bad --probe")?),
             "--view" => {

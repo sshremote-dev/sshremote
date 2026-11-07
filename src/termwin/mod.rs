@@ -971,12 +971,7 @@ impl TermWindow {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
-                let color = if on { strong } else { weak };
-                let b = egui::Button::new(RichText::new(glyph).size(14.0).color(color))
-                    .frame_when_inactive(on)
-                    .selected(on)
-                    .min_size(Vec2::splat(28.0));
-                ui.add(b).on_hover_text(tip).clicked()
+                ui.add(crate::gui::tool_button(glyph, on)).on_hover_text(tip).clicked()
             };
             if let Some(cmd) = &self.system
                 && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)", false)
@@ -1043,24 +1038,29 @@ impl TermWindow {
                 self.save_settings();
             }
             ui.add_space(6.0);
-            // How the active tab is shown.
+            // How the active tab is shown: a segmented control, as in Windows 11.
             if let Some(t) = self.tabs.get_mut(self.active) {
-                for (v, glyph, tip) in [
-                    (
-                        View::Markdown,
-                        ic::ARTICLE,
-                        "Read the output as Markdown, with copy buttons on code (agent replies)",
-                    ),
-                    (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
-                    (View::Terminal, ic::TERMINAL, "Terminal"),
-                ] {
-                    if small(ui, glyph, tip, t.view == v) {
-                        t.view = v;
-                        if v == View::Terminal {
-                            t.forget_reading();
+                let track =
+                    if ui.visuals().dark_mode { Color32::from_white_alpha(10) } else { Color32::from_black_alpha(10) };
+                egui::Frame::new().fill(track).corner_radius(8).inner_margin(2).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (v, glyph, tip) in [
+                        (
+                            View::Markdown,
+                            ic::ARTICLE,
+                            "Read the output as Markdown, with copy buttons on code (agent replies)",
+                        ),
+                        (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
+                        (View::Terminal, ic::TERMINAL, "Terminal"),
+                    ] {
+                        if small(ui, glyph, tip, t.view == v) {
+                            t.view = v;
+                            if v == View::Terminal {
+                                t.forget_reading();
+                            }
                         }
                     }
-                }
+                });
             }
         });
     }

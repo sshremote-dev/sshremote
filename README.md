@@ -28,7 +28,8 @@ anywhere on `PATH`).
   resizing edges.
 - **Remote screen**: toolbar in the title bar (in full screen, a dock that hides at the top edge):
   quality, fit, monitors, sharing one window or application, special keys, files, terminal (in place
-  of the picture), chat, screenshot, pause, view only, clipboard, sound.
+  of the picture), chat, screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
+  Ctrl+Alt+Enter (or the toolbar) enters and leaves full screen.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
   windows), profiles for local shells and SSH hosts, find, schemes, mouse reporting for full-screen
   programs. Two reading views:
