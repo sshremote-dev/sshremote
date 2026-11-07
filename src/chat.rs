@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn lines_survive_escaping() {
-        for s in ["hi", "two\nlines", "back\\slash\\n literal", "안녕하세요"] {
+        for s in ["hi", "two\nlines", "back\\slash\\n literal", "\u{C548}\u{B155}\u{D558}\u{C138}\u{C694}"] {
             assert_eq!(unescape(&escape(s)), s);
             assert!(!escape(s).contains('\n'));
         }
