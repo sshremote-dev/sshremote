@@ -1080,7 +1080,7 @@ impl TermWindow {
                 let ask = match t.view {
                     View::Terminal => screen(&mut child, t, font_size, copy_on_select, focused, keys, out),
                     View::Text | View::Markdown => {
-                        reader(&mut child, t);
+                        reader(&mut child, t, font_size, keys, out);
                         PaneAsk {
                             focus: child.response().contains_pointer() && child.input(|i| i.pointer.any_pressed()),
                             ..Default::default()
@@ -1163,7 +1163,35 @@ fn buffer_text(t: &Tab) -> String {
 }
 
 /// The text and Markdown views of a tab, styled as VS Code's editor and Markdown preview.
-fn reader(ui: &mut egui::Ui, t: &mut Tab) {
+fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut Vec<Cmd>) {
+    // The live rows around the cursor stay at the bottom, where typing goes to the shell as in
+    // the terminal view.
+    let full = ui.available_rect_before_wrap();
+    let font = FontId::monospace(font_size);
+    let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    let (first, last) = input_rows(t);
+    let strip = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - (last - first + 1) as f32 * ch - 14.0), full.max);
+    let id = egui::Id::unique(("reader-input", t.id));
+    let resp = ui.interact(strip, id, Sense::click());
+    ui.painter().rect_filled(strip, CornerRadius::ZERO, scheme_bg());
+    ui.painter().hline(strip.x_range(), strip.top(), egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.6)));
+    let inner = strip.shrink2(Vec2::new(8.0, 7.0));
+    let c = t.term.grid().cursor.point;
+    let at = Pos2::new(inner.left() + c.column.0 as f32 * cw, inner.top() + (c.line.0 - first) as f32 * ch);
+    // The keys come here unless the text view's selectable text has them; typing takes them back.
+    let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_))));
+    let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
+    let grab = keys && (resp.clicked() || typing || !elsewhere);
+    if keys {
+        keyboard(ui, t, id, strip, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, out);
+    }
+    let focused = ui.memory(|m| m.has_focus(id));
+    paint(ui, t, inner, &font, cw, ch, first, focused);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_y(strip.top() - 1.0)));
+    let ui = &mut child;
     let markdown = t.view == View::Markdown;
     if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != t.clean) {
         let raw = buffer_text(t);
@@ -1243,6 +1271,206 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab) {
             );
         });
     });
+}
+
+/// Keys, text, input-method compositions and pastes for the shell of `t`, typed into the widget
+/// `id`, whose input method composes at `cursor`. `grab` takes the keyboard focus for it.
+fn keyboard(ui: &egui::Ui, t: &mut Tab, id: egui::Id, area: Rect, cursor: Rect, grab: bool, out: &mut Vec<Cmd>) {
+    // Holding the focus keeps Tab, the arrows and Escape for the shell instead of moving between the
+    // window's buttons, where Enter or Space would then press one. It is asked for only when it is
+    // elsewhere: each request also ends an input method's composition.
+    let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+    let focused = ui.memory_mut(|m| {
+        if grab && !m.has_focus(id) {
+            m.request_focus(id);
+        }
+        if m.has_focus(id) {
+            m.set_focus_lock_filter(id, filter);
+        }
+        m.has_focus(id)
+    });
+    if !focused {
+        t.preedit.clear();
+        return;
+    }
+    // An input method composes at the terminal's cursor, as in a text field.
+    ui.ctx().output_mut(|o| {
+        o.ime = Some(egui::output::IMEOutput {
+            purpose: egui::IMEPurpose::Terminal,
+            rect: area,
+            cursor_rect: cursor,
+            should_interrupt_composition: false,
+        })
+    });
+    let mode = *t.term.mode();
+    let mut send: Vec<u8> = Vec::new();
+    for e in ui.ctx().input(|i| i.events.clone()) {
+        match e {
+            Event::Text(s) => send.extend_from_slice(s.as_bytes()),
+            Event::Ime(egui::ImeEvent::Preedit { text, .. }) => t.preedit = text,
+            Event::Ime(egui::ImeEvent::Commit(s)) => {
+                t.preedit.clear();
+                send.extend_from_slice(s.as_bytes());
+            }
+            Event::Copy => match t.term.selection_to_string() {
+                Some(s) if !s.is_empty() => {
+                    ui.ctx().copy_text(s);
+                    t.term.selection = None;
+                }
+                _ => send.push(0x03),
+            },
+            Event::Cut => send.push(0x18),
+            Event::Paste(s) => {
+                let s = s.replace("\r\n", "\r").replace('\n', "\r");
+                if mode.contains(TermMode::BRACKETED_PASTE) {
+                    send.extend_from_slice(b"\x1b[200~");
+                    send.extend_from_slice(s.as_bytes());
+                    send.extend_from_slice(b"\x1b[201~");
+                } else {
+                    send.extend_from_slice(s.as_bytes());
+                }
+            }
+            Event::Key { key, pressed: true, modifiers, .. } => {
+                // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
+                let cs = modifiers.ctrl && modifiers.shift;
+                let alt_shift = modifiers.alt && modifiers.shift && !modifiers.ctrl;
+                let alt = modifiers.alt && !modifiers.shift && !modifiers.ctrl;
+                if (cs && matches!(key, Key::T | Key::W | Key::F))
+                    || (modifiers.ctrl && matches!(key, Key::Tab | Key::Equals | Key::Plus | Key::Minus))
+                    || (alt_shift && matches!(key, Key::Equals | Key::Plus | Key::Minus | Key::D))
+                    || (alt && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown))
+                {
+                    continue;
+                }
+                if modifiers.shift && matches!(key, Key::PageUp | Key::PageDown) {
+                    t.term.scroll_display(if key == Key::PageUp { Scroll::PageUp } else { Scroll::PageDown });
+                    continue;
+                }
+                if let Some(b) = key_bytes(key, modifiers, mode.contains(TermMode::APP_CURSOR)) {
+                    send.extend_from_slice(&b);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !send.is_empty() && t.exited.is_none() {
+        t.term.scroll_display(Scroll::Bottom);
+        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+    }
+}
+
+/// Paints the terminal's rows from `first` on into `area`: backgrounds, then text in runs of the
+/// same colour, the cursor (hollow without the focus) and an input method's composition.
+#[allow(clippy::too_many_arguments)]
+fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, first: i32, focused: bool) {
+    let origin = area.min;
+    let painter = ui.painter_at(area);
+    let content = t.term.renderable_content();
+    let colors = content.colors;
+    let sel = content.selection;
+    let cursor = content.cursor.point;
+    let offset = content.display_offset as i32;
+    let show_cursor = content.mode.contains(TermMode::SHOW_CURSOR) && offset == 0 && t.exited.is_none();
+    let mut run = String::new();
+    let mut run_start = Pos2::ZERO;
+    let mut run_color = scheme_fg();
+    let flush = |run: &mut String, at: Pos2, color: Color32| {
+        if !run.trim().is_empty() {
+            painter.text(at, Align2::LEFT_TOP, run.as_str(), font.clone(), color);
+        }
+        run.clear();
+    };
+    let mut last_row = i32::MIN;
+    let mut hollow = None;
+    for cell in content.display_iter {
+        let row = cell.point.line.0 + offset;
+        if row < first {
+            continue;
+        }
+        let col = cell.point.column.0;
+        if row != last_row {
+            flush(&mut run, run_start, run_color);
+            last_row = row;
+        }
+        let flags = cell.flags;
+        if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let pos = Pos2::new(origin.x + col as f32 * cw, origin.y + (row - first) as f32 * ch);
+        let wide = flags.contains(Flags::WIDE_CHAR);
+        let width = if wide { 2.0 * cw } else { cw };
+        let mut fg = color(cell.fg, colors);
+        let mut bg = color(cell.bg, colors);
+        if flags.contains(Flags::BOLD)
+            && let Color::Named(n) = cell.fg
+            && (n as usize) < 8
+        {
+            fg = pal(n as usize + 8);
+        }
+        if flags.contains(Flags::DIM) {
+            fg = fg.gamma_multiply(0.66);
+        }
+        if flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        if sel.is_some_and(|s| s.contains(cell.point)) {
+            bg = ACCENT.gamma_multiply(0.55);
+        }
+        let at_cursor = show_cursor && cell.point == cursor;
+        let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
+        if at_cursor && focused {
+            (fg, bg) = (scheme_bg(), scheme_fg());
+        } else if at_cursor {
+            hollow = Some(cell_rect);
+        }
+        if bg != scheme_bg() {
+            painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
+        }
+        if flags.contains(Flags::UNDERLINE) {
+            painter.hline(cell_rect.x_range(), cell_rect.bottom() - 1.5, egui::Stroke::new(1.0, fg));
+        }
+        let c = if flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+        // ASCII shares the grid exactly; anything else is placed on its own cell.
+        if c.is_ascii() && !wide && fg == run_color && !run.is_empty() {
+            run.push(c);
+            continue;
+        }
+        flush(&mut run, run_start, run_color);
+        if c.is_ascii() && !wide {
+            run_start = pos;
+            run_color = fg;
+            run.push(c);
+        } else if c != ' ' {
+            painter.text(cell_rect.center(), Align2::CENTER_CENTER, c, font.clone(), fg);
+        }
+    }
+    flush(&mut run, run_start, run_color);
+    if !t.preedit.is_empty() && show_cursor {
+        // The composition in progress, underlined on the cursor's cells.
+        let at = Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset - first) as f32 * ch);
+        let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), scheme_fg());
+        let r = Rect::from_min_size(at, Vec2::new(galley.size().x.max(cw), ch));
+        painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
+        painter.galley(at, galley, scheme_fg());
+        painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
+    }
+    if let Some(r) = hollow {
+        let stroke = egui::Stroke::new(1.0, scheme_fg());
+        painter.rect_stroke(r.shrink(0.5), CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+    }
+}
+
+/// Rows of the live screen shown under the text and Markdown views, so what is typed can be seen:
+/// a few rows above the cursor down to the last written row (an agent's input box and status).
+fn input_rows(t: &Tab) -> (i32, i32) {
+    let grid = t.term.grid();
+    let cursor = grid.cursor.point.line.0;
+    let screen = grid.screen_lines() as i32;
+    let cols = grid.columns();
+    let written = |row: i32| (0..cols).any(|c| !matches!(grid[Line(row)][Column(c)].c, ' ' | '\0'));
+    let last = (cursor..screen).rev().find(|&r| written(r)).unwrap_or(cursor).max(cursor);
+    let first = (cursor - 3).max(0).max(last - 9);
+    (first, last)
 }
 
 /// A web address under column `col` of a line, for Ctrl+click.
@@ -1524,205 +1752,41 @@ fn screen(
     let mode = *t.term.mode();
     let keys = keys && t.search.is_none();
     if keys {
-        // Hold the keyboard focus so Tab, the arrows and Escape reach the shell instead of moving
-        // between the window's buttons, where Enter or Space would then press one.
-        let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
-        ui.memory_mut(|m| {
-            m.request_focus(resp.id);
-            m.set_focus_lock_filter(resp.id, filter);
-        });
-        // An input method composes at the terminal's cursor, as in a text field.
         let c = t.term.grid().cursor.point;
         let at = Pos2::new(origin.x + c.column.0 as f32 * cw, origin.y + (c.line.0 + offset) as f32 * ch);
-        ui.ctx().output_mut(|o| {
-            o.ime = Some(egui::output::IMEOutput {
-                purpose: egui::IMEPurpose::Terminal,
-                rect: area,
-                cursor_rect: Rect::from_min_size(at, Vec2::new(cw, ch)),
-                should_interrupt_composition: false,
-            })
-        });
+        keyboard(ui, t, resp.id, area, Rect::from_min_size(at, Vec2::new(cw, ch)), true, out);
     } else {
         t.preedit.clear();
     }
-    let mut send: Vec<u8> = Vec::new();
-    let events = ui.ctx().input(|i| i.events.clone());
-    for e in events {
-        // Only the focused pane types; the wheel scrolls the pane under the pointer.
-        if !keys && !matches!(e, Event::MouseWheel { .. }) {
-            continue;
+    // The wheel scrolls the pane under the pointer; full-screen programs (less, vim) get arrows.
+    if resp.hovered() {
+        let mut send: Vec<u8> = Vec::new();
+        for e in ui.ctx().input(|i| i.events.clone()) {
+            let Event::MouseWheel { unit, delta, .. } = e else { continue };
+            let lines = match unit {
+                egui::MouseWheelUnit::Point => delta.y / ch,
+                egui::MouseWheelUnit::Line => delta.y,
+                egui::MouseWheelUnit::Page => delta.y * rows as f32,
+            };
+            let lines = if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
+            if lines == 0 {
+                continue;
+            }
+            if mode.contains(TermMode::ALT_SCREEN) {
+                let key = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
+                for _ in 0..lines.unsigned_abs() {
+                    send.extend_from_slice(key);
+                }
+            } else {
+                t.term.scroll_display(Scroll::Delta(lines));
+            }
         }
-        match e {
-            Event::Text(s) => send.extend_from_slice(s.as_bytes()),
-            Event::Ime(egui::ImeEvent::Preedit { text, .. }) => t.preedit = text,
-            Event::Ime(egui::ImeEvent::Commit(s)) => {
-                t.preedit.clear();
-                send.extend_from_slice(s.as_bytes());
-            }
-            Event::Copy => match t.term.selection_to_string() {
-                Some(s) if !s.is_empty() => {
-                    ui.ctx().copy_text(s);
-                    t.term.selection = None;
-                }
-                _ => send.push(0x03),
-            },
-            Event::Cut => send.push(0x18),
-            Event::MouseWheel { unit, delta, .. } if resp.hovered() => {
-                let lines = match unit {
-                    egui::MouseWheelUnit::Point => delta.y / ch,
-                    egui::MouseWheelUnit::Line => delta.y,
-                    egui::MouseWheelUnit::Page => delta.y * rows as f32,
-                };
-                let lines = if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
-                if lines == 0 {
-                    continue;
-                }
-                if mode.contains(TermMode::ALT_SCREEN) {
-                    // Full-screen programs (less, vim) get arrow keys instead.
-                    let key = if lines > 0 { b"OA" } else { b"OB" };
-                    for _ in 0..lines.unsigned_abs() {
-                        send.extend_from_slice(key);
-                    }
-                } else {
-                    t.term.scroll_display(Scroll::Delta(lines));
-                }
-            }
-            Event::Paste(s) => {
-                let s = s.replace("\r\n", "\r").replace('\n', "\r");
-                if mode.contains(TermMode::BRACKETED_PASTE) {
-                    send.extend_from_slice(b"\x1b[200~");
-                    send.extend_from_slice(s.as_bytes());
-                    send.extend_from_slice(b"\x1b[201~");
-                } else {
-                    send.extend_from_slice(s.as_bytes());
-                }
-            }
-            Event::Key { key, pressed: true, modifiers, .. } => {
-                // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
-                let cs = modifiers.ctrl && modifiers.shift;
-                let alt_shift = modifiers.alt && modifiers.shift && !modifiers.ctrl;
-                let alt = modifiers.alt && !modifiers.shift && !modifiers.ctrl;
-                if (cs && matches!(key, Key::T | Key::W))
-                    || (modifiers.ctrl && matches!(key, Key::Tab | Key::Equals | Key::Plus | Key::Minus))
-                    || (alt_shift && matches!(key, Key::Equals | Key::Plus | Key::Minus | Key::D))
-                    || (alt && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown))
-                {
-                    continue;
-                }
-                if modifiers.shift && matches!(key, Key::PageUp | Key::PageDown) {
-                    t.term.scroll_display(if key == Key::PageUp { Scroll::PageUp } else { Scroll::PageDown });
-                    continue;
-                }
-                if let Some(b) = key_bytes(key, modifiers, mode.contains(TermMode::APP_CURSOR)) {
-                    send.extend_from_slice(&b);
-                }
-            }
-            _ => {}
+        if !send.is_empty() && t.exited.is_none() {
+            out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
         }
     }
-    if !send.is_empty() && t.exited.is_none() {
-        t.term.scroll_display(Scroll::Bottom);
-        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
-    }
-
-    // Paint the cells: backgrounds, then text in runs of the same colour.
+    paint(ui, t, area, &font, cw, ch, 0, focused);
     let painter = ui.painter_at(area);
-    let content = t.term.renderable_content();
-    let colors = content.colors;
-    let sel = content.selection;
-    let cursor = content.cursor.point;
-    let offset = content.display_offset as i32;
-    let show_cursor = content.mode.contains(TermMode::SHOW_CURSOR) && offset == 0 && t.exited.is_none();
-    let mut run = String::new();
-    let mut run_start = Pos2::ZERO;
-    let mut run_color = scheme_fg();
-    let flush = |run: &mut String, at: Pos2, color: Color32| {
-        if !run.trim().is_empty() {
-            painter.text(at, Align2::LEFT_TOP, run.as_str(), font.clone(), color);
-        }
-        run.clear();
-    };
-    let mut last_row = i32::MIN;
-    let mut hollow = None;
-    for cell in content.display_iter {
-        let row = cell.point.line.0 + offset;
-        let col = cell.point.column.0;
-        if row != last_row {
-            flush(&mut run, run_start, run_color);
-            last_row = row;
-        }
-        let flags = cell.flags;
-        if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-            continue;
-        }
-        let pos = Pos2::new(origin.x + col as f32 * cw, origin.y + row as f32 * ch);
-        let wide = flags.contains(Flags::WIDE_CHAR);
-        let width = if wide { 2.0 * cw } else { cw };
-        let mut fg = color(cell.fg, colors);
-        let mut bg = color(cell.bg, colors);
-        if flags.contains(Flags::BOLD)
-            && let Color::Named(n) = cell.fg
-            && (n as usize) < 8
-        {
-            fg = pal(n as usize + 8);
-        }
-        if flags.contains(Flags::DIM) {
-            fg = fg.gamma_multiply(0.66);
-        }
-        if flags.contains(Flags::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        let selected = sel.is_some_and(|s| s.contains(cell.point));
-        if selected {
-            bg = ACCENT.gamma_multiply(0.55);
-        }
-        let at_cursor = show_cursor && cell.point == cursor;
-        let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
-        if at_cursor && focused {
-            (fg, bg) = (scheme_bg(), scheme_fg());
-        } else if at_cursor {
-            // A pane without the focus shows a hollow cursor.
-            hollow = Some(cell_rect);
-        }
-        if bg != scheme_bg() {
-            painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
-        }
-        if flags.contains(Flags::UNDERLINE) {
-            painter.hline(cell_rect.x_range(), cell_rect.bottom() - 1.5, egui::Stroke::new(1.0, fg));
-        }
-        let c = if flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
-        // ASCII shares the grid exactly; anything else is placed on its own cell.
-        if c.is_ascii() && !wide && fg == run_color && !run.is_empty() {
-            run.push(c);
-            continue;
-        }
-        flush(&mut run, run_start, run_color);
-        if c.is_ascii() && !wide {
-            run_start = pos;
-            run_color = fg;
-            run.push(c);
-        } else if c != ' ' {
-            painter.text(cell_rect.center(), Align2::CENTER_CENTER, c, font.clone(), fg);
-        }
-    }
-    flush(&mut run, run_start, run_color);
-    if !t.preedit.is_empty() && show_cursor {
-        // The composition in progress, underlined on the cursor's cells.
-        let at = Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset) as f32 * ch);
-        let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), scheme_fg());
-        let r = Rect::from_min_size(at, Vec2::new(galley.size().x.max(cw), ch));
-        painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
-        painter.galley(at, galley, scheme_fg());
-        painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
-    }
-    if let Some(r) = hollow {
-        painter.rect_stroke(
-            r.shrink(0.5),
-            CornerRadius::ZERO,
-            egui::Stroke::new(1.0, scheme_fg()),
-            egui::StrokeKind::Inside,
-        );
-    }
     if let Some(text) = &t.exited {
         let r = Rect::from_min_size(Pos2::new(area.left(), area.bottom() - 28.0), Vec2::new(area.width(), 28.0));
         painter.rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(40, 42, 50, 235));
@@ -1947,6 +2011,22 @@ mod tests {
         let out = ctx.run_ui(input, |ui| {
             w.embedded(ui);
         });
-        assert!(out.platform_output.ime.is_some());
+        let ime = out.platform_output.ime.expect("an input method at the cursor");
+        // Asking for the focus again every frame would end the composition each time.
+        assert!(!ime.should_interrupt_composition, "the composition is left alone between frames");
+    }
+
+    #[test]
+    fn reading_views_still_type_into_the_shell() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        for view in [View::Text, View::Markdown] {
+            w.tabs[0].view = view;
+            frame(&ctx, &mut w, Vec::new());
+            let done = frame(&ctx, &mut w, vec![Event::Ime(egui::ImeEvent::Commit("\u{D55C}".into())), Event::Text("a".into())]);
+            assert_eq!(typed(&done), "\u{D55C}a");
+        }
     }
 }
