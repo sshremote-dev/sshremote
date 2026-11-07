@@ -166,6 +166,10 @@ const SCHEMES: [Scheme; 6] = [
 /// The scheme in use, shared by every terminal window.
 static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// The cursor's shape: a thin bar as in VS Code and Windows Terminal, a block, or an underline.
+static CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
+
 /// Selected cells, in VS Code's dark selection colour.
 const SELECTION: Color32 = Color32::from_rgb(38, 79, 120);
 
@@ -261,6 +265,8 @@ struct Tab {
     reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
+    /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
+    typed_at: f64,
 }
 
 /// The text and Markdown views' content, with the output revision and the first live row it ends above.
@@ -483,6 +489,9 @@ impl TermWindow {
     }
 
     fn with_profiles(profiles: Vec<Profile>, viewport: &'static str, title: &str) -> Self {
+        let c =
+            crate::hosts::setting("term_cursor").and_then(|v| v.parse().ok()).unwrap_or(0usize).min(CURSORS.len() - 1);
+        CURSOR.store(c, std::sync::atomic::Ordering::Relaxed);
         let setting = |k: &str| crate::hosts::setting(k);
         if let Some(i) = setting("term_scheme").and_then(|v| v.parse().ok()) {
             SCHEME.store(i, std::sync::atomic::Ordering::Relaxed);
@@ -606,6 +615,7 @@ impl TermWindow {
             view: View::Terminal,
             search: None,
             preedit: String::new(),
+            typed_at: 0.0,
             rev: 0,
             reading: None,
             group: id,
@@ -759,6 +769,7 @@ impl TermWindow {
         crate::hosts::set_setting("term_font", &format!("{}", self.font_size));
         crate::hosts::set_setting("term_scheme", &SCHEME.load(std::sync::atomic::Ordering::Relaxed).to_string());
         crate::hosts::set_setting("term_copy_select", if self.copy_on_select { "1" } else { "0" });
+        crate::hosts::set_setting("term_cursor", &CURSOR.load(std::sync::atomic::Ordering::Relaxed).to_string());
     }
 
     fn body(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
@@ -952,6 +963,16 @@ impl TermWindow {
                             }
                             ui.separator();
                             changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
+                            ui.horizontal(|ui| {
+                                ui.label("Cursor");
+                                let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+                                for (k, name) in CURSORS.iter().enumerate() {
+                                    if ui.selectable_label(k == current, *name).clicked() {
+                                        CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
+                                        changed = true;
+                                    }
+                                }
+                            });
                             ui.separator();
                             ui.label(RichText::new("Shortcuts").strong());
                             for (k, v) in [
@@ -1400,7 +1421,10 @@ fn keyboard(ui: &egui::Ui, t: &mut Tab, id: egui::Id, area: Rect, cursor: Rect, 
     }
     if !send.is_empty() && t.exited.is_none() {
         t.term.scroll_display(Scroll::Bottom);
+        t.typed_at = ui.input(|i| i.time);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+    } else if !t.preedit.is_empty() {
+        t.typed_at = ui.input(|i| i.time);
     }
 }
 
@@ -1426,7 +1450,16 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
         run.clear();
     };
     let mut last_row = i32::MIN;
-    let mut hollow = None;
+    let mut caret_cell: Option<Rect> = None;
+    let shape = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+    let block = shape == 1;
+    // Blinking as in VS Code: on and off every half second, and steady for a moment after typing.
+    let now = ui.input(|i| i.time);
+    let since = now - t.typed_at;
+    let lit = !focused || since < 0.6 || ((since - 0.6) / 0.53) as u64 % 2 == 1;
+    if focused && show_cursor {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.53 - (since - 0.6).rem_euclid(0.53)));
+    }
     for cell in content.display_iter {
         let row = cell.point.line.0 + offset;
         if row < first {
@@ -1463,10 +1496,11 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
         }
         let at_cursor = show_cursor && cell.point == cursor;
         let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
-        if at_cursor && focused {
-            (fg, bg) = (scheme_bg(), scheme_fg());
-        } else if at_cursor {
-            hollow = Some(cell_rect);
+        if at_cursor {
+            caret_cell = Some(cell_rect);
+            if focused && block && lit && t.preedit.is_empty() {
+                (fg, bg) = (scheme_bg(), scheme_fg());
+            }
         }
         if bg != scheme_bg() {
             painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
@@ -1490,8 +1524,9 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
         }
     }
     flush(&mut run, run_start, run_color);
+    let mut caret = caret_cell;
     if !t.preedit.is_empty() && show_cursor {
-        // The composition in progress, underlined on the cursor's cells.
+        // The composition in progress, underlined, with the caret after it as in a text field.
         let at =
             Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset - first) as f32 * ch);
         let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), scheme_fg());
@@ -1499,10 +1534,21 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
         painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
         painter.galley(at, galley, scheme_fg());
         painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
+        caret = Some(Rect::from_min_size(Pos2::new(r.right(), r.top()), Vec2::new(cw, ch)));
     }
-    if let Some(r) = hollow {
-        let stroke = egui::Stroke::new(1.0, scheme_fg());
+    let Some(r) = caret else { return };
+    let color = if focused { scheme_fg() } else { scheme_fg().gamma_multiply(0.45) };
+    if !focused && block {
+        // A pane without the focus shows a hollow block.
+        let stroke = egui::Stroke::new(1.0, color);
         painter.rect_stroke(r.shrink(0.5), CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+    } else if lit && !(block && t.preedit.is_empty()) {
+        let bar = match shape {
+            2 => Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 2.0), r.max),
+            1 => r,
+            _ => Rect::from_min_size(r.min, Vec2::new(2.0, r.height())),
+        };
+        painter.rect_filled(bar, CornerRadius::ZERO, color);
     }
 }
 

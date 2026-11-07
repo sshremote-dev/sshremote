@@ -168,7 +168,8 @@ copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
   its last pane).
 - Find (Ctrl+Shift+F) searches the scrollback; Ctrl+click opens a link.
 - Settings: text size (also Ctrl+= and Ctrl+-), colour schemes (One Half Dark, Campbell, Dracula,
-  Solarized Dark, Tango Dark, One Half Light) and copy on select, remembered between runs.
+  Solarized Dark, Tango Dark, One Half Light), copy on select and the cursor (a thin blinking bar
+  as in VS Code and Windows Terminal by default, or a block or an underline), remembered between runs.
 - Three views: the terminal itself, plain text, and Markdown, styled after VS Code's editor and
   Markdown preview (its Dark Modern and Light Modern colours, following the app's theme). The text
   view shows the whole scrollback with line numbers, selectable with the mouse or Ctrl+A. The
