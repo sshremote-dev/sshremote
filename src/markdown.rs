@@ -41,7 +41,7 @@ pub fn install_bold(ctx: &egui::Context) {
 }
 
 /// A run of Markdown.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum Block {
     Heading(u8, String),
     Para(String),
@@ -65,7 +65,7 @@ pub enum Block {
     Pre(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub enum Align {
     Left,
     Center,
@@ -1018,75 +1018,140 @@ fn heading(ui: &mut egui::Ui, th: &Theme, level: u8, text: &str) {
 
 /// Draws blocks; `id` keeps the copy buttons and scroll areas of separate documents apart.
 pub fn blocks(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], id: egui::Id) {
-    for (n, b) in blocks.iter().enumerate() {
-        let bid = id.with(n);
-        match b {
-            Block::Heading(level, text) => heading(ui, th, *level, text),
-            Block::Pre(text) => {
-                pre(ui, th, text);
+    for n in 0..blocks.len() {
+        block(ui, th, blocks, n, id);
+    }
+}
+
+/// Draws `blocks[n]`; the others decide spacing (a list item followed by another stays close).
+fn block(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], n: usize, id: egui::Id) {
+    let b = &blocks[n];
+    let bid = id.with(n);
+    match b {
+        Block::Heading(level, text) => heading(ui, th, *level, text),
+        Block::Pre(text) => {
+            pre(ui, th, text);
+            ui.add_space(6.0);
+        }
+        Block::Para(text) => {
+            rich(ui, text, BODY, th, false);
+            ui.add_space(6.0);
+        }
+        Block::Code { lang, code } => {
+            code_block(ui, th, lang, code, bid);
+            ui.add_space(8.0);
+        }
+        Block::Table { align, rows } => {
+            table(ui, th, align, rows, bid);
+            ui.add_space(8.0);
+        }
+        Block::Item { depth, marker, text } => {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(6.0 + *depth as f32 * 22.0);
+                let glyph = match marker.as_str() {
+                    "-" => ["•", "◦", "▪"][depth % 3].to_string(),
+                    "[ ]" => "☐".into(),
+                    "[x]" => "☑".into(),
+                    m => m.to_string(),
+                };
+                let (r, _) = ui.allocate_exact_size(Vec2::new(18.0, BODY * 1.55), Sense::hover());
+                ui.painter().text(r.right_center(), Align2::RIGHT_CENTER, glyph, FontId::proportional(BODY), th.weak);
+                ui.vertical(|ui| rich(ui, text, BODY, th, false));
+            });
+            if !matches!(blocks.get(n + 1), Some(Block::Item { .. })) {
                 ui.add_space(6.0);
             }
-            Block::Para(text) => {
-                rich(ui, text, BODY, th, false);
-                ui.add_space(6.0);
-            }
-            Block::Code { lang, code } => {
-                code_block(ui, th, lang, code, bid);
-                ui.add_space(8.0);
-            }
-            Block::Table { align, rows } => {
-                table(ui, th, align, rows, bid);
-                ui.add_space(8.0);
-            }
-            Block::Item { depth, marker, text } => {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.add_space(6.0 + *depth as f32 * 22.0);
-                    let glyph = match marker.as_str() {
-                        "-" => ["•", "◦", "▪"][depth % 3].to_string(),
-                        "[ ]" => "☐".into(),
-                        "[x]" => "☑".into(),
-                        m => m.to_string(),
-                    };
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(18.0, BODY * 1.55), Sense::hover());
-                    ui.painter().text(
-                        r.right_center(),
-                        Align2::RIGHT_CENTER,
-                        glyph,
-                        FontId::proportional(BODY),
-                        th.weak,
-                    );
-                    ui.vertical(|ui| rich(ui, text, BODY, th, false));
-                });
-                if !matches!(blocks.get(n + 1), Some(Block::Item { .. })) {
-                    ui.add_space(6.0);
-                }
-            }
-            Block::Quote(inner) => {
-                let r = egui::Frame::new()
-                    .inner_margin(egui::Margin { left: 16, right: 4, top: 2, bottom: 2 })
-                    .show(ui, |ui| {
-                        let mut weak = *th;
-                        weak.fg = th.weak;
-                        self::blocks(ui, &weak, inner, bid);
-                    })
-                    .response
-                    .rect;
-                ui.painter().vline(r.left() + 2.0, r.y_range(), Stroke::new(4.0, th.quote));
-                ui.add_space(6.0);
-            }
-            Block::Rule => {
-                ui.add_space(6.0);
-                let r = ui.available_rect_before_wrap();
-                ui.painter().hline(r.x_range(), r.top(), Stroke::new(2.0, th.rule));
-                ui.add_space(10.0);
-            }
+        }
+        Block::Quote(inner) => {
+            let r = egui::Frame::new()
+                .inner_margin(egui::Margin { left: 16, right: 4, top: 2, bottom: 2 })
+                .show(ui, |ui| {
+                    let mut weak = *th;
+                    weak.fg = th.weak;
+                    self::blocks(ui, &weak, inner, bid);
+                })
+                .response
+                .rect;
+            ui.painter().vline(r.left() + 2.0, r.y_range(), Stroke::new(4.0, th.quote));
+            ui.add_space(6.0);
+        }
+        Block::Rule => {
+            ui.add_space(6.0);
+            let r = ui.available_rect_before_wrap();
+            ui.painter().hline(r.x_range(), r.top(), Stroke::new(2.0, th.rule));
+            ui.add_space(10.0);
         }
     }
 }
 
-/// Draws a document.
-/// Draws a document in the colours of `th` (the background it is drawn on).
+/// Heights of laid-out blocks by their content, the next block's kind and the width, so a long
+/// document is measured once and only the blocks in view are drawn each frame.
+#[derive(Default)]
+pub struct Heights(std::collections::HashMap<(u64, bool, u32), f32>);
+
+impl Heights {
+    fn key(blocks: &[Block], n: usize, width: f32) -> (u64, bool, u32) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        blocks[n].hash(&mut h);
+        (h.finish(), matches!(blocks.get(n + 1), Some(Block::Item { .. })), width.round() as u32)
+    }
+}
+
+/// Draws the blocks of `doc` that meet `view` (in the coordinates of the scroll area's content,
+/// whose top left is at `origin`), in a column at `x` (from the content's left) `width` wide,
+/// starting `top` below the content's top. Returns where the document ends, in content
+/// coordinates. Blocks out of view are not laid out again, only their measured heights used.
+#[allow(clippy::too_many_arguments)]
+pub fn show_in_view(
+    ui: &mut egui::Ui,
+    doc: &Doc,
+    id: egui::Id,
+    th: &Theme,
+    heights: &mut Heights,
+    view: Rect,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> f32 {
+    let origin = ui.max_rect().min;
+    let gap = ui.spacing().item_spacing.y;
+    // Heights the cache lacks are measured once, without drawing.
+    if heights.0.len() > 20_000 {
+        heights.0.clear();
+    }
+    for n in 0..doc.blocks.len() {
+        let key = Heights::key(&doc.blocks, n, width);
+        if !heights.0.contains_key(&key) {
+            let rect = Rect::from_min_size(Pos2::new(origin.x + x, -1.0e6), Vec2::new(width, f32::INFINITY));
+            let mut probe =
+                ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("measure", n)).sizing_pass().invisible());
+            block(&mut probe, th, &doc.blocks, n, id.with("measure"));
+            heights.0.insert(key, probe.min_rect().height());
+        }
+    }
+    let mut y = top;
+    for n in 0..doc.blocks.len() {
+        let h = heights.0[&Heights::key(&doc.blocks, n, width)];
+        // Drawn when in view, with a screen's margin so scrolling does not show gaps.
+        if y + h >= view.top() - view.height() && y <= view.bottom() + view.height() {
+            let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .id_salt(("block", n))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            block(&mut child, th, &doc.blocks, n, id);
+        }
+        y += h + gap;
+    }
+    y
+}
+
+/// Draws a whole document in the colours of `th` (the background it is drawn on).
+#[cfg(test)]
 pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
     blocks(ui, th, &doc.blocks, id);
 }
@@ -1167,5 +1232,51 @@ mod tests {
         let (job, links) = inline("see [docs](https://a.b) or https://c.d.", 14.0, &th, false);
         assert_eq!(job.text, "see docs or https://c.d.");
         assert_eq!(links, vec![(4..8, "https://a.b".to_string()), (12..23, "https://c.d".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+
+    /// Frame times for a long document drawn whole and drawn by what is in view:
+    /// cargo test --release -- --ignored --nocapture draws_only_what_is_in_view
+    #[test]
+    #[ignore]
+    fn draws_only_what_is_in_view() {
+        let mut text = String::new();
+        for k in 0..400 {
+            text.push_str(&format!(
+                "## Part {k}\n\nSome **bold** and *italic* text with `code` and a [link](https://a.b) in it, long enough to wrap once or twice in the column.\n\n- one\n- two\n\n```rust\nfn main() {{ let x = {k}; }}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+            ));
+        }
+        let doc = Doc::new(&text);
+        let ctx = egui::Context::default();
+        let th = Theme::palette(true);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0))),
+            ..Default::default()
+        };
+        let time = |f: &mut dyn FnMut(&mut egui::Ui)| {
+            let _ = ctx.run_ui(input(), |ui| f(ui));
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                let _ = ctx.run_ui(input(), |ui| f(ui));
+            }
+            start.elapsed().as_secs_f64() * 100.0
+        };
+        let whole = time(&mut |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| show(ui, &doc, egui::Id::unique("whole"), &th));
+        });
+        let mut heights = Heights::default();
+        let lazy = time(&mut |ui| {
+            egui::ScrollArea::vertical().id_salt("lazy").show_viewport(ui, |ui, view| {
+                let end = show_in_view(ui, &doc, egui::Id::unique("lazy"), &th, &mut heights, view, 20.0, 900.0, 0.0);
+                let o = ui.max_rect().min;
+                ui.allocate_rect(Rect::from_min_size(o, Vec2::new(940.0, end)), Sense::hover());
+            });
+        });
+        eprintln!("{} blocks: whole {whole:.2} ms a frame, in view {lazy:.2} ms a frame", doc.blocks.len());
+        assert!(lazy * 5.0 < whole, "drawing what is in view is much quicker");
     }
 }

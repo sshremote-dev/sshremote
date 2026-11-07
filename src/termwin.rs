@@ -168,6 +168,10 @@ static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 static CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
 
+/// The text and Markdown views are made again from the scrollback at most this often (seconds)
+/// while output streams in.
+const REBUILD_EVERY: f64 = 0.1;
+
 /// Selected cells, in VS Code's dark selection colour.
 const SELECTION: Color32 = Color32::from_rgb(38, 79, 120);
 
@@ -275,6 +279,10 @@ struct Tab {
     last_screen: Vec<String>,
     /// Hints a full-screen program floats over its text, found by comparing screens.
     overlays: Vec<String>,
+    /// Heights of the Markdown view's blocks, measured once each.
+    md_heights: crate::markdown::Heights,
+    /// When the text or Markdown view was last rebuilt from the scrollback, in egui's time.
+    built_at: f64,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
 }
@@ -696,6 +704,8 @@ impl TermWindow {
             search: None,
             preedit: String::new(),
             typed_at: 0.0,
+            md_heights: Default::default(),
+            built_at: 0.0,
             stitched: Vec::new(),
             last_screen: Vec::new(),
             overlays: Vec::new(),
@@ -1325,7 +1335,13 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let (first, last) = input_rows(t);
-    if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
+    let now = ui.input(|i| i.time);
+    let due = t.reading.is_none() || now - t.built_at >= REBUILD_EVERY;
+    if !due {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(REBUILD_EVERY));
+    }
+    if due && t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
+        t.built_at = now;
         let history = (t.term.grid().total_lines() - t.term.grid().screen_lines()) as i32;
         let text = if t.term.mode().contains(TermMode::ALT_SCREEN) {
             // A full-screen program shows a window on a longer text: its screens are stitched
@@ -1358,22 +1374,33 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
     let wheel = if ui.rect_contains_pointer(area) { wheel_lines(ui, ch, 10.0) } else { 0 };
     let scroll =
         egui::ScrollArea::both().id_salt(("reading", t.id, markdown)).auto_shrink([false, false]).stick_to_bottom(true);
-    let shown = scroll.show(ui, |ui| {
+    let mut heights = std::mem::take(&mut t.md_heights);
+    let doc_id = egui::Id::unique(("md-doc", t.id));
+    let shown = scroll.show_viewport(ui, |ui, view| {
         if markdown {
             // A readable column, as in the preview; the live rows sit under it on the same edge.
-            let width = ui.available_width().min(960.0);
-            let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 20.0;
-            egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 20, top: 14, bottom: 6 }).show(
-                ui,
-                |ui| {
-                    ui.set_max_width(width - 40.0);
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)), &th);
-                    live = Some(live_area(ui, id, cw, ch, live_rows));
-                },
+            // Only the blocks in view are laid out and drawn, so long output stays quick.
+            let full = ui.available_width();
+            let width = full.min(960.0);
+            let pad = ((full - width) / 2.0).max(0.0) + 20.0;
+            let column = width - 40.0;
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let end = crate::markdown::show_in_view(ui, doc, doc_id, &th, &mut heights, view, pad, column, 14.0);
+            let origin = ui.max_rect().min;
+            let rows = Rect::from_min_size(
+                origin + Vec2::new(pad, end),
+                Vec2::new(column.max(cw * 20.0), live_rows as f32 * ch),
+            );
+            let resp = ui.interact(rows, id, Sense::click());
+            live = Some((rows, resp));
+            // The content's size, for the scroll area.
+            ui.allocate_rect(
+                Rect::from_min_max(origin, Pos2::new(origin.x + full, rows.bottom() + 6.0)),
+                Sense::hover(),
             );
         }
     });
+    t.md_heights = heights;
     // At the top of the document the wheel asks the program to scroll back, and what it shows is
     // stitched on above; at the bottom it scrolls the program forward.
     let at_top = shown.state.clamped_offset().y <= 1.0;
@@ -1401,14 +1428,6 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
         let icon = if rect.contains(p) { egui::CursorIcon::Text } else { egui::CursorIcon::Default };
         ui.ctx().set_cursor_icon(icon);
     }
-}
-
-/// Space for the live rows at the end of a reading view.
-fn live_area(ui: &mut egui::Ui, id: egui::Id, cw: f32, ch: f32, rows: usize) -> (Rect, egui::Response) {
-    let width = ui.available_width().max(cw * 20.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, rows as f32 * ch), Sense::hover());
-    let resp = ui.interact(rect, id, Sense::click());
-    (rect, resp)
 }
 
 /// Keys, text, input-method compositions and pastes for the shell of `t`, typed into the widget
@@ -1658,7 +1677,7 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
 }
 
 /// Rows of the live screen shown under the text and Markdown views, so what is typed can be seen:
-/// a few rows above the cursor down to the last written row (an agent's input box and status).
+/// from the cursor's row down to the last written row (an agent's input box and status).
 fn input_rows(t: &Tab) -> (i32, i32) {
     let grid = t.term.grid();
     let cursor = grid.cursor.point.line.0;
@@ -1666,7 +1685,8 @@ fn input_rows(t: &Tab) -> (i32, i32) {
     let cols = grid.columns();
     let written = |row: i32| (0..cols).any(|c| !matches!(grid[Line(row)][Column(c)].c, ' ' | '\0'));
     let last = (cursor..screen).rev().find(|&r| written(r)).unwrap_or(cursor).max(cursor);
-    let first = (cursor - 3).max(0).max(last - 9);
+    // From the cursor's row down: what is above it is already output, read as the document.
+    let first = cursor.max(last - 9);
     (first, last)
 }
 
@@ -1716,7 +1736,13 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
     let history = (grid.total_lines() - grid.screen_lines()) as i32;
     let (_, last) = input_rows(t);
     let key = (t.rev, t.term.grid().cursor.point.line.0, t.term.grid().cursor.point.column.0);
-    if t.editor.as_ref().is_none_or(|e| e.0 != key) {
+    let now = ui.input(|i| i.time);
+    let due = t.editor.is_none() || now - t.built_at >= REBUILD_EVERY;
+    if !due {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(REBUILD_EVERY));
+    }
+    if due && t.editor.as_ref().is_none_or(|e| e.0 != key) {
+        t.built_at = now;
         let (text, at) = screen_text(t, -history, last);
         t.editor = Some((key, std::rc::Rc::new((text, at))));
     }
@@ -1876,7 +1902,8 @@ fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
             let f = cell.flags;
             cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
         }
-        while cells.last().is_some_and(|c| c.0 == ' ') {
+        // A row that goes on in the next keeps its last spaces: they separate the words there.
+        while !wrapped && cells.last().is_some_and(|c| c.0 == ' ') {
             cells.pop();
         }
         let plain: String = cells.iter().map(|c| c.0).collect();
