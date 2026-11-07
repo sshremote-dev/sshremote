@@ -18,8 +18,12 @@ use crate::transport::Target;
 
 mod home;
 mod remote;
+mod theme;
 
 use remote::Remote;
+use theme::filled;
+pub(crate) use theme::primary;
+pub use theme::{set_theme, style};
 
 pub(crate) const ACCENT: Color32 = Color32::from_rgb(64, 132, 245);
 
@@ -60,6 +64,7 @@ pub(crate) mod ic {
     pub const X_CIRCLE: &str = "\u{E4F8}";
     pub const CAMERA: &str = "\u{E10E}";
     pub const CHAT: &str = "\u{E16C}";
+    pub const SEND: &str = "\u{E396}";
     pub const CORNERS_IN: &str = "\u{E1CE}";
     pub const CORNERS_OUT: &str = "\u{E1D0}";
     pub const FILE: &str = "\u{E230}";
@@ -81,29 +86,6 @@ pub(crate) mod ic {
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";
     pub const X: &str = "\u{E4F6}";
-}
-
-/// The filled variant of the icon font, for a set star.
-fn filled() -> egui::FontFamily {
-    egui::FontFamily::Name("phosphor-fill".into())
-}
-
-fn install_fonts(ctx: &egui::Context) {
-    crate::markdown::install_bold(ctx);
-    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
-    let regular = egui::FontData::from_static(include_bytes!("../../assets/fonts/Phosphor.ttf"));
-    let fill = egui::FontData::from_static(include_bytes!("../../assets/fonts/Phosphor-Fill.ttf"));
-    let fallback = |f| InsertFontFamily { family: f, priority: FontPriority::Lowest };
-    ctx.add_font(FontInsert {
-        name: "phosphor".into(),
-        data: regular,
-        families: vec![fallback(egui::FontFamily::Proportional), fallback(egui::FontFamily::Monospace)],
-    });
-    ctx.add_font(FontInsert {
-        name: "phosphor-fill".into(),
-        data: fill,
-        families: vec![InsertFontFamily { family: filled(), priority: FontPriority::Highest }],
-    });
 }
 
 /// The logo, for the window and the task bar.
@@ -319,45 +301,6 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
     native
 }
 
-pub fn style(ctx: &egui::Context) {
-    install_fonts(ctx);
-    // Ctrl+plus and Ctrl+minus belong to the remote host and the terminal, not to zooming this window.
-    ctx.options_mut(|o| o.zoom_with_keyboard = false);
-    let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
-    set_theme(ctx, dark);
-    ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = Vec2::new(10.0, 10.0);
-        s.spacing.button_padding = Vec2::new(12.0, 6.0);
-        s.spacing.interact_size.y = 30.0;
-    });
-}
-
-/// Dark or light, remembered between runs.
-pub fn set_theme(ctx: &egui::Context, dark: bool) {
-    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-    if dark {
-        v.panel_fill = Color32::from_rgb(18, 19, 23);
-        v.window_fill = Color32::from_rgb(28, 30, 36);
-        v.extreme_bg_color = Color32::from_rgb(12, 13, 16);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(48, 52, 62);
-    } else {
-        v.panel_fill = Color32::from_rgb(242, 243, 246);
-        v.window_fill = Color32::WHITE;
-        v.extreme_bg_color = Color32::from_rgb(234, 236, 241);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(226, 230, 238);
-    }
-    v.selection.bg_fill = ACCENT;
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = CornerRadius::same(8);
-    }
-    v.window_corner_radius = CornerRadius::same(12);
-    v.menu_corner_radius = CornerRadius::same(10);
-    let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
-    ctx.set_visuals_of(theme, v);
-    ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
-    crate::hosts::set_setting("theme", if dark { "dark" } else { "light" });
-}
-
 const GOOD: Color32 = Color32::from_rgb(70, 190, 110);
 const WARN: Color32 = Color32::from_rgb(230, 170, 50);
 const BAD: Color32 = Color32::from_rgb(225, 85, 75);
@@ -489,7 +432,9 @@ impl eframe::App for App {
                     let start = std::mem::replace(&mut self.start_with, Start::Screen);
                     let label = format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend);
                     let mut remote = Remote::new(sess, rx, ctl, label, ssh_cmd, start == Start::Terminal);
-                    if start == Start::Files && let Err(e) = remote.open_files_only() {
+                    if start == Start::Files
+                        && let Err(e) = remote.open_files_only()
+                    {
                         self.error = Some(e);
                     }
                     next = Some(Screen::Remote(Box::new(remote)));

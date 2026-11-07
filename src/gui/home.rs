@@ -21,10 +21,12 @@ impl App {
                 let target = Target::Direct { addr, password: f.password.clone() };
                 return self.start(ctx, target, host);
             }
-            if f.remember && !f.password.is_empty()
-                && let Err(e) = crate::vault::set(&host, &f.password) {
-                    self.error = Some(format!("The password was not saved: {e}"));
-                }
+            if f.remember
+                && !f.password.is_empty()
+                && let Err(e) = crate::vault::set(&host, &f.password)
+            {
+                self.error = Some(format!("The password was not saved: {e}"));
+            }
             // A password typed now wins over a saved one.
             let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
             Target::Ssh {
@@ -193,9 +195,10 @@ impl App {
         let known: Vec<String> =
             if self.vault.is_some() { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
         if let Some(v) = &mut self.vault
-            && !v.show(ctx, &known) {
-                self.vault = None;
-            }
+            && !v.show(ctx, &known)
+        {
+            self.vault = None;
+        }
         if let Some(b) = &mut self.backup
             && !b.show(ctx, &mut changed)
         {

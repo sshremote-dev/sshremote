@@ -6,7 +6,7 @@ use std::process::Command;
 
 use eframe::egui::{self, Color32, RichText};
 
-use crate::gui::{ACCENT, ic};
+use crate::gui::{ic, primary};
 
 fn ssh_dir() -> PathBuf {
     let home =
@@ -199,7 +199,7 @@ impl KeyTool {
                 ui.end_row();
             });
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Create key").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                if ui.add(primary("Create key")).clicked() {
                     self.generate();
                 }
                 if ui.button("Open the .ssh folder").clicked() {
@@ -254,14 +254,17 @@ fn block(lines: &[&str], alias: &str) -> Option<(usize, usize)> {
     let start = lines.iter().position(|l| {
         key_of(l) == "host" && l.trim()[4..].trim().trim_start_matches('=').split_whitespace().eq([alias])
     })?;
-    let end = (start + 1..lines.len()).find(|&i| matches!(key_of(lines[i]).as_str(), "host" | "match")).unwrap_or(lines.len());
+    let end = (start + 1..lines.len())
+        .find(|&i| matches!(key_of(lines[i]).as_str(), "host" | "match"))
+        .unwrap_or(lines.len());
     Some((start, end))
 }
 
 /// The config text with `h` added, or the block of `was` updated to it.
 pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let values = [h.hostname.trim(), h.user.trim(), if h.port.trim() == "22" { "" } else { h.port.trim() }, h.identity.trim()];
+    let values =
+        [h.hostname.trim(), h.user.trim(), if h.port.trim() == "22" { "" } else { h.port.trim() }, h.identity.trim()];
     let names = ["HostName", "User", "Port", "IdentityFile"];
     let Some((start, end)) = block(&lines, was).or_else(|| block(&lines, h.alias.trim())) else {
         let mut out = text.trim_end().to_string();
@@ -293,7 +296,10 @@ pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
         }
     }
     // Keys that were not there yet go right under the Host line.
-    let new: Vec<String> = (0..4).filter(|&i| !done[i] && !values[i].is_empty()).map(|i| format!("{indent}{} {}", names[i], values[i])).collect();
+    let new: Vec<String> = (0..4)
+        .filter(|&i| !done[i] && !values[i].is_empty())
+        .map(|i| format!("{indent}{} {}", names[i], values[i]))
+        .collect();
     let mut out: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
     out.push(format!("Host {}", h.alias.trim()));
     out.extend(new);
@@ -461,12 +467,15 @@ impl ConfigTool {
         if let Some(alias) = remove {
             if self.text != self.saved {
                 self.status = Some((false, "The file has unsaved edits; save or revert them first.".into()));
-            } else if self.write(remove_host(&self.saved, &alias), format!("Removed {alias} (the old file is config.bak)")) {
+            } else if self
+                .write(remove_host(&self.saved, &alias), format!("Removed {alias} (the old file is config.bak)"))
+            {
                 *changed = true;
             }
         }
         ui.separator();
-        let heading = if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
+        let heading =
+            if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
         ui.label(RichText::new(heading).strong());
         let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
         egui::Grid::new("addhost").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
@@ -494,7 +503,7 @@ impl ConfigTool {
         });
         ui.horizontal(|ui| {
             let label = if self.editing.is_empty() { "Add host" } else { "Save host" };
-            if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(ACCENT)).clicked() && self.save_form() {
+            if ui.add(primary(label)).clicked() && self.save_form() {
                 *changed = true;
             }
             if !self.editing.is_empty() && ui.button("Cancel").clicked() {
@@ -507,7 +516,7 @@ impl ConfigTool {
     fn file_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.horizontal(|ui| {
             let dirty = self.text != self.saved;
-            let save = egui::Button::new(RichText::new(format!("{}  Save", ic::CHECK)).color(Color32::WHITE)).fill(ACCENT);
+            let save = primary(format!("{}  Save", ic::CHECK));
             if ui.add_enabled(dirty, save).on_hover_text("Ctrl+S; the previous file is kept as config.bak").clicked()
                 || (dirty && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)))
             {
@@ -533,21 +542,24 @@ impl ConfigTool {
         });
         let th = crate::markdown::Theme::of(ui);
         egui::Frame::new().fill(th.bg).corner_radius(6).inner_margin(6.0).show(ui, |ui| {
-            egui::ScrollArea::both().max_height(ui.available_height() - 30.0).auto_shrink([false, false]).show(ui, |ui| {
-                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
-                    let mut job = crate::markdown::highlight(buf.as_str(), "ssh-config", &th, 13.0);
-                    job.wrap.max_width = f32::INFINITY;
-                    ui.ctx().fonts_mut(|f| f.layout_job(job))
-                };
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.text)
-                        .code_editor()
-                        .frame(egui::Frame::NONE)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(18)
-                        .layouter(&mut layouter),
-                );
-            });
+            egui::ScrollArea::both().max_height(ui.available_height() - 30.0).auto_shrink([false, false]).show(
+                ui,
+                |ui| {
+                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
+                        let mut job = crate::markdown::highlight(buf.as_str(), "ssh-config", &th, 13.0);
+                        job.wrap.max_width = f32::INFINITY;
+                        ui.ctx().fonts_mut(|f| f.layout_job(job))
+                    };
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.text)
+                            .code_editor()
+                            .frame(egui::Frame::NONE)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(18)
+                            .layouter(&mut layouter),
+                    );
+                },
+            );
         });
     }
 }
@@ -623,7 +635,7 @@ impl VaultTool {
                 ui.end_row();
             });
             let ready = !self.host.trim().is_empty() && !self.password.is_empty();
-            let save = egui::Button::new(RichText::new("Save password").color(Color32::WHITE)).fill(ACCENT);
+            let save = primary("Save password");
             if ui.add_enabled(ready, save).clicked() {
                 let host = self.host.trim().to_string();
                 self.status = Some(match crate::vault::set(&host, &self.password) {
@@ -691,7 +703,7 @@ impl BackupTool {
                         "With a passphrase (at least {} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored.",
                         crate::backup::MIN_PASSPHRASE
                     ));
-                let now = egui::Button::new(RichText::new(format!("{}  Back up now", ic::DOWNLOAD)).color(Color32::WHITE)).fill(ACCENT);
+                let now = primary(format!("{}  Back up now", ic::DOWNLOAD));
                 if ui.add(now).clicked() {
                     let min = crate::backup::MIN_PASSPHRASE;
                     if !self.passphrase.is_empty() && self.passphrase.chars().count() < min {
@@ -812,7 +824,10 @@ Host *
             "# mine\nHost web2\n  Port 2222\n  HostName 10.0.0.6\n  ForwardAgent yes\n\nHost *\n  ServerAliveInterval 30\n"
         );
         let added = upsert_host(text, "", &h("db", "10.0.0.9", "root", "22"));
-        assert!(added.ends_with("ServerAliveInterval 30\n\nHost db\n    HostName 10.0.0.9\n    User root\n"), "{added}");
+        assert!(
+            added.ends_with("ServerAliveInterval 30\n\nHost db\n    HostName 10.0.0.9\n    User root\n"),
+            "{added}"
+        );
         assert_eq!(remove_host(text, "web1"), "# mine\n\nHost *\n  ServerAliveInterval 30\n");
         assert_eq!(remove_host(text, "nothere"), text);
     }

@@ -540,17 +540,22 @@ impl Remote {
         let Some((lines, input)) = self.chat.as_mut() else { return Ok(None) };
         let mut open = true;
         let mut sent = None;
-        let resp = egui::Window::new("Chat")
+        let resp = egui::Window::new(format!("{}  Chat", ic::CHAT))
             .open(&mut open)
             .default_pos(ctx.content_rect().left_top() + Vec2::new(20.0, 70.0))
-            .default_size([340.0, 420.0])
+            .default_size([360.0, 460.0])
+            .min_size([280.0, 260.0])
             .show(ctx, |ui| {
-                let h = ui.available_height().max(120.0) - 64.0;
+                ui.label(
+                    RichText::new("With the person at the SSH host's screen; a window opens there.").small().weak(),
+                );
+                let h = (ui.available_height() - 56.0).max(120.0);
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .max_height(h)
                     .show(ui, |ui| crate::chat::show_lines(ui, lines, "Remote", "You"));
+                ui.add_space(4.0);
                 sent = crate::chat::input_row(ui, input, true);
             });
         let rect = resp.map(|r| r.response.rect);

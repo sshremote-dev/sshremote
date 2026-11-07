@@ -1170,7 +1170,8 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let (first, last) = input_rows(t);
-    let strip = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - (last - first + 1) as f32 * ch - 14.0), full.max);
+    let strip =
+        Rect::from_min_max(Pos2::new(full.left(), full.bottom() - (last - first + 1) as f32 * ch - 14.0), full.max);
     let id = egui::Id::unique(("reader-input", t.id));
     let resp = ui.interact(strip, id, Sense::click());
     ui.painter().rect_filled(strip, CornerRadius::ZERO, scheme_bg());
@@ -1447,7 +1448,8 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
     flush(&mut run, run_start, run_color);
     if !t.preedit.is_empty() && show_cursor {
         // The composition in progress, underlined on the cursor's cells.
-        let at = Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset - first) as f32 * ch);
+        let at =
+            Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset - first) as f32 * ch);
         let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), scheme_fg());
         let r = Rect::from_min_size(at, Vec2::new(galley.size().x.max(cw), ch));
         painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
@@ -2025,7 +2027,11 @@ mod tests {
         for view in [View::Text, View::Markdown] {
             w.tabs[0].view = view;
             frame(&ctx, &mut w, Vec::new());
-            let done = frame(&ctx, &mut w, vec![Event::Ime(egui::ImeEvent::Commit("\u{D55C}".into())), Event::Text("a".into())]);
+            let done = frame(
+                &ctx,
+                &mut w,
+                vec![Event::Ime(egui::ImeEvent::Commit("\u{D55C}".into())), Event::Text("a".into())],
+            );
             assert_eq!(typed(&done), "\u{D55C}a");
         }
     }

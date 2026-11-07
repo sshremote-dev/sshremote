@@ -158,24 +158,41 @@ impl eframe::App for ChatApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.label(RichText::new("Message from the person viewing this screen").weak());
-            ui.separator();
-            let input_h = 64.0;
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .max_height(ui.available_height() - input_h)
-                .show(ui, |ui| show_lines(ui, &self.lines, "Viewer", "You"));
-            if self.ended.is_some() {
-                ui.label(RichText::new("The viewer has disconnected; this window closes shortly.").weak());
-            }
+        let card = ui.visuals().window_fill;
+        let header = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(16, 10));
+        egui::Panel::top("chat-header").frame(header).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(34.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 17.0, crate::gui::ACCENT);
+                let icon = egui::FontId::proportional(17.0);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::gui::ic::CHAT, icon, Color32::WHITE);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(RichText::new("Viewer").strong().size(15.0));
+                    let state = if self.ended.is_some() {
+                        "disconnected; this window closes shortly"
+                    } else {
+                        "viewing this screen over SSH Remote"
+                    };
+                    ui.label(RichText::new(state).small().weak());
+                });
+            });
+        });
+        let footer = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(12, 10));
+        egui::Panel::bottom("chat-input").frame(footer).show(ui, |ui| {
             if let Some(text) = input_row(ui, &mut self.input, self.ended.is_none()) {
                 println!("{}", escape(&text));
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
                 self.lines.push((false, text));
             }
+        });
+        let body = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));
+        egui::CentralPanel::default().frame(body).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| show_lines(ui, &self.lines, "Viewer", "You"));
         });
         if self.ended.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -184,41 +201,91 @@ impl eframe::App for ChatApp {
     }
 }
 
-/// Message bubbles; `them` and `me` label the two sides.
+/// The conversation as message bubbles, as in a messaging app: the other side's on the left with
+/// their name over the first of a run, one's own on the right in the accent colour.
 pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &str) {
-    for (theirs, text) in lines {
-        let (who, fill, align) = if *theirs {
-            (them, Color32::from_rgb(44, 48, 58), egui::Align::Min)
+    let dark = ui.visuals().dark_mode;
+    if lines.is_empty() {
+        ui.add_space(ui.available_height() * 0.3);
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new(crate::gui::ic::CHAT).size(34.0).weak());
+            ui.label(RichText::new("No messages yet").strong());
+            ui.label(RichText::new(format!("Messages with {them} appear here.")).small().weak());
+        });
+        return;
+    }
+    let width = ui.available_width();
+    for (i, (theirs, text)) in lines.iter().enumerate() {
+        let first = i == 0 || lines[i - 1].0 != *theirs;
+        let last = i + 1 == lines.len() || lines[i + 1].0 != *theirs;
+        if first && i > 0 {
+            ui.add_space(6.0);
+        }
+        let (fill, fg) = if *theirs {
+            (
+                if dark { Color32::from_rgb(44, 47, 56) } else { Color32::from_rgb(232, 235, 241) },
+                ui.visuals().text_color(),
+            )
         } else {
-            (me, Color32::from_rgb(40, 84, 160), egui::Align::Max)
+            (crate::gui::ACCENT, Color32::WHITE)
         };
+        // The corner nearest the sender stays sharp on the last bubble of a run.
+        let r = 16u8;
+        let radius = match (*theirs, last) {
+            (true, true) => egui::CornerRadius { nw: r, ne: r, sw: 4, se: r },
+            (false, true) => egui::CornerRadius { nw: r, ne: r, sw: r, se: 4 },
+            _ => egui::CornerRadius::same(r),
+        };
+        let align = if *theirs { egui::Align::Min } else { egui::Align::Max };
         ui.with_layout(egui::Layout::top_down(align), |ui| {
-            ui.label(RichText::new(who).small().weak());
-            egui::Frame::new().fill(fill).corner_radius(egui::CornerRadius::same(10)).inner_margin(8.0).show(
+            if first {
+                ui.label(RichText::new(if *theirs { them } else { me }).small().weak());
+            }
+            ui.add_space(-6.0);
+            egui::Frame::new().fill(fill).corner_radius(radius).inner_margin(egui::Margin::symmetric(12, 8)).show(
                 ui,
                 |ui| {
-                    ui.set_max_width(260.0);
-                    ui.label(RichText::new(text).color(Color32::WHITE));
+                    ui.set_max_width(width * 0.75);
+                    ui.add(egui::Label::new(RichText::new(text).color(fg).size(14.0)).wrap().selectable(true));
                 },
             );
         });
+        ui.add_space(-6.0);
     }
 }
 
-/// A text field with a Send button; returns the text when sent.
+/// A rounded message field with a round send button; Enter sends. Returns the text when sent.
 pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option<String> {
     let mut sent = None;
-    ui.horizontal(|ui| {
-        let edit = ui.add_enabled(
-            enabled,
-            egui::TextEdit::singleline(input).hint_text("Type a message").desired_width(ui.available_width() - 70.0),
-        );
-        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (ui.add_enabled(enabled, egui::Button::new("Send")).clicked() || enter) && !input.trim().is_empty() {
-            sent = Some(std::mem::take(input).trim().to_string());
-            edit.request_focus();
-        }
-    });
+    let field = ui.visuals().extreme_bg_color;
+    let line = ui.visuals().widgets.noninteractive.bg_stroke;
+    egui::Frame::new()
+        .fill(field)
+        .stroke(line)
+        .corner_radius(20)
+        .inner_margin(egui::Margin { left: 14, right: 4, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let edit = ui.add_enabled(
+                    enabled,
+                    egui::TextEdit::singleline(input)
+                        .hint_text("Message")
+                        .frame(egui::Frame::NONE)
+                        .desired_width(ui.available_width() - 40.0)
+                        .min_size(egui::Vec2::new(0.0, 30.0)),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let ready = enabled && !input.trim().is_empty();
+                let send = egui::Button::new(RichText::new(crate::gui::ic::SEND).size(16.0).color(Color32::WHITE))
+                    .fill(if ready { crate::gui::ACCENT } else { crate::gui::ACCENT.gamma_multiply(0.4) })
+                    .corner_radius(16)
+                    .min_size(egui::Vec2::splat(32.0));
+                if (ui.add_enabled(ready, send).on_hover_text("Send (Enter)").clicked() || enter) && ready {
+                    sent = Some(std::mem::take(input).trim().to_string());
+                    edit.request_focus();
+                }
+            });
+        });
     sent
 }
 

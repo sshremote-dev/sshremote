@@ -23,7 +23,9 @@ pub fn png_from_rgb(w: usize, h: usize, rgb: &[u8], grey: bool) -> Result<Vec<u8
     if grey {
         enc.set_color(png::ColorType::Grayscale);
         let g: Vec<u8> = rgb
-            .as_chunks::<3>().0.iter()
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
             .collect();
         enc.write_header().and_then(|mut w| w.write_image_data(&g)).map_err(|e| e.to_string())?;

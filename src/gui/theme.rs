@@ -1,0 +1,187 @@
+//! The look shared by every window: the system's own UI and code fonts, text sizes, colours,
+//! rounded widgets and soft shadows, in a dark and a light variant.
+
+use eframe::egui::{
+    self, Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Vec2,
+    epaint::text::{FontInsert, FontPriority, InsertFontFamily},
+};
+
+use super::ACCENT;
+
+/// The filled variant of the icon font, for a set star.
+pub(super) fn filled() -> FontFamily {
+    FontFamily::Name("phosphor-fill".into())
+}
+
+/// Fonts that may be on this system, by family, best first; a .ttc entry names its face.
+fn system_fonts() -> (Vec<(&'static str, u32)>, Vec<(&'static str, u32)>) {
+    if cfg!(windows) {
+        (
+            vec![(r"C:\Windows\Fonts\segoeui.ttf", 0), (r"C:\Windows\Fonts\malgun.ttf", 0)],
+            vec![(r"C:\Windows\Fonts\CascadiaMono.ttf", 0), (r"C:\Windows\Fonts\consola.ttf", 0)],
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            vec![("/System/Library/Fonts/SFNS.ttf", 0), ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0)],
+            vec![("/System/Library/Fonts/SFNSMono.ttf", 0)],
+        )
+    } else {
+        (
+            vec![
+                ("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", 0),
+                ("/usr/share/fonts/opentype/cantarell/Cantarell-Regular.otf", 0),
+                ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+                ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
+            ],
+            vec![
+                ("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf", 0),
+                ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
+            ],
+        )
+    }
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    crate::markdown::install_bold(ctx);
+    // The system's UI font first (one Latin face, then its Korean, Japanese and Chinese fallback),
+    // egui's own fonts after it for what they lack. Missing files are skipped.
+    let (ui_fonts, mono_fonts) = system_fonts();
+    for (family, list) in [(FontFamily::Proportional, ui_fonts), (FontFamily::Monospace, mono_fonts)] {
+        let mut latin_done = false;
+        // Inserted in reverse at the front, so the list's order is kept.
+        let found: Vec<_> = list.into_iter().filter(|(p, _)| std::path::Path::new(p).is_file()).collect();
+        let mut picked = Vec::new();
+        for (path, index) in found {
+            let cjk = path.contains("malgun") || path.contains("CJK") || path.contains("Gothic");
+            if cjk || !latin_done {
+                latin_done |= !cjk;
+                picked.push((path, index));
+            }
+        }
+        for (path, index) in picked.into_iter().rev() {
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            let mut data = egui::FontData::from_owned(bytes);
+            data.index = index;
+            let families = vec![InsertFontFamily { family: family.clone(), priority: FontPriority::Highest }];
+            ctx.add_font(FontInsert { name: format!("system:{path}"), data, families });
+        }
+    }
+    let regular = egui::FontData::from_static(include_bytes!("../../assets/fonts/Phosphor.ttf"));
+    let fill = egui::FontData::from_static(include_bytes!("../../assets/fonts/Phosphor-Fill.ttf"));
+    let fallback = |f| InsertFontFamily { family: f, priority: FontPriority::Lowest };
+    ctx.add_font(FontInsert {
+        name: "phosphor".into(),
+        data: regular,
+        families: vec![fallback(FontFamily::Proportional), fallback(FontFamily::Monospace)],
+    });
+    ctx.add_font(FontInsert {
+        name: "phosphor-fill".into(),
+        data: fill,
+        families: vec![InsertFontFamily { family: filled(), priority: FontPriority::Highest }],
+    });
+}
+
+/// Fonts, sizes, spacing and the remembered theme, for any window of the program.
+pub fn style(ctx: &egui::Context) {
+    install_fonts(ctx);
+    // Ctrl+plus and Ctrl+minus belong to the remote host and the terminal, not to zooming this window.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    let dark = crate::hosts::setting("theme").is_none_or(|t| t != "light");
+    set_theme(ctx, dark);
+    ctx.all_styles_mut(|s| {
+        s.text_styles = [
+            (TextStyle::Small, FontId::proportional(11.5)),
+            (TextStyle::Body, FontId::proportional(14.0)),
+            (TextStyle::Button, FontId::proportional(14.0)),
+            (TextStyle::Heading, FontId::proportional(20.0)),
+            (TextStyle::Monospace, FontId::monospace(13.5)),
+        ]
+        .into();
+        s.spacing.item_spacing = Vec2::new(10.0, 10.0);
+        s.spacing.button_padding = Vec2::new(12.0, 6.0);
+        s.spacing.interact_size.y = 30.0;
+        s.spacing.window_margin = egui::Margin::same(16);
+        s.spacing.menu_margin = egui::Margin::same(8);
+        s.spacing.icon_width = 18.0;
+        s.spacing.icon_width_inner = 10.0;
+        s.spacing.scroll.bar_width = 8.0;
+        s.spacing.scroll.floating = true;
+    });
+}
+
+/// Dark or light, remembered between runs.
+pub fn set_theme(ctx: &egui::Context, dark: bool) {
+    let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let (text, weak_line) = if dark {
+        v.panel_fill = Color32::from_rgb(20, 21, 25);
+        v.window_fill = Color32::from_rgb(30, 32, 38);
+        v.extreme_bg_color = Color32::from_rgb(14, 15, 18);
+        v.faint_bg_color = Color32::from_rgb(26, 28, 33);
+        v.code_bg_color = Color32::from_rgb(36, 38, 46);
+        for (w, fill) in [
+            (&mut v.widgets.inactive, Color32::from_rgb(40, 43, 51)),
+            (&mut v.widgets.hovered, Color32::from_rgb(52, 56, 66)),
+            (&mut v.widgets.active, Color32::from_rgb(60, 65, 77)),
+            (&mut v.widgets.open, Color32::from_rgb(46, 50, 59)),
+        ] {
+            w.bg_fill = fill;
+            w.weak_bg_fill = fill;
+        }
+        (Color32::from_rgb(230, 232, 237), Color32::from_white_alpha(18))
+    } else {
+        v.panel_fill = Color32::from_rgb(244, 245, 248);
+        v.window_fill = Color32::WHITE;
+        v.extreme_bg_color = Color32::from_rgb(236, 238, 243);
+        v.faint_bg_color = Color32::from_rgb(248, 249, 251);
+        v.code_bg_color = Color32::from_rgb(236, 238, 243);
+        for (w, fill) in [
+            (&mut v.widgets.inactive, Color32::from_rgb(233, 235, 240)),
+            (&mut v.widgets.hovered, Color32::from_rgb(222, 226, 234)),
+            (&mut v.widgets.active, Color32::from_rgb(210, 216, 226)),
+            (&mut v.widgets.open, Color32::from_rgb(226, 230, 238)),
+        ] {
+            w.bg_fill = fill;
+            w.weak_bg_fill = fill;
+        }
+        (Color32::from_rgb(28, 30, 36), Color32::from_black_alpha(22))
+    };
+    v.override_text_color = None;
+    v.widgets.noninteractive.fg_stroke.color = text;
+    v.widgets.inactive.fg_stroke.color = text;
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, weak_line);
+    // Flat buttons: no outline until hovered.
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, weak_line);
+    v.selection.bg_fill = ACCENT;
+    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.hyperlink_color = Color32::from_rgb(90, 160, 255);
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.corner_radius = CornerRadius::same(8);
+        w.expansion = 0.0;
+    }
+    v.window_corner_radius = CornerRadius::same(14);
+    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_stroke = Stroke::new(1.0, weak_line);
+    let shade = if dark { 110 } else { 40 };
+    v.window_shadow = Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(shade) };
+    v.popup_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(shade) };
+    v.window_highlight_topmost = false;
+    v.striped = true;
+    let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
+    ctx.set_visuals_of(theme, v);
+    ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
+    crate::hosts::set_setting("theme", if dark { "dark" } else { "light" });
+}
+
+/// A filled accent button for the main action of a window or form.
+pub(crate) fn primary(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text.into()).color(Color32::WHITE))
+        .fill(ACCENT)
+        .min_size(Vec2::new(0.0, 32.0))
+}
