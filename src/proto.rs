@@ -368,6 +368,16 @@ fn bad() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "malformed message")
 }
 
+/// A message, or a kind of something in one, from a newer version: the reader may pass it over.
+fn unknown() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "unknown message")
+}
+
+/// Whether a decoding error is only a newer version's message, which can be passed over.
+pub fn is_unknown(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Unsupported
+}
+
 struct Cur<'a> {
     d: &'a [u8],
     p: usize,
@@ -672,8 +682,8 @@ impl ToAgent {
                 },
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
-            33 => ToAgent::Share(crate::capture::Share::from_wire(c.u8()?, c.u64()?).ok_or_else(bad)?),
-            _ => return Err(bad()),
+            33 => ToAgent::Share(crate::capture::Share::from_wire(c.u8()?, c.u64()?).ok_or_else(unknown)?),
+            _ => return Err(unknown()),
         })
     }
 }
@@ -1006,7 +1016,7 @@ impl ToClient {
                 ok: c.u8()? != 0,
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
-            _ => return Err(bad()),
+            _ => return Err(unknown()),
         })
     }
 }
@@ -1015,6 +1025,18 @@ impl ToClient {
 mod tests {
     use super::*;
     use crate::xk;
+
+    /// A newer version's message can be passed over; a damaged one cannot.
+    #[test]
+    fn unknown_messages_differ_from_damaged_ones() {
+        assert!(is_unknown(&ToAgent::decode(250, &[]).unwrap_err()));
+        assert!(is_unknown(&ToClient::decode(250, &[]).unwrap_err()));
+        let mut share = vec![9u8];
+        share.extend_from_slice(&0u64.to_le_bytes());
+        assert!(is_unknown(&ToAgent::decode(33, &share).unwrap_err()));
+        let (k, p) = ToAgent::FileStart { id: 1, size: 3, dir: "/d".into(), name: "a".into() }.encode();
+        assert!(!is_unknown(&ToAgent::decode(k, &p[..p.len() - 3]).unwrap_err()));
+    }
 
     #[test]
     fn roundtrip() {

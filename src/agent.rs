@@ -93,14 +93,24 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let (tx, rx) = mpsc::channel();
     // Why the viewer's stream ended, when it ended badly, for the viewer to see.
     let (why_tx, why) = mpsc::channel::<String>();
+    // Kinds of message this agent could not read, each reported once.
+    let (skip_tx, skipped) = mpsc::channel::<u8>();
     thread::spawn(move || {
         let mut input = BufReader::new(input);
+        let mut told = std::collections::HashSet::new();
         loop {
             match read_msg(&mut input) {
                 Ok(Some((k, p))) => match ToAgent::decode(k, &p) {
                     Ok(m) => {
                         if tx.send(m).is_err() {
                             break;
+                        }
+                    }
+                    // A newer viewer's request: messages carry their length, so the stream stays in
+                    // step and the rest of the session goes on.
+                    Err(e) if crate::proto::is_unknown(&e) => {
+                        if told.insert(k) {
+                            let _ = skip_tx.send(k);
                         }
                     }
                     Err(_) => {
@@ -164,6 +174,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         msgs.extend(rx.try_iter());
         msgs.splice(0..0, queued.drain(..));
+        for k in skipped.try_iter() {
+            let text = format!("The SSH host's sshremote is older than this one and passed over a request it does not know (message {k}); update it there.");
+            send(enc, &ToClient::Notice(text)).map_err(io_err)?;
+        }
         for m in msgs {
             // Text waiting to be pasted goes in before any later input, so the order is kept.
             let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym));

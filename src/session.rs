@@ -135,9 +135,23 @@ impl Session {
                     Err(e) => return drop(tx.send(Ev::Closed(e.to_string()))),
                 };
                 let _ = dec.window_log_max(27);
+                let mut told = std::collections::HashSet::new();
                 loop {
                     let msg = match read_msg(&mut dec) {
-                        Ok(Some((k, p))) => ToClient::decode(k, &p).map_err(|e| e.to_string()),
+                        Ok(Some((k, p))) => match ToClient::decode(k, &p) {
+                            Ok(m) => Ok(m),
+                            // A newer agent's message: it carries its length, so the rest still
+                            // reads; said once per kind.
+                            Err(e) if crate::proto::is_unknown(&e) => {
+                                if !told.insert(k) {
+                                    continue;
+                                }
+                                Ok(ToClient::Notice(format!(
+                                    "The SSH host's sshremote is newer than this one and sent something it does not know (message {k}); update it here."
+                                )))
+                            }
+                            Err(e) => Err(e.to_string()),
+                        },
                         Ok(None) => Err("connection closed".into()),
                         Err(e) => Err(e.to_string()),
                     };
