@@ -140,6 +140,8 @@ struct Tab {
     dir: Option<bool>,
     /// What it runs, to open the same in a new pane.
     profile: Profile,
+    /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
+    preedit: String,
 }
 
 /// A tab or pane waiting for the window's context: what it runs, and the pane it splits (with the
@@ -473,6 +475,7 @@ impl TermWindow {
             backend,
             view: View::Terminal,
             search: None,
+            preedit: String::new(),
             clean: true,
             group: id,
             dir: None,
@@ -902,6 +905,8 @@ impl TermWindow {
         }
         let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
+        // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
+        let keys = self.renaming.is_none() && !ui.ctx().any_popup_open();
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let font_size = self.font_size;
@@ -912,10 +917,11 @@ impl TermWindow {
             let several = panes.len() > 1;
             for (&i, &r) in panes.iter().zip(&rects) {
                 let focused = i == self.active;
+                let keys = keys && focused;
                 let t = &mut self.tabs[i];
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(("pane", t.id)));
                 let ask = match t.view {
-                    View::Terminal => screen(&mut child, t, font_size, copy_on_select, focused, out),
+                    View::Terminal => screen(&mut child, t, font_size, copy_on_select, focused, keys, out),
                     View::Text | View::Markdown => {
                         reader(&mut child, t);
                         PaneAsk { focus: child.response().contains_pointer() && child.input(|i| i.pointer.any_pressed()), ..Default::default() }
@@ -1044,7 +1050,7 @@ fn open_url(url: &str) {
     }
 }
 
-fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, focused: bool, out: &mut Vec<Cmd>) -> PaneAsk {
+fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, focused: bool, keys: bool, out: &mut Vec<Cmd>) -> PaneAsk {
     let mut ask = PaneAsk::default();
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -1258,15 +1264,43 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
     }
     let mode = *t.term.mode();
+    let keys = keys && t.search.is_none();
+    if keys {
+        // Hold the keyboard focus so Tab, the arrows and Escape reach the shell instead of moving
+        // between the window's buttons, where Enter or Space would then press one.
+        let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+        ui.memory_mut(|m| {
+            m.request_focus(resp.id);
+            m.set_focus_lock_filter(resp.id, filter);
+        });
+        // An input method composes at the terminal's cursor, as in a text field.
+        let c = t.term.grid().cursor.point;
+        let at = Pos2::new(origin.x + c.column.0 as f32 * cw, origin.y + (c.line.0 + offset) as f32 * ch);
+        ui.ctx().output_mut(|o| {
+            o.ime = Some(egui::output::IMEOutput {
+                purpose: egui::IMEPurpose::Terminal,
+                rect: area,
+                cursor_rect: Rect::from_min_size(at, Vec2::new(cw, ch)),
+                should_interrupt_composition: false,
+            })
+        });
+    } else {
+        t.preedit.clear();
+    }
     let mut send: Vec<u8> = Vec::new();
     let events = ui.ctx().input(|i| i.events.clone());
     for e in events {
         // Only the focused pane types; the wheel scrolls the pane under the pointer.
-        if !focused && !matches!(e, Event::MouseWheel { .. }) {
+        if !keys && !matches!(e, Event::MouseWheel { .. }) {
             continue;
         }
         match e {
             Event::Text(s) => send.extend_from_slice(s.as_bytes()),
+            Event::Ime(egui::ImeEvent::Preedit { text, .. }) => t.preedit = text,
+            Event::Ime(egui::ImeEvent::Commit(s)) => {
+                t.preedit.clear();
+                send.extend_from_slice(s.as_bytes());
+            }
             Event::Copy => match t.term.selection_to_string() {
                 Some(s) if !s.is_empty() => {
                     ui.ctx().copy_text(s);
@@ -1414,6 +1448,15 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         }
     }
     flush(&mut run, run_start, run_color);
+    if !t.preedit.is_empty() && show_cursor {
+        // The composition in progress, underlined on the cursor's cells.
+        let at = Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset) as f32 * ch);
+        let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), scheme_fg());
+        let r = Rect::from_min_size(at, Vec2::new(galley.size().x.max(cw), ch));
+        painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
+        painter.galley(at, galley, scheme_fg());
+        painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
+    }
     if let Some(r) = hollow {
         painter.rect_stroke(r.shrink(0.5), CornerRadius::ZERO, egui::Stroke::new(1.0, scheme_fg()), egui::StrokeKind::Inside);
     }
