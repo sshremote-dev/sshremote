@@ -213,36 +213,36 @@ pub(super) fn sync_rows(t: &mut Tab) {
     let history = grid.total_lines() - grid.screen_lines();
     let cols = grid.columns();
     let cached = t.rows.plain.len();
-    let same_at = |t: &Tab, k: usize| {
-        // The cached newest rows are now `k` rows further up.
-        (0..cached.min(3)).all(|i| k + i < history && row_plain(t, -((k + i + 1) as i32)) == t.rows.plain[cached - 1 - i])
+    // The scrollback's row `h` (oldest first) as a line number of the grid.
+    let line = |h: usize| h as i32 - history as i32;
+    // Whether the cache matches the scrollback once its `d` oldest rows are dropped: the newest
+    // rows and rows spread over the whole overlap must agree, so repeated output at the bottom
+    // cannot pass for a scrollback that did not move.
+    let matches = |t: &Tab, d: usize| {
+        let overlap = cached - d;
+        let spread = (0..32).map(|i| d + overlap * i / 32);
+        let newest = (cached.saturating_sub(3).max(d)..cached).rev();
+        newest.chain(spread).all(|j| row_plain(t, line(j - d)) == t.rows.plain[j])
     };
-    let shift = if t.rows.cols != cols || cached == 0 {
+    let dropped = if t.rows.cols != cols || cached == 0 {
         None
-    } else if history > cached {
-        // Still filling: exactly the growth scrolled in.
-        Some(history - cached).filter(|&k| same_at(t, k))
-    } else if history == cached {
-        // Full: the oldest rows drop as new ones come; find how far the cached ones moved.
-        (0..history).find(|&k| same_at(t, k))
     } else {
-        None
+        // Rows that scrolled in come after the cached ones; the oldest may have dropped off the top.
+        (cached.saturating_sub(history)..cached).find(|&d| matches(t, d))
     };
-    match shift {
-        Some(k) => {
-            for line in (1..=k as i32).rev() {
-                let md = row_markdown(t, -line);
-                let plain = row_plain(t, -line);
+    match dropped {
+        Some(d) => {
+            t.rows.md.drain(..d);
+            t.rows.plain.drain(..d);
+            for h in cached - d..history {
+                let md = row_markdown(t, line(h));
+                let plain = row_plain(t, line(h));
                 t.rows.md.push_back(md);
                 t.rows.plain.push_back(plain);
             }
-            while t.rows.plain.len() > history {
-                t.rows.md.pop_front();
-                t.rows.plain.pop_front();
-            }
         }
         None => {
-            let (md, plain) = (1..=history as i32).rev().map(|l| (row_markdown(t, -l), row_plain(t, -l))).unzip();
+            let (md, plain) = (0..history).map(|h| (row_markdown(t, line(h)), row_plain(t, line(h)))).unzip();
             t.rows = Rows { md, plain, cols };
         }
     }

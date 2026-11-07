@@ -248,13 +248,10 @@ impl Gdi {
                 return None;
             }
             let ((ml, mt), _) = self.monitor;
-            match super::dxgi::Dup::open(ml, mt) {
-                Ok(d) => {
-                    self.base = Dib::new(self.screen, d.size.0, d.size.1);
-                    self.dup = self.base.is_some().then_some(d);
-                    self.dup_ready = false;
-                }
-                Err(_) => {}
+            if let Ok(d) = super::dxgi::Dup::open(ml, mt) {
+                self.base = Dib::new(self.screen, d.size.0, d.size.1);
+                self.dup = self.base.is_some().then_some(d);
+                self.dup_ready = false;
             }
             if self.dup.is_none() {
                 self.dup_retry = std::time::Instant::now() + std::time::Duration::from_secs(2);

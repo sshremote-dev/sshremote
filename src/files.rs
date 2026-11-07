@@ -78,7 +78,7 @@ pub enum Note {
 
 impl Note {
     /// The agent's answer to an upload.
-    pub fn to_client(self) -> ToClient {
+    pub fn into_client(self) -> ToClient {
         match self {
             Note::Progress { id, received } => ToClient::FileProgress { id, received },
             Note::Done { id, ok, text } => ToClient::FileDone { id, ok, text },

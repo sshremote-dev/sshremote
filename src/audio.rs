@@ -211,9 +211,8 @@ impl Player {
         };
         let mut q = self.queue.lock().unwrap();
         for f in stereo.chunks(2) {
-            for c in 0..self.device_ch {
-                q.push_back(if c < 2 { f[c] } else { 0.0 });
-            }
+            // Left and right, then silence for any further channels of the device.
+            q.extend(f.iter().copied().chain(std::iter::repeat(0.0)).take(self.device_ch));
         }
         // More than 300 ms queued means the link stalled; drop the oldest to stay live.
         let max = self.device_rate as usize * self.device_ch * 3 / 10;

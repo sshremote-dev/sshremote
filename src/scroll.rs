@@ -118,7 +118,7 @@ mod tests {
             .map(|i| {
                 let (x, y) = (i % w, i / w + offset);
                 // Pseudo-random glyph pixels, so no other shift lines up by accident.
-                let r = (x as u32 * 73_856_093 ^ y as u32 * 19_349_663).wrapping_mul(2_654_435_761) >> 28;
+                let r = ((x as u32 * 73_856_093) ^ (y as u32 * 19_349_663)).wrapping_mul(2_654_435_761) >> 28;
                 if x > 40 && r < 4 && y % 20 > 4 { 200 } else { 10 }
             })
             .collect();

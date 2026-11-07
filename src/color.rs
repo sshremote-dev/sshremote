@@ -192,7 +192,7 @@ impl Reducer {
         if self.mode == Mode::Mono {
             // Text and lines on any background, not only dark on light (see `bilevel`).
             let luma: Vec<u8> = (0..h)
-                .flat_map(|y| img.data[y * img.stride..y * img.stride + w * 4].chunks_exact(4))
+                .flat_map(|y| img.data[y * img.stride..y * img.stride + w * 4].as_chunks::<4>().0.iter())
                 .map(|p| ((77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8) as u8)
                 .collect();
             data = crate::bilevel::binarize(&luma, w, h);

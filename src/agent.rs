@@ -265,17 +265,17 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         inbox.start_in(id, size, std::path::Path::new(&dir), &name)
                     };
                     if let Some(m) = note {
-                        send(enc, &m.to_client()).map_err(io_err)?;
+                        send(enc, &m.into_client()).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileData { id, data } => {
                     if let Some(m) = inbox.data(id, &data) {
-                        send(enc, &m.to_client()).map_err(io_err)?;
+                        send(enc, &m.into_client()).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileEnd { id } => {
                     if let Some(m) = inbox.end(id, true, "") {
-                        send(enc, &m.to_client()).map_err(io_err)?;
+                        send(enc, &m.into_client()).map_err(io_err)?;
                     }
                 }
                 ToAgent::ListDir { path } => send(enc, &crate::files::list(&path)).map_err(io_err)?,

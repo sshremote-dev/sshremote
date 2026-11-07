@@ -1738,4 +1738,32 @@ mod rows {
         t.parser.advance(&mut t.term, b"\x1b[3J\x1b[2J\x1b[Hafter clear\r\n");
         check(t);
     }
+
+    /// Output that repeats itself does not fool the cache once the scrollback is full.
+    #[test]
+    fn cached_rows_survive_repeated_output() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        tab_with(&mut w, &ctx);
+        let t = &mut w.tabs[0];
+        let check = |t: &mut Tab| {
+            reader::sync_rows(t);
+            let g = t.term.grid();
+            let history = (g.total_lines() - g.screen_lines()) as i32;
+            assert_eq!(reader::join_rows(t.rows_md()), reader::screen_markdown(t, -history, 0));
+        };
+        for k in 0..10_100 {
+            t.parser.advance(&mut t.term, format!("unique {k}\r\n").as_bytes());
+        }
+        check(t);
+        for round in 0..20 {
+            for _ in 0..(round % 5 + 1) * 3 {
+                t.parser.advance(&mut t.term, b"same\r\n");
+            }
+            if round % 3 == 0 {
+                t.parser.advance(&mut t.term, b"\r\n\r\n");
+            }
+            check(t);
+        }
+    }
 }
