@@ -33,6 +33,7 @@ pub(crate) mod ic {
     pub const CARET_UP: &str = "\u{E13C}";
     pub const ARTICLE: &str = "\u{E0A8}";
     pub const COPY: &str = "\u{E1CA}";
+    pub const CHECK: &str = "\u{E182}";
     pub const GLOBE: &str = "\u{E288}";
     pub const KEY: &str = "\u{E2D6}";
     pub const TEXT_T: &str = "\u{E48A}";
@@ -79,6 +80,7 @@ fn filled() -> egui::FontFamily {
 }
 
 fn install_fonts(ctx: &egui::Context) {
+    crate::markdown::install_bold(ctx);
     use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
     let regular = egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor.ttf"));
     let fill = egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor-Fill.ttf"));

@@ -140,6 +140,10 @@ struct Tab {
     dir: Option<bool>,
     /// What it runs, to open the same in a new pane.
     profile: Profile,
+    /// Bumped by output, so the text and Markdown views rebuild only after a change.
+    rev: u64,
+    /// The text view's text and the Markdown view's document, for `rev` and the session choice.
+    reading: Option<(u64, bool, std::rc::Rc<(String, crate::markdown::Doc)>)>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
 }
@@ -476,6 +480,8 @@ impl TermWindow {
             view: View::Terminal,
             search: None,
             preedit: String::new(),
+            rev: 0,
+            reading: None,
             clean: true,
             group: id,
             dir: None,
@@ -527,6 +533,7 @@ impl TermWindow {
     pub fn output(&mut self, id: u32, data: &[u8]) {
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
             t.parser.advance(&mut t.term, data);
+            t.rev += 1;
         }
     }
 
@@ -583,6 +590,7 @@ impl TermWindow {
                 let (data, exit) = l.drain();
                 if !data.is_empty() {
                     t.parser.advance(&mut t.term, &data);
+                    t.rev += 1;
                 }
                 if let Some(e) = exit {
                     t.exited = Some(e);
@@ -997,28 +1005,80 @@ fn buffer_text(t: &Tab) -> String {
     text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string()
 }
 
-/// The text and Markdown views of a tab.
+/// The text and Markdown views of a tab, styled as VS Code's editor and Markdown preview.
 fn reader(ui: &mut egui::Ui, t: &mut Tab) {
-    let raw = buffer_text(t);
     let markdown = t.view == View::Markdown;
-    let text = if markdown && t.clean { crate::markdown::clean_agent_output(&raw) } else { raw };
+    if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != t.clean) {
+        let raw = buffer_text(t);
+        let doc = crate::markdown::Doc::new(&raw, t.clean);
+        t.reading = Some((t.rev, t.clean, std::rc::Rc::new((raw, doc))));
+    }
+    let read = t.reading.as_ref().expect("just built").2.clone();
+    let (text, doc) = (&read.0, &read.1);
+    let th = crate::markdown::Theme::of(ui);
+    ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, th.bg);
+    ui.visuals_mut().override_text_color = Some(th.fg);
     ui.horizontal(|ui| {
         if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
             ui.ctx().copy_text(text.clone());
         }
         if markdown {
-            ui.checkbox(&mut t.clean, "Remove terminal frames and agent markers");
+            ui.checkbox(&mut t.clean, "Agent session").on_hover_text(
+                "Claude Code or Codex output: frames removed; prompts, replies and tool runs apart, with a copy button under each reply",
+            );
         }
-        ui.label(RichText::new(format!("{} lines", text.lines().count())).weak().small());
+        ui.label(RichText::new(format!("{} lines", text.lines().count())).color(th.fg.gamma_multiply(0.6)).small());
     });
     ui.add_space(4.0);
-    egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-        ui.visuals_mut().override_text_color = Some(scheme_fg());
-        if markdown {
-            crate::markdown::show(ui, &text);
-        } else {
-            ui.add(egui::Label::new(RichText::new(&text).monospace().size(13.0)).selectable(true).extend());
-        }
+    if markdown {
+        egui::ScrollArea::vertical().id_salt(("md", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+            // A readable column, as in the preview.
+            let width = ui.available_width().min(900.0);
+            let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 12.0;
+            egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 12, top: 8, bottom: 24 }).show(ui, |ui| {
+                ui.set_max_width(width - 24.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
+            });
+        });
+        return;
+    }
+    // The text view: an editor with line numbers, where text is selected with the mouse or Ctrl+A.
+    let font = FontId::monospace(13.5);
+    let row = ui.ctx().fonts_mut(|f| f.row_height(&font));
+    let lines = text.lines().count().max(1);
+    let digit = ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'));
+    let gutter = digit * (lines.to_string().len() as f32 + 1.0) + 12.0;
+    egui::ScrollArea::both().id_salt(("text", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, row * lines as f32), Sense::hover());
+            let clip = ui.clip_rect();
+            let first = ((clip.top() - g.top()) / row).floor().max(0.0) as usize;
+            let last = (((clip.bottom() - g.top()) / row).ceil().max(0.0) as usize).min(lines);
+            for n in first..last {
+                ui.painter().text(
+                    Pos2::new(g.right() - 6.0, g.top() + n as f32 * row),
+                    Align2::RIGHT_TOP,
+                    (n + 1).to_string(),
+                    font.clone(),
+                    th.fg.gamma_multiply(0.45),
+                );
+            }
+            let color = th.fg;
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
+                let job = egui::text::LayoutJob::simple(buf.as_str().to_string(), font.clone(), color, f32::INFINITY);
+                ui.ctx().fonts_mut(|f| f.layout_job(job))
+            };
+            let mut view: &str = text;
+            ui.add(
+                egui::TextEdit::multiline(&mut view)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(f32::INFINITY)
+                    .layouter(&mut layouter),
+            );
+        });
     });
 }
 
@@ -1042,7 +1102,7 @@ fn url_at(line: &str, col: usize) -> Option<String> {
     (word.starts_with("http://") || word.starts_with("https://")).then(|| word.to_string())
 }
 
-fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     if cfg!(windows) {
         let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     } else {
@@ -1522,8 +1582,9 @@ pub fn local_profiles() -> Vec<Profile> {
 }
 
 /// The terminal as a program of its own (`sshremote terminal [HOST]`).
-pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>) -> Result<(), String> {
-    struct Solo(TermWindow);
+/// `view` ("text" or "markdown") is how the first tab starts.
+pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>, view: Option<String>) -> Result<(), String> {
+    struct Solo(TermWindow, Option<View>);
     impl eframe::App for Solo {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             let ctx = ui.ctx().clone();
@@ -1531,6 +1592,11 @@ pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>) -> Result<(), Str
             if !self.0.before(&ctx, &mut out) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
+            }
+            if let Some(t) = self.0.tabs.first_mut()
+                && let Some(v) = self.1.take()
+            {
+                t.view = v;
             }
             self.0.body(ui, &mut out);
             self.0.after(&ctx, &mut out);
@@ -1544,7 +1610,12 @@ pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>) -> Result<(), Str
             crate::gui::style(&cc.egui_ctx);
             let mut w = TermWindow::standalone(first, Vec::new());
             w.pending.extend(panes.into_iter().map(|(p, side)| (p, Some((0, side)))));
-            Ok(Box::new(Solo(w)))
+            let view = match view.as_deref() {
+                Some("text") => Some(View::Text),
+                Some("markdown") => Some(View::Markdown),
+                _ => None,
+            };
+            Ok(Box::new(Solo(w, view)))
         }),
     )
     .map_err(|e| e.to_string())
