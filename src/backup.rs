@@ -5,8 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -15,6 +18,8 @@ const KEEP_AUTO: usize = 14;
 pub const MIN_PASSPHRASE: usize = 8;
 /// Larger files in ~/.ssh (sockets, logs) are not keys or settings and are left out.
 const MAX_SSH_FILE: u64 = 1 << 20;
+/// PBKDF2 rounds for new backups (OWASP's figure for HMAC-SHA256); a backup names its own count.
+const ROUNDS: u32 = 600_000;
 
 fn ssh_dir() -> Option<PathBuf> {
     Some(crate::sys::ssh_dir())
@@ -22,8 +27,7 @@ fn ssh_dir() -> Option<PathBuf> {
 
 /// Where backups made by hand go: Documents/sshremote.
 pub fn folder() -> PathBuf {
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
+    let home = crate::sys::home_dir();
     let docs = home.join("Documents");
     (if docs.is_dir() { docs } else { home }).join("sshremote")
 }
@@ -37,8 +41,20 @@ fn stamp() -> String {
     crate::files::local_time(secs).replace([' ', ':'], "-")
 }
 
-/// A key from a passphrase, stretched so guessing is slow.
-fn key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+/// A key from a passphrase by PBKDF2-HMAC-SHA256, stretched so guessing is slow.
+fn pbkdf2(passphrase: &str, salt: &[u8], rounds: u32) -> [u8; 32] {
+    let mac = <Hmac<Sha256> as Mac>::new_from_slice(passphrase.as_bytes()).expect("HMAC takes any key length");
+    let mut u: [u8; 32] = mac.clone().chain_update(salt).chain_update(1u32.to_be_bytes()).finalize().into_bytes().into();
+    let mut t = u;
+    for _ in 1..rounds {
+        u = mac.clone().chain_update(u).finalize().into_bytes().into();
+        t.iter_mut().zip(u).for_each(|(a, b)| *a ^= b);
+    }
+    t
+}
+
+/// The key of backups made before PBKDF2: iterated SHA-256.
+fn legacy_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     let mut h: [u8; 32] = Sha256::new().chain_update(salt).chain_update(passphrase.as_bytes()).finalize().into();
     for _ in 0..200_000 {
         h = Sha256::new().chain_update(h).chain_update(salt).finalize().into();
@@ -59,14 +75,26 @@ fn seal(plain: &[u8], passphrase: &str) -> Value {
     let mut nonce = [0u8; 12];
     getrandom::getrandom(&mut salt).expect("system random source");
     getrandom::getrandom(&mut nonce).expect("system random source");
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key(passphrase, &salt)));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&pbkdf2(passphrase, &salt, ROUNDS)));
     let data = cipher.encrypt(Nonce::from_slice(&nonce), plain).expect("encryption");
-    json!({ "salt": hex(&salt), "nonce": hex(&nonce), "data": hex(&data) })
+    json!({ "kdf": "pbkdf2-sha256", "rounds": ROUNDS, "salt": B64.encode(salt), "nonce": B64.encode(nonce), "data": B64.encode(data) })
 }
 
 fn open(sealed: &Value, passphrase: &str) -> Result<Vec<u8>, String> {
-    let field = |k: &str| sealed[k].as_str().and_then(unhex).ok_or("damaged backup");
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key(passphrase, &field("salt")?)));
+    let pbkdf2_sealed = sealed["kdf"] == "pbkdf2-sha256";
+    let field = |k: &str| {
+        let s = sealed[k].as_str();
+        if pbkdf2_sealed { s.and_then(|s| B64.decode(s).ok()) } else { s.and_then(unhex) }.ok_or("damaged backup")
+    };
+    let salt = field("salt")?;
+    let key = if pbkdf2_sealed {
+        // A count far beyond any we write would only make opening hang.
+        let rounds = sealed["rounds"].as_u64().filter(|r| (1..=10_000_000).contains(r)).ok_or("damaged backup")?;
+        pbkdf2(passphrase, &salt, rounds as u32)
+    } else {
+        legacy_key(passphrase, &salt)
+    };
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     cipher
         .decrypt(Nonce::from_slice(&field("nonce")?), field("data")?.as_slice())
         .map_err(|_| "wrong passphrase".to_string())
@@ -100,8 +128,8 @@ pub fn create(passphrase: Option<&str>) -> String {
             .filter_map(|h| crate::vault::get(&h).map(|s| (h, Value::String(s))))
             .collect();
         let files: serde_json::Map<String, Value> =
-            ssh_files().into_iter().map(|(name, data)| (name, Value::String(hex(&data)))).collect();
-        let secrets = json!({ "passwords": passwords, "ssh": files });
+            ssh_files().into_iter().map(|(name, data)| (name, Value::String(B64.encode(data)))).collect();
+        let secrets = json!({ "passwords": passwords, "ssh": files, "encoding": "base64" });
         out["secrets"] = seal(secrets.to_string().as_bytes(), p);
     }
     serde_json::to_string_pretty(&out).expect("json")
@@ -313,8 +341,11 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
                 if ssh_files {
                     let ssh = ssh_dir().ok_or("no home folder")?;
                     let mut written = 0;
+                    let base64 = secrets["encoding"] == "base64";
                     for (rel, data) in &files {
-                        let data = data.as_str().and_then(unhex).ok_or("damaged backup")?;
+                        let data = data.as_str();
+                        let data = if base64 { data.and_then(|d| B64.decode(d).ok()) } else { data.and_then(unhex) };
+                        let data = data.ok_or("damaged backup")?;
                         written += put_ssh_file(&ssh, rel, &data)? as usize;
                     }
                     done.push(format!(
@@ -341,6 +372,25 @@ mod tests {
         let sealed = seal(b"secret", "pass");
         assert_eq!(open(&sealed, "pass").unwrap(), b"secret");
         assert!(open(&sealed, "wrong").is_err());
+    }
+
+    #[test]
+    fn pbkdf2_matches_the_published_vectors() {
+        let hex_of = |k: [u8; 32]| hex(&k);
+        assert_eq!(hex_of(pbkdf2("password", b"salt", 1)), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
+        assert_eq!(hex_of(pbkdf2("password", b"salt", 2)), "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43");
+        assert_eq!(hex_of(pbkdf2("password", b"salt", 4096)), "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a");
+    }
+
+    /// Backups sealed before PBKDF2 still open.
+    #[test]
+    fn older_backups_still_open() {
+        let salt = [7u8; 16];
+        let nonce = [9u8; 12];
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&legacy_key("pass", &salt)));
+        let data = cipher.encrypt(Nonce::from_slice(&nonce), b"old".as_slice()).unwrap();
+        let sealed = json!({ "salt": hex(&salt), "nonce": hex(&nonce), "data": hex(&data) });
+        assert_eq!(open(&sealed, "pass").unwrap(), b"old");
     }
 
     #[test]

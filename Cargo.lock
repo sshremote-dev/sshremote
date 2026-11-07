@@ -3593,6 +3593,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",
+ "base64",
  "chacha20poly1305",
  "cpal",
  "crossterm",
@@ -3602,6 +3603,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "hkdf",
+ "hmac",
  "libc",
  "openh264",
  "opus",
