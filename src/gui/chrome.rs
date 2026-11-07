@@ -20,6 +20,11 @@ fn maximized(ctx: &egui::Context) -> bool {
 /// The largest window side in pixels the GPU draws, as the renderer found it.
 pub static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8192);
 
+/// The colour of title bars and tab strips, a shade darker than the panels.
+pub fn bar_fill(v: &egui::Visuals) -> Color32 {
+    v.panel_fill.lerp_to_gamma(Color32::BLACK, if v.dark_mode { 0.25 } else { 0.04 })
+}
+
 /// Edges that resize the window and Alt+Space for the system menu; call once per frame of every
 /// window that draws its own frame, before its content.
 pub fn behaviour(ctx: &egui::Context) {
@@ -90,7 +95,7 @@ pub struct BarResponse {
 pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarResponse {
     let ctx = ui.ctx().clone();
     let mut out = BarResponse::default();
-    let fill = ui.visuals().panel_fill.lerp_to_gamma(Color32::BLACK, if ui.visuals().dark_mode { 0.25 } else { 0.04 });
+    let fill = bar_fill(ui.visuals());
     let frame = egui::Frame::new().fill(fill).inner_margin(egui::Margin::ZERO);
     egui::Panel::top("chrome-title-bar").exact_size(HEIGHT).frame(frame).show_separator_line(false).show(ui, |ui| {
         let bar = ui.max_rect();

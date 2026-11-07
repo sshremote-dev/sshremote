@@ -209,9 +209,66 @@ impl eframe::App for ChatApp {
     }
 }
 
+/// How many earlier messages are kept with each host.
+const HISTORY_KEEP: usize = 300;
+
+/// Where the conversation with `host` is kept between sessions.
+fn history_path(host: &str) -> Option<std::path::PathBuf> {
+    let safe: String =
+        host.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.@".contains(c) { c } else { '_' }).collect();
+    crate::hosts::config_dir().map(|d| d.join("chat").join(format!("{safe}.jsonl")))
+}
+
+/// The messages exchanged with `host` before, oldest first: (theirs, text).
+pub fn load_history(host: &str) -> Vec<(bool, String)> {
+    history_path(host).map(|p| load_from(&p)).unwrap_or_default()
+}
+
+/// Adds a message to the conversation kept with `host`.
+pub fn append_history(host: &str, theirs: bool, text: &str) {
+    if let Some(p) = history_path(host) {
+        append_to(&p, theirs, text, 512 << 10);
+    }
+}
+
+/// The last messages kept in `path`, one JSON pair a line.
+fn load_from(path: &std::path::Path) -> Vec<(bool, String)> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let lines: Vec<(bool, String)> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    lines[lines.len().saturating_sub(HISTORY_KEEP)..].to_vec()
+}
+
+/// Adds a message to `path`; past `limit` bytes the file is written again with the last ones only.
+fn append_to(path: &std::path::Path, theirs: bool, text: &str, limit: u64) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > limit) {
+        let mut kept = load_from(path);
+        kept.push((theirs, text.to_string()));
+        let body: String = kept.iter().map(|m| serde_json::to_string(m).expect("json") + "\n").collect();
+        let _ = std::fs::write(path, body);
+    } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = f.write_all((serde_json::to_string(&(theirs, text)).expect("json") + "\n").as_bytes());
+    }
+}
+
+/// Forgets the conversation kept with `host`.
+pub fn clear_history(host: &str) {
+    if let Some(p) = history_path(host) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// The conversation as message bubbles, as in a messaging app: the other side's on the left with
 /// their name over the first of a run, one's own on the right in the accent colour.
 pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &str) {
+    show_lines_since(ui, lines, 0, them, me);
+}
+
+/// Like `show_lines`, with the first `earlier` messages from before this session set apart.
+pub fn show_lines_since(ui: &mut egui::Ui, lines: &[(bool, String)], earlier: usize, them: &str, me: &str) {
     let dark = ui.visuals().dark_mode;
     if lines.is_empty() {
         ui.add_space(ui.available_height() * 0.3);
@@ -224,8 +281,19 @@ pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &
     }
     let width = ui.available_width();
     for (i, (theirs, text)) in lines.iter().enumerate() {
-        let first = i == 0 || lines[i - 1].0 != *theirs;
-        let last = i + 1 == lines.len() || lines[i + 1].0 != *theirs;
+        let divider = |ui: &mut egui::Ui, text: &str| {
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| ui.label(RichText::new(text).small().weak()));
+            ui.add_space(2.0);
+        };
+        if i == 0 && earlier > 0 {
+            divider(ui, "Earlier");
+        }
+        if i == earlier && earlier > 0 {
+            divider(ui, "This session");
+        }
+        let first = i == 0 || i == earlier || lines[i - 1].0 != *theirs;
+        let last = i + 1 == lines.len() || i + 1 == earlier || lines[i + 1].0 != *theirs;
         if first && i > 0 {
             ui.add_space(6.0);
         }
@@ -299,6 +367,26 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
 
 #[cfg(test)]
 mod tests {
+    /// The conversation kept with a host: in order, with any text, trimmed to the last ones.
+    #[test]
+    fn history_round_trip() {
+        let path = std::env::temp_dir().join(format!("sshremote-chat-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        super::append_to(&path, true, "hello\nsecond line", 1 << 20);
+        super::append_to(&path, false, "tab\tand \"quotes\" \u{d55c}\u{ae00}", 1 << 20);
+        assert_eq!(
+            super::load_from(&path),
+            [(true, "hello\nsecond line".to_string()), (false, "tab\tand \"quotes\" \u{d55c}\u{ae00}".to_string())]
+        );
+        for k in 0..400 {
+            super::append_to(&path, k % 2 == 0, &format!("m{k}"), 2_000);
+        }
+        let kept = super::load_from(&path);
+        assert!(kept.len() <= super::HISTORY_KEEP);
+        assert_eq!(kept.last().unwrap().1, "m399");
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
 
     #[test]

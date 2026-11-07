@@ -234,6 +234,8 @@ pub struct App {
     save_error: Option<String>,
     /// The first connection opens in full screen (--fullscreen).
     start_fullscreen: bool,
+    /// The terminal panel and the chat beside the screen from the start (--open panel, chat).
+    start_panels: (bool, bool),
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -292,6 +294,10 @@ pub fn run(opt: &Options) -> Result<(), String> {
                     Start::Screen
                 },
                 start_fullscreen: open.split_whitespace().any(|w| w == "fullscreen"),
+                start_panels: (
+                    open.split_whitespace().any(|w| w == "panel"),
+                    open.split_whitespace().any(|w| w == "chat"),
+                ),
                 vault: None,
                 backup: None,
                 service: None,
@@ -485,6 +491,8 @@ impl eframe::App for App {
                     if std::mem::take(&mut self.start_fullscreen) {
                         remote.set_fullscreen(&ctx, true);
                     }
+                    let (panel, chat) = std::mem::take(&mut self.start_panels);
+                    remote.open_panels(panel, chat);
                     if start == Start::Files
                         && let Err(e) = remote.open_files_only()
                     {

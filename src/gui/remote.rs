@@ -47,6 +47,14 @@ pub(super) struct Remote {
     /// Messages kept while the panel is closed, and how many are unread.
     chat_lines: Vec<(bool, String)>,
     unread: usize,
+    /// How many of the messages are from earlier sessions with this host.
+    chat_earlier: usize,
+    /// The chat panel's width beside the picture.
+    chat_w: f32,
+    /// The terminal as a panel under the picture, its height, and whether it has the keyboard.
+    term_split: bool,
+    term_h: f32,
+    term_focus: bool,
     paused: bool,
     monitors: Vec<crate::proto::MonitorInfo>,
     monitor: usize,
@@ -108,6 +116,8 @@ impl Remote {
         ssh_cmd: Option<Vec<String>>,
         terminal: bool,
     ) -> Self {
+        // The conversation with this host so far, from earlier sessions.
+        let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
         Remote {
             terms: terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone())),
             term_inline: terminal,
@@ -147,8 +157,13 @@ impl Remote {
             next_upload: 1,
             sound: None,
             chat: None,
-            chat_lines: Vec::new(),
+            chat_earlier: chat_lines.len(),
+            chat_lines,
             unread: 0,
+            chat_w: 340.0,
+            term_split: false,
+            term_h: 260.0,
+            term_focus: false,
             paused: false,
             monitors: Vec::new(),
             monitor: 0,
@@ -300,22 +315,44 @@ impl Remote {
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
         let inline = self.term_inline && self.terms.is_some();
+        // Side panels, as in an editor: the chat on the right, the terminal along the bottom; the
+        // picture takes what is left, so both can be used while watching.
+        let (rest, chat_area) = self.chat_split(ui, area);
+        let split = !inline && !self.term_detached && self.term_split && self.terms.is_some();
+        let (pic_area, term_area) = if split { self.term_split_at(ui, rest) } else { (rest, None) };
+        // The keyboard goes to whichever of the picture and the terminal was clicked last.
+        if let Some(p) = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()) {
+            if term_area.is_some_and(|r| r.contains(p)) {
+                self.term_focus = true;
+            } else if split && pic_area.contains(p) {
+                self.term_focus = false;
+            }
+        }
         let shown = if inline {
-            // The terminal fills the area below the toolbar; the remote screen waits behind it.
-            let area = screen.with_min_y(screen.top() + strip);
-            self.inline_terminal(ui, area)?;
+            // The terminal fills the area beside the chat; the remote screen waits behind it.
+            self.inline_terminal(ui, rest)?;
             None
         } else {
-            self.resize(area.size() * ppp)?;
-            self.edge_pan(&ctx, area);
-            self.picture(ui, area, ppp)
+            self.resize(pic_area.size() * ppp)?;
+            self.edge_pan(&ctx, pic_area);
+            self.picture(ui, pic_area, ppp)
         };
+        if let Some(r) = term_area {
+            self.terminal_panel(ui, r)?;
+            // Where the keys go, outlined.
+            let focused = if self.term_focus { r } else { pic_area };
+            ui.painter().rect_stroke(focused.shrink(0.5), CornerRadius::ZERO, egui::Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+        }
         self.last_shown = shown;
         let toolbar_rect = if docked { None } else { self.toolbar(&ctx, screen)? };
         if let Some(f) = bar_action {
             f(self, &ctx)?;
         }
-        let chat_rect = self.chat_panel(&ctx)?;
+        let chat_rect = match chat_area {
+            Some(r) => self.chat_panel(ui, r)?,
+            None => None,
+        };
+        let chat_rect = chat_rect.or(term_area);
         self.upload_overlay(&ctx, screen);
         self.draw_toasts(&ctx, screen);
         self.file_window(&ctx)?;
@@ -396,14 +433,17 @@ impl Remote {
                     };
                     self.notify(&msg);
                 }
-                Ok(Ev::Net(ToClient::Chat(t))) => match self.chat.as_mut() {
-                    Some((lines, _)) => lines.push((true, t)),
-                    None => {
-                        self.notify(&format!("Message: {t}"));
-                        self.chat_lines.push((true, t));
-                        self.unread += 1;
+                Ok(Ev::Net(ToClient::Chat(t))) => {
+                    crate::chat::append_history(self.host(), true, &t);
+                    match self.chat.as_mut() {
+                        Some((lines, _)) => lines.push((true, t)),
+                        None => {
+                            self.notify(&format!("Message: {t}"));
+                            self.chat_lines.push((true, t));
+                            self.unread += 1;
+                        }
                     }
-                },
+                }
                 Ok(Ev::Net(ToClient::Monitors { list, current })) => {
                     (self.monitors, self.monitor) = (list, current as usize)
                 }
@@ -605,39 +645,154 @@ impl Remote {
     }
 
     /// The chat panel; returns its rectangle while open.
-    pub(super) fn chat_panel(&mut self, ctx: &egui::Context) -> Result<Option<Rect>, String> {
+    /// Opens the terminal panel under the picture (with the keyboard) and the chat beside it.
+    pub(super) fn open_panels(&mut self, terminal: bool, chat: bool) {
+        if terminal {
+            self.terms.get_or_insert_with(|| crate::termwin::TermWindow::new(self.ssh_cmd.clone()));
+            (self.term_split, self.term_focus) = (true, true);
+        }
+        if chat && self.chat.is_none() {
+            self.chat = Some((std::mem::take(&mut self.chat_lines), String::new()));
+            self.unread = 0;
+        }
+    }
+
+    /// The area beside the chat panel, and the panel's own, with the splitter between to drag.
+    fn chat_split(&mut self, ui: &mut egui::Ui, area: Rect) -> (Rect, Option<Rect>) {
+        if self.chat.is_none() {
+            return (area, None);
+        }
+        let w = self.chat_w.clamp(260.0, (area.width() * 0.6).max(260.0));
+        let panel = area.with_min_x(area.right() - w);
+        let handle = Rect::from_min_max(Pos2::new(panel.left() - 3.0, area.top()), Pos2::new(panel.left() + 3.0, area.bottom()));
+        let r = ui.interact(handle, egui::Id::unique("chat-splitter"), egui::Sense::drag());
+        if r.hovered() || r.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        self.chat_w = w - r.drag_delta().x;
+        (area.with_max_x(panel.left()), Some(panel))
+    }
+
+    /// The picture above, the terminal panel below, and the splitter between them to drag.
+    fn term_split_at(&mut self, ui: &mut egui::Ui, area: Rect) -> (Rect, Option<Rect>) {
+        let h = self.term_h.clamp(120.0, (area.height() - 120.0).max(120.0));
+        let panel = area.with_min_y(area.bottom() - h);
+        let handle = Rect::from_min_max(Pos2::new(area.left(), panel.top() - 3.0), Pos2::new(area.right(), panel.top() + 3.0));
+        let r = ui.interact(handle, egui::Id::unique("terminal-splitter"), egui::Sense::drag());
+        if r.hovered() || r.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        self.term_h = h - r.drag_delta().y;
+        (area.with_max_y(panel.top()), Some(panel))
+    }
+
+    /// The terminal under the picture: a header to hide it, fill the window with it or move it to a
+    /// window of its own, then the shells.
+    fn terminal_panel(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<(), String> {
+        let fill = ui.visuals().panel_fill;
+        ui.painter().rect_filled(area, CornerRadius::ZERO, fill);
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter().hline(area.x_range(), area.top(), line);
+        let head = Rect::from_min_size(area.min, Vec2::new(area.width(), 28.0));
+        let mut what = None;
+        let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(head.shrink2(Vec2::new(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        bar.label(RichText::new("TERMINAL").small().strong());
+        bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+                ui.add(egui::Button::new(RichText::new(glyph).size(14.0)).frame_when_inactive(false).min_size(Vec2::splat(24.0)))
+                    .on_hover_text(tip)
+                    .clicked()
+            };
+            if small(ui, ic::CARET_DOWN, "Hide the panel (the shells keep running)") {
+                what = Some('h');
+            }
+            if small(ui, ic::ARROW_SQUARE_OUT, "Move the terminal to a window of its own") {
+                what = Some('w');
+            }
+            if small(ui, ic::CORNERS_OUT, "Fill the window with the terminal (the remote screen waits behind it)") {
+                what = Some('f');
+            }
+        });
+        match what {
+            Some('h') => self.term_split = false,
+            Some('w') => (self.term_split, self.term_detached) = (false, true),
+            Some('f') => (self.term_split, self.term_inline) = (false, true),
+            _ => {}
+        }
+        if what.is_some() {
+            self.term_focus = false;
+            return self.release_all();
+        }
+        let body = area.with_min_y(head.bottom());
+        let Some(mut t) = self.terms.take() else { return Ok(()) };
+        t.keys_on = self.term_focus;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("terminal-panel"));
+        let cmds = t.embedded(&mut child);
+        self.terms = Some(t);
+        for c in cmds {
+            match c {
+                crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Close => {
+                    self.terms = None;
+                    self.term_split = false;
+                    self.term_focus = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The chat docked beside the picture: earlier messages with this host, then this session's.
+    pub(super) fn chat_panel(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<Option<Rect>, String> {
+        let host = self.host().to_string();
+        let earlier = self.chat_earlier;
         let Some((lines, input)) = self.chat.as_mut() else { return Ok(None) };
-        let mut open = true;
         let mut sent = None;
-        let resp = egui::Window::new(format!("{}  Chat", ic::CHAT))
-            .open(&mut open)
-            .default_pos(ctx.content_rect().left_top() + Vec2::new(20.0, 70.0))
-            .default_size([360.0, 460.0])
-            .min_size([280.0, 260.0])
-            .show(ctx, |ui| {
-                ui.label(
-                    RichText::new("With the person at the SSH host's screen; a window opens there.").small().weak(),
-                );
-                let h = (ui.available_height() - 56.0).max(120.0);
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .max_height(h)
-                    .show(ui, |ui| crate::chat::show_lines(ui, lines, "Remote", "You"));
-                ui.add_space(4.0);
-                sent = crate::chat::input_row(ui, input, true);
+        let (mut close, mut clear) = (false, false);
+        let fill = ui.visuals().panel_fill;
+        ui.painter().rect_filled(area, CornerRadius::ZERO, fill);
+        ui.painter().vline(area.left(), area.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+        let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink2(Vec2::new(12.0, 8.0))).id_salt("chat-panel"));
+        panel.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}  Chat", ic::CHAT)).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
+                    ui.add(egui::Button::new(RichText::new(glyph).size(14.0)).frame_when_inactive(false).min_size(Vec2::splat(24.0)))
+                        .on_hover_text(tip)
+                        .clicked()
+                };
+                close = small(ui, ic::X, "Close the chat (the conversation is kept)");
+                clear = earlier + lines.len() > 0 && small(ui, ic::TRASH, "Clear the history kept with this host");
             });
-        let rect = resp.map(|r| r.response.rect);
+        });
+        panel.label(RichText::new("With the person at the SSH host's screen; a window opens there.").small().weak());
+        let h = (panel.available_height() - 52.0).max(80.0);
+        egui::ScrollArea::vertical()
+            .id_salt("chat-lines")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .max_height(h)
+            .show(&mut panel, |ui| crate::chat::show_lines_since(ui, lines, earlier, "Remote", "You"));
+        panel.add_space(4.0);
+        sent = crate::chat::input_row(&mut panel, input, true).or(sent);
+        if clear {
+            crate::chat::clear_history(&host);
+            lines.clear();
+            self.chat_earlier = 0;
+        }
         if let Some(text) = sent {
             if let Some((lines, _)) = self.chat.as_mut() {
                 lines.push((false, text.clone()));
             }
+            crate::chat::append_history(&host, false, &text);
             self.send(ToAgent::Chat(text))?;
         }
-        if !open && let Some((lines, _)) = self.chat.take() {
+        if close && let Some((lines, _)) = self.chat.take() {
             self.chat_lines = lines;
         }
-        Ok(rect)
+        Ok(Some(area))
     }
 
     /// Shows the file transfer window and carries out what it asks for.
@@ -828,6 +983,7 @@ impl Remote {
     /// The terminal in this window, with a bar to go back to the screen or give it its own window.
     pub(super) fn inline_terminal(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<(), String> {
         let Some(mut t) = self.terms.take() else { return Ok(()) };
+        t.keys_on = true;
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).id_salt("inline-terminal"));
         let cmds = t.embedded(&mut child);
         self.terms = Some(t);
@@ -848,6 +1004,7 @@ impl Remote {
             return Ok(());
         }
         let Some(mut t) = self.terms.take() else { return Ok(()) };
+        t.keys_on = true;
         let host = self.host().to_string();
         let cmds = t.show(ctx, &host);
         self.terms = Some(t);
@@ -1149,9 +1306,10 @@ impl Remote {
             ui_rects.iter().any(|t| t.contains(p))
                 || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background)
         };
-        // Keys go to the remote unless a toolbar widget (a slider, a menu) has focus.
-        let local = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open();
-        if let Some(rect) = shown {
+        // Keys go to the remote unless a toolbar widget (a slider, a menu) or the terminal panel has them.
+        let term_keys = self.term_split && self.term_focus && self.terms.is_some() && !self.term_detached;
+        let local = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || term_keys;
+        if let Some(rect) = shown.filter(|_| !local) {
             // Composed text (Korean, Japanese, Chinese input methods) arrives as IME commits.
             ctx.output_mut(|o| {
                 o.ime = Some(egui::output::IMEOutput {
@@ -1516,29 +1674,45 @@ impl Remote {
             }));
         }
         let (glyph, tip) = if self.term_inline && self.terms.is_some() {
-            (ic::MONITOR, "Back to the remote screen (the terminal keeps running)")
+            (ic::MONITOR, "Back to the remote screen, with the terminal under it")
         } else {
-            (ic::TERMINAL, "Terminal: a shell on the SSH host, in place of the screen")
+            (ic::TERMINAL, "Terminal: a shell on the SSH host in a panel under the screen (right click for more)")
         };
-        let term = icon(ui, glyph, tip, self.terms.is_some());
+        let showing = self.terms.is_some() && (self.term_split || self.term_inline || self.term_detached);
+        let term = icon(ui, glyph, tip, showing);
         if term.clicked() {
             *action = Some(Box::new(|r, _| {
                 if r.terms.is_none() {
                     r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
+                    r.term_split = false;
                 }
-                r.term_detached = false;
-                r.term_inline = !r.term_inline;
+                if r.term_inline || r.term_detached {
+                    // Back under the picture.
+                    (r.term_inline, r.term_detached, r.term_split) = (false, false, true);
+                } else {
+                    r.term_split = !r.term_split;
+                }
+                r.term_focus = r.term_split;
                 r.release_all()
             }));
         }
         term.context_menu(|ui| {
+            if ui.button(format!("{}  Terminal in place of the screen", ic::CORNERS_OUT)).clicked() {
+                *action = Some(Box::new(|r, _| {
+                    if r.terms.is_none() {
+                        r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
+                    }
+                    (r.term_inline, r.term_detached, r.term_split) = (true, false, false);
+                    r.release_all()
+                }));
+                ui.close();
+            }
             if ui.button(format!("{}  Terminal in its own window", ic::TERMINAL)).clicked() {
                 *action = Some(Box::new(|r, _| {
                     if r.terms.is_none() {
                         r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
                     }
-                    r.term_inline = false;
-                    r.term_detached = true;
+                    (r.term_inline, r.term_detached, r.term_split) = (false, true, false);
                     Ok(())
                 }));
                 ui.close();
@@ -1552,8 +1726,7 @@ impl Remote {
                             }
                         }
                     }
-                    r.term_inline = false;
-                    r.term_detached = false;
+                    (r.term_inline, r.term_detached, r.term_split) = (false, false, false);
                     Ok(())
                 }));
                 ui.close();
@@ -1928,15 +2101,26 @@ mod actions {
         h.r.file_cmd(crate::filewin::Cmd::Close).unwrap();
         assert!(h.r.files.is_none(), "files close");
 
-        // The terminal button turns into "back to the screen" in the same place.
-        let term_at = h.find_in(ic::TERMINAL, Rect::from_min_size(Pos2::ZERO, Vec2::new(h.size.x, 40.0))).unwrap().center();
-        h.click_at(term_at).unwrap();
-        assert!(h.r.terms.is_some() && h.r.term_inline, "terminal in place of the screen");
-        h.click_at(term_at).unwrap();
-        assert!(!h.r.term_inline, "back to the screen");
+        // The terminal opens in a panel under the picture, with the keyboard.
+        h.tool(ic::TERMINAL).unwrap();
+        assert!(h.r.terms.is_some() && h.r.term_split && h.r.term_focus, "terminal panel under the screen");
+        assert!(h.r.last_shown.is_some(), "the picture stays in view");
+        // A click on the picture gives it the keyboard back; one in the panel takes it again.
+        let pic = h.r.last_shown.unwrap();
+        h.click_at(pic.center()).unwrap();
+        assert!(!h.r.term_focus, "the picture has the keys");
+        h.click_at(Pos2::new(pic.center().x, h.size.y - 40.0)).unwrap();
+        assert!(h.r.term_focus, "the terminal has the keys");
+        // Typing goes to the shell, not to the remote screen.
+        let typed = Event::Text("x".into());
+        h.frame(vec![typed]).unwrap();
+        h.tool(ic::TERMINAL).unwrap();
+        assert!(!h.r.term_split && h.r.terms.is_some(), "hidden, the shell still running");
 
         h.tool(ic::CHAT).unwrap();
         assert!(h.r.chat.is_some(), "chat opens");
+        let pic = h.r.last_shown.unwrap();
+        assert!(pic.right() <= h.size.x - 260.0, "the picture makes room for the chat: {pic:?}");
         h.tool(ic::CHAT).unwrap();
         assert!(h.r.chat.is_none(), "chat closes");
 

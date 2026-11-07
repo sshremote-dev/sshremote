@@ -26,8 +26,6 @@ use paint::*;
 use reader::*;
 use stitch::*;
 
-const TAB_STRIP: Color32 = Color32::from_rgb(12, 13, 16);
-
 /// A colour scheme: name, background, foreground, the sixteen ANSI colours.
 struct Scheme(&'static str, [u8; 3], [u8; 3], [[u8; 3]; 16]);
 
@@ -408,6 +406,9 @@ pub enum Cmd {
 }
 
 pub struct TermWindow {
+    /// Whether keys typed in this window go to the shell; a window that shows the terminal beside
+    /// something else (the remote screen) turns it off while that has the keyboard.
+    pub keys_on: bool,
     tabs: Vec<Tab>,
     active: usize,
     next_id: u32,
@@ -464,6 +465,7 @@ impl TermWindow {
         let chosen = setting("term_colors").and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < SCHEMES.len());
         SCHEME.store(chosen.unwrap_or(AUTO), std::sync::atomic::Ordering::Relaxed);
         TermWindow {
+            keys_on: true,
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
@@ -1135,7 +1137,7 @@ impl TermWindow {
             }
         } else {
             let strip =
-                egui::Frame::new().fill(TAB_STRIP).inner_margin(egui::Margin { left: 8, right: 6, top: 6, bottom: 0 });
+                egui::Frame::new().fill(crate::gui::chrome::bar_fill(ui.visuals())).inner_margin(egui::Margin { left: 8, right: 6, top: 6, bottom: 0 });
             egui::Panel::top("term-tabs").frame(strip).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
                 ui.horizontal(|ui| self.strip(ui, out));
@@ -1214,7 +1216,7 @@ impl TermWindow {
         let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
         // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
-        let keys = self.renaming.is_none() && !ui.ctx().any_popup_open();
+        let keys = self.keys_on && self.renaming.is_none() && !ui.ctx().any_popup_open();
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let font_size = self.font_size;
@@ -1475,6 +1477,32 @@ mod tests {
         let mut out = Vec::new();
         let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
         out
+    }
+
+    /// Syntax-coloured code is fenced with its indentation, and a frame drawn right above the
+    /// prompt (as an agent's input box) stays with the prompt in the live rows.
+    #[test]
+    fn coloured_code_and_framed_prompts() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        let cols = t.term.grid().columns();
+        let kw = "\x1b[38;5;170m";
+        let st = "\x1b[38;5;114m";
+        let r = "\x1b[0m";
+        let out = format!(
+            "\x1b[2J\x1b[HSome text\r\n\r\n  {kw}def{r} f(x):\r\n      {kw}return{r} {st}\"x\"{r}\r\n\r\n  after\r\n{}\r\n> \r\n{}\r\n  status\x1b[2A\r\x1b[2C",
+            "\u{2500}".repeat(cols),
+            "\u{2500}".repeat(cols)
+        );
+        t.parser.advance(&mut t.term, out.as_bytes());
+        let (first, last) = reader::input_rows(t);
+        let md = reader::screen_markdown(t, 0, first);
+        assert!(md.contains("  ```\n  def f(x):\n      return \"x\"\n  ```"), "{md}");
+        assert!(md.contains("after"), "{md}");
+        assert!(!md.contains('\u{2500}'), "the frame goes with the prompt: {md}");
+        assert_eq!(last - first, 3, "rule, prompt, rule, status");
     }
 
     /// The text view shows output that arrives after it opens, as it streams in.

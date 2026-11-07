@@ -76,7 +76,8 @@ options:
   --sound         play the host's sound (about 8 KB/s)
   --fullscreen    window mode: start in full screen (Ctrl+Alt+Enter leaves it)
   --open WHAT     window mode: start with the host's terminal in place of its screen (terminal),
-                  or with its files and the screen paused (files)
+                  its files and the screen paused (files), or beside the screen a terminal panel
+                  (panel) and the chat (chat); several in one value, as 'panel chat'
   --probe SECS    run headless for SECS and print traffic (with --view WxH, --dump out.ppm)
 
 keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, z zoom, r refresh)";
