@@ -172,8 +172,18 @@ const SCHEMES: [Scheme; 6] = [
     ),
 ];
 
-/// The scheme in use, shared by every terminal window.
-static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The scheme in use, shared by every terminal window; `AUTO` follows the app's theme.
+static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(AUTO);
+const AUTO: usize = usize::MAX;
+
+/// The scheme shown: the one chosen, or One Half Dark or Light after the app's theme.
+fn scheme() -> &'static Scheme {
+    match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
+        AUTO if crate::gui::theme::DARK.load(std::sync::atomic::Ordering::Relaxed) => &SCHEMES[0],
+        AUTO => &SCHEMES[SCHEMES.len() - 1],
+        i => &SCHEMES[i % SCHEMES.len()],
+    }
+}
 
 /// The cursor's shape: a thin bar as in VS Code and Windows Terminal, a block, or an underline.
 static CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -183,23 +193,27 @@ const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
 /// while output streams in.
 const REBUILD_EVERY: f64 = 0.1;
 
-/// Selected cells, in VS Code's dark selection colour.
-const SELECTION: Color32 = Color32::from_rgb(38, 79, 120);
+/// Selected cells, in VS Code's selection colour for a dark or a light background.
+fn selection() -> Color32 {
+    let [r, g, b, _] = scheme_bg().to_array();
+    let light = r as u32 * 299 + g as u32 * 587 + b as u32 * 114 > 128_000;
+    if light { Color32::from_rgb(173, 214, 255) } else { Color32::from_rgb(38, 79, 120) }
+}
 
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
 fn scheme_bg() -> Color32 {
-    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].1)
+    rgb(scheme().1)
 }
 
 fn scheme_fg() -> Color32 {
-    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].2)
+    rgb(scheme().2)
 }
 
 fn pal(i: usize) -> Color32 {
-    rgb(SCHEMES[SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len()].3[i % 16])
+    rgb(scheme().3[i % 16])
 }
 
 struct Size {
@@ -446,9 +460,9 @@ impl TermWindow {
             crate::hosts::setting("term_cursor").and_then(|v| v.parse().ok()).unwrap_or(0usize).min(CURSORS.len() - 1);
         CURSOR.store(c, std::sync::atomic::Ordering::Relaxed);
         let setting = |k: &str| crate::hosts::setting(k);
-        if let Some(i) = setting("term_scheme").and_then(|v| v.parse().ok()) {
-            SCHEME.store(i, std::sync::atomic::Ordering::Relaxed);
-        }
+        // "auto" or a scheme's number; the older key always held a number, chosen or not.
+        let chosen = setting("term_colors").and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < SCHEMES.len());
+        SCHEME.store(chosen.unwrap_or(AUTO), std::sync::atomic::Ordering::Relaxed);
         TermWindow {
             tabs: Vec::new(),
             active: 0,
@@ -810,7 +824,8 @@ impl TermWindow {
     /// Saves the terminal preferences.
     fn save_settings(&self) {
         crate::hosts::set_setting("term_font", &format!("{}", self.font_size));
-        crate::hosts::set_setting("term_scheme", &SCHEME.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        let scheme = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
+        crate::hosts::set_setting("term_colors", &if scheme == AUTO { "auto".to_string() } else { scheme.to_string() });
         crate::hosts::set_setting("term_copy_select", if self.copy_on_select { "1" } else { "0" });
         crate::hosts::set_setting("term_cursor", &CURSOR.load(std::sync::atomic::Ordering::Relaxed).to_string());
     }
@@ -1015,9 +1030,11 @@ impl TermWindow {
                     ui.set_min_width(240.0);
                     ui.label(RichText::new("Appearance").strong());
                     changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
-                    let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len();
-                    for (k, sc) in SCHEMES.iter().enumerate() {
-                        if ui.selectable_label(k == current, sc.0).clicked() {
+                    let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
+                    let names = std::iter::once((AUTO, "Automatic (follows the app theme)"))
+                        .chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
+                    for (k, name) in names {
+                        if ui.selectable_label(k == current, name).clicked() {
                             SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
                             changed = true;
                         }
@@ -1458,6 +1475,44 @@ mod tests {
         let mut out = Vec::new();
         let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
         out
+    }
+
+    /// The text view shows output that arrives after it opens, as it streams in.
+    #[test]
+    fn text_view_follows_new_output() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        // Frames closer together than the rebuild interval, as when output streams in.
+        let mut clock = 0.0;
+        let mut tick = |w: &mut TermWindow| {
+            clock += 0.04;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                focused: true,
+                time: Some(clock),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                w.embedded(ui);
+            });
+        };
+        tick(&mut w);
+        w.tabs[0].view = View::Text;
+        tick(&mut w);
+        for k in 0..5 {
+            let t = &mut w.tabs[0];
+            t.parser.advance(&mut t.term, format!("streamed line {k}\r\n").as_bytes());
+            t.rev += 1;
+            tick(&mut w);
+        }
+        for _ in 0..5 {
+            tick(&mut w);
+        }
+        let doc = &w.tabs[0].editor.as_ref().expect("built").1.0;
+        assert!(doc.contains("streamed line 4"), "{doc:?}");
+        // What is drawn: the laid-out text, not only the document behind it.
+        let shown = &w.tabs[0].editor_galley.as_ref().expect("laid out").3.text;
+        assert!(shown.contains("streamed line 4"), "{shown:?}");
     }
 
     fn typed(cmds: &[Cmd]) -> String {

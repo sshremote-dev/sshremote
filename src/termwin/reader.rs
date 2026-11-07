@@ -282,14 +282,15 @@ pub(super) fn text_editor(
         text.push_str(&screen);
         t.editor = Some((key, std::rc::Rc::new((text, before + at))));
     }
-    let doc = t.editor.as_ref().expect("just built").1.clone();
+    let (doc_key, doc) = t.editor.as_ref().map(|e| (e.0, e.1.clone())).expect("just built");
     // The laid-out text, made again only when the text, its font or its colour changes, not every
-    // frame (a long scrollback takes a while to lay out).
+    // frame (a long scrollback takes a while to lay out). It is keyed by the document it was made
+    // from: the terminal may already be ahead of a document waiting for its next rebuild.
     let fg_now = scheme_fg();
-    let stale = t.editor_galley.as_ref().is_none_or(|g| g.0 != key || g.1 != font.size || g.2 != fg_now);
+    let stale = t.editor_galley.as_ref().is_none_or(|g| g.0 != doc_key || g.1 != font.size || g.2 != fg_now);
     if stale {
         let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(&doc.0, font, fg_now, f));
-        t.editor_galley = Some((key, font.size, fg_now, std::sync::Arc::new(job)));
+        t.editor_galley = Some((doc_key, font.size, fg_now, std::sync::Arc::new(job)));
     }
     // egui lays the job out again only when it or the font atlas changed; a galley kept across
     // frames would point into an atlas that may have been rebuilt.
