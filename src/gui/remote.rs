@@ -19,11 +19,11 @@ pub(super) struct Remote {
     pan: Vec2,
     fullscreen: bool,
     pinned: bool,
-    /// Where the toolbar sits along the top edge, 0 left to 1 right; dragged by its grip or handle.
+    /// Where the toolbar sits along the top edge, 0 left to 1 right; dragged by its grip.
     bar_x: f32,
     /// The toolbar's width last frame, to keep it on screen.
     bar_w: f32,
-    /// The tucked-away toolbar stays out until then: after the handle or the toolbar was last under the pointer.
+    /// The hidden toolbar stays out until then: after the top edge or the toolbar was last under the pointer.
     bar_until: Instant,
     clip: Clip,
     share_clipboard: bool,
@@ -1163,50 +1163,18 @@ impl Remote {
         (centre - width / 2.0).clamp(screen.left() + 4.0, (screen.right() - width - 4.0).max(screen.left() + 4.0))
     }
 
-    /// The toolbar, or while it is tucked away a small tab hanging from the top edge (as in Jump
-    /// Desktop) that brings it back when the pointer reaches it; returns the toolbar's rectangle.
+    /// The toolbar; unpinned it is hidden entirely and comes back while the pointer is at the top
+    /// edge of the window, as in Remote Desktop's full screen. Returns the toolbar's rectangle.
     pub(super) fn toolbar(&mut self, ctx: &egui::Context, screen: Rect) -> Result<Option<Rect>, String> {
         let id = egui::Id::unique("toolbar");
-        let handle_id = egui::Id::unique("toolbar-handle");
+        if !self.pinned
+            && ctx.pointer_hover_pos().is_some_and(|p| p.y <= screen.top() + 6.0 && screen.x_range().contains(p.x))
+        {
+            self.bar_until = Instant::now() + Duration::from_millis(700);
+        }
         let shown_a_while = Instant::now() < self.bar_until;
         if !(self.pinned || shown_a_while || menu_open(ctx) || ctx.any_popup_open()) {
-            let size = Vec2::new(64.0, 18.0);
-            let left = self.bar_left(screen, size.x);
-            let rect = Rect::from_min_size(Pos2::new(left, screen.top()), size);
-            let dot = match self.ctl.rtt {
-                r if r < 80.0 => GOOD,
-                r if r < 250.0 => WARN,
-                _ => BAD,
-            };
-            let resp = egui::Area::new(handle_id).fixed_pos(rect.min).order(egui::Order::Foreground).show(ctx, |ui| {
-                let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                let fill = ctx.global_style().visuals.window_fill;
-                let radius = CornerRadius { nw: 0, ne: 0, sw: 9, se: 9 };
-                ui.painter().rect_filled(r, radius, fill.gamma_multiply(if resp.hovered() { 1.0 } else { 0.9 }));
-                ui.painter().rect_stroke(
-                    r,
-                    radius,
-                    Stroke::new(1.0, Color32::from_white_alpha(30)),
-                    egui::StrokeKind::Inside,
-                );
-                ui.painter().circle_filled(r.left_center() + Vec2::new(14.0, 0.0), 3.5, dot);
-                let fg = ctx.global_style().visuals.text_color();
-                ui.painter().text(
-                    r.center() + Vec2::new(6.0, 0.0),
-                    Align2::CENTER_CENTER,
-                    ic::CARET_DOWN,
-                    FontId::proportional(13.0),
-                    fg,
-                );
-                resp.on_hover_text("Toolbar (not pinned). Point here to show it; drag to move it along the edge.")
-            });
-            let r = resp.inner;
-            self.drag_bar(ctx, &r, screen);
-            // Hovering opens the toolbar, which then stays while the pointer is on it.
-            if r.hovered() && !r.dragged() && !r.drag_stopped() {
-                self.bar_until = Instant::now() + Duration::from_millis(700);
-                ctx.request_repaint();
-            }
+            ctx.request_repaint_after(Duration::from_millis(100));
             return Ok(None);
         }
         let mut action: Option<Deferred> = None;
@@ -1542,12 +1510,12 @@ impl Remote {
         let (pin, tip) = if self.pinned {
             (
                 RichText::new(ic::PUSH_PIN).size(16.0).family(filled()).color(Color32::WHITE),
-                "Pinned: the toolbar stays. Click to unpin; it then folds into a tab at the top edge.",
+                "Pinned: the toolbar stays. Click to unpin; it then hides and comes back when the pointer reaches the top edge.",
             )
         } else {
             (
                 RichText::new(ic::PUSH_PIN_SLASH).size(16.0).color(ui.visuals().weak_text_color()),
-                "Not pinned: the toolbar folds into a tab at the top edge. Click to pin it.",
+                "Not pinned: the toolbar hides and comes back when the pointer reaches the top edge. Click to pin it.",
             )
         };
         let b =
@@ -1557,7 +1525,7 @@ impl Remote {
             self.notify(if self.pinned {
                 "Toolbar pinned"
             } else {
-                "Toolbar unpinned: it folds into the tab at the top"
+                "Toolbar unpinned: point at the top edge to bring it back"
             });
         }
         ui.separator();

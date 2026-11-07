@@ -89,9 +89,9 @@ round trip; hover for traffic, fps and quality) and icon buttons for:
   context menu gives the terminal a window of its own or closes the shells;
 - options: view only (watch without sending keys, clicks or the wheel; a badge on the picture says
   so), clipboard sharing, sound, system keys, theme and a full repaint;
-- a pin that keeps the toolbar shown (a filled pin on a blue button); unpinned, the toolbar folds
-  into a small tab hanging from the top edge, as in Jump Desktop, that opens it when the pointer
-  reaches it; the tab and the toolbar's grip move it along the edge, and the place is remembered;
+- a pin that keeps the toolbar shown (a filled pin on a blue button); unpinned, the toolbar hides
+  completely, as in Remote Desktop's full screen, and comes back while the pointer is at the top
+  edge of the window; its grip moves it along the edge, and the place is remembered;
 - disconnect.
 
 Menus stay open while their sliders and switches are used, and the toolbar stays while a menu is open.
