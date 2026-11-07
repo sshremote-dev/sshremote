@@ -1890,4 +1890,63 @@ mod tests {
             rx.try_iter().filter_map(|e| if let TermEvent::PtyWrite(s) = e { Some(s) } else { None }).collect();
         assert_eq!(replies, ["\x1b[1;3R"]);
     }
+
+    /// A frame of the window with no real display, as the window would run it.
+    fn frame(ctx: &egui::Context, w: &mut TermWindow, events: Vec<Event>) -> Vec<Cmd> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
+        out
+    }
+
+    fn typed(cmds: &[Cmd]) -> String {
+        let bytes: Vec<u8> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::Send(ToAgent::TermInput { data, .. }) => Some(data.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn input_methods_type_into_the_shell() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        // The first frames open the shell and lay the terminal out.
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let preedit = Event::Ime(egui::ImeEvent::Preedit { text: "\u{D558}".into(), active_range_chars: None });
+        let composing = frame(&ctx, &mut w, vec![preedit]);
+        assert_eq!(typed(&composing), "", "nothing is sent while composing");
+        assert_eq!(w.tabs[0].preedit, "\u{D558}");
+        let enter = Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let commit = Event::Ime(egui::ImeEvent::Commit("\u{D55C}\u{AE00}".into()));
+        let done = frame(&ctx, &mut w, vec![commit, Event::Text(" ok".into()), enter]);
+        assert_eq!(typed(&done), "\u{D55C}\u{AE00} ok\r");
+        assert!(w.tabs[0].preedit.is_empty());
+        // The window asks the system for an input method at the cursor.
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+            focused: true,
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            w.embedded(ui);
+        });
+        assert!(out.platform_output.ime.is_some());
+    }
 }
