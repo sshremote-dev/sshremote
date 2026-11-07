@@ -15,9 +15,11 @@ use super::region::{self, R};
 use super::{Capture, Image, Input, Monitor, NEEDS_HELPER, Share, WindowInfo};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
+// Input goes to Mutter without waiting for its reply: a round trip per pointer move would hold up
+// the next event and the next frame.
 macro_rules! notify {
     ($s:expr, $method:literal, $body:expr) => {
-        $s.session.call::<_, _, ()>($method, $body).map_err(|e| format!("GNOME {}: {e}", $method))
+        $s.session.call_noreply($method, $body).map_err(|e| format!("GNOME {}: {e}", $method))
     };
 }
 

@@ -278,6 +278,8 @@ struct Tab {
     reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
+    /// The scrollback's rows, worked out once each for the reading views.
+    rows: reader::Rows,
     /// The text view's document as a layout job, for the same key, font size and colour.
     editor_galley: Option<(EditorKey, f32, Color32, std::sync::Arc<egui::text::LayoutJob>)>,
     /// The text view's document and the cursor's place in it, for an output revision and cursor.
@@ -304,10 +306,21 @@ struct Tab {
 type Reading = (u64, i32, std::rc::Rc<(String, crate::markdown::Doc)>);
 
 impl Tab {
+    #[cfg(test)]
+    fn rows_len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[cfg(test)]
+    fn rows_md(&self) -> Vec<(String, bool)> {
+        self.rows.md()
+    }
+
     /// Lets go of what the text and Markdown views built, when the terminal is shown again.
     fn forget_reading(&mut self) {
         self.reading = None;
         self.editor = None;
+        self.rows = Default::default();
         self.editor_galley = None;
         self.md_heights = Default::default();
         self.stitched = Vec::new();
@@ -638,6 +651,7 @@ impl TermWindow {
             mouse_held: None,
             editor: None,
             editor_galley: None,
+            rows: Default::default(),
             rev: 0,
             reading: None,
             group: id,
@@ -1654,5 +1668,74 @@ mod tests {
         w.tear(before[1], Pos2::ZERO);
         assert!(w.take_torn().is_empty());
         assert_eq!(order(&w).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+
+    /// Time to rebuild the reading views from a full scrollback, whole and after new output:
+    /// cargo test --release -- --ignored --nocapture rebuild_cost
+    #[test]
+    #[ignore]
+    fn rebuild_cost() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), ..Default::default() };
+        let _ = ctx.run_ui(input.clone(), |ui| { w.embedded(ui); });
+        let _ = ctx.run_ui(input, |ui| { w.embedded(ui); });
+        let t = &mut w.tabs[0];
+        let out = |t: &mut Tab, from: usize, n: usize| {
+            for k in from..from + n {
+                t.parser.advance(&mut t.term, format!("line {k}: some \x1b[1mbold\x1b[0m output with `code`\r\n").as_bytes());
+            }
+        };
+        out(t, 0, 12_000);
+        let start = std::time::Instant::now();
+        reader::sync_rows(t);
+        let whole = start.elapsed();
+        out(t, 12_000, 50);
+        let start = std::time::Instant::now();
+        reader::sync_rows(t);
+        let step = start.elapsed();
+        eprintln!("{} rows: whole {:.1} ms, after 50 new lines {:.2} ms", t.rows_len(), whole.as_secs_f64() * 1e3, step.as_secs_f64() * 1e3);
+    }
+}
+
+#[cfg(test)]
+mod rows {
+    use super::*;
+
+    fn tab_with(w: &mut TermWindow, ctx: &egui::Context) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0))), ..Default::default() };
+        let _ = ctx.run_ui(input.clone(), |ui| { w.embedded(ui); });
+        let _ = ctx.run_ui(input, |ui| { w.embedded(ui); });
+    }
+
+    /// The cached scrollback matches the scrollback worked out whole, while it fills, once it is
+    /// full and old rows drop, and after it is cleared.
+    #[test]
+    fn cached_rows_follow_the_scrollback() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        tab_with(&mut w, &ctx);
+        let t = &mut w.tabs[0];
+        let check = |t: &mut Tab| {
+            reader::sync_rows(t);
+            let g = t.term.grid();
+            let history = (g.total_lines() - g.screen_lines()) as i32;
+            let whole = reader::screen_markdown(t, -history, 0);
+            let cached = reader::join_rows(t.rows_md());
+            assert_eq!(cached, whole);
+        };
+        for round in 0..30 {
+            for k in 0..(round * 97 % 700 + 1) {
+                t.parser.advance(&mut t.term, format!("r{round} l{k} \x1b[1mb\x1b[0m\r\n").as_bytes());
+            }
+            check(t);
+        }
+        t.parser.advance(&mut t.term, b"\x1b[3J\x1b[2J\x1b[Hafter clear\r\n");
+        check(t);
     }
 }

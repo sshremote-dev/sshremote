@@ -27,7 +27,6 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     }
     if due && t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
         t.built_at = now;
-        let history = (t.term.grid().total_lines() - t.term.grid().screen_lines()) as i32;
         let text = if t.term.mode().contains(TermMode::ALT_SCREEN) {
             // A full-screen program shows a window on a longer text: its screens are stitched
             // together, so a reply or a table cut off by scrolling keeps its shape.
@@ -39,7 +38,9 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
             t.last_screen.clear();
             t.overlays.clear();
             t.stitch_at = None;
-            screen_markdown(t, -history, first)
+            sync_rows(t);
+            let rows: Vec<(String, bool)> = t.rows.md.iter().cloned().chain((0..first).map(|l| row_markdown(t, l))).collect();
+            join_rows(rows)
         };
         let doc = crate::markdown::Doc::new(&text);
         t.reading = Some((t.rev, first, std::rc::Rc::new((text, doc))));
@@ -171,6 +172,82 @@ pub(super) fn screen_text(t: &Tab, from: i32, to: i32) -> (String, usize) {
     (out, at)
 }
 
+/// The scrollback's rows as Markdown and as plain text, oldest first. Rows that have scrolled off
+/// the screen do not change, so each is worked out once.
+#[derive(Default)]
+pub(super) struct Rows {
+    md: std::collections::VecDeque<(String, bool)>,
+    plain: std::collections::VecDeque<String>,
+    cols: usize,
+}
+
+#[cfg(test)]
+impl Rows {
+    pub(super) fn len(&self) -> usize {
+        self.plain.len()
+    }
+
+    pub(super) fn md(&self) -> Vec<(String, bool)> {
+        self.md.iter().cloned().collect()
+    }
+}
+
+/// One row as plain text without trailing spaces.
+fn row_plain(t: &Tab, line: i32) -> String {
+    let row = &t.term.grid()[Line(line)];
+    let mut text = String::new();
+    for c in 0..t.term.grid().columns() {
+        let cell = &row[Column(c)];
+        if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            text.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+    }
+    text.truncate(text.trim_end().len());
+    text
+}
+
+/// Brings the cache up to the scrollback: rows that scrolled in are added, rows the scrollback
+/// dropped are let go. When the two cannot be matched (cleared, resized) it is made anew.
+pub(super) fn sync_rows(t: &mut Tab) {
+    let grid = t.term.grid();
+    let history = grid.total_lines() - grid.screen_lines();
+    let cols = grid.columns();
+    let cached = t.rows.plain.len();
+    let same_at = |t: &Tab, k: usize| {
+        // The cached newest rows are now `k` rows further up.
+        (0..cached.min(3)).all(|i| k + i < history && row_plain(t, -((k + i + 1) as i32)) == t.rows.plain[cached - 1 - i])
+    };
+    let shift = if t.rows.cols != cols || cached == 0 {
+        None
+    } else if history > cached {
+        // Still filling: exactly the growth scrolled in.
+        Some(history - cached).filter(|&k| same_at(t, k))
+    } else if history == cached {
+        // Full: the oldest rows drop as new ones come; find how far the cached ones moved.
+        (0..history).find(|&k| same_at(t, k))
+    } else {
+        None
+    };
+    match shift {
+        Some(k) => {
+            for line in (1..=k as i32).rev() {
+                let md = row_markdown(t, -line);
+                let plain = row_plain(t, -line);
+                t.rows.md.push_back(md);
+                t.rows.plain.push_back(plain);
+            }
+            while t.rows.plain.len() > history {
+                t.rows.md.pop_front();
+                t.rows.plain.pop_front();
+            }
+        }
+        None => {
+            let (md, plain) = (1..=history as i32).rev().map(|l| (row_markdown(t, -l), row_plain(t, -l))).unzip();
+            t.rows = Rows { md, plain, cols };
+        }
+    }
+}
+
 /// The text view: one read-only document of the whole scrollback and screen in the terminal's font,
 /// with line numbers, selected as in VS Code (drag, double-click for a word, Shift+click, Ctrl+A,
 /// Ctrl+C) and a caret where the shell's cursor is, which takes typing for the shell.
@@ -183,8 +260,6 @@ pub(super) fn text_editor(
     keys: bool,
     out: &mut Vec<Cmd>,
 ) {
-    let grid = t.term.grid();
-    let history = (grid.total_lines() - grid.screen_lines()) as i32;
     let (_, last) = input_rows(t);
     let key = (t.rev, t.term.grid().cursor.point.line.0, t.term.grid().cursor.point.column.0);
     let now = ui.input(|i| i.time);
@@ -194,8 +269,18 @@ pub(super) fn text_editor(
     }
     if due && t.editor.as_ref().is_none_or(|e| e.0 != key) {
         t.built_at = now;
-        let (text, at) = screen_text(t, -history, last);
-        t.editor = Some((key, std::rc::Rc::new((text, at))));
+        // The scrollback from the cache, the screen worked out now (the cursor is there).
+        sync_rows(t);
+        let (screen, at) = screen_text(t, 0, last);
+        let mut text = String::with_capacity(t.rows.plain.iter().map(|r| r.len() + 1).sum::<usize>() + screen.len());
+        let mut before = 0;
+        for row in &t.rows.plain {
+            text.push_str(row);
+            text.push('\n');
+            before += row.chars().count() + 1;
+        }
+        text.push_str(&screen);
+        t.editor = Some((key, std::rc::Rc::new((text, before + at))));
     }
     let doc = t.editor.as_ref().expect("just built").1.clone();
     // The laid-out text, made again only when the text, its font or its colour changes, not every
@@ -330,110 +415,117 @@ pub(super) const LINE_MARKERS: [&str; 6] = ["● ", "⏺ ", "❯ ", "› ", "•
 /// as Claude Code draws `#`), bold and italic runs become `**` and `*`. Agents draw Markdown with
 /// these attributes and drop the marks, so this gives the Markdown view its structure back.
 pub(super) fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
-    let grid = t.term.grid();
-    let cols = grid.columns();
+    join_rows((from..to).map(|line| row_markdown(t, line)))
+}
+
+/// Rows put together into lines: a row the terminal wrapped goes on in the next one, as one line.
+pub(super) fn join_rows(rows: impl IntoIterator<Item = (String, bool)>) -> String {
     let mut lines: Vec<String> = Vec::new();
-    // A row the terminal wrapped goes on in the next one: they are one line of text.
-    let mut wrapped = false;
-    let add = |lines: &mut Vec<String>, text: String, join: bool| match lines.last_mut() {
-        Some(last) if join => last.push_str(&text),
-        _ => lines.push(text),
-    };
-    for line in from..to {
-        let row = &grid[Line(line)];
-        let join = wrapped;
-        wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
-        let mut cells: Vec<(char, bool, bool, bool)> = Vec::new();
-        for c in 0..cols {
-            let cell = &row[Column(c)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
-            let f = cell.flags;
-            cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
+    let mut join = false;
+    for (text, wraps) in rows {
+        match lines.last_mut() {
+            Some(last) if join => last.push_str(&text),
+            _ => lines.push(text),
         }
-        // A row that goes on in the next keeps its last spaces: they separate the words there.
-        while !wrapped && cells.last().is_some_and(|c| c.0 == ' ') {
-            cells.pop();
-        }
-        let plain: String = cells.iter().map(|c| c.0).collect();
-        // Leading spaces and an agent's marker stay as they are.
-        let indent = plain.len() - plain.trim_start().len();
-        let mut start = plain[..indent].chars().count();
-        let rest: String = plain.trim_start().to_string();
-        let mut prefix = plain[..indent].to_string();
-        if let Some(m) = LINE_MARKERS.iter().find(|m| rest.starts_with(**m)) {
-            prefix.push_str(m);
-            start += m.chars().count();
-        }
-        let body = &cells[start.min(cells.len())..];
-        let text: Vec<&(char, bool, bool, bool)> = body.iter().filter(|c| !c.0.is_whitespace()).collect();
-        let boxy = body.iter().any(|c| ('\u{2500}'..='\u{257f}').contains(&c.0));
-        let words: String = body.iter().map(|c| c.0).collect();
-        // Text laid out in columns stays as it is, without marks.
-        if crate::markdown::columned(&words) {
-            add(&mut lines, format!("{prefix}{words}"), join);
-            continue;
-        }
-        if !text.is_empty() && !boxy && text.iter().all(|c| c.1) {
-            let level = if text.iter().all(|c| c.2 || c.3) { "#" } else { "##" };
-            add(&mut lines, format!("{prefix}{level} {}", words.trim()), join);
-            continue;
-        }
-        let mut out = prefix;
-        let (mut bold, mut italic) = (false, false);
-        for (i, &(ch, b, it, _)) in body.iter().enumerate() {
-            if !ch.is_whitespace() {
-                // Spaces keep the style around them, so marks hug the words.
-                if (b, it) != (bold, italic) {
-                    let closing = out.len();
-                    if italic {
-                        out.push('*');
-                    }
-                    if bold && !b {
-                        out.push_str("**");
-                    }
-                    // A mark that closes and one that opens are kept apart by an invisible space, so
-                    // "**bold***italic*" cannot be read the other way round.
-                    if out.len() > closing && (b && !bold || it) {
-                        out.push('\u{200B}');
-                    }
-                    if b && !bold {
-                        out.push_str("**");
-                    }
-                    if it {
-                        out.push('*');
-                    }
-                    (bold, italic) = (b, it);
-                }
-            } else if bold || italic {
-                // A style ends before the space when the next word is not in it.
-                match body[i..].iter().find(|c| !c.0.is_whitespace()) {
-                    None => break,
-                    Some(next) if (next.1, next.2) != (bold, italic) => {
-                        if italic {
-                            out.push('*');
-                        }
-                        if bold {
-                            out.push_str("**");
-                        }
-                        (bold, italic) = (false, false);
-                    }
-                    Some(_) => {}
-                }
-            }
-            out.push(ch);
-        }
-        let trailing = out.len() - out.trim_end().len();
-        out.truncate(out.len() - trailing);
-        if italic {
-            out.push('*');
-        }
-        if bold {
-            out.push_str("**");
-        }
-        add(&mut lines, out, join);
+        join = wraps;
     }
     lines.join("\n").trim_end().to_string()
 }
+
+/// One row as Markdown (see [`screen_markdown`]), and whether the terminal wrapped it into the next.
+pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
+    let grid = t.term.grid();
+    let cols = grid.columns();
+    let row = &grid[Line(line)];
+    let wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+    let mut cells: Vec<(char, bool, bool, bool)> = Vec::new();
+    for c in 0..cols {
+        let cell = &row[Column(c)];
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let ch = if cell.c == '\0' { ' ' } else { cell.c };
+        let f = cell.flags;
+        cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
+    }
+    // A row that goes on in the next keeps its last spaces: they separate the words there.
+    while !wrapped && cells.last().is_some_and(|c| c.0 == ' ') {
+        cells.pop();
+    }
+    let plain: String = cells.iter().map(|c| c.0).collect();
+    // Leading spaces and an agent's marker stay as they are.
+    let indent = plain.len() - plain.trim_start().len();
+    let mut start = plain[..indent].chars().count();
+    let rest: String = plain.trim_start().to_string();
+    let mut prefix = plain[..indent].to_string();
+    if let Some(m) = LINE_MARKERS.iter().find(|m| rest.starts_with(**m)) {
+        prefix.push_str(m);
+        start += m.chars().count();
+    }
+    let body = &cells[start.min(cells.len())..];
+    let text: Vec<&(char, bool, bool, bool)> = body.iter().filter(|c| !c.0.is_whitespace()).collect();
+    let boxy = body.iter().any(|c| ('\u{2500}'..='\u{257f}').contains(&c.0));
+    let words: String = body.iter().map(|c| c.0).collect();
+    // Text laid out in columns stays as it is, without marks.
+    if crate::markdown::columned(&words) {
+        return (format!("{prefix}{words}"), wrapped);
+    }
+    if !text.is_empty() && !boxy && text.iter().all(|c| c.1) {
+        let level = if text.iter().all(|c| c.2 || c.3) { "#" } else { "##" };
+        return (format!("{prefix}{level} {}", words.trim()), wrapped);
+    }
+    let mut out = prefix;
+    let (mut bold, mut italic) = (false, false);
+    for (i, &(ch, b, it, _)) in body.iter().enumerate() {
+        if !ch.is_whitespace() {
+            // Spaces keep the style around them, so marks hug the words.
+            if (b, it) != (bold, italic) {
+                let closing = out.len();
+                if italic {
+                    out.push('*');
+                }
+                if bold && !b {
+                    out.push_str("**");
+                }
+                // A mark that closes and one that opens are kept apart by an invisible space, so
+                // "**bold***italic*" cannot be read the other way round.
+                if out.len() > closing && (b && !bold || it) {
+                    out.push('\u{200B}');
+                }
+                if b && !bold {
+                    out.push_str("**");
+                }
+                if it {
+                    out.push('*');
+                }
+                (bold, italic) = (b, it);
+            }
+        } else if bold || italic {
+            // A style ends before the space when the next word is not in it.
+            match body[i..].iter().find(|c| !c.0.is_whitespace()) {
+                None => break,
+                Some(next) if (next.1, next.2) != (bold, italic) => {
+                    if italic {
+                        out.push('*');
+                    }
+                    if bold {
+                        out.push_str("**");
+                    }
+                    (bold, italic) = (false, false);
+                }
+                Some(_) => {}
+            }
+        }
+        out.push(ch);
+    }
+    let trailing = out.len() - out.trim_end().len();
+    out.truncate(out.len() - trailing);
+    if italic {
+        out.push('*');
+    }
+    if bold {
+        out.push_str("**");
+    }
+    (out, wrapped)
+}
+

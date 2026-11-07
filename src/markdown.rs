@@ -45,6 +45,9 @@ pub fn install_bold(ctx: &egui::Context) {
 pub enum Block {
     Heading(u8, String),
     Para(String),
+    /// A paragraph or preformatted run that goes on in the next block: one long run is kept in
+    /// parts so only the parts in view are drawn, and the parts are drawn with no space between.
+    Part(Box<Block>),
     Code {
         lang: String,
         code: String,
@@ -302,17 +305,19 @@ pub fn parse(text: &str) -> Vec<Block> {
     let lines: Vec<&str> = text.lines().collect();
     let mut blocks = Vec::new();
     let mut para: Vec<&str> = Vec::new();
-    let flush = |para: &mut Vec<&str>, blocks: &mut Vec<Block>| {
+    let flush_part = |para: &mut Vec<&str>, blocks: &mut Vec<Block>, more: bool| {
         if !para.is_empty() {
-            if para.iter().any(|l| columned(l)) {
-                blocks.push(Block::Pre(para.join("\n")));
+            let b = if para.iter().any(|l| columned(l)) {
+                Block::Pre(para.join("\n"))
             } else {
                 // Lines of a paragraph join up, as in the preview: the terminal broke them only to fit.
-                blocks.push(Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")));
-            }
+                Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" "))
+            };
+            blocks.push(if more { Block::Part(Box::new(b)) } else { b });
             para.clear();
         }
     };
+    let flush = |para: &mut Vec<&str>, blocks: &mut Vec<Block>| flush_part(para, blocks, false);
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -419,6 +424,11 @@ pub fn parse(text: &str) -> Vec<Block> {
             continue;
         } else {
             para.push(line);
+            // A very long paragraph (output without blank lines) goes in parts, so a long document
+            // is still drawn by the parts in view.
+            if para.len() >= 40 {
+                flush_part(&mut para, &mut blocks, true);
+            }
         }
         i += 1;
     }
@@ -1037,6 +1047,11 @@ fn block(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], n: usize, id: egui::Id
             rich(ui, text, BODY, th, false);
             ui.add_space(6.0);
         }
+        Block::Part(inner) => match &**inner {
+            Block::Para(text) => rich(ui, text, BODY, th, false),
+            Block::Pre(text) => pre(ui, th, text),
+            _ => {}
+        },
         Block::Code { lang, code } => {
             code_block(ui, th, lang, code, bid);
             ui.add_space(8.0);
@@ -1145,7 +1160,7 @@ pub fn show_in_view(
                 probe.min_rect().height()
             });
             tops.push((y, h));
-            y += h + gap;
+            y += h + if matches!(doc.blocks[n], Block::Part(_)) { 0.0 } else { gap };
         }
         heights.layout = Some((doc_key, w, tops, y));
     }
@@ -1178,6 +1193,16 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paragraphs_go_in_joined_parts() {
+        let text: Vec<String> = (0..100).map(|k| format!("line {k}")).collect();
+        let b = parse(&text.join("\n"));
+        assert_eq!(b.len(), 3);
+        assert!(matches!(&b[0], Block::Part(p) if matches!(&**p, Block::Para(t) if t.starts_with("line 0 ") && t.ends_with("line 39"))));
+        assert!(matches!(&b[1], Block::Part(_)));
+        assert_eq!(b[2], Block::Para((80..100).map(|k| format!("line {k}")).collect::<Vec<_>>().join(" ")));
+    }
 
     #[test]
     fn box_tables_become_markdown() {

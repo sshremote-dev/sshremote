@@ -30,6 +30,7 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+#[cfg(any(windows, test))]
 /// One argument quoted the way the C runtime splits a command line: backslashes before a quote,
 /// and at the end before the closing quote, are doubled.
 pub fn quote_arg(a: &str) -> String {
@@ -59,6 +60,7 @@ pub fn quote_arg(a: &str) -> String {
 }
 
 /// A command line from separate arguments.
+#[cfg(any(windows, test))]
 pub fn command_line(argv: &[String]) -> String {
     argv.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ")
 }

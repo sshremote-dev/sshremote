@@ -20,6 +20,8 @@ pub struct Portal {
     session: OwnedObjectPath,
     pub node: u32,
     fd: OwnedFd,
+    /// The RemoteDesktop interface, made once: input events go through it many times a second.
+    rd: Proxy<'static>,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -97,7 +99,14 @@ pub fn pick() -> Result<Portal, String> {
     let p = Proxy::new(&conn, DEST, PATH, SC).map_err(err("ScreenCast"))?;
     let fd: OwnedFd =
         p.call("OpenPipeWireRemote", &(&sp, HashMap::<&str, Value>::new())).map_err(err("OpenPipeWireRemote"))?;
-    Ok(Portal { conn, session, node, fd })
+    let rd = zbus::blocking::proxy::Builder::new(&conn)
+        .destination(DEST)
+        .and_then(|b| b.path(PATH))
+        .and_then(|b| b.interface(RD))
+        .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
+        .and_then(|b| b.build())
+        .map_err(err("RemoteDesktop"))?;
+    Ok(Portal { conn, session, node, fd, rd })
 }
 
 impl Portal {
@@ -117,8 +126,8 @@ impl Portal {
     where
         B: zbus::export::serde::ser::Serialize + zbus::zvariant::DynamicType,
     {
-        let p = Proxy::new(&self.conn, DEST, PATH, RD).map_err(err(method))?;
-        p.call::<_, _, ()>(method, body).map_err(err(method))
+        // Without waiting for the reply, as for Mutter's own interface.
+        self.rd.call_noreply(method, body).map_err(err(method))
     }
 
     fn none() -> HashMap<&'static str, Value<'static>> {
