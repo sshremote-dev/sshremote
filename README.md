@@ -72,10 +72,11 @@ round trip; hover for traffic, fps and quality) and icon buttons for:
   remote screen to show;
 - share: the entire screen, one window or one application (see below);
 - full screen (F11; the toolbar then hides until the pointer reaches the top edge);
-- special keys (Ctrl+Alt+Del, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen, Win plus
-  the next key);
+- special keys (Ctrl+Alt+Del, lock screen, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen,
+  Win plus the next key);
 - file transfer, terminal, chat, screenshot, pause and single frame;
-- options: clipboard sharing, sound, system keys, theme and a full repaint;
+- options: view only (watch without sending keys, clicks or the wheel; a badge on the picture says
+  so), clipboard sharing, sound, system keys, theme and a full repaint;
 - a pin that keeps the toolbar shown (a filled pin on a blue button); unpinned, the toolbar folds
   into a small tab hanging from the top edge, as in Jump Desktop, that opens it when the pointer
   reaches it; the tab and the toolbar's grip move it along the edge, and the place is remembered;

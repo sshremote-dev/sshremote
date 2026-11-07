@@ -213,6 +213,8 @@ struct Remote {
     bar_until: Instant,
     clip: Clip,
     share_clipboard: bool,
+    /// Watching only: no key, click or wheel reaches the SSH host.
+    view_only: bool,
     held: BTreeSet<u32>,
     mods: Modifiers,
     pointer: (u16, u16),
@@ -1043,6 +1045,7 @@ impl eframe::App for App {
                         bar_until: Instant::now(),
                         clip: Clip::new(),
                         share_clipboard: true,
+                        view_only: false,
                         held: BTreeSet::new(),
                         mods: Modifiers::NONE,
                         pointer: (u16::MAX, u16::MAX),
@@ -1113,7 +1116,7 @@ impl eframe::App for App {
                 {
                     // As in RustDesk: system keys go to the remote host while the pointer is over its picture.
                     let over = ctx.pointer_hover_pos().is_some_and(|p| r.last_shown.is_some_and(|s| s.contains(p)));
-                    crate::keygrab::set_active(r.grab_keys && ctx.input(|i| i.focused) && over);
+                    crate::keygrab::set_active(r.grab_keys && !r.view_only && ctx.input(|i| i.focused) && over);
                 }
                 let grabbed: Vec<(u32, bool)> =
                     self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
@@ -1194,10 +1197,13 @@ impl Remote {
             self.pick_at = None;
             self.send(ToAgent::Share { kind: 3, id: 0 })?;
         }
-        if self.paused {
-            // A badge on the picture: it is a still image until resumed.
-            let text =
-                format!("{}  Paused   ·   {} resumes, {} fetches one frame", ic::PAUSE, ic::PLAY, ic::ARROW_CLOCKWISE);
+        if self.paused || self.view_only {
+            // A badge on the picture: it is a still image until resumed, or input is off.
+            let text = if self.paused {
+                format!("{}  Paused   ·   {} resumes, {} fetches one frame", ic::PAUSE, ic::PLAY, ic::ARROW_CLOCKWISE)
+            } else {
+                format!("{}  View only   ·   turn it off in Options {}", ic::EYE, ic::GEAR)
+            };
             let painter =
                 ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("paused-badge")));
             let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
@@ -1224,7 +1230,11 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
-        self.input(&ctx, shown, &ui_rects)?;
+        if self.view_only {
+            self.release_all()?;
+        } else {
+            self.input(&ctx, shown, &ui_rects)?;
+        }
         if ctx.input(|i| i.key_pressed(Key::F11)) {
             self.set_fullscreen(&ctx, !self.fullscreen);
         }
@@ -2295,8 +2305,9 @@ impl Remote {
             }));
         }
         let keys = icon_menu(ui, ic::KEYBOARD, |ui| {
-            let combos: [(&str, &str, Option<Vec<u32>>); 8] = [
+            let combos: [(&str, &str, Option<Vec<u32>>); 9] = [
                 ("Secure attention", "Ctrl+Alt+Del", None),
+                ("Lock screen", "Win+L", Some(vec![SUPER_L, 'l' as u32])),
                 ("Start menu", "Win", Some(vec![SUPER_L])),
                 ("Run", "Win+R", Some(vec![SUPER_L, 'r' as u32])),
                 ("File explorer", "Win+E", Some(vec![SUPER_L, 'e' as u32])),
@@ -2395,6 +2406,7 @@ impl Remote {
         let mut dark = ui.visuals().dark_mode;
         let mut theme_clicked = false;
         let more = icon_menu(ui, ic::GEAR, |ui| {
+            ui.checkbox(&mut self.view_only, "View only").on_hover_text("Watch without sending keys, clicks or the wheel");
             ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
             sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
             if cfg!(windows) {
