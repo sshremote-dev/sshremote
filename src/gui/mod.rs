@@ -117,30 +117,28 @@ fn decode_icon() -> Option<egui::IconData> {
     rgba.truncate(info.buffer_size());
     Some(egui::IconData { rgba, width: info.width, height: info.height })
 }
-const SHIFT_L: u32 = 0xffe1;
-const CONTROL_L: u32 = 0xffe3;
-const ALT_L: u32 = 0xffe9;
+use crate::xk::{self, ALT_L, CONTROL_L, SHIFT_L};
 
 /// Keysym for a key by its position (US layout names), so the remote layout decides the character.
 fn keysym(k: Key) -> Option<u32> {
     use Key::*;
     let ch = |c: char| Some(c as u32);
     match k {
-        ArrowLeft => Some(0xff51),
-        ArrowUp => Some(0xff52),
-        ArrowRight => Some(0xff53),
-        ArrowDown => Some(0xff54),
-        Escape => Some(0xff1b),
-        Tab => Some(0xff09),
-        Backspace => Some(0xff08),
-        Enter => Some(0xff0d),
+        ArrowLeft => Some(xk::LEFT),
+        ArrowUp => Some(xk::UP),
+        ArrowRight => Some(xk::RIGHT),
+        ArrowDown => Some(xk::DOWN),
+        Escape => Some(xk::ESCAPE),
+        Tab => Some(xk::TAB),
+        Backspace => Some(xk::BACKSPACE),
+        Enter => Some(xk::RETURN),
         Space => ch(' '),
-        Insert => Some(0xff63),
-        Delete => Some(0xffff),
-        Home => Some(0xff50),
-        End => Some(0xff57),
-        PageUp => Some(0xff55),
-        PageDown => Some(0xff56),
+        Insert => Some(xk::INSERT),
+        Delete => Some(xk::DELETE),
+        Home => Some(xk::HOME),
+        End => Some(xk::END),
+        PageUp => Some(xk::PAGE_UP),
+        PageDown => Some(xk::PAGE_DOWN),
         Comma => ch(','),
         Backslash => ch('\\'),
         Slash => ch('/'),
@@ -158,7 +156,7 @@ fn keysym(k: Key) -> Option<u32> {
             match (it.next(), it.next()) {
                 (Some(c @ ('A'..='Z' | '0'..='9')), None) => ch(c.to_ascii_lowercase()),
                 (Some('F'), Some(_)) => {
-                    name[1..].parse::<u32>().ok().filter(|n| (1..=12).contains(n)).map(|n| 0xffbd + n)
+                    name[1..].parse::<u32>().ok().and_then(xk::f)
                 }
                 _ => None,
             }
@@ -573,9 +571,9 @@ mod tests {
     fn keys_map_to_keysyms() {
         assert_eq!(keysym(Key::A), Some('a' as u32));
         assert_eq!(keysym(Key::Num7), Some('7' as u32));
-        assert_eq!(keysym(Key::F1), Some(0xffbe));
-        assert_eq!(keysym(Key::F12), Some(0xffc9));
-        assert_eq!(keysym(Key::Enter), Some(0xff0d));
+        assert_eq!(keysym(Key::F1), Some(xk::F1));
+        assert_eq!(keysym(Key::F12), Some(xk::F12));
+        assert_eq!(keysym(Key::Enter), Some(xk::RETURN));
         assert_eq!(keysym(Key::Quote), Some('\'' as u32));
     }
 }

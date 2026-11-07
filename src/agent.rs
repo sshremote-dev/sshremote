@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::xk;
 use crate::capture::{self, Image, Input};
 use crate::color::Mode;
 use crate::color::{Plane, Reducer, diff, pack};
@@ -165,7 +166,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         msgs.splice(0..0, queued.drain(..));
         for m in msgs {
             // Text waiting to be pasted goes in before any later input, so the order is kept.
-            let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if keysym & 0xff00_0000 == 0x0100_0000);
+            let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym));
             if !typed_text && matches!(m, ToAgent::Key { .. } | ToAgent::KeyState { .. } | ToAgent::Button { .. }) {
                 paste(&mut pending, &mut clip, cap.as_mut());
             }
@@ -229,7 +230,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 }
                 ToAgent::Ping(t) => send(enc, &ToClient::Pong(t)).map_err(io_err)?,
                 // GNOME types only what its keyboard layout has; other text (Korean, emoji...) is pasted.
-                ToAgent::Key { keysym, mods: 0 } if keysym & 0xff00_0000 == 0x0100_0000 && cap.name() == "gnome" => {
+                ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym) && cap.name() == "gnome" => {
                     if let Some(c) = char::from_u32(keysym & 0x00ff_ffff) {
                         pending.push(c);
                     }
@@ -351,17 +352,17 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         Ok(crate::ui::Outcome::Type { text, replace }) => {
                             if replace {
                                 for (k, down) in
-                                    [(0xffe3, true), ('a' as u32, true), ('a' as u32, false), (0xffe3, false)]
+                                    [(xk::CONTROL_L, true), ('a' as u32, true), ('a' as u32, false), (xk::CONTROL_L, false)]
                                 {
                                     queued.push(ToAgent::KeyState { keysym: k, down });
                                 }
                             }
                             for c in text.chars() {
                                 let keysym = match c {
-                                    '\n' => 0xff0d,
-                                    '\t' => 0xff09,
+                                    '\n' => xk::RETURN,
+                                    '\t' => xk::TAB,
                                     c if (c as u32) < 0x100 => c as u32,
-                                    c => 0x0100_0000 | c as u32,
+                                    c => xk::unicode(c as u32),
                                 };
                                 queued.push(ToAgent::Key { keysym, mods: 0 });
                             }
@@ -531,7 +532,7 @@ fn paste(pending: &mut String, clip: &mut crate::clip::Clip, cap: &mut dyn captu
         report(Err("text outside the keyboard layout needs the clipboard, which is unavailable".into()));
         return;
     }
-    for (k, down) in [(0xffe3, true), ('v' as u32, true), ('v' as u32, false), (0xffe3, false)] {
+    for (k, down) in [(xk::CONTROL_L, true), ('v' as u32, true), ('v' as u32, false), (xk::CONTROL_L, false)] {
         report(cap.input(Input::KeyState { keysym: k, down }));
     }
     // Applications fetch pasted text asynchronously; let it land before the next keys.

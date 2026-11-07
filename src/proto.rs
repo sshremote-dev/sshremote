@@ -35,7 +35,7 @@ pub const MOD_CTRL: u8 = 2;
 pub const MOD_ALT: u8 = 4;
 pub const MOD_SUPER: u8 = 8;
 /// X11 keysym of the left Win (Super) key.
-pub const SUPER_L: u32 = 0xffeb;
+pub use crate::xk::SUPER_L;
 
 #[derive(Debug, PartialEq)]
 pub enum ToAgent {
@@ -1014,19 +1014,20 @@ impl ToClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xk;
 
     #[test]
     fn roundtrip() {
         let msgs = [
             ToAgent::Settings(Settings { view_w: 1900, view_h: 1000, scale: 75, mode: Mode::Gray16, fps: 10 }),
             ToAgent::Ack(7),
-            ToAgent::Key { keysym: 0xff0d, mods: MOD_CTRL },
+            ToAgent::Key { keysym: xk::RETURN, mods: MOD_CTRL },
             ToAgent::Pointer { x: 3, y: 4 },
             ToAgent::Button { button: 1, pressed: true },
             ToAgent::Scroll { steps: -2 },
             ToAgent::Refresh,
             ToAgent::Ping(5),
-            ToAgent::KeyState { keysym: 0xffe1, down: true },
+            ToAgent::KeyState { keysym: xk::SHIFT_L, down: true },
             ToAgent::HScroll { steps: -3 },
             ToAgent::Clipboard("hello".into()),
             ToAgent::SecureAttention,

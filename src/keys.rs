@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::xk;
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER, SUPER_L};
 
 /// Maps a terminal key event to an X11 keysym plus modifier bits.
@@ -19,25 +20,24 @@ pub fn keysym(ev: &KeyEvent) -> Option<(u32, u8)> {
     let sym = match ev.code {
         // The character already carries its shift level.
         KeyCode::Char(c) => {
-            let c = c as u32;
-            return Some((if c <= 0xff { c } else { 0x0100_0000 | c }, mods));
+            return Some((xk::of_char(c), mods));
         }
-        KeyCode::Backspace => 0xff08,
-        KeyCode::Tab => 0xff09,
-        KeyCode::BackTab => return Some((0xff09, mods | MOD_SHIFT)),
-        KeyCode::Enter => 0xff0d,
-        KeyCode::Esc => 0xff1b,
-        KeyCode::Home => 0xff50,
-        KeyCode::Left => 0xff51,
-        KeyCode::Up => 0xff52,
-        KeyCode::Right => 0xff53,
-        KeyCode::Down => 0xff54,
-        KeyCode::PageUp => 0xff55,
-        KeyCode::PageDown => 0xff56,
-        KeyCode::End => 0xff57,
-        KeyCode::Insert => 0xff63,
-        KeyCode::Delete => 0xffff,
-        KeyCode::F(n @ 1..=12) => 0xffbe + n as u32 - 1,
+        KeyCode::Backspace => xk::BACKSPACE,
+        KeyCode::Tab => xk::TAB,
+        KeyCode::BackTab => return Some((xk::TAB, mods | MOD_SHIFT)),
+        KeyCode::Enter => xk::RETURN,
+        KeyCode::Esc => xk::ESCAPE,
+        KeyCode::Home => xk::HOME,
+        KeyCode::Left => xk::LEFT,
+        KeyCode::Up => xk::UP,
+        KeyCode::Right => xk::RIGHT,
+        KeyCode::Down => xk::DOWN,
+        KeyCode::PageUp => xk::PAGE_UP,
+        KeyCode::PageDown => xk::PAGE_DOWN,
+        KeyCode::End => xk::END,
+        KeyCode::Insert => xk::INSERT,
+        KeyCode::Delete => xk::DELETE,
+        KeyCode::F(n @ 1..=12) => xk::F1 + n as u32 - 1,
         _ => return None,
     };
     Some((sym, mods | shift))
@@ -51,7 +51,7 @@ pub fn is_menu(ev: &KeyEvent) -> bool {
 
 /// Modifier bits and the keys that hold them on the host.
 pub const MODIFIERS: [(u8, u32); 4] =
-    [(MOD_SHIFT, 0xffe1), (MOD_CTRL, 0xffe3), (MOD_ALT, 0xffe9), (MOD_SUPER, SUPER_L)];
+    [(MOD_SHIFT, xk::SHIFT_L), (MOD_CTRL, xk::CONTROL_L), (MOD_ALT, xk::ALT_L), (MOD_SUPER, SUPER_L)];
 
 /// AltGr arrives as Ctrl+Alt with the character it made ('@', '{' on European layouts); the
 /// character is what was meant, so the two modifiers are dropped.

@@ -1188,7 +1188,7 @@ impl Remote {
                 Event::Paste(_) if !local => self.tap('v' as u32)?,
                 Event::Ime(egui::ImeEvent::Commit(text)) if !local => {
                     for c in text.chars() {
-                        let sym = if (c as u32) < 0x100 { c as u32 } else { 0x0100_0000 | c as u32 };
+                        let sym = xk::of_char(c);
                         self.send(ToAgent::Key { keysym: sym, mods: 0 })?;
                     }
                 }
@@ -1465,9 +1465,9 @@ impl Remote {
                 ("Run", "Win+R", Some(vec![SUPER_L, 'r' as u32])),
                 ("File explorer", "Win+E", Some(vec![SUPER_L, 'e' as u32])),
                 ("Show desktop", "Win+D", Some(vec![SUPER_L, 'd' as u32])),
-                ("Switch window", "Alt+Tab", Some(vec![ALT_L, 0xff09])),
-                ("Close window", "Alt+F4", Some(vec![ALT_L, 0xffc1])),
-                ("Print screen", "PrtSc", Some(vec![0xff61])),
+                ("Switch window", "Alt+Tab", Some(vec![ALT_L, xk::TAB])),
+                ("Close window", "Alt+F4", Some(vec![ALT_L, xk::F1 + 3])),
+                ("Print screen", "PrtSc", Some(vec![xk::PRINT])),
             ];
             for (label, shortcut, keys) in combos {
                 if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {

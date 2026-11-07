@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::xk;
 use crate::color::Mode;
 use crate::proto::{
     Settings, ToAgent, ToClient, UI_CHECKED, UI_DISABLED, UI_EXPANDED, UI_FOCUSED, UI_SELECTED, UiAction, UiElem,
@@ -110,33 +111,33 @@ fn tools() -> Value {
 fn key_name(k: &str) -> Option<u32> {
     let l = k.to_ascii_lowercase();
     Some(match l.as_str() {
-        "ctrl" | "control" => 0xffe3,
-        "shift" => 0xffe1,
-        "alt" | "option" => 0xffe9,
-        "win" | "super" | "meta" | "cmd" | "windows" => 0xffeb,
-        "enter" | "return" => 0xff0d,
-        "tab" => 0xff09,
-        "esc" | "escape" => 0xff1b,
-        "backspace" => 0xff08,
-        "delete" | "del" => 0xffff,
-        "insert" => 0xff63,
-        "home" => 0xff50,
-        "end" => 0xff57,
-        "pageup" | "page_up" => 0xff55,
-        "pagedown" | "page_down" => 0xff56,
-        "left" => 0xff51,
-        "up" => 0xff52,
-        "right" => 0xff53,
-        "down" => 0xff54,
+        "ctrl" | "control" => xk::CONTROL_L,
+        "shift" => xk::SHIFT_L,
+        "alt" | "option" => xk::ALT_L,
+        "win" | "super" | "meta" | "cmd" | "windows" => xk::SUPER_L,
+        "enter" | "return" => xk::RETURN,
+        "tab" => xk::TAB,
+        "esc" | "escape" => xk::ESCAPE,
+        "backspace" => xk::BACKSPACE,
+        "delete" | "del" => xk::DELETE,
+        "insert" => xk::INSERT,
+        "home" => xk::HOME,
+        "end" => xk::END,
+        "pageup" | "page_up" => xk::PAGE_UP,
+        "pagedown" | "page_down" => xk::PAGE_DOWN,
+        "left" => xk::LEFT,
+        "up" => xk::UP,
+        "right" => xk::RIGHT,
+        "down" => xk::DOWN,
         "space" => ' ' as u32,
-        "printscreen" | "print" => 0xff61,
-        "capslock" => 0xffe5,
-        "menu" | "apps" => 0xff67,
+        "printscreen" | "print" => xk::PRINT,
+        "capslock" => xk::CAPS_LOCK,
+        "menu" | "apps" => xk::MENU,
         "plus" => '+' as u32,
         "minus" => '-' as u32,
         _ => {
-            if let Some(n) = l.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()).filter(|n| (1..=12).contains(n)) {
-                return Some(0xffbd + n);
+            if let Some(k) = l.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()).and_then(xk::f) {
+                return Some(k);
             }
             let mut it = l.chars();
             let c = it.next()?;
@@ -361,10 +362,10 @@ impl Server {
                 let text = args.get("text").and_then(Value::as_str).ok_or("missing text")?;
                 for c in text.chars() {
                     let sym = match c {
-                        '\n' => 0xff0d,
-                        '\t' => 0xff09,
+                        '\n' => xk::RETURN,
+                        '\t' => xk::TAB,
                         c if (c as u32) < 0x100 => c as u32,
-                        c => 0x0100_0000 | c as u32,
+                        c => xk::unicode(c as u32),
                     };
                     self.send(ToAgent::Key { keysym: sym, mods: 0 })?;
                 }
@@ -589,9 +590,9 @@ mod tests {
 
     #[test]
     fn key_names() {
-        assert_eq!(key_name("Ctrl"), Some(0xffe3));
-        assert_eq!(key_name("win"), Some(0xffeb));
-        assert_eq!(key_name("F5"), Some(0xffc2));
+        assert_eq!(key_name("Ctrl"), Some(xk::CONTROL_L));
+        assert_eq!(key_name("win"), Some(xk::SUPER_L));
+        assert_eq!(key_name("F5"), Some(xk::F1 + 4));
         assert_eq!(key_name("a"), Some('a' as u32));
         assert_eq!(key_name("bogus"), None);
     }

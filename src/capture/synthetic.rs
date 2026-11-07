@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use crate::xk;
 use super::{Capture, Image, Input, scale_nearest};
 
 const W: usize = 1280;
@@ -120,7 +121,7 @@ impl Capture for Synthetic {
         match ev {
             Input::Move { x, y } => self.pointer = ((x as usize).min(W - 1), (y as usize).min(H - 1)),
             Input::Button { pressed: true, .. } => self.clicks += 1,
-            Input::Key { keysym: 0xff08, .. } => {
+            Input::Key { keysym: xk::BACKSPACE, .. } => {
                 self.typed.pop();
             }
             Input::Key { keysym: 0x76, .. } => self.playing = if self.playing.is_some() { None } else { Some(0) },

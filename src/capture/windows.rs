@@ -31,6 +31,7 @@ use windows_sys::core::BOOL;
 
 use super::winlist::{self, R, Scope};
 use super::{Capture, Image, Input, Monitor, Share, WindowInfo};
+use crate::xk;
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 const DESKTOP_ALL: u32 = 0x01ff;
@@ -638,23 +639,23 @@ fn kbd(vk: VIRTUAL_KEY, scan: u16, flags: u32) -> INPUT {
 
 fn special_vk(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
     Some(match keysym {
-        0xff08 => (VK_BACK, false),
-        0xff09 => (VK_TAB, false),
-        0xff0d => (VK_RETURN, false),
-        0xff1b => (VK_ESCAPE, false),
-        0xff50 => (VK_HOME, true),
-        0xff51 => (VK_LEFT, true),
-        0xff52 => (VK_UP, true),
-        0xff53 => (VK_RIGHT, true),
-        0xff54 => (VK_DOWN, true),
-        0xff55 => (VK_PRIOR, true),
-        0xff56 => (VK_NEXT, true),
-        0xff57 => (VK_END, true),
-        0xff63 => (VK_INSERT, true),
-        0xffff => (VK_DELETE, true),
-        0xffbe..=0xffc9 => (VK_F1 + (keysym - 0xffbe) as u16, false),
-        0xffeb => (VK_LWIN, true),
-        0xffec => (VK_RWIN, true),
+        xk::BACKSPACE => (VK_BACK, false),
+        xk::TAB => (VK_TAB, false),
+        xk::RETURN => (VK_RETURN, false),
+        xk::ESCAPE => (VK_ESCAPE, false),
+        xk::HOME => (VK_HOME, true),
+        xk::LEFT => (VK_LEFT, true),
+        xk::UP => (VK_UP, true),
+        xk::RIGHT => (VK_RIGHT, true),
+        xk::DOWN => (VK_DOWN, true),
+        xk::PAGE_UP => (VK_PRIOR, true),
+        xk::PAGE_DOWN => (VK_NEXT, true),
+        xk::END => (VK_END, true),
+        xk::INSERT => (VK_INSERT, true),
+        xk::DELETE => (VK_DELETE, true),
+        xk::F1..=xk::F12 => (VK_F1 + (keysym - xk::F1) as u16, false),
+        xk::SUPER_L => (VK_LWIN, true),
+        xk::SUPER_R => (VK_RWIN, true),
         _ => return None,
     })
 }
@@ -665,16 +666,16 @@ fn vk_of(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         return Some(k);
     }
     Some(match keysym {
-        0xffe1 => (VK_LSHIFT, false),
-        0xffe2 => (VK_RSHIFT, false),
-        0xffe3 => (VK_LCONTROL, false),
-        0xffe4 => (VK_RCONTROL, true),
-        0xffe9 => (VK_LMENU, false),
-        0xffea => (VK_RMENU, true),
-        0xffe5 => (VK_CAPITAL, false),
-        0xff13 => (VK_PAUSE, false),
-        0xff61 => (VK_SNAPSHOT, true),
-        0xff67 => (VK_APPS, true),
+        xk::SHIFT_L => (VK_LSHIFT, false),
+        xk::SHIFT_R => (VK_RSHIFT, false),
+        xk::CONTROL_L => (VK_LCONTROL, false),
+        xk::CONTROL_R => (VK_RCONTROL, true),
+        xk::ALT_L => (VK_LMENU, false),
+        xk::ALT_R => (VK_RMENU, true),
+        xk::CAPS_LOCK => (VK_CAPITAL, false),
+        xk::PAUSE => (VK_PAUSE, false),
+        xk::PRINT => (VK_SNAPSHOT, true),
+        xk::MENU => (VK_APPS, true),
         0x20..=0x7e => {
             let scan = unsafe { VkKeyScanW(keysym as u16) };
             if scan == -1 {
@@ -696,7 +697,7 @@ fn key_state(keysym: u32, down: bool, seq: &mut Vec<INPUT>) {
             seq.push(kbd(vk, scan, up | if ext { KEYEVENTF_EXTENDEDKEY } else { 0 }));
         }
         None => {
-            let c = if keysym & 0xff00_0000 == 0x0100_0000 { keysym & 0xff_ffff } else { keysym };
+            let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
             if let Some(c) = char::from_u32(c) {
                 let mut buf = [0u16; 2];
                 for &unit in c.encode_utf16(&mut buf).iter() {
@@ -710,7 +711,7 @@ fn key_state(keysym: u32, down: bool, seq: &mut Vec<INPUT>) {
 /// Text goes in as Unicode; shortcuts and special keys go in as virtual keys
 /// wrapped in their modifiers.
 fn key_events(keysym: u32, mods: u8, seq: &mut Vec<INPUT>) {
-    let ch = if keysym & 0xff00_0000 == 0x0100_0000 {
+    let ch = if xk::is_unicode(keysym) {
         char::from_u32(keysym & 0x00ff_ffff)
     } else if keysym <= 0xff {
         char::from_u32(keysym)

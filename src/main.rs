@@ -37,6 +37,7 @@ mod tools;
 mod transport;
 mod ui;
 mod vault;
+mod xk;
 mod video;
 
 use color::Mode;

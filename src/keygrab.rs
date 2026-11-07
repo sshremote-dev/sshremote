@@ -13,6 +13,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_RWIN, VK_SNAPSHOT, VK_TAB,
 };
+use crate::xk;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HC_ACTION,
     KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_UP, MSG, SetWindowsHookExW, WH_KEYBOARD_LL,
@@ -35,11 +36,11 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } < 0;
         let vk = k.vkCode as u16;
         let keysym = match vk {
-            VK_LWIN => Some(0xffeb),
-            VK_RWIN => Some(0xffec),
-            VK_TAB if alt => Some(0xff09),
-            VK_ESCAPE if alt || ctrl => Some(0xff1b),
-            VK_SNAPSHOT => Some(0xff61),
+            VK_LWIN => Some(xk::SUPER_L),
+            VK_RWIN => Some(xk::SUPER_R),
+            VK_TAB if alt => Some(xk::TAB),
+            VK_ESCAPE if alt || ctrl => Some(xk::ESCAPE),
+            VK_SNAPSHOT => Some(xk::PRINT),
             _ => None,
         };
         if let Some(sym) = keysym
