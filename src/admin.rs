@@ -38,14 +38,26 @@ fn check() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// The setting as last read or written: 0 not read yet, 1 no, 2 yes (the menu asks every frame).
+static ASK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Whether the window asks for administrator rights when it starts (the default).
 pub fn ask_at_start() -> bool {
-    cfg!(windows) && crate::hosts::setting("elevate").is_none_or(|v| v != "no")
+    use std::sync::atomic::Ordering;
+    match ASK.load(Ordering::Relaxed) {
+        0 => {
+            let on = cfg!(windows) && crate::hosts::setting("elevate").is_none_or(|v| v != "no");
+            ASK.store(1 + on as u8, Ordering::Relaxed);
+            on
+        }
+        v => v == 2,
+    }
 }
 
 #[cfg(windows)]
 pub fn set_ask_at_start(on: bool) {
     crate::hosts::set_setting("elevate", if on { "yes" } else { "no" });
+    ASK.store(1 + on as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Starts this program again with administrator rights through the UAC prompt. Ok(false) when

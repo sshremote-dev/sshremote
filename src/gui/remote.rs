@@ -241,7 +241,7 @@ impl Remote {
         if disconnect {
             return Err("disconnected".into());
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(100));
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
         Ok(())
     }
 
@@ -360,7 +360,7 @@ impl Remote {
             self.set_fullscreen(&ctx, !self.fullscreen);
         }
         // Network messages wake the window themselves; this only keeps statistics and pings going.
-        ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_secs(1));
         Ok(())
     }
 
@@ -922,8 +922,10 @@ impl Remote {
             painter.galley(rect.min + Vec2::new(18.0, 10.0), galley, Color32::WHITE.gamma_multiply(fade));
             y = rect.top() - 8.0;
         }
-        if !self.toasts.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(50));
+        if let Some(next) = self.toasts.iter().map(|t| t.2).min() {
+            // Steady until the last second, which fades.
+            let until_fade = Duration::from_secs(5).saturating_sub(next.elapsed());
+            ctx.request_repaint_after(if until_fade.is_zero() { Duration::from_millis(50) } else { until_fade });
         }
     }
 

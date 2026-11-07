@@ -4,6 +4,11 @@
 
 /// The store's name, or None when this system has none sshremote can use.
 pub fn backend() -> Option<&'static str> {
+    static BACKEND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *BACKEND.get_or_init(find_backend)
+}
+
+fn find_backend() -> Option<&'static str> {
     if cfg!(windows) {
         Some("Windows Credential Manager")
     } else if cfg!(target_os = "macos") {
@@ -220,19 +225,29 @@ pub fn get(host: &str) -> Option<String> {
 
 pub fn set(host: &str, secret: &str) -> Result<(), String> {
     backend().ok_or("no password store on this system (install secret-tool)")?;
+    forget_list();
     sys::set(host, secret)
 }
 
 pub fn delete(host: &str) -> Result<(), String> {
+    forget_list();
     sys::delete(host)
 }
 
-/// Hosts with a saved password.
+/// Hosts with a saved password, asked of the store once and kept until a password is saved or
+/// removed (the store can be slow, and terminal tabs ask on every ssh tab).
 pub fn list() -> Vec<String> {
     if backend().is_none() {
         return Vec::new();
     }
-    sys::list()
+    let mut cache = LIST.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get_or_insert_with(sys::list).clone()
+}
+
+static LIST: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+fn forget_list() {
+    *LIST.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[cfg(test)]

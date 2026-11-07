@@ -277,6 +277,8 @@ struct Tab {
     stitched: Vec<String>,
     /// The full-screen program's last screen, to tell its fixed rows from those that move.
     last_screen: Vec<String>,
+    /// Where the last screen went into the stitched document, to look there first.
+    stitch_at: Option<i64>,
     /// Hints a full-screen program floats over its text, found by comparing screens.
     overlays: Vec<String>,
     /// Heights of the Markdown view's blocks, measured once each.
@@ -289,6 +291,20 @@ struct Tab {
 
 /// The text and Markdown views' content, with the output revision and the first live row it ends above.
 type Reading = (u64, i32, std::rc::Rc<(String, crate::markdown::Doc)>);
+
+impl Tab {
+    /// Lets go of what the text and Markdown views built, when the terminal is shown again.
+    fn forget_reading(&mut self) {
+        self.reading = None;
+        self.editor = None;
+        self.editor_galley = None;
+        self.md_heights = Default::default();
+        self.stitched = Vec::new();
+        self.last_screen = Vec::new();
+        self.overlays = Vec::new();
+        self.stitch_at = None;
+    }
+}
 
 /// A tab or pane waiting for the window's context: what it runs, and the pane it splits (with the
 /// direction) if any.
@@ -709,6 +725,7 @@ impl TermWindow {
             stitched: Vec::new(),
             last_screen: Vec::new(),
             overlays: Vec::new(),
+            stitch_at: None,
             mouse_held: None,
             editor: None,
             editor_galley: None,
@@ -1130,6 +1147,9 @@ impl TermWindow {
                 ] {
                     if small(ui, glyph, tip, t.view == v) {
                         t.view = v;
+                        if v == View::Terminal {
+                            t.forget_reading();
+                        }
                     }
                 }
             }
@@ -1353,6 +1373,7 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
             t.stitched.clear();
             t.last_screen.clear();
             t.overlays.clear();
+            t.stitch_at = None;
             screen_markdown(t, -history, first)
         };
         let doc = crate::markdown::Doc::new(&text);
@@ -1376,6 +1397,8 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
         egui::ScrollArea::both().id_salt(("reading", t.id, markdown)).auto_shrink([false, false]).stick_to_bottom(true);
     let mut heights = std::mem::take(&mut t.md_heights);
     let doc_id = egui::Id::unique(("md-doc", t.id));
+    // The document's identity: a new one is built when the output changes.
+    let doc_key = std::rc::Rc::as_ptr(&read) as usize as u64;
     let shown = scroll.show_viewport(ui, |ui, view| {
         if markdown {
             // A readable column, as in the preview; the live rows sit under it on the same edge.
@@ -1385,7 +1408,7 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
             let pad = ((full - width) / 2.0).max(0.0) + 20.0;
             let column = width - 40.0;
             ui.spacing_mut().item_spacing.y = 6.0;
-            let end = crate::markdown::show_in_view(ui, doc, doc_id, &th, &mut heights, view, pad, column, 14.0);
+            let end = crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
             let origin = ui.max_rect().min;
             let rows = Rect::from_min_size(
                 origin + Vec2::new(pad, end),
@@ -2073,14 +2096,41 @@ const STITCH_MAX: usize = 5000;
 /// Programs such as Claude Code scroll inside their own screen, so each screen is a window on a
 /// longer text; where it overlaps the document (scrolled back, or new lines at the end) it replaces
 /// the overlapped lines and extends the document; a screen that matches nothing starts it anew.
+#[cfg(test)]
 fn stitch(doc: &mut Vec<String>, screen: &[String]) {
+    stitch_near(doc, screen, None);
+}
+
+/// [`stitch`], looking first within a few screens of `near` (where the last screen went), and
+/// through the whole document only when nothing fits there. Returns where the screen went.
+fn stitch_near(doc: &mut Vec<String>, screen: &[String], near: Option<i64>) -> Option<i64> {
     let m = screen.len();
     if m == 0 {
-        return;
+        return near;
     }
     let n = doc.len();
+    let all = -(m as i64 - 1)..=(n as i64);
+    if let Some(at) = near {
+        let span = 3 * m as i64;
+        let window = (at - span).max(*all.start())..=(at + span).min(*all.end());
+        if let Some(p) = best_place(doc, screen, window) {
+            return Some(place(doc, screen, p));
+        }
+    }
+    match best_place(doc, screen, all) {
+        Some(p) => Some(place(doc, screen, p)),
+        None => {
+            *doc = screen.to_vec();
+            Some(0)
+        }
+    }
+}
+
+/// Where `screen` best overlaps `doc` among the positions `range`, if it overlaps well enough.
+fn best_place(doc: &[String], screen: &[String], range: std::ops::RangeInclusive<i64>) -> Option<i64> {
+    let (m, n) = (screen.len(), doc.len());
     let mut best: Option<(i64, usize)> = None;
-    for p in -(m as i64 - 1)..=(n as i64) {
+    for p in range {
         let from = (-p).max(0) as usize;
         let to = (m as i64).min(n as i64 - p).max(0) as usize;
         if from >= to {
@@ -2102,10 +2152,12 @@ fn stitch(doc: &mut Vec<String>, screen: &[String]) {
             best = Some((p, score));
         }
     }
-    let Some((p, _)) = best else {
-        *doc = screen.to_vec();
-        return;
-    };
+    best.map(|b| b.0)
+}
+
+/// Puts `screen` into `doc` at `p`: the overlapped lines replaced, the rest extended.
+fn place(doc: &mut Vec<String>, screen: &[String], p: i64) -> i64 {
+    let (m, n) = (screen.len(), doc.len());
     let mut out: Vec<String> = Vec::with_capacity(n + m);
     if p > 0 {
         out.extend_from_slice(&doc[..p as usize]);
@@ -2129,6 +2181,7 @@ fn stitch(doc: &mut Vec<String>, screen: &[String]) {
         out.drain(..out.len() - STITCH_MAX);
     }
     *doc = out;
+    p
 }
 
 /// Rows of a full-screen program that stay put while the rest of its screen moves: an input line,
@@ -2177,7 +2230,7 @@ fn stitch_screen(t: &mut Tab, screen: Vec<String>) {
     }
     t.last_screen = screen;
     let mut doc = std::mem::take(&mut t.stitched);
-    stitch(&mut doc, &piece);
+    t.stitch_at = stitch_near(&mut doc, &piece, t.stitch_at);
     // Hints seen floating since are taken off lines that went in before they were recognised.
     for line in doc.iter_mut() {
         if let Some(h) = t.overlays.iter().find(|h| line.trim_end().ends_with(h.as_str()) && line.trim() != h.as_str())
@@ -2595,6 +2648,12 @@ fn tab_title(raw: &str) -> String {
 
 /// The shells of this computer, as in Windows Terminal's new-tab menu.
 pub fn local_profiles() -> Vec<Profile> {
+    // Which shells are installed does not change while the program runs.
+    static FOUND: std::sync::OnceLock<Vec<Profile>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(find_local_profiles).clone()
+}
+
+fn find_local_profiles() -> Vec<Profile> {
     let mut out = Vec::new();
     let mut add = |name: &str, argv: Vec<&str>| {
         out.push(Profile {

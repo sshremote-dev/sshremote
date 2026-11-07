@@ -105,6 +105,11 @@ pub(crate) fn logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
 
 /// The logo, for the window and the task bar.
 pub(crate) fn app_icon() -> Option<egui::IconData> {
+    static ICON: std::sync::OnceLock<Option<egui::IconData>> = std::sync::OnceLock::new();
+    ICON.get_or_init(decode_icon).clone()
+}
+
+fn decode_icon() -> Option<egui::IconData> {
     let mut reader =
         png::Decoder::new(std::io::Cursor::new(&include_bytes!("../../assets/sshremote.png")[..])).read_info().ok()?;
     let mut rgba = vec![0; reader.output_buffer_size()];

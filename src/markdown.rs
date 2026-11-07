@@ -1085,10 +1085,15 @@ fn block(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], n: usize, id: egui::Id
     }
 }
 
-/// Heights of laid-out blocks by their content, the next block's kind and the width, so a long
-/// document is measured once and only the blocks in view are drawn each frame.
+/// Where a document's blocks go: heights measured once per block content and width (kept across
+/// documents, since a growing output repeats most blocks), and for the current document and width
+/// each block's top, so the blocks in view are found by binary search.
 #[derive(Default)]
-pub struct Heights(std::collections::HashMap<(u64, bool, u32), f32>);
+pub struct Heights {
+    measured: std::collections::HashMap<(u64, bool, u32), f32>,
+    /// The document (its key) and width the tops are for; each block's top and height.
+    layout: Option<(u64, u32, Vec<(f32, f32)>, f32)>,
+}
 
 impl Heights {
     fn key(blocks: &[Block], n: usize, width: f32) -> (u64, bool, u32) {
@@ -1101,12 +1106,14 @@ impl Heights {
 
 /// Draws the blocks of `doc` that meet `view` (in the coordinates of the scroll area's content,
 /// whose top left is at `origin`), in a column at `x` (from the content's left) `width` wide,
-/// starting `top` below the content's top. Returns where the document ends, in content
-/// coordinates. Blocks out of view are not laid out again, only their measured heights used.
+/// starting `top` below the content's top. `doc_key` names the document: its layout is worked out
+/// when it or the width changes, and each frame only looks up and draws the blocks in view.
+/// Returns where the document ends, in content coordinates.
 #[allow(clippy::too_many_arguments)]
 pub fn show_in_view(
     ui: &mut egui::Ui,
     doc: &Doc,
+    doc_key: u64,
     id: egui::Id,
     th: &Theme,
     heights: &mut Heights,
@@ -1117,37 +1124,43 @@ pub fn show_in_view(
 ) -> f32 {
     let origin = ui.max_rect().min;
     let gap = ui.spacing().item_spacing.y;
-    // Heights the cache lacks are measured once, without drawing.
-    if heights.0.len() > 20_000 {
-        heights.0.clear();
-    }
-    for n in 0..doc.blocks.len() {
-        let key = Heights::key(&doc.blocks, n, width);
-        if !heights.0.contains_key(&key) {
-            let rect = Rect::from_min_size(Pos2::new(origin.x + x, -1.0e6), Vec2::new(width, f32::INFINITY));
-            let mut probe =
-                ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("measure", n)).sizing_pass().invisible());
-            block(&mut probe, th, &doc.blocks, n, id.with("measure"));
-            heights.0.insert(key, probe.min_rect().height());
+    let w = width.round() as u32;
+    if heights.layout.as_ref().is_none_or(|l| l.0 != doc_key || l.1 != w) {
+        if heights.measured.len() > 20_000 {
+            heights.measured.clear();
         }
-    }
-    let mut y = top;
-    for n in 0..doc.blocks.len() {
-        let h = heights.0[&Heights::key(&doc.blocks, n, width)];
-        // Drawn when in view, with a screen's margin so scrolling does not show gaps.
-        if y + h >= view.top() - view.height() && y <= view.bottom() + view.height() {
-            let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .id_salt(("block", n))
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            block(&mut child, th, &doc.blocks, n, id);
+        // Blocks not seen before at this width are measured without being drawn.
+        let mut tops = Vec::with_capacity(doc.blocks.len());
+        let mut y = top;
+        for n in 0..doc.blocks.len() {
+            let key = Heights::key(&doc.blocks, n, width);
+            let h = *heights.measured.entry(key).or_insert_with(|| {
+                let rect = Rect::from_min_size(Pos2::new(origin.x + x, -1.0e6), Vec2::new(width, f32::INFINITY));
+                let mut probe = ui
+                    .new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("measure", n)).sizing_pass().invisible());
+                block(&mut probe, th, &doc.blocks, n, id.with("measure"));
+                probe.min_rect().height()
+            });
+            tops.push((y, h));
+            y += h + gap;
         }
-        y += h + gap;
+        heights.layout = Some((doc_key, w, tops, y));
     }
-    y
+    let (_, _, tops, end) = heights.layout.as_ref().expect("just laid out");
+    // In view, with a screen's margin either side so scrolling does not show gaps.
+    let (from, to) = (view.top() - view.height(), view.bottom() + view.height());
+    let first = tops.partition_point(|&(y, h)| y + h < from);
+    for (n, &(y, h)) in tops.iter().enumerate().skip(first) {
+        if y > to {
+            break;
+        }
+        let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new().max_rect(rect).id_salt(("block", n)).layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        block(&mut child, th, &doc.blocks, n, id);
+    }
+    *end
 }
 
 /// Draws a whole document in the colours of `th` (the background it is drawn on).
@@ -1271,7 +1284,7 @@ mod speed {
         let mut heights = Heights::default();
         let lazy = time(&mut |ui| {
             egui::ScrollArea::vertical().id_salt("lazy").show_viewport(ui, |ui, view| {
-                let end = show_in_view(ui, &doc, egui::Id::unique("lazy"), &th, &mut heights, view, 20.0, 900.0, 0.0);
+                let end = show_in_view(ui, &doc, 1, egui::Id::unique("lazy"), &th, &mut heights, view, 20.0, 900.0, 0.0);
                 let o = ui.max_rect().min;
                 ui.allocate_rect(Rect::from_min_size(o, Vec2::new(940.0, end)), Sense::hover());
             });

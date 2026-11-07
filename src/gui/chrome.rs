@@ -20,8 +20,16 @@ fn maximized(ctx: &egui::Context) -> bool {
 /// Edges that resize the window and Alt+Space for the system menu; call once per frame of every
 /// window that draws its own frame, before its content.
 pub fn behaviour(ctx: &egui::Context) {
+    // A new window is rounded in its first frames, not looked for on every frame after.
     #[cfg(windows)]
-    win::round_corners();
+    {
+        let key = egui::Id::unique(("chrome-rounded", ctx.viewport_id()));
+        let seen = ctx.data(|d| d.get_temp::<u8>(key)).unwrap_or(0);
+        if seen < 3 {
+            win::round_corners();
+            ctx.data_mut(|d| d.insert_temp(key, seen + 1));
+        }
+    }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
