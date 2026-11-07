@@ -267,6 +267,10 @@ struct Tab {
     preedit: String,
     /// The text view's document and the cursor's place in it, for an output revision and cursor.
     editor: Option<((u64, i32, usize), std::rc::Rc<(String, usize)>)>,
+    /// The mouse button a program that asked for the mouse holds down, for its drag reports.
+    mouse_held: Option<u8>,
+    /// A full-screen program's screens stitched into one document, as Markdown lines.
+    stitched: Vec<String>,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
 }
@@ -618,6 +622,8 @@ impl TermWindow {
             search: None,
             preedit: String::new(),
             typed_at: 0.0,
+            stitched: Vec::new(),
+            mouse_held: None,
             editor: None,
             rev: 0,
             reading: None,
@@ -1177,19 +1183,6 @@ impl TermWindow {
 
 /// Draws a shell and passes keys, paste and the mouse wheel to it.
 /// The whole buffer as text, plain or read as Markdown.
-/// The text of the scrollback and the screen above row `upto`, without trailing spaces.
-fn text_before(t: &Tab, upto: i32) -> String {
-    let grid = t.term.grid();
-    let history = (grid.total_lines() - grid.screen_lines()) as i32;
-    if upto <= -history {
-        return String::new();
-    }
-    let start = Point::new(Line(-history), Column(0));
-    let end = Point::new(Line(upto - 1), Column(grid.columns().saturating_sub(1)));
-    let text = t.term.bounds_to_string(start, end);
-    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string()
-}
-
 /// The text and Markdown views of a tab, as one document in the manner of VS Code's editor and
 /// Markdown preview: the scrollback above, and at its end the live rows where the prompt and the
 /// cursor are, which take the keys as the terminal view does. Only those rows show a text cursor
@@ -1206,7 +1199,20 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let (first, last) = input_rows(t);
     if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
-        let text = text_before(t, first);
+        let history = (t.term.grid().total_lines() - t.term.grid().screen_lines()) as i32;
+        let text = if t.term.mode().contains(TermMode::ALT_SCREEN) {
+            // A full-screen program shows a window on a longer text: its screens are stitched
+            // together, so a reply or a table cut off by scrolling keeps its shape.
+            let end = if status_row(t) && first == t.term.grid().screen_lines() as i32 { first - 1 } else { first };
+            let screen = content_rows(screen_markdown(t, 0, end).lines().map(str::to_string).collect());
+            let mut stitched = std::mem::take(&mut t.stitched);
+            stitch(&mut stitched, &screen);
+            t.stitched = stitched;
+            t.stitched.join("\n")
+        } else {
+            t.stitched.clear();
+            screen_markdown(t, -history, first)
+        };
         let doc = crate::markdown::Doc::new(&text);
         t.reading = Some((t.rev, first, std::rc::Rc::new((text, doc))));
     }
@@ -1223,11 +1229,9 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
     // The keys come to the live rows unless selected text has them; typing takes them back.
     let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_) | Event::Paste(_))));
     let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
-    let scroll = egui::ScrollArea::both()
-        .id_salt(("reading", t.id, markdown))
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR);
+    let wheel = if ui.rect_contains_pointer(area) { wheel_lines(ui, ch, 10.0) } else { 0 };
+    let scroll =
+        egui::ScrollArea::both().id_salt(("reading", t.id, markdown)).auto_shrink([false, false]).stick_to_bottom(true);
     let shown = scroll.show(ui, |ui| {
         if markdown {
             // A readable column, as in the preview; the live rows sit under it on the same edge.
@@ -1244,6 +1248,15 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
             );
         }
     });
+    // At the top of the document the wheel asks the program to scroll back, and what it shows is
+    // stitched on above; at the bottom it scrolls the program forward.
+    let at_top = shown.state.clamped_offset().y <= 1.0;
+    let at_bottom = shown.state.clamped_offset().y + shown.inner_rect.height() >= shown.content_size.y - 1.0;
+    if program_scrolls(t) && t.exited.is_none() && ((wheel > 0 && at_top) || (wheel < 0 && at_bottom)) {
+        let grid = t.term.grid();
+        let send = wheel_bytes(*t.term.mode(), wheel, grid.columns() / 2, grid.screen_lines() / 2);
+        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+    }
     let Some((rect, resp)) = live else { return };
     let rect = rect.intersect(shown.inner_rect);
     let grab = keys && (resp.clicked() || typing || !elsewhere);
@@ -1594,11 +1607,17 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
     let lines = text.lines().count().max(1);
     let gutter = cw * (lines.to_string().len() as f32 + 2.0);
     let mut caret_rect = None;
+    let own_wheel = if program_scrolls(t) {
+        egui::scroll_area::ScrollSource::SCROLL_BAR
+    } else {
+        egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR
+    };
+    forward_wheel(ui, t, ui.available_rect_before_wrap(), ch, out);
     let scroll = egui::ScrollArea::both()
         .id_salt(("text-scroll", t.id))
         .auto_shrink([false, false])
         .stick_to_bottom(true)
-        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR);
+        .scroll_source(own_wheel);
     let shown = scroll.show(ui, |ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
         ui.add_space(8.0);
@@ -1674,6 +1693,278 @@ fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, 
     }
 }
 
+/// Markers an agent puts before a line, kept as they are ahead of the line's own formatting.
+const LINE_MARKERS: [&str; 6] = ["● ", "⏺ ", "❯ ", "› ", "• ", "▎ "];
+
+/// The rows `from` to `to` (exclusive) as Markdown, with what the terminal showed as styles written
+/// back as Markdown: a whole bold line becomes a heading (level 1 when also underlined or italic,
+/// as Claude Code draws `#`), bold and italic runs become `**` and `*`. Agents draw Markdown with
+/// these attributes and drop the marks, so this gives the Markdown view its structure back.
+fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
+    let grid = t.term.grid();
+    let cols = grid.columns();
+    let mut lines: Vec<String> = Vec::new();
+    for line in from..to {
+        let row = &grid[Line(line)];
+        let mut cells: Vec<(char, bool, bool, bool)> = Vec::new();
+        for c in 0..cols {
+            let cell = &row[Column(c)];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let ch = if cell.c == '\0' { ' ' } else { cell.c };
+            let f = cell.flags;
+            cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
+        }
+        while cells.last().is_some_and(|c| c.0 == ' ') {
+            cells.pop();
+        }
+        let plain: String = cells.iter().map(|c| c.0).collect();
+        // Leading spaces and an agent's marker stay as they are.
+        let indent = plain.len() - plain.trim_start().len();
+        let mut start = plain[..indent].chars().count();
+        let rest: String = plain.trim_start().to_string();
+        let mut prefix = plain[..indent].to_string();
+        if let Some(m) = LINE_MARKERS.iter().find(|m| rest.starts_with(**m)) {
+            prefix.push_str(m);
+            start += m.chars().count();
+        }
+        let body = &cells[start.min(cells.len())..];
+        let text: Vec<&(char, bool, bool, bool)> = body.iter().filter(|c| !c.0.is_whitespace()).collect();
+        let boxy = body.iter().any(|c| ('\u{2500}'..='\u{257f}').contains(&c.0));
+        let words: String = body.iter().map(|c| c.0).collect();
+        // Text laid out in columns stays as it is, without marks.
+        if crate::markdown::columned(&words) {
+            lines.push(format!("{prefix}{words}"));
+            continue;
+        }
+        if !text.is_empty() && !boxy && text.iter().all(|c| c.1) {
+            let level = if text.iter().all(|c| c.2 || c.3) { "#" } else { "##" };
+            lines.push(format!("{prefix}{level} {}", words.trim()));
+            continue;
+        }
+        let mut out = prefix;
+        let (mut bold, mut italic) = (false, false);
+        for (i, &(ch, b, it, _)) in body.iter().enumerate() {
+            if !ch.is_whitespace() {
+                // Spaces keep the style around them, so marks hug the words.
+                if (b, it) != (bold, italic) {
+                    let closing = out.len();
+                    if italic {
+                        out.push('*');
+                    }
+                    if bold && !b {
+                        out.push_str("**");
+                    }
+                    // A mark that closes and one that opens are kept apart by an invisible space, so
+                    // "**bold***italic*" cannot be read the other way round.
+                    if out.len() > closing && (b && !bold || it) {
+                        out.push('\u{200B}');
+                    }
+                    if b && !bold {
+                        out.push_str("**");
+                    }
+                    if it {
+                        out.push('*');
+                    }
+                    (bold, italic) = (b, it);
+                }
+                if matches!(ch, '*' | '_' | '`') && !boxy {
+                    out.push('\\');
+                }
+            } else if bold || italic {
+                // A style ends before the space when the next word is not in it.
+                match body[i..].iter().find(|c| !c.0.is_whitespace()) {
+                    None => break,
+                    Some(next) if (next.1, next.2) != (bold, italic) => {
+                        if italic {
+                            out.push('*');
+                        }
+                        if bold {
+                            out.push_str("**");
+                        }
+                        (bold, italic) = (false, false);
+                    }
+                    Some(_) => {}
+                }
+            }
+            out.push(ch);
+        }
+        let trailing = out.len() - out.trim_end().len();
+        out.truncate(out.len() - trailing);
+        if italic {
+            out.push('*');
+        }
+        if bold {
+            out.push_str("**");
+        }
+        lines.push(out);
+    }
+    lines.join("\n").trim_end().to_string()
+}
+
+/// A mouse report for a program that asked for the mouse: `button` 0 left, 1 middle, 2 right,
+/// 64 and 65 the wheel up and down, plus 32 while dragging; `col` and `row` from 0. SGR form when
+/// the program asked for it, the classic form otherwise.
+fn mouse_report(mode: TermMode, button: u8, col: usize, row: usize, pressed: bool) -> Vec<u8> {
+    if mode.contains(TermMode::SGR_MOUSE) {
+        format!("\x1b[<{button};{};{}{}", col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
+    } else {
+        let b = if pressed { button } else { 3 };
+        let at = |v: usize| (32 + v + 1).min(255) as u8;
+        vec![0x1b, b'[', b'M', 32 + b, at(col), at(row)]
+    }
+}
+
+/// What the wheel sends to a full-screen program, `lines` up when positive: wheel reports when it
+/// asked for the mouse (Claude Code, vim, htop), otherwise arrow keys (less, man).
+fn wheel_bytes(mode: TermMode, lines: i32, col: usize, row: usize) -> Vec<u8> {
+    let mut send = Vec::new();
+    for _ in 0..lines.unsigned_abs() {
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            send.extend(mouse_report(mode, if lines > 0 { 64 } else { 65 }, col, row, true));
+        } else {
+            let app = mode.contains(TermMode::APP_CURSOR);
+            send.extend_from_slice(match (lines > 0, app) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            });
+        }
+    }
+    send
+}
+
+/// Wheel steps in lines from this frame's events, up positive.
+fn wheel_lines(ui: &egui::Ui, ch: f32, page: f32) -> i32 {
+    let mut total = 0;
+    for e in ui.ctx().input(|i| i.events.clone()) {
+        let Event::MouseWheel { unit, delta, .. } = e else { continue };
+        let lines = match unit {
+            egui::MouseWheelUnit::Point => delta.y / ch,
+            egui::MouseWheelUnit::Line => delta.y,
+            egui::MouseWheelUnit::Page => delta.y * page,
+        };
+        total += if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
+    }
+    total
+}
+
+/// Whether the wheel belongs to the program rather than to the view: a full-screen program, or one
+/// that asked for the mouse.
+fn program_scrolls(t: &Tab) -> bool {
+    t.term.mode().intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE)
+}
+
+/// The text and Markdown views of a program that scrolls itself: the wheel over them goes to the
+/// program, at the middle of its screen.
+fn forward_wheel(ui: &egui::Ui, t: &Tab, area: Rect, ch: f32, out: &mut Vec<Cmd>) {
+    if !program_scrolls(t) || !ui.rect_contains_pointer(area) || t.exited.is_some() {
+        return;
+    }
+    let grid = t.term.grid();
+    let lines = wheel_lines(ui, ch, grid.screen_lines() as f32);
+    if lines != 0 {
+        let send = wheel_bytes(*t.term.mode(), lines, grid.columns() / 2, grid.screen_lines() / 2);
+        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+    }
+}
+
+/// The most lines kept of a full-screen program's stitched document.
+const STITCH_MAX: usize = 5000;
+
+/// Puts a new screen of a full-screen program into the document stitched from its earlier screens.
+/// Programs such as Claude Code scroll inside their own screen, so each screen is a window on a
+/// longer text; where it overlaps the document (scrolled back, or new lines at the end) it replaces
+/// the overlapped lines and extends the document; a screen that matches nothing starts it anew.
+fn stitch(doc: &mut Vec<String>, screen: &[String]) {
+    let m = screen.len();
+    if m == 0 {
+        return;
+    }
+    let n = doc.len();
+    let mut best: Option<(i64, usize)> = None;
+    for p in -(m as i64 - 1)..=(n as i64) {
+        let from = (-p).max(0) as usize;
+        let to = (m as i64).min(n as i64 - p).max(0) as usize;
+        if from >= to {
+            continue;
+        }
+        let overlap = to - from;
+        let mut score = 0;
+        let mut written = 0;
+        for i in from..to {
+            let (a, b) = (&doc[(p + i as i64) as usize], &screen[i]);
+            if a == b {
+                score += 1;
+                written += !a.trim().is_empty() as usize;
+            }
+        }
+        // Most of the overlap must agree, a few lines that are still being written aside, and it
+        // must agree on text rather than on blank lines alone.
+        if written >= 2.min(m) && score * 10 >= overlap * 7 && best.is_none_or(|(_, s)| score >= s) {
+            best = Some((p, score));
+        }
+    }
+    let Some((p, _)) = best else {
+        *doc = screen.to_vec();
+        return;
+    };
+    let mut out: Vec<String> = Vec::with_capacity(n + m);
+    if p > 0 {
+        out.extend_from_slice(&doc[..p as usize]);
+    }
+    out.extend_from_slice(screen);
+    let after = (p + m as i64).max(0) as usize;
+    if after < n {
+        out.extend_from_slice(&doc[after..]);
+    }
+    if out.len() > STITCH_MAX {
+        out.drain(..out.len() - STITCH_MAX);
+    }
+    *doc = out;
+}
+
+/// A screen of a full-screen agent without what stays at its bottom whatever is scrolled: the
+/// input box, mode and status lines, and the jump-to-bottom hint with the row it covers.
+fn content_rows(mut lines: Vec<String>) -> Vec<String> {
+    // Claude Code pins the question being read to the top row, over the text under it.
+    if lines.first().is_some_and(|l| l.starts_with("❯ ")) {
+        lines[0].clear();
+    }
+    let frame = |l: &str| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().all(|c| "─━═╭╮╰╯┌┐└┘│ ".contains(c))
+    };
+    // The input box: everything from the rule above the last prompt down.
+    if let Some(p) = lines.iter().rposition(|l| l.trim_start().starts_with('❯'))
+        && p > 0
+        && frame(&lines[p - 1])
+        && lines[p + 1..].iter().all(|l| frame(l) || l.trim().is_empty() || crate::markdown::is_chrome(l))
+    {
+        lines.truncate(p - 1);
+    }
+    while let Some(l) = lines.last() {
+        if l.trim().is_empty() || crate::markdown::is_chrome(l) || frame(l) {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+    lines
+}
+
+/// Whether the screen's last row is a status line such as tmux draws: one background colour, not
+/// the terminal's own, across the whole width.
+fn status_row(t: &Tab) -> bool {
+    let grid = t.term.grid();
+    let row = &grid[Line(grid.screen_lines() as i32 - 1)];
+    let first = row[Column(0)].bg;
+    let default = matches!(first, Color::Named(alacritty_terminal::vte::ansi::NamedColor::Background));
+    !default && (0..grid.columns()).all(|c| row[Column(c)].bg == first)
+}
+
 /// A web address under column `col` of a line, for Ctrl+click.
 fn url_at(line: &str, col: usize) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
@@ -1728,6 +2019,51 @@ fn screen(
     ask.focus = resp.clicked() || resp.drag_started() || resp.secondary_clicked() || resp.middle_clicked();
     let origin = area.min;
     let offset = t.term.grid().display_offset() as i32;
+    let mode = *t.term.mode();
+    // A program that asked for the mouse gets clicks and drags; Shift keeps them for selecting here.
+    let app_mouse = mode.intersects(TermMode::MOUSE_MODE) && !ui.input(|i| i.modifiers.shift) && t.exited.is_none();
+    if app_mouse && (focused || ask.focus) {
+        let mut send = Vec::new();
+        let at = |p: Pos2| {
+            let col = (((p.x - origin.x) / cw).floor().max(0.0) as usize).min(cols as usize - 1);
+            let row = (((p.y - origin.y) / ch).floor().max(0.0) as usize).min(rows as usize - 1);
+            (col, row)
+        };
+        for e in ui.ctx().input(|i| i.events.clone()) {
+            match e {
+                Event::PointerButton { pos, button, pressed, .. }
+                    if area.contains(pos) || (!pressed && t.mouse_held.is_some()) =>
+                {
+                    let b = match button {
+                        egui::PointerButton::Primary => 0,
+                        egui::PointerButton::Middle => 1,
+                        egui::PointerButton::Secondary => 2,
+                        _ => continue,
+                    };
+                    let (col, row) = at(pos);
+                    send.extend(mouse_report(mode, b, col, row, pressed));
+                    t.mouse_held = pressed.then_some(b);
+                }
+                Event::PointerMoved(pos)
+                    if area.contains(pos) && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
+                {
+                    if let Some(b) = t.mouse_held {
+                        let (col, row) = at(pos);
+                        send.extend(mouse_report(mode, b + 32, col, row, true));
+                    } else if mode.contains(TermMode::MOUSE_MOTION) {
+                        let (col, row) = at(pos);
+                        send.extend(mouse_report(mode, 35, col, row, true));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !send.is_empty() {
+            out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+        }
+    } else {
+        t.mouse_held = None;
+    }
     // Cell under a screen position, as a grid point.
     let cell_at = |p: Pos2| {
         let col = (((p.x - origin.x) / cw).floor().max(0.0) as usize).min(cols as usize - 1);
@@ -1737,13 +2073,15 @@ fn screen(
     };
 
     // Mouse: drag selects, double click selects a word, the wheel scrolls back.
-    if resp.drag_started_by(egui::PointerButton::Primary)
+    if !app_mouse
+        && resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(p) = resp.interact_pointer_pos()
     {
         let (pt, side) = cell_at(p);
         t.term.selection = Some(Selection::new(SelectionType::Simple, pt, side));
     }
-    if resp.dragged_by(egui::PointerButton::Primary)
+    if !app_mouse
+        && resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(p), Some(sel)) = (resp.interact_pointer_pos(), t.term.selection.as_mut())
     {
         let (pt, side) = cell_at(p);
@@ -1767,7 +2105,8 @@ fn screen(
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
-    if resp.double_clicked()
+    if !app_mouse
+        && resp.double_clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
         let (pt, side) = cell_at(p);
@@ -1959,31 +2298,18 @@ fn screen(
     } else {
         t.preedit.clear();
     }
-    // The wheel scrolls the pane under the pointer; full-screen programs (less, vim) get arrows.
+    // The wheel scrolls the pane under the pointer back through its scrollback; a full-screen
+    // program or one that asked for the mouse scrolls itself.
     if resp.hovered() {
-        let mut send: Vec<u8> = Vec::new();
-        for e in ui.ctx().input(|i| i.events.clone()) {
-            let Event::MouseWheel { unit, delta, .. } = e else { continue };
-            let lines = match unit {
-                egui::MouseWheelUnit::Point => delta.y / ch,
-                egui::MouseWheelUnit::Line => delta.y,
-                egui::MouseWheelUnit::Page => delta.y * rows as f32,
-            };
-            let lines = if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
-            if lines == 0 {
-                continue;
-            }
-            if mode.contains(TermMode::ALT_SCREEN) {
-                let key = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
-                for _ in 0..lines.unsigned_abs() {
-                    send.extend_from_slice(key);
-                }
-            } else {
-                t.term.scroll_display(Scroll::Delta(lines));
-            }
-        }
-        if !send.is_empty() && t.exited.is_none() {
-            out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+        let lines = wheel_lines(ui, ch, rows as f32);
+        if lines != 0 && program_scrolls(t) && t.exited.is_none() {
+            let (col, row) = resp.hover_pos().map_or((0, 0), |p| {
+                let (pt, _) = cell_at(p);
+                (pt.column.0, (pt.line.0 + offset).max(0) as usize)
+            });
+            out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: wheel_bytes(mode, lines, col, row) }));
+        } else if lines != 0 {
+            t.term.scroll_display(Scroll::Delta(lines));
         }
     }
     paint(ui, t, area, &font, cw, ch, 0, focused);
@@ -2315,5 +2641,78 @@ mod tests {
         assert!(copied, "the selection is copied");
         // Typing still reaches the shell, and the selection gives way to the caret.
         assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Text("ls".into())])), "ls");
+    }
+
+    #[test]
+    fn styles_on_screen_come_back_as_markdown() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        let screen = "\x1b[2J\x1b[H\x1b[38;5;231m\u{25CF}\x1b[39m \x1b[1;3;4mThe Log\x1b[0m\r\n\r\n  \x1b[3mA short story\x1b[0m\r\n\r\n  \x1b[1mChapter 1\x1b[0m\r\n  plain \x1b[1mbold\x1b[0m word\r\n";
+        t.parser.advance(&mut t.term, screen.as_bytes());
+        let md = screen_markdown(t, 0, 6);
+        assert_eq!(md, "\u{25CF} # The Log\n\n  *A short story*\n\n  ## Chapter 1\n  plain **bold** word");
+    }
+
+    #[test]
+    fn screens_of_a_full_screen_program_stitch_into_one_document() {
+        let lines = |r: std::ops::Range<usize>| r.map(|i| format!("line {i}")).collect::<Vec<_>>();
+        let mut doc = Vec::new();
+        stitch(&mut doc, &lines(20..30));
+        // Scrolled back by five lines: the earlier ones go on top.
+        stitch(&mut doc, &lines(15..25));
+        assert_eq!(doc, lines(15..30));
+        // New output at the end, with the last line still being written.
+        let mut screen = lines(22..32);
+        screen[9] = "line 31 (partial".into();
+        stitch(&mut doc, &screen);
+        assert_eq!(doc.len(), 17);
+        assert_eq!(doc[16], "line 31 (partial");
+        // Something else entirely starts a new document.
+        stitch(&mut doc, &["menu".to_string(), "item".to_string()]);
+        assert_eq!(doc, ["menu", "item"]);
+    }
+
+    /// Screens captured from a real full-screen agent (tmux capture-pane -e, s0.txt at the bottom,
+    /// then one page up each), from the folder in SSHREMOTE_CAPS: cargo test -- --ignored captured
+    #[test]
+    #[ignore]
+    fn captured_agent_screens_read_as_one_session() {
+        let dir = std::env::var("SSHREMOTE_CAPS").expect("SSHREMOTE_CAPS");
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.term.resize(Size { cols: 120, rows: 30 });
+        t.parser.advance(&mut t.term, b"\x1b[?1049h");
+        let mut doc = Vec::new();
+        for k in 0..6 {
+            let Ok(raw) = std::fs::read_to_string(format!("{dir}/s{k}.txt")) else { break };
+            let screen = format!("\x1b[H\x1b[2J{}", raw.trim_end_matches('\n').replace('\n', "\r\n"));
+            t.parser.advance(&mut t.term, screen.as_bytes());
+            let lines = content_rows(screen_markdown(t, 0, 30).lines().map(str::to_string).collect());
+            stitch(&mut doc, &lines);
+        }
+        let text = doc.join("\n");
+        eprintln!("{text}");
+        let parsed = crate::markdown::Doc::new(&text);
+        for p in &parsed.parts {
+            eprintln!("--- {p:?}");
+        }
+        let blocks: Vec<&crate::markdown::Block> = parsed
+            .parts
+            .iter()
+            .flat_map(|p| match p {
+                crate::markdown::Part::Doc(b) | crate::markdown::Part::Reply { blocks: b, .. } => b.iter().collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        use crate::markdown::Block;
+        assert!(blocks.iter().any(|b| matches!(b, Block::Table { rows, .. } if rows.len() >= 4)), "the whole table");
+        assert!(blocks.iter().any(|b| matches!(b, Block::Heading(2, h) if h.contains("Chapter 5"))), "headings");
+        assert!(!blocks.iter().any(|b| matches!(b, Block::Pre(_))), "prose is not read as columns");
+        assert!(!text.contains("Jump to bottom") && !text.contains("bypass permissions"), "no controls");
     }
 }

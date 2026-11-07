@@ -79,6 +79,27 @@ fn install_fonts(ctx: &egui::Context) {
         data: fill,
         families: vec![InsertFontFamily { family: filled(), priority: FontPriority::Highest }],
     });
+    // After the icon font, so its private-use glyphs keep the icons.
+    // Symbols that agents and shells draw (prompts, bullets, arrows, spinners) from the system's
+    // symbol font.
+    let symbols: &[&str] = if cfg!(windows) {
+        &[r"C:\Windows\Fonts\seguisym.ttf"]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+        ]
+    };
+    for path in symbols {
+        if let Ok(bytes) = std::fs::read(path) {
+            let fallback = |f| InsertFontFamily { family: f, priority: FontPriority::Lowest };
+            ctx.add_font(FontInsert {
+                name: format!("symbols:{path}"),
+                data: egui::FontData::from_owned(bytes),
+                families: vec![fallback(FontFamily::Proportional), fallback(FontFamily::Monospace)],
+            });
+        }
+    }
 }
 
 /// Fonts, sizes, spacing and the remembered theme, for any window of the program.

@@ -94,12 +94,14 @@ impl Doc {
     /// Reads Claude Code or Codex output as a session (frames removed, replies split out) when
     /// their markers are there, and anything else as Markdown.
     pub fn new(text: &str) -> Self {
-        let agent = text.lines().any(|l| l.starts_with("⏺ ") || l.starts_with("● "))
+        let agent = text.lines().any(|l| l.starts_with("⏺ ") || l.starts_with("● ") || l.starts_with("❯ "))
             || (text.lines().any(|l| l.starts_with("› ")) && text.lines().any(|l| l.starts_with("• ")));
+        let text = tidy(text);
         if !agent {
-            return Doc { parts: vec![Part::Doc(parse(text))] };
+            // Text indented as a whole (an agent's reply scrolled past its marker) is not columns.
+            return Doc { parts: vec![Part::Doc(parse(&dedent(&text)))] };
         }
-        Doc { parts: session(&tidy(text)) }
+        Doc { parts: session(&text) }
     }
 }
 
@@ -132,7 +134,17 @@ pub fn tidy(text: &str) -> String {
             i += 1;
             continue;
         }
+        if is_chrome(lines[i]) {
+            i += 1;
+            continue;
+        }
         let line = lines[i].trim_end();
+        if let Some(rest) = line.trim_start().strip_prefix('▎') {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push(format!("{indent}>{rest}"));
+            i += 1;
+            continue;
+        }
         let framed = line.trim_start().starts_with(['│', '┃', '║']);
         let l = if framed {
             let inner = line.trim_start().trim_start_matches(['│', '┃', '║']);
@@ -171,6 +183,7 @@ fn box_table(lines: &[&str]) -> (Vec<Vec<String>>, usize) {
             continue;
         }
         if !t.starts_with('│') {
+            used -= 1;
             break;
         }
         let cells: Vec<&str> = t.trim_matches('│').split('│').collect();
@@ -190,7 +203,21 @@ fn box_table(lines: &[&str]) -> (Vec<Vec<String>>, usize) {
             }
         }
     }
-    (Vec::new(), 0)
+    // Cut off at the end of the screen: the rows so far.
+    finish(&mut cur, &mut rows);
+    if rows.is_empty() { (Vec::new(), 0) } else { (rows, used) }
+}
+
+/// Lines of an agent's screen that are its controls, not the conversation: the logo, spinners and
+/// "Worked for" lines, the mode and effort status, and the jump-to-bottom hint.
+pub fn is_chrome(line: &str) -> bool {
+    let t = line.trim();
+    let blocks = t.chars().filter(|c| ('\u{2580}'..='\u{259f}').contains(c)).count();
+    blocks >= 3
+        || t.contains("Jump to bottom")
+        || t.starts_with(['✻', '✶', '✢', '✳', '✽', '◉', '⏵'])
+        || t.starts_with("? for shortcuts")
+        || t.contains("esc to interrupt")
 }
 
 /// Codex's tool runs start with these words after its bullet.
@@ -213,7 +240,7 @@ pub fn session(text: &str) -> Vec<Part> {
     let mut flush = |kind: &Kind, title: &mut String, body: &mut Vec<String>| {
         let text = body.join("\n").trim_matches('\n').to_string();
         match kind {
-            Kind::Doc if !text.trim().is_empty() => parts.push(Part::Doc(parse(&text))),
+            Kind::Doc if !text.trim().is_empty() => parts.push(Part::Doc(parse(&dedent(&text)))),
             Kind::Prompt if !text.trim().is_empty() => parts.push(Part::Prompt(text.trim().to_string())),
             Kind::Reply if !text.trim().is_empty() => parts.push(Part::Reply { blocks: parse(&text), source: text }),
             Kind::Tool => parts.push(Part::Tool { title: std::mem::take(title), output: dedent(&text) }),
@@ -223,11 +250,11 @@ pub fn session(text: &str) -> Vec<Part> {
         body.clear();
     };
     for line in text.lines() {
-        let marker = ["⏺ ", "● ", "• ", "> ", "› "].iter().find(|m| line.starts_with(**m));
+        let marker = ["⏺ ", "● ", "• ", "> ", "› ", "❯ "].iter().find(|m| line.starts_with(**m));
         if let Some(m) = marker {
             let rest = line[m.len()..].trim_end();
             flush(&kind, &mut title, &mut body);
-            if *m == "> " || *m == "› " {
+            if *m == "> " || *m == "› " || *m == "❯ " {
                 kind = Kind::Prompt;
                 body.push(rest.to_string());
             } else if is_tool_call(rest) || (*m == "• " && CODEX_TOOLS.iter().any(|w| rest.starts_with(w))) {
@@ -319,11 +346,11 @@ fn list_marker(t: &str) -> Option<(String, &str)> {
         .then(|| (format!("{n}."), &rest[1..]))
 }
 
-/// A line laid out with spaces rather than written as prose: indented, or with a gap of several
-/// spaces or a tab between words, as in `dir`, `ls -l` or a table of numbers.
-fn columned(line: &str) -> bool {
-    let t = line.trim_end();
-    t.starts_with([' ', '\t']) || t.contains('\t') || t.trim_start().contains("  ")
+/// A line laid out with spaces rather than written as prose: a gap of several spaces or a tab
+/// between words, as in `dir`, `ls -l` or a table of numbers. Indentation alone is not enough.
+pub fn columned(line: &str) -> bool {
+    let t = line.trim();
+    t.contains('\t') || t.contains("  ")
 }
 
 /// Text in the terminal's own font with each character on the grid: wide characters (Korean,
@@ -369,7 +396,8 @@ pub fn parse(text: &str) -> Vec<Block> {
             if para.iter().any(|l| columned(l)) {
                 blocks.push(Block::Pre(para.join("\n")));
             } else {
-                blocks.push(Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n")));
+                // Lines of a paragraph join up, as in the preview: the terminal broke them only to fit.
+                blocks.push(Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")));
             }
             para.clear();
         }
@@ -636,7 +664,8 @@ fn inline(text: &str, size: f32, th: &Theme, strong: bool) -> (LayoutJob, Links)
             rest = r;
             continue;
         }
-        if let Some(r) = rest.strip_prefix('*').filter(|r| !r.starts_with(' ') && (italic || r.contains('*'))) {
+        // A star closes italics wherever it is, and opens them only before a word with a closing star to come.
+        if let Some(r) = rest.strip_prefix('*').filter(|r| italic || (!r.starts_with(' ') && r.contains('*'))) {
             flush_buf(&mut job, &mut buf, &mut chars, bold, italic, strike);
             italic = !italic;
             rest = r;
@@ -1226,12 +1255,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_2_screens_read_as_a_session() {
+        let raw = " ▐▛███▛█   Claude Code v2\n\n❯ give me a story\n\n● # The Log\n\n  ▎ Three short.\n\n  ---\n\n  ┌──────┬──────┐\n  │ Time │ Note │\n  ├──────┼──────┤\n  │ 21:04│ SOS  │\n                Jump to bottom (ctrl+End) ↓\n✻ Worked for 12s";
+        let parts = Doc::new(raw).parts;
+        assert_eq!(parts[0], Part::Prompt("give me a story".into()));
+        let Part::Reply { blocks, .. } = &parts[1] else { panic!("{parts:?}") };
+        assert_eq!(blocks[0], Block::Heading(1, "The Log".into()));
+        assert_eq!(blocks[1], Block::Quote(vec![Block::Para("Three short.".into())]));
+        assert_eq!(blocks[2], Block::Rule);
+        assert!(matches!(&blocks[3], Block::Table { rows, .. } if rows.len() == 2), "{blocks:?}");
+        assert_eq!(parts.len(), 2, "{parts:?}");
+    }
+
+    #[test]
     fn markdown_blocks_parse() {
         let b = parse(
             "# Title\n\nSome *text*\nmore.\n\n- one\n  - two\n1. three\n- [x] done\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n> quoted\n\n---",
         );
         assert_eq!(b[0], Block::Heading(1, "Title".into()));
-        assert_eq!(b[1], Block::Para("Some *text*\nmore.".into()));
+        assert_eq!(b[1], Block::Para("Some *text* more.".into()));
         assert_eq!(b[2], Block::Item { depth: 0, marker: "-".into(), text: "one".into() });
         assert_eq!(b[3], Block::Item { depth: 1, marker: "-".into(), text: "two".into() });
         assert_eq!(b[4], Block::Item { depth: 0, marker: "1.".into(), text: "three".into() });
@@ -1270,6 +1312,8 @@ mod tests {
             function: Color32::YELLOW,
             ty: Color32::GREEN,
         };
+        let (job, _) = inline("*one,* *\"two.\"*", 14.0, &th, false);
+        assert_eq!(job.text, "one, \"two.\"");
         let (job, links) = inline("see [docs](https://a.b) or https://c.d.", 14.0, &th, false);
         assert_eq!(job.text, "see docs or https://c.d.");
         assert_eq!(links, vec![(4..8, "https://a.b".to_string()), (12..23, "https://c.d".to_string())]);
