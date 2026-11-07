@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod dxgi;
 #[cfg(target_os = "linux")]
 mod gnome;
 #[cfg(target_os = "linux")]

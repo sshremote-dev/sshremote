@@ -1,5 +1,7 @@
-//! Windows backend: GDI copy of the primary screen (scaled by StretchBlt when a
-//! smaller target is asked for) and SendInput for keyboard and mouse.
+//! Windows backend: the monitor's picture from Desktop Duplication when it changed (GDI copies
+//! when duplication is not available: another session, the secure desktop, a window across
+//! monitors), scaled by StretchBlt when a smaller target is asked for, and SendInput for
+//! keyboard and mouse.
 
 use std::ptr::null_mut;
 
@@ -91,6 +93,65 @@ pub struct Gdi {
     pointer_inside: bool,
     /// The shared window closed and the whole screen came back; the viewer is told once.
     ended: bool,
+    /// Desktop Duplication of the monitor, and the monitor-sized picture it fills.
+    dup: Option<super::dxgi::Dup>,
+    base: Option<Dib>,
+    /// The duplicated picture is complete (its first frame arrived).
+    dup_ready: bool,
+    /// When duplication may be tried again after it failed.
+    dup_retry: std::time::Instant,
+    /// The next grab returns a picture even if the screen did not change (new size or scope).
+    force: bool,
+}
+
+/// A device-independent bitmap selected into its own memory DC.
+struct Dib {
+    dc: HDC,
+    bmp: HBITMAP,
+    old: HGDIOBJ,
+    bits: *mut u8,
+    w: usize,
+    h: usize,
+}
+
+impl Dib {
+    fn new(screen: HDC, w: usize, h: usize) -> Option<Dib> {
+        unsafe {
+            let dc = CreateCompatibleDC(screen);
+            let mut bi: BITMAPINFO = std::mem::zeroed();
+            bi.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut bits = null_mut();
+            let bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            if bmp.is_null() {
+                DeleteDC(dc);
+                return None;
+            }
+            let old = SelectObject(dc, bmp);
+            Some(Dib { dc, bmp, old, bits: bits as *mut u8, w, h })
+        }
+    }
+
+    fn pixels(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.bits, self.w * self.h * 4) }
+    }
+}
+
+impl Drop for Dib {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.dc, self.old);
+            DeleteObject(self.bmp);
+            DeleteDC(self.dc);
+        }
+    }
 }
 
 impl Gdi {
@@ -125,6 +186,11 @@ impl Gdi {
                 shown: Vec::new(),
                 pointer_inside: true,
                 ended: false,
+                dup: None,
+                base: None,
+                dup_ready: false,
+                dup_retry: std::time::Instant::now(),
+                force: true,
             };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
@@ -141,15 +207,72 @@ impl Gdi {
         }
     }
 
-    fn blit(&self) -> bool {
+    /// Copies the captured area into the target bitmap, from the screen or from the duplicated
+    /// picture (`src` with its top-left at `at` on the virtual desktop).
+    fn blit_from(&self, src: HDC, at: (i32, i32)) -> bool {
         let (w, h) = (self.target.0 as i32, self.target.1 as i32);
         let (dw, dh) = (self.desk.0 as i32, self.desk.1 as i32);
+        let (x, y) = (self.origin.0 - at.0, self.origin.1 - at.1);
         unsafe {
             if (w, h) == (dw, dh) {
-                BitBlt(self.mem, 0, 0, w, h, self.screen, self.origin.0, self.origin.1, SRCCOPY) != 0
+                BitBlt(self.mem, 0, 0, w, h, src, x, y, SRCCOPY) != 0
             } else {
                 SetStretchBltMode(self.mem, COLORONCOLOR);
-                StretchBlt(self.mem, 0, 0, w, h, self.screen, self.origin.0, self.origin.1, dw, dh, SRCCOPY) != 0
+                StretchBlt(self.mem, 0, 0, w, h, src, x, y, dw, dh, SRCCOPY) != 0
+            }
+        }
+    }
+
+    fn blit(&self) -> bool {
+        self.blit_from(self.screen, (0, 0))
+    }
+
+    /// Whether the captured area lies on the monitor being duplicated.
+    fn on_monitor(&self) -> bool {
+        let ((ml, mt), (mw, mh)) = self.monitor;
+        self.origin.0 >= ml
+            && self.origin.1 >= mt
+            && self.origin.0 + self.desk.0 as i32 <= ml + mw as i32
+            && self.origin.1 + self.desk.1 as i32 <= mt + mh as i32
+    }
+
+    /// Looks at the duplicated monitor: Some(true) when its picture or pointer changed, Some(false)
+    /// when nothing did, None when duplication cannot serve this frame (GDI does instead).
+    fn poll_dup(&mut self) -> Option<bool> {
+        if !self.on_monitor() {
+            return None;
+        }
+        if self.dup.is_none() {
+            if std::time::Instant::now() < self.dup_retry {
+                return None;
+            }
+            let ((ml, mt), _) = self.monitor;
+            match super::dxgi::Dup::open(ml, mt) {
+                Ok(d) => {
+                    self.base = Dib::new(self.screen, d.size.0, d.size.1);
+                    self.dup = self.base.is_some().then_some(d);
+                    self.dup_ready = false;
+                }
+                Err(_) => {}
+            }
+            if self.dup.is_none() {
+                self.dup_retry = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                return None;
+            }
+        }
+        let (dup, base) = (self.dup.as_mut()?, self.base.as_mut()?);
+        let stride = base.w * 4;
+        match dup.next(base.pixels(), stride) {
+            Ok(super::dxgi::Next::Same) => Some(false),
+            Ok(super::dxgi::Next::Pointer) => Some(true),
+            Ok(super::dxgi::Next::Picture) => {
+                self.dup_ready = true;
+                Some(true)
+            }
+            Err(super::dxgi::Lost) => {
+                // A desktop switch or mode change: open again on the next frame, GDI meanwhile.
+                (self.dup, self.base, self.dup_ready) = (None, None, false);
+                None
             }
         }
     }
@@ -217,6 +340,21 @@ impl Gdi {
                 x = x.max(b);
             }
         }
+    }
+
+    /// The target bitmap with the pointer drawn on it and, while a window is shared, the rest
+    /// greyed out.
+    fn finish(&self) -> Image {
+        self.draw_cursor();
+        let (w, h) = self.target;
+        let mut data = unsafe {
+            GdiFlush();
+            std::slice::from_raw_parts(self.bits, w * h * 4).to_vec()
+        };
+        if self.scope != Scope::Screen {
+            self.mask(&mut data);
+        }
+        Image { w, h, stride: w * 4, data }
     }
 
     fn draw_cursor(&self) {
@@ -306,6 +444,8 @@ impl Capture for Gdi {
         (self.current, self.origin, self.desk) = (index, (s.left, s.top), (s.info.w, s.info.h));
         self.monitor = (self.origin, self.desk);
         self.scope = Scope::Screen;
+        (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
+        self.dup_retry = std::time::Instant::now();
         Ok(())
     }
 
@@ -323,6 +463,7 @@ impl Capture for Gdi {
                 self.scope = Scope::Screen;
                 (self.origin, self.desk) = self.monitor;
                 self.pointer_inside = true;
+                self.force = true;
                 return Ok("the whole screen".into());
             }
             Share::Window(id) | Share::App(id) => id as HWND,
@@ -350,6 +491,7 @@ impl Capture for Gdi {
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
+        self.force = true;
         self.free_bitmap();
         unsafe {
             let mut bi: BITMAPINFO = std::mem::zeroed();
@@ -375,6 +517,19 @@ impl Capture for Gdi {
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.update_layout();
+        let force = std::mem::take(&mut self.force) || self.scope != Scope::Screen;
+        match self.poll_dup() {
+            // Nothing changed on the monitor: no copy, no work further down.
+            Some(false) if !force && self.dup_ready => return Ok(None),
+            Some(_) if self.dup_ready => {
+                let at = self.monitor.0;
+                let dc = self.base.as_ref().map(|b| b.dc).unwrap_or(self.screen);
+                if self.blit_from(dc, at) {
+                    return Ok(Some(self.finish()));
+                }
+            }
+            _ => {}
+        }
         if !self.blit() {
             // The input desktop changed (lock screen, UAC); follow it and retry once.
             if !follow_input_desktop() {
@@ -388,16 +543,7 @@ impl Capture for Gdi {
                 return Ok(None);
             }
         }
-        self.draw_cursor();
-        let (w, h) = self.target;
-        let mut data = unsafe {
-            GdiFlush();
-            std::slice::from_raw_parts(self.bits, w * h * 4).to_vec()
-        };
-        if self.scope != Scope::Screen {
-            self.mask(&mut data);
-        }
-        Ok(Some(Image { w, h, stride: w * 4, data }))
+        Ok(Some(self.finish()))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

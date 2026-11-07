@@ -3611,6 +3611,7 @@ dependencies = [
  "spake2",
  "uiautomation",
  "unicode-width",
+ "windows",
  "windows-sys 0.61.2",
  "zbus",
  "zstd",

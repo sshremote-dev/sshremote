@@ -1,0 +1,143 @@
+//! Desktop Duplication (DXGI): the system hands over a monitor's picture only when something on it
+//! changed, so an idle screen costs nothing, where GDI copies the whole screen for every frame.
+//! The picture lands in a buffer of the monitor's size, from which the GDI path scales, crops and
+//! draws the pointer as before.
+
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_MODE_ROTATION_IDENTITY;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
+    IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+};
+use windows::core::Interface;
+
+/// What the next look at the monitor found.
+pub enum Next {
+    /// Nothing changed since the last look.
+    Same,
+    /// Only the pointer moved or changed; the picture is as before.
+    Pointer,
+    /// A new picture was copied into the buffer.
+    Picture,
+}
+
+/// The duplication of one monitor.
+pub struct Dup {
+    device: ID3D11Device,
+    ctx: ID3D11DeviceContext,
+    dup: IDXGIOutputDuplication,
+    staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// The monitor's size in pixels.
+    pub size: (usize, usize),
+}
+
+/// The duplication stopped (desktop switch, mode change, another program took it): open again.
+pub struct Lost;
+
+impl Dup {
+    /// Duplicates the monitor whose top-left corner is at (`left`, `top`) on the virtual desktop.
+    pub fn open(left: i32, top: i32) -> Result<Dup, String> {
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("DXGI: {e}"))?;
+            let mut a = 0;
+            while let Ok(adapter) = factory.EnumAdapters1(a) {
+                a += 1;
+                let mut o = 0;
+                while let Ok(output) = adapter.EnumOutputs(o) {
+                    o += 1;
+                    let Ok(desc) = output.GetDesc() else { continue };
+                    let r = desc.DesktopCoordinates;
+                    if (r.left, r.top) != (left, top) || desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
+                        continue;
+                    }
+                    let (device, ctx) = device_for(&adapter)?;
+                    let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("DXGI output: {e}"))?;
+                    let dup = output1.DuplicateOutput(&device).map_err(|e| format!("Desktop Duplication: {e}"))?;
+                    let size = ((r.right - r.left) as usize, (r.bottom - r.top) as usize);
+                    return Ok(Dup { device, ctx, dup, staging: None, size });
+                }
+            }
+            Err("no DXGI output at that place".into())
+        }
+    }
+
+    /// Looks for a change and, when the picture changed, copies it into `dst` (BGRA rows of
+    /// `stride` bytes, at least the monitor's size).
+    pub fn next(&mut self, dst: &mut [u8], stride: usize) -> Result<Next, Lost> {
+        unsafe {
+            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut res: Option<IDXGIResource> = None;
+            match self.dup.AcquireNextFrame(0, &mut info, &mut res) {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(Next::Same),
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => return Err(Lost),
+                Err(_) => return Err(Lost),
+            }
+            // No new picture, only the pointer.
+            if info.LastPresentTime == 0 {
+                let _ = self.dup.ReleaseFrame();
+                return Ok(if info.LastMouseUpdateTime != 0 { Next::Pointer } else { Next::Same });
+            }
+            let copied = self.copy(res, dst, stride);
+            let _ = self.dup.ReleaseFrame();
+            copied.map(|_| Next::Picture).map_err(|_| Lost)
+        }
+    }
+
+    unsafe fn copy(&mut self, res: Option<IDXGIResource>, dst: &mut [u8], stride: usize) -> Result<(), String> {
+        unsafe {
+            let tex: ID3D11Texture2D = res.ok_or("no frame")?.cast().map_err(|e| e.to_string())?;
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            tex.GetDesc(&mut desc);
+            if self.staging.as_ref().is_none_or(|s| (s.1, s.2) != (desc.Width, desc.Height)) {
+                let mut sd = desc;
+                sd.Usage = D3D11_USAGE_STAGING;
+                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                sd.BindFlags = 0;
+                sd.MiscFlags = 0;
+                sd.MipLevels = 1;
+                sd.ArraySize = 1;
+                let mut t = None;
+                self.device.CreateTexture2D(&sd, None, Some(&mut t)).map_err(|e| e.to_string())?;
+                self.staging = Some((t.ok_or("no staging texture")?, desc.Width, desc.Height));
+            }
+            let (staging, w, h) = self.staging.as_ref().expect("just made");
+            self.ctx.CopyResource(staging, &tex);
+            let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut map)).map_err(|e| e.to_string())?;
+            let (w, h) = ((*w as usize).min(self.size.0), (*h as usize).min(self.size.1));
+            let src = map.pData as *const u8;
+            for y in 0..h.min(dst.len() / stride.max(1)) {
+                let from = std::slice::from_raw_parts(src.add(y * map.RowPitch as usize), w * 4);
+                dst[y * stride..y * stride + w * 4].copy_from_slice(from);
+            }
+            self.ctx.Unmap(staging, 0);
+            Ok(())
+        }
+    }
+}
+
+unsafe fn device_for(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+    unsafe {
+        let (mut device, mut ctx) = (None, None);
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut ctx),
+        )
+        .map_err(|e| format!("Direct3D 11: {e}"))?;
+        Ok((device.ok_or("no Direct3D device")?, ctx.ok_or("no Direct3D context")?))
+    }
+}
