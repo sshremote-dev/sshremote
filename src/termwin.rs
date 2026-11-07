@@ -347,7 +347,13 @@ pub struct TermWindow {
     system: Option<Vec<String>>,
     profiles: Vec<Profile>,
     /// Where the window's position is remembered and what its title says.
-    viewport: &'static str,
+    viewport: egui::ViewportId,
+    /// Where a window made from a torn-off tab opens, in screen points.
+    position: Option<Pos2>,
+    /// The tab being dragged in the strip.
+    dragging: Option<u32>,
+    /// Windows made from tabs dragged out of this one, for the owner to show.
+    torn: Vec<TermWindow>,
     title: String,
     copy_on_select: bool,
     renaming: Option<(usize, String)>,
@@ -355,6 +361,8 @@ pub struct TermWindow {
     pending: Vec<Pending>,
     /// The window closes with its last tab instead of opening a fresh shell.
     standalone: bool,
+    /// A window of its own, which draws its frame: tabs in the title bar beside the window buttons.
+    framed: bool,
 }
 
 fn color(c: Color, colors: &alacritty_terminal::term::color::Colors) -> Color32 {
@@ -509,12 +517,16 @@ impl TermWindow {
             font_size: setting("term_font").and_then(|v| v.parse().ok()).unwrap_or(14.0),
             system: None,
             profiles,
-            viewport,
+            viewport: egui::ViewportId::from_hash_of(viewport),
+            position: None,
+            dragging: None,
+            torn: Vec::new(),
             title: title.into(),
             copy_on_select: setting("term_copy_select").is_some_and(|v| v == "1"),
             renaming: None,
             pending: Vec::new(),
             standalone: false,
+            framed: false,
         }
     }
 
@@ -583,6 +595,60 @@ impl TermWindow {
     }
 
     /// Ends every pane of a tab.
+    /// Moves the tab `group` to where the tab `to` is.
+    fn move_group(&mut self, group: u32, to: u32) {
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let order: Vec<u32> = self.groups().iter().map(|g| g.0).collect();
+        let (Some(from), Some(target)) = (order.iter().position(|&g| g == group), order.iter().position(|&g| g == to))
+        else {
+            return;
+        };
+        let moved: Vec<Tab> = self.tabs.extract_if(.., |t| t.group == group).collect();
+        // Before the target when moving left, after it when moving right.
+        let at = if target < from {
+            self.tabs.iter().position(|t| t.group == to).unwrap_or(0)
+        } else {
+            self.tabs.iter().rposition(|t| t.group == to).map_or(self.tabs.len(), |k| k + 1)
+        };
+        for (k, t) in moved.into_iter().enumerate() {
+            self.tabs.insert(at + k, t);
+        }
+        if let Some(id) = active {
+            self.active = self.tabs.iter().position(|t| t.id == id).unwrap_or(0);
+        }
+    }
+
+    /// Takes the tab `group` out into a new window at `at` (screen points). Shells on the SSH host
+    /// of a remote-screen session stay with it, since that session carries their output.
+    fn tear(&mut self, group: u32, at: Pos2) {
+        if !self.framed || self.tabs.iter().any(|t| t.group == group && matches!(t.backend, Backend::Agent)) {
+            return;
+        }
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let moved: Vec<Tab> = self.tabs.extract_if(.., |t| t.group == group).collect();
+        if moved.is_empty() {
+            return;
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut w = TermWindow::with_profiles(self.profiles.clone(), "sshremote-torn-terminal", &self.title);
+        w.viewport = egui::ViewportId::from_hash_of(("sshremote-torn-terminal", n));
+        w.next_id = moved.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        w.tabs = moved;
+        w.framed = true;
+        w.standalone = true;
+        w.position = Some(at);
+        w.system = self.system.clone();
+        w.font_size = self.font_size;
+        self.torn.push(w);
+        self.active = active.and_then(|id| self.tabs.iter().position(|t| t.id == id)).unwrap_or(0);
+    }
+
+    /// Windows made from tabs dragged out of this one since the last call.
+    pub fn take_torn(&mut self) -> Vec<TermWindow> {
+        std::mem::take(&mut self.torn)
+    }
+
     fn close_group(&mut self, group: u32, out: &mut Vec<Cmd>) {
         while let Some(&i) = self.panes(group).last() {
             self.close_pane(i, out);
@@ -711,16 +777,22 @@ impl TermWindow {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(window_title)
             .with_inner_size([900.0, 560.0])
-            .with_min_inner_size([360.0, 200.0]);
+            .with_min_inner_size([360.0, 200.0])
+            .with_decorations(false);
+        self.framed = true;
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(self.viewport), builder, |ui, _| {
+        if let Some(p) = self.position.take() {
+            builder = builder.with_position(p);
+        }
+        ctx.show_viewport_immediate(self.viewport, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 out.extend(self.close_all());
                 out.push(Cmd::Close);
                 return;
             }
+            crate::gui::chrome::behaviour(ui.ctx());
             self.body(ui, &mut out);
         });
         self.after(ctx, &mut out);
@@ -781,252 +853,282 @@ impl TermWindow {
         crate::hosts::set_setting("term_cursor", &CURSOR.load(std::sync::atomic::Ordering::Relaxed).to_string());
     }
 
+    /// The tabs, the new-tab button and menu, and the window's own buttons (views, settings).
+    fn strip(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
+        let mut close = None;
+        let groups = self.groups();
+        let current = self.tabs.get(self.active).map(|t| t.group);
+        let n = groups.len().max(1) as f32;
+        let room = (ui.available_width() - 150.0).max(120.0);
+        let tab_w = (room / n).clamp(110.0, 220.0);
+        let mut tab_rects: Vec<(u32, Rect)> = Vec::new();
+        let mut drag_end: Option<(u32, Pos2)> = None;
+        for (gi, &(group, i)) in groups.iter().enumerate() {
+            let active = Some(group) == current;
+            let next_active = groups.get(gi + 1).is_some_and(|g| Some(g.0) == current);
+            let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click_and_drag());
+            tab_rects.push((group, rect));
+            let hovered = r.hovered();
+            let p = ui.painter();
+            let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+            if active {
+                p.rect_filled(rect, top_round, scheme_bg());
+            } else if hovered {
+                p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
+            } else if !next_active && gi + 1 < groups.len() {
+                // A thin divider between two inactive tabs.
+                let x = rect.right() - 0.5;
+                p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, TAB_DIVIDER));
+            }
+            let t = &self.tabs[i];
+            let ended = t.exited.is_some();
+            let fg = if active { Color32::WHITE } else { Color32::from_gray(170) };
+            let fg = if ended { fg.gamma_multiply(0.5) } else { fg };
+            p.text(
+                rect.left_center() + Vec2::new(12.0, 0.0),
+                Align2::LEFT_CENTER,
+                ic::TERMINAL,
+                FontId::proportional(14.0),
+                fg,
+            );
+            // The close button appears on the active tab and under the pointer, as in browsers.
+            let close_rect = Rect::from_center_size(rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
+            let show_close = active || hovered;
+            let title_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 10.0 };
+            let mut title = t.custom.clone().unwrap_or_else(|| t.title.clone());
+            if ended {
+                title.push_str(" (ended)");
+            }
+            let count = self.panes(group).len();
+            if count > 1 {
+                title = format!("{title}  ({count} panes)");
+            }
+            let title_rect =
+                Rect::from_min_max(Pos2::new(rect.left() + 32.0, rect.top()), Pos2::new(title_right, rect.bottom()));
+            let galley = p.layout_no_wrap(title, FontId::proportional(13.0), fg);
+            let clip = ui.painter_at(title_rect);
+            clip.galley(Pos2::new(title_rect.left(), rect.center().y - galley.size().y / 2.0), galley.clone(), fg);
+            if galley.size().x > title_rect.width() {
+                // Fade the cut end instead of ending mid-letter.
+                let bg = if active {
+                    scheme_bg()
+                } else if hovered {
+                    TAB_HOVER
+                } else {
+                    TAB_STRIP
+                };
+                let fade = Rect::from_min_max(
+                    Pos2::new(title_rect.right() - 18.0, rect.top() + 6.0),
+                    Pos2::new(title_rect.right(), rect.bottom() - 6.0),
+                );
+                for k in 0..6 {
+                    let a = (k as f32 + 1.0) / 6.0;
+                    let x0 = fade.left() + fade.width() * k as f32 / 6.0;
+                    let slice = Rect::from_min_max(Pos2::new(x0, fade.top()), Pos2::new(fade.right(), fade.bottom()));
+                    ui.painter().rect_filled(slice, CornerRadius::ZERO, bg.gamma_multiply(a * 0.35));
+                }
+            }
+            if show_close {
+                let cr = ui.interact(close_rect, ui.make_persistent_id(("close-tab", t.id)), Sense::click());
+                if cr.hovered() {
+                    ui.painter().circle_filled(close_rect.center(), 10.0, Color32::from_white_alpha(28));
+                }
+                ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
+                if cr.clicked() {
+                    close = Some(group);
+                }
+                cr.on_hover_text("Close (middle click on the tab also closes)");
+            }
+            if r.clicked() && close.is_none() {
+                self.active = i;
+            }
+            if r.drag_started_by(egui::PointerButton::Primary) {
+                if groups.len() == 1 && self.framed {
+                    // The only tab moves the window, as in Windows Terminal.
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                } else {
+                    self.dragging = Some(group);
+                    self.active = i;
+                }
+            }
+            if r.drag_stopped()
+                && self.dragging == Some(group)
+                && let Some(p) = ui.ctx().input(|inp| inp.pointer.latest_pos())
+            {
+                drag_end = Some((group, p));
+            }
+            if r.middle_clicked() {
+                close = Some(group);
+            }
+            if r.double_clicked() {
+                let name = self.tabs[i].custom.clone().unwrap_or_else(|| self.tabs[i].title.clone());
+                self.renaming = Some((i, name));
+            }
+            r.on_hover_text(&self.tabs[i].title);
+        }
+        // A dragged tab moves along the strip; dropped away from it, it opens in a window of its own.
+        if let Some(group) = self.dragging
+            && let Some(p) = ui.ctx().pointer_interact_pos()
+            && let Some(&(over, _)) = tab_rects.iter().find(|(g, r)| *g != group && r.x_range().contains(p.x))
+        {
+            self.move_group(group, over);
+        }
+        if let Some((group, p)) = drag_end {
+            self.dragging = None;
+            let strip = tab_rects.iter().fold(Rect::NOTHING, |a, (_, r)| a.union(*r));
+            if (p.y - strip.center().y).abs() > 60.0 || !ui.ctx().content_rect().contains(p) {
+                let origin = ui.ctx().input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
+                self.tear(group, origin + p.to_vec2() - Vec2::new(60.0, 16.0));
+            }
+        }
+        ui.add_space(4.0);
+        let (plus, pr) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::click());
+        if pr.hovered() {
+            ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), TAB_HOVER);
+        }
+        ui.painter().text(
+            plus.center(),
+            Align2::CENTER_CENTER,
+            ic::PLUS,
+            FontId::proportional(15.0),
+            Color32::from_gray(200),
+        );
+        if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
+            self.open_tab();
+        }
+        // The profiles: local shells, ssh hosts, the SSH host's own shell.
+        let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
+            .frame_when_inactive(false)
+            .min_size(Vec2::new(22.0, 30.0));
+        let profiles = self.profiles.clone();
+        egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+            ui.set_min_width(240.0);
+            for (k, p) in profiles.iter().enumerate() {
+                let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
+                if ui.add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut)).clicked() {
+                    self.pending.push((p.clone(), None));
+                    ui.close();
+                }
+            }
+        });
+        if let Some(group) = close {
+            self.close_group(group, out);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
+                let color = if on { Color32::WHITE } else { Color32::from_gray(170) };
+                let b = egui::Button::new(RichText::new(glyph).size(14.0).color(color))
+                    .frame_when_inactive(on)
+                    .selected(on)
+                    .min_size(Vec2::splat(28.0));
+                ui.add(b).on_hover_text(tip).clicked()
+            };
+            if let Some(cmd) = &self.system
+                && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)", false)
+            {
+                let _ = spawn_system(cmd);
+            }
+            let font = &mut self.font_size;
+            let mut copy_on_select = self.copy_on_select;
+            let mut changed = false;
+            let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(Color32::from_gray(170)))
+                .frame_when_inactive(false)
+                .min_size(Vec2::splat(28.0));
+            egui::containers::menu::MenuButton::from_button(gear)
+                .config(
+                    egui::containers::menu::MenuConfig::new()
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                )
+                .ui(ui, |ui| {
+                    ui.set_min_width(240.0);
+                    ui.label(RichText::new("Appearance").strong());
+                    changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
+                    let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len();
+                    for (k, sc) in SCHEMES.iter().enumerate() {
+                        if ui.selectable_label(k == current, sc.0).clicked() {
+                            SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+                            changed = true;
+                        }
+                    }
+                    ui.separator();
+                    changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
+                    ui.horizontal(|ui| {
+                        ui.label("Cursor");
+                        let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+                        for (k, name) in CURSORS.iter().enumerate() {
+                            if ui.selectable_label(k == current, *name).clicked() {
+                                CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.label(RichText::new("Shortcuts").strong());
+                    for (k, v) in [
+                        ("Ctrl+Shift+T", "New tab"),
+                        ("Ctrl+Shift+W", "Close pane or tab"),
+                        ("Ctrl+Tab", "Next tab"),
+                        ("Alt+Shift+= / -", "Split right / down"),
+                        ("Alt+Shift+D", "Split along the longer side"),
+                        ("Alt+arrows", "Move between panes"),
+                        ("Ctrl+Shift+F", "Find"),
+                        ("Ctrl+Shift+C / V", "Copy / paste"),
+                        ("Ctrl+= / Ctrl+-", "Text size"),
+                        ("Ctrl+click", "Open a link"),
+                        ("Double-click a tab", "Rename it"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(k).monospace().size(12.0));
+                            ui.label(RichText::new(v).weak().size(12.0));
+                        });
+                    }
+                });
+            self.copy_on_select = copy_on_select;
+            if changed {
+                self.save_settings();
+            }
+            ui.add_space(6.0);
+            // How the active tab is shown.
+            if let Some(t) = self.tabs.get_mut(self.active) {
+                for (v, glyph, tip) in [
+                    (
+                        View::Markdown,
+                        ic::ARTICLE,
+                        "Read the output as Markdown, with copy buttons on code (agent replies)",
+                    ),
+                    (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
+                    (View::Terminal, ic::TERMINAL, "Terminal"),
+                ] {
+                    if small(ui, glyph, tip, t.view == v) {
+                        t.view = v;
+                    }
+                }
+            }
+        });
+    }
+
     fn body(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
         // A tab strip as in Windows Terminal or a browser: the active tab joins the terminal below.
-        let strip =
-            egui::Frame::new().fill(TAB_STRIP).inner_margin(egui::Margin { left: 8, right: 6, top: 6, bottom: 0 });
-        egui::Panel::top("term-tabs").frame(strip).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
-            ui.horizontal(|ui| {
-                let mut close = None;
-                let groups = self.groups();
-                let current = self.tabs.get(self.active).map(|t| t.group);
-                let n = groups.len().max(1) as f32;
-                let room = (ui.available_width() - 150.0).max(120.0);
-                let tab_w = (room / n).clamp(110.0, 220.0);
-                for (gi, &(group, i)) in groups.iter().enumerate() {
-                    let active = Some(group) == current;
-                    let next_active = groups.get(gi + 1).is_some_and(|g| Some(g.0) == current);
-                    let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click());
-                    let hovered = r.hovered();
-                    let p = ui.painter();
-                    let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
-                    if active {
-                        p.rect_filled(rect, top_round, scheme_bg());
-                    } else if hovered {
-                        p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
-                    } else if !next_active && gi + 1 < groups.len() {
-                        // A thin divider between two inactive tabs.
-                        let x = rect.right() - 0.5;
-                        p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, TAB_DIVIDER));
-                    }
-                    let t = &self.tabs[i];
-                    let ended = t.exited.is_some();
-                    let fg = if active { Color32::WHITE } else { Color32::from_gray(170) };
-                    let fg = if ended { fg.gamma_multiply(0.5) } else { fg };
-                    p.text(
-                        rect.left_center() + Vec2::new(12.0, 0.0),
-                        Align2::LEFT_CENTER,
-                        ic::TERMINAL,
-                        FontId::proportional(14.0),
-                        fg,
-                    );
-                    // The close button appears on the active tab and under the pointer, as in browsers.
-                    let close_rect =
-                        Rect::from_center_size(rect.right_center() - Vec2::new(16.0, 0.0), Vec2::splat(20.0));
-                    let show_close = active || hovered;
-                    let title_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 10.0 };
-                    let mut title = t.custom.clone().unwrap_or_else(|| t.title.clone());
-                    if ended {
-                        title.push_str(" (ended)");
-                    }
-                    let count = self.panes(group).len();
-                    if count > 1 {
-                        title = format!("{title}  ({count} panes)");
-                    }
-                    let title_rect = Rect::from_min_max(
-                        Pos2::new(rect.left() + 32.0, rect.top()),
-                        Pos2::new(title_right, rect.bottom()),
-                    );
-                    let galley = p.layout_no_wrap(title, FontId::proportional(13.0), fg);
-                    let clip = ui.painter_at(title_rect);
-                    clip.galley(
-                        Pos2::new(title_rect.left(), rect.center().y - galley.size().y / 2.0),
-                        galley.clone(),
-                        fg,
-                    );
-                    if galley.size().x > title_rect.width() {
-                        // Fade the cut end instead of ending mid-letter.
-                        let bg = if active {
-                            scheme_bg()
-                        } else if hovered {
-                            TAB_HOVER
-                        } else {
-                            TAB_STRIP
-                        };
-                        let fade = Rect::from_min_max(
-                            Pos2::new(title_rect.right() - 18.0, rect.top() + 6.0),
-                            Pos2::new(title_rect.right(), rect.bottom() - 6.0),
-                        );
-                        for k in 0..6 {
-                            let a = (k as f32 + 1.0) / 6.0;
-                            let x0 = fade.left() + fade.width() * k as f32 / 6.0;
-                            let slice =
-                                Rect::from_min_max(Pos2::new(x0, fade.top()), Pos2::new(fade.right(), fade.bottom()));
-                            ui.painter().rect_filled(slice, CornerRadius::ZERO, bg.gamma_multiply(a * 0.35));
-                        }
-                    }
-                    if show_close {
-                        let cr = ui.interact(close_rect, ui.make_persistent_id(("close-tab", t.id)), Sense::click());
-                        if cr.hovered() {
-                            ui.painter().circle_filled(close_rect.center(), 10.0, Color32::from_white_alpha(28));
-                        }
-                        ui.painter().text(
-                            close_rect.center(),
-                            Align2::CENTER_CENTER,
-                            ic::X,
-                            FontId::proportional(12.0),
-                            fg,
-                        );
-                        if cr.clicked() {
-                            close = Some(group);
-                        }
-                        cr.on_hover_text("Close (middle click on the tab also closes)");
-                    }
-                    if r.clicked() && close.is_none() {
-                        self.active = i;
-                    }
-                    if r.middle_clicked() {
-                        close = Some(group);
-                    }
-                    if r.double_clicked() {
-                        let name = self.tabs[i].custom.clone().unwrap_or_else(|| self.tabs[i].title.clone());
-                        self.renaming = Some((i, name));
-                    }
-                    r.on_hover_text(&self.tabs[i].title);
-                }
-                ui.add_space(4.0);
-                let (plus, pr) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::click());
-                if pr.hovered() {
-                    ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), TAB_HOVER);
-                }
-                ui.painter().text(
-                    plus.center(),
-                    Align2::CENTER_CENTER,
-                    ic::PLUS,
-                    FontId::proportional(15.0),
-                    Color32::from_gray(200),
-                );
-                if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
-                    self.open_tab();
-                }
-                // The profiles: local shells, ssh hosts, the SSH host's own shell.
-                let menu_btn =
-                    egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
-                        .frame_when_inactive(false)
-                        .min_size(Vec2::new(22.0, 30.0));
-                let profiles = self.profiles.clone();
-                egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
-                    ui.set_min_width(240.0);
-                    for (k, p) in profiles.iter().enumerate() {
-                        let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
-                        if ui
-                            .add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut))
-                            .clicked()
-                        {
-                            self.pending.push((p.clone(), None));
-                            ui.close();
-                        }
-                    }
-                });
-                if let Some(group) = close {
-                    self.close_group(group, out);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
-                        let color = if on { Color32::WHITE } else { Color32::from_gray(170) };
-                        let b = egui::Button::new(RichText::new(glyph).size(14.0).color(color))
-                            .frame_when_inactive(on)
-                            .selected(on)
-                            .min_size(Vec2::splat(28.0));
-                        ui.add(b).on_hover_text(tip).clicked()
-                    };
-                    if let Some(cmd) = &self.system
-                        && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)", false)
-                    {
-                        let _ = spawn_system(cmd);
-                    }
-                    let font = &mut self.font_size;
-                    let mut copy_on_select = self.copy_on_select;
-                    let mut changed = false;
-                    let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(Color32::from_gray(170)))
-                        .frame_when_inactive(false)
-                        .min_size(Vec2::splat(28.0));
-                    egui::containers::menu::MenuButton::from_button(gear)
-                        .config(
-                            egui::containers::menu::MenuConfig::new()
-                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
-                        )
-                        .ui(ui, |ui| {
-                            ui.set_min_width(240.0);
-                            ui.label(RichText::new("Appearance").strong());
-                            changed |=
-                                ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
-                            let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len();
-                            for (k, sc) in SCHEMES.iter().enumerate() {
-                                if ui.selectable_label(k == current, sc.0).clicked() {
-                                    SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
-                                    changed = true;
-                                }
-                            }
-                            ui.separator();
-                            changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
-                            ui.horizontal(|ui| {
-                                ui.label("Cursor");
-                                let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
-                                for (k, name) in CURSORS.iter().enumerate() {
-                                    if ui.selectable_label(k == current, *name).clicked() {
-                                        CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
-                                        changed = true;
-                                    }
-                                }
-                            });
-                            ui.separator();
-                            ui.label(RichText::new("Shortcuts").strong());
-                            for (k, v) in [
-                                ("Ctrl+Shift+T", "New tab"),
-                                ("Ctrl+Shift+W", "Close pane or tab"),
-                                ("Ctrl+Tab", "Next tab"),
-                                ("Alt+Shift+= / -", "Split right / down"),
-                                ("Alt+Shift+D", "Split along the longer side"),
-                                ("Alt+arrows", "Move between panes"),
-                                ("Ctrl+Shift+F", "Find"),
-                                ("Ctrl+Shift+C / V", "Copy / paste"),
-                                ("Ctrl+= / Ctrl+-", "Text size"),
-                                ("Ctrl+click", "Open a link"),
-                                ("Double-click a tab", "Rename it"),
-                            ] {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(k).monospace().size(12.0));
-                                    ui.label(RichText::new(v).weak().size(12.0));
-                                });
-                            }
-                        });
-                    self.copy_on_select = copy_on_select;
-                    if changed {
-                        self.save_settings();
-                    }
-                    ui.add_space(6.0);
-                    // How the active tab is shown.
-                    if let Some(t) = self.tabs.get_mut(self.active) {
-                        for (v, glyph, tip) in [
-                            (
-                                View::Markdown,
-                                ic::ARTICLE,
-                                "Read the output as Markdown, with copy buttons on code (agent replies)",
-                            ),
-                            (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
-                            (View::Terminal, ic::TERMINAL, "Terminal"),
-                        ] {
-                            if small(ui, glyph, tip, t.view == v) {
-                                t.view = v;
-                            }
-                        }
-                    }
-                });
+        // A window of its own has it in its title bar, beside the window's buttons.
+        if self.framed {
+            let bar = crate::gui::chrome::title_bar(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| self.strip(ui, out));
             });
-        });
+            if bar.close {
+                out.extend(self.close_all());
+                out.push(Cmd::Close);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        } else {
+            let strip =
+                egui::Frame::new().fill(TAB_STRIP).inner_margin(egui::Margin { left: 8, right: 6, top: 6, bottom: 0 });
+            egui::Panel::top("term-tabs").frame(strip).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
+                ui.horizontal(|ui| self.strip(ui, out));
+            });
+        }
         // Keyboard shortcuts of the window itself, as in other terminals.
         let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
             let cs = i.modifiers.ctrl && i.modifiers.shift;
@@ -2378,7 +2480,7 @@ pub fn local_profiles() -> Vec<Profile> {
 /// The terminal as a program of its own (`sshremote terminal [HOST]`).
 /// `view` ("text" or "markdown") is how the first tab starts.
 pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>, view: Option<String>) -> Result<(), String> {
-    struct Solo(TermWindow, Option<View>);
+    struct Solo(TermWindow, Option<View>, Vec<TermWindow>);
     impl eframe::App for Solo {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             let ctx = ui.ctx().clone();
@@ -2392,8 +2494,18 @@ pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>, view: Option<Stri
             {
                 t.view = v;
             }
+            crate::gui::chrome::behaviour(&ctx);
             self.0.body(ui, &mut out);
             self.0.after(&ctx, &mut out);
+            // Windows made from torn-off tabs, each with its own viewport.
+            self.2.extend(self.0.take_torn());
+            let mut more = Vec::new();
+            self.2.retain_mut(|w| {
+                let cmds = w.show(&ctx, "");
+                more.extend(w.take_torn());
+                !cmds.iter().any(|c| matches!(c, Cmd::Close))
+            });
+            self.2.extend(more);
         }
     }
     let native = crate::gui::native_options("SSH Remote Terminal", [960.0, 600.0]);
@@ -2403,13 +2515,14 @@ pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>, view: Option<Stri
         Box::new(move |cc| {
             crate::gui::style(&cc.egui_ctx);
             let mut w = TermWindow::standalone(first, Vec::new());
+            w.framed = true;
             w.pending.extend(panes.into_iter().map(|(p, side)| (p, Some((0, side)))));
             let view = match view.as_deref() {
                 Some("text") => Some(View::Text),
                 Some("markdown") => Some(View::Markdown),
                 _ => None,
             };
-            Ok(Box::new(Solo(w, view)))
+            Ok(Box::new(Solo(w, view, Vec::new())))
         }),
     )
     .map_err(|e| e.to_string())
@@ -2714,5 +2827,27 @@ mod tests {
         assert!(blocks.iter().any(|b| matches!(b, Block::Heading(2, h) if h.contains("Chapter 5"))), "headings");
         assert!(!blocks.iter().any(|b| matches!(b, Block::Pre(_))), "prose is not read as columns");
         assert!(!text.contains("Jump to bottom") && !text.contains("bypass permissions"), "no controls");
+    }
+
+    #[test]
+    fn tabs_move_along_the_strip_and_session_shells_stay() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        w.open_tab();
+        w.open_tab();
+        frame(&ctx, &mut w, Vec::new());
+        let order = |w: &TermWindow| w.groups().iter().map(|g| g.0).collect::<Vec<_>>();
+        let before = order(&w);
+        assert_eq!(before.len(), 3);
+        w.move_group(before[0], before[2]);
+        assert_eq!(order(&w), [before[1], before[2], before[0]]);
+        w.move_group(before[0], before[1]);
+        assert_eq!(order(&w), before);
+        // Shells on the SSH host belong to the session's window.
+        w.framed = true;
+        w.tear(before[1], Pos2::ZERO);
+        assert!(w.take_torn().is_empty());
+        assert_eq!(order(&w).len(), 3);
     }
 }

@@ -246,12 +246,20 @@ impl FileWindow {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(format!("Files - {host}"))
             .with_inner_size([1000.0, 640.0])
-            .with_min_inner_size([640.0, 360.0]);
+            .with_min_inner_size([640.0, 360.0])
+            .with_decorations(false);
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sshremote-files"), builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
+                out.push(Cmd::Close);
+            }
+            crate::gui::chrome::behaviour(ui.ctx());
+            let bar = crate::gui::chrome::title_bar(ui, |ui| {
+                ui.label(RichText::new(format!("Files - {host}")).size(13.0));
+            });
+            if bar.close {
                 out.push(Cmd::Close);
             }
             self.body(ui, host, transfers, &mut out);

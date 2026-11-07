@@ -166,11 +166,19 @@ impl App {
     pub(super) fn side_windows(&mut self, ctx: &egui::Context) {
         if let Some(mut t) = self.terms.take() {
             let cmds = t.show(ctx, "");
+            self.torn_terms.extend(t.take_torn());
             let closed = cmds.iter().any(|c| matches!(c, crate::termwin::Cmd::Close));
             if !closed {
                 self.terms = Some(t);
             }
         }
+        let mut more = Vec::new();
+        self.torn_terms.retain_mut(|w| {
+            let cmds = w.show(ctx, "");
+            more.extend(w.take_torn());
+            !cmds.iter().any(|c| matches!(c, crate::termwin::Cmd::Close))
+        });
+        self.torn_terms.extend(more);
         let mut actions = Vec::new();
         if let Some(k) = &mut self.keys
             && !k.show(ctx, &mut actions)
@@ -276,15 +284,6 @@ impl App {
         let _ = ui;
     }
 
-    pub(super) fn logo(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
-        if self.logo.is_none() {
-            let i = app_icon()?;
-            let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
-            self.logo = Some(ctx.load_texture("sshremote-logo", img, egui::TextureOptions::LINEAR));
-        }
-        self.logo.clone()
-    }
-
     pub(super) fn connect_screen(&mut self, ui: &mut egui::Ui) {
         // What the screen asks for: (host, port, how).
         #[derive(Clone, Copy, PartialEq)]
@@ -299,86 +298,69 @@ impl App {
         let mut starred: Option<(String, bool)> = None;
         let mut forget: Option<String> = None;
         let ctx = ui.ctx().clone();
-        let logo = self.logo(&ctx);
         let dark = ui.visuals().dark_mode;
         let card = ui.visuals().window_fill;
         let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
-        egui::Panel::top("home-header")
-            .frame(egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(18, 10)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    match &logo {
-                        Some(t) => {
-                            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(34.0)));
-                        }
-                        None => {
-                            let (r, _) = ui.allocate_exact_size(Vec2::splat(34.0), egui::Sense::hover());
-                            ui.painter().rect_filled(r, CornerRadius::same(9), ACCENT);
-                            ui.painter().text(
-                                r.center(),
-                                Align2::CENTER_CENTER,
-                                ic::TERMINAL,
-                                FontId::proportional(20.0),
-                                Color32::WHITE,
-                            );
+        // The title bar is the header: the app's name, its tools and the window's buttons.
+        let bar = super::chrome::title_bar(ui, |ui| {
+            ui.label(RichText::new("SSH Remote").size(14.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (glyph, tip) = if dark { (ic::SUN, "Light theme") } else { (ic::MOON, "Dark theme") };
+                if icon(ui, glyph, tip, false).clicked() {
+                    set_theme(ui.ctx(), !dark);
+                }
+                icon_menu(ui, ic::WRENCH, |ui| {
+                    ui.set_min_width(220.0);
+                    if ui.button(format!("{}  SSH keys", ic::KEY)).clicked() {
+                        self.keys = Some(crate::tools::KeyTool::new());
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  SSH hosts (~/.ssh/config)", ic::GLOBE)).clicked() {
+                        self.config = Some(crate::tools::ConfigTool::new());
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  Saved passwords", ic::LOCK_KEY)).clicked() {
+                        self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  Backup and restore", ic::ARCHIVE)).clicked() {
+                        self.backup = Some(crate::tools::BackupTool::new());
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("Local terminal").small().weak());
+                    for p in crate::termwin::local_profiles() {
+                        if ui.button(format!("{}  {}", p.icon, p.name)).clicked() {
+                            self.open_profile(p);
+                            ui.close();
                         }
                     }
-                    ui.label(RichText::new("SSH Remote").size(21.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (glyph, tip) = if dark { (ic::SUN, "Light theme") } else { (ic::MOON, "Dark theme") };
-                        if icon(ui, glyph, tip, false).clicked() {
-                            set_theme(ui.ctx(), !dark);
-                        }
-                        icon_menu(ui, ic::WRENCH, |ui| {
-                            ui.set_min_width(220.0);
-                            if ui.button(format!("{}  SSH keys", ic::KEY)).clicked() {
-                                self.keys = Some(crate::tools::KeyTool::new());
-                                ui.close();
-                            }
-                            if ui.button(format!("{}  SSH hosts (~/.ssh/config)", ic::GLOBE)).clicked() {
-                                self.config = Some(crate::tools::ConfigTool::new());
-                                ui.close();
-                            }
-                            if ui.button(format!("{}  Saved passwords", ic::LOCK_KEY)).clicked() {
-                                self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
-                                ui.close();
-                            }
-                            if ui.button(format!("{}  Backup and restore", ic::ARCHIVE)).clicked() {
-                                self.backup = Some(crate::tools::BackupTool::new());
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.label(RichText::new("Local terminal").small().weak());
-                            for p in crate::termwin::local_profiles() {
-                                if ui.button(format!("{}  {}", p.icon, p.name)).clicked() {
-                                    self.open_profile(p);
-                                    ui.close();
-                                }
-                            }
-                            ui.separator();
-                            if ui.button(format!("{}  Built-in test desktop", ic::MONITOR)).clicked() {
-                                go = Some((String::new(), String::new(), How::TestDesktop));
-                                ui.close();
-                            }
-                            if cfg!(windows) {
-                                ui.separator();
-                                self.admin_items(ui);
-                            }
-                        })
-                        .on_hover_text("Tools: SSH keys, SSH hosts, local terminal");
-                        if cfg!(windows) {
-                            self.admin_badge(ui);
-                        }
-                        let local = icon(ui, ic::TERMINAL, "Local terminal", false);
-                        if local.clicked()
-                            && let Some(p) = crate::termwin::local_profiles().into_iter().next()
-                        {
-                            self.open_profile(p);
-                        }
-                    });
-                });
+                    ui.separator();
+                    if ui.button(format!("{}  Built-in test desktop", ic::MONITOR)).clicked() {
+                        go = Some((String::new(), String::new(), How::TestDesktop));
+                        ui.close();
+                    }
+                    if cfg!(windows) {
+                        ui.separator();
+                        self.admin_items(ui);
+                    }
+                })
+                .on_hover_text("Tools: SSH keys, SSH hosts, local terminal");
+                if cfg!(windows) {
+                    self.admin_badge(ui);
+                }
+                let local = icon(ui, ic::TERMINAL, "Local terminal", false);
+                if local.clicked()
+                    && let Some(p) = crate::termwin::local_profiles().into_iter().next()
+                {
+                    self.open_profile(p);
+                }
             });
+        });
+        if bar.close {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             let width = ui.available_width().min(760.0);

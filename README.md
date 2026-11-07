@@ -51,6 +51,12 @@ the console. Pass `--cell WxH` when the client terminal's cell size is not 10x20
 
 ## Window mode
 
+Every window draws its own title bar, as Windows Terminal and browsers do: the window's content
+(the terminal's tabs, the remote screen's toolbar, the home screen's tools) sits beside the minimize,
+maximize and close buttons, and the bar keeps what the system's own does: dragging it moves the
+window (with snapping), a double click maximizes or restores it, the icon, a right click or
+Alt+Space open the system menu, and the edges resize it. Windows 11 rounds the corners.
+
 `sshremote` with no arguments (or a double click on `sshremote.exe`, which opens no console window)
 shows the home screen, laid out like AnyDesk: the app's mark and name at the top, a "Connect to a host"
 field, and below it the connections (favorites, recent hosts and the `Host` aliases of
@@ -76,7 +82,7 @@ and receive Ctrl+Alt+Del); without them those items are shown disabled. "Ask for
 rights at start" in the tools menu turns the prompt off. An elevated window cannot take files
 dragged from Explorer (Windows blocks it); the file window still transfers them.
 
-In a session the toolbar at the top shows the connection state (a green, yellow or red dot with the
+In a session the toolbar (in the title bar in a window, a dock over the top edge in full screen) shows the connection state (a green, yellow or red dot with the
 round trip; hover for traffic, fps and quality) and icon buttons for:
 
 - display: quality presets and custom colours, scale and fps; fit, stretch or a fixed zoom; the
@@ -160,7 +166,8 @@ Windows) and travel over the same connection, so they need no second login and a
 programs such as vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with
 copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
 
-- Tabs: double-click to rename, Ctrl+Shift+T new, Ctrl+Tab next.
+- Tabs: double-click to rename, Ctrl+Shift+T new, Ctrl+Tab next; drag a tab along the strip to
+  move it, or out of the window to give it a window of its own (the only tab drags the window).
 - Panes: Alt+Shift+= splits the focused pane side by side and Alt+Shift+- one above the other (also
   in the context menu), Alt+Shift+D along the longer side; the new pane runs the same profile. Alt and
   the arrow keys or a click move the focus, which is outlined; only the focused pane takes keys, the

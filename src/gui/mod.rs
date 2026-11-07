@@ -16,6 +16,7 @@ use crate::proto::{MOD_SUPER, PRESETS, SUPER_L, ToAgent, ToClient};
 use crate::session::{Action, Control, Ev, Framebuffer, Options, REMOTE, Session};
 use crate::transport::Target;
 
+pub(crate) mod chrome;
 mod home;
 mod remote;
 mod theme;
@@ -86,6 +87,19 @@ pub(crate) mod ic {
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";
     pub const X: &str = "\u{E4F6}";
+}
+
+/// The logo as a texture, loaded once per window context, for title bars.
+pub(crate) fn logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
+    let id = egui::Id::unique("sshremote-logo-texture");
+    if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
+        return Some(t);
+    }
+    let i = app_icon()?;
+    let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
+    let t = ctx.load_texture("sshremote-logo", img, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    Some(t)
 }
 
 /// The logo, for the window and the task bar.
@@ -205,9 +219,10 @@ pub struct App {
     grabbed: Option<mpsc::Receiver<(u32, bool)>>,
     /// The stand-alone terminal window (local shells and ssh sessions).
     terms: Option<crate::termwin::TermWindow>,
+    /// Terminal windows made from tabs dragged out of the terminal.
+    torn_terms: Vec<crate::termwin::TermWindow>,
     keys: Option<crate::tools::KeyTool>,
     config: Option<crate::tools::ConfigTool>,
-    logo: Option<TextureHandle>,
     show_options: bool,
     /// What the next connection opens with: its screen, its terminal or its files.
     start_with: Start,
@@ -256,9 +271,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 budget,
                 grabbed,
                 terms: None,
+                torn_terms: Vec::new(),
                 keys: None,
                 config: None,
-                logo: None,
                 show_options: false,
                 start_with: match open.as_str() {
                     "terminal" => Start::Terminal,
@@ -290,7 +305,9 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
             .with_inner_size(size)
-            .with_min_inner_size([320.0, 240.0]),
+            .with_min_inner_size([320.0, 240.0])
+            // Every window draws its own title bar (see chrome).
+            .with_decorations(false),
         ..Default::default()
     };
     if let Some(icon) = app_icon() {
@@ -409,6 +426,10 @@ enum Source {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !fullscreen {
+            chrome::behaviour(&ctx);
+        }
         let mut next = None;
         let opt = self.options();
         match &mut self.screen {
@@ -450,6 +471,13 @@ impl eframe::App for App {
                 Err(mpsc::TryRecvError::Empty) => {
                     let secs = started.elapsed().as_secs();
                     let label = label.clone();
+                    if chrome::title_bar(ui, |ui| {
+                        ui.label(RichText::new("SSH Remote").size(14.0).strong());
+                    })
+                    .close
+                    {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
                     egui::CentralPanel::default().show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(ui.available_height() * 0.35);

@@ -201,31 +201,31 @@ impl Remote {
         let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
         let mut show_screen = false;
         let mut disconnect = false;
-        let bar = egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(14, 8));
-        egui::Panel::top("files-only-bar").frame(bar).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let dot = match self.ctl.rtt {
-                    r if r < 80.0 => GOOD,
-                    r if r < 250.0 => WARN,
-                    _ => BAD,
-                };
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                ui.painter().circle_filled(r.center(), 4.0, dot);
-                ui.label(RichText::new(format!("{}  Files on {host}", ic::FOLDER)).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(format!("{}  Disconnect", ic::X)).clicked() {
-                        disconnect = true;
-                    }
-                    if ui
-                        .button(format!("{}  Show the screen", ic::MONITOR))
-                        .on_hover_text("Open the remote screen; the file manager keeps a window of its own")
-                        .clicked()
-                    {
-                        show_screen = true;
-                    }
-                });
+        let bar = super::chrome::title_bar(ui, |ui| {
+            let dot = match self.ctl.rtt {
+                r if r < 80.0 => GOOD,
+                r if r < 250.0 => WARN,
+                _ => BAD,
+            };
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 4.0, dot);
+            ui.label(RichText::new(format!("{}  Files on {host}", ic::FOLDER)).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(format!("{}  Disconnect", ic::X)).clicked() {
+                    disconnect = true;
+                }
+                if ui
+                    .button(format!("{}  Show the screen", ic::MONITOR))
+                    .on_hover_text("Open the remote screen; the file manager keeps a window of its own")
+                    .clicked()
+                {
+                    show_screen = true;
+                }
             });
         });
+        if bar.close {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        }
         let transfers = self.transfers();
         let cmds = egui::CentralPanel::default()
             .show(ui, |ui| self.files.as_mut().map(|f| f.embedded(ui, &host, &transfers)).unwrap_or_default())
@@ -275,16 +275,27 @@ impl Remote {
         }
         self.take_drops(&ctx)?;
         self.feed_uploads()?;
-        let screen = ui.max_rect();
+        // In a window the toolbar sits in the title bar, beside the window's buttons; in full screen
+        // it floats over the top edge as a dock.
+        let docked = !self.fullscreen;
+        let mut bar_action: Option<Deferred> = None;
+        if docked {
+            let bar = super::chrome::title_bar(ui, |ui| self.toolbar_items(ui, &mut bar_action));
+            if bar.close {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
+        let screen = if docked { ui.available_rect_before_wrap() } else { ui.max_rect() };
         let ppp = ctx.pixels_per_point();
-        // A pinned toolbar gets its own strip instead of covering the top of the remote screen.
-        let area = if self.pinned { screen.with_min_y(screen.top() + 42.0) } else { screen };
+        // A pinned dock gets its own strip instead of covering the top of the remote screen.
+        let strip = if docked { 0.0 } else { 42.0 };
+        let area = if self.pinned { screen.with_min_y(screen.top() + strip) } else { screen };
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
         let inline = self.term_inline && self.terms.is_some();
         let shown = if inline {
             // The terminal fills the area below the toolbar; the remote screen waits behind it.
-            let area = screen.with_min_y(screen.top() + 42.0);
+            let area = screen.with_min_y(screen.top() + strip);
             self.inline_terminal(ui, area)?;
             None
         } else {
@@ -293,7 +304,10 @@ impl Remote {
             self.picture(ui, area, ppp)
         };
         self.last_shown = shown;
-        let toolbar_rect = self.toolbar(&ctx, screen)?;
+        let toolbar_rect = if docked { None } else { self.toolbar(&ctx, screen)? };
+        if let Some(f) = bar_action {
+            f(self, &ctx)?;
+        }
         let chat_rect = self.chat_panel(&ctx)?;
         self.upload_overlay(&ctx, screen);
         self.draw_toasts(&ctx, screen);
@@ -1589,7 +1603,10 @@ impl Remote {
             }));
         }
         // Pinned: a filled, coloured pin on a highlighted button; not pinned: a struck-through pin.
-        let (pin, tip) = if self.pinned {
+        // Only the full-screen dock can hide; in a window the toolbar is the title bar.
+        let (pin, tip) = if !self.fullscreen {
+            (RichText::new(""), "")
+        } else if self.pinned {
             (
                 RichText::new(ic::PUSH_PIN).size(16.0).family(filled()).color(Color32::WHITE),
                 "Pinned: the toolbar stays. Click to unpin; it then hides and comes back when the pointer reaches the top edge.",
@@ -1602,7 +1619,7 @@ impl Remote {
         };
         let b =
             egui::Button::new(pin).min_size(Vec2::splat(28.0)).frame_when_inactive(self.pinned).selected(self.pinned);
-        if ui.add(b).on_hover_text(tip).clicked() {
+        if self.fullscreen && ui.add(b).on_hover_text(tip).clicked() {
             self.pinned = !self.pinned;
             self.notify(if self.pinned {
                 "Toolbar pinned"

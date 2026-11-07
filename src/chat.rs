@@ -158,6 +158,14 @@ impl eframe::App for ChatApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
+        crate::gui::chrome::behaviour(&ctx);
+        if crate::gui::chrome::title_bar(ui, |ui| {
+            ui.label(RichText::new("SSH Remote chat").size(13.0));
+        })
+        .close
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let card = ui.visuals().window_fill;
         let header = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(16, 10));
         egui::Panel::top("chat-header").frame(header).show(ui, |ui| {
