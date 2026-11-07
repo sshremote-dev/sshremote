@@ -378,9 +378,7 @@ impl App {
                             .margin(egui::Margin::symmetric(8, 7)),
                     );
                     let enter = host.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    let b = egui::Button::new(RichText::new(format!("{}  Terminal", ic::TERMINAL)).color(Color32::WHITE))
-                        .fill(ACCENT)
-                        .min_size(Vec2::new(112.0, 32.0));
+                    let b = crate::gui::theme::primary(format!("{}  Terminal", ic::TERMINAL)).min_size(Vec2::new(112.0, 32.0));
                     if ui.add(b).on_hover_text("Open an SSH terminal (Enter)").clicked() || enter {
                         go = Some((self.form.host.clone(), self.form.port.clone(), How::Terminal));
                     }

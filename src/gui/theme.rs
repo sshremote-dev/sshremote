@@ -6,7 +6,6 @@ use eframe::egui::{
     epaint::text::{FontInsert, FontPriority, InsertFontFamily},
 };
 
-use super::ACCENT;
 
 /// The filled variant of the icon font, for a set star.
 pub(super) fn filled() -> FontFamily {
@@ -232,17 +231,18 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
     ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
 }
 
-/// A filled accent button for the main action of a window or form.
+/// The main action of a window or form: a button close to the background with an outline, in
+/// the text colour, so it stands out without loud colour.
 pub(crate) fn primary(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text.into()).color(Color32::WHITE))
-        .fill(ACCENT)
+    egui::Button::new(egui::RichText::new(text.into()).strong())
+        .stroke(Stroke::new(1.0, crate::gui::outline()))
         .min_size(Vec2::new(0.0, 32.0))
 }
 
 #[cfg(test)]
 mod contrast {
     use super::*;
-    use crate::gui::{ACCENT, DANGER_FILL, accent_text, bad, good, selected_fill, warn};
+    use crate::gui::{ACCENT, bad, good, selected_fill, warn};
 
     /// A colour over `bg`, its alpha blended in as egui paints it.
     fn over(c: Color32, bg: Color32) -> Color32 {
@@ -292,9 +292,8 @@ mod contrast {
                 ("weak text on panel", weak, v.panel_fill, 4.5),
                 ("weak text on title bar", weak, bar, 4.5),
                 ("weak text on field", weak, v.extreme_bg_color, 4.5),
-                ("white on accent button", Color32::WHITE, ACCENT, 4.5),
-                ("selected icon on its tint", accent_text(), on_tint, 4.5),
-                ("white on a danger button", Color32::WHITE, DANGER_FILL, 4.5),
+                ("selected icon on its tint", text, on_tint, 4.5),
+                ("red cross on the dock", bad(), bar, 4.5),
                 ("link on panel", v.hyperlink_color, v.panel_fill, 4.5),
                 ("good text on panel", good(), v.panel_fill, 4.5),
                 ("warning text on panel", warn(), v.panel_fill, 4.5),
@@ -302,12 +301,12 @@ mod contrast {
                 ("good on title bar", good(), bar, 4.5),
                 ("error text on its notice", bad(), over(bad().gamma_multiply(0.15), v.panel_fill), 4.5),
                 ("focus outline on panel", ACCENT, v.panel_fill, 3.0),
-                ("own chat bubble", Color32::WHITE, ACCENT, 4.5),
+                ("own chat bubble", text, if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, 4.5),
             ];
             let mut pairs = pairs;
             for c in crate::gui::AVATAR_COLORS {
-                // A large letter: 3 is enough (WCAG AA for large text), 4.5 is kept anyway.
-                pairs.push(("initial on its square", Color32::WHITE, c, 4.5));
+                let square = over(c.gamma_multiply(if dark { 0.30 } else { 0.16 }), v.panel_fill);
+                pairs.push(("initial on its square", v.strong_text_color(), square, 4.5));
             }
             for (name, fg, bg, need) in pairs {
                 let r = ratio(fg, bg);

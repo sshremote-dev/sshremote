@@ -503,7 +503,8 @@ impl FileWindow {
                     let on = p.sel.contains(&i);
                     let painter = ui.painter_at(rect);
                     if on {
-                        painter.rect_filled(rect, CornerRadius::same(crate::gui::theme::R_SM), ACCENT.gamma_multiply(0.35));
+                        painter.rect_filled(rect, CornerRadius::same(crate::gui::theme::R_SM), crate::gui::selected_fill());
+                        painter.rect_stroke(rect, CornerRadius::same(crate::gui::theme::R_SM), egui::Stroke::new(1.0, crate::gui::selected_stroke()), egui::StrokeKind::Inside);
                     } else if r.hovered() {
                         painter.rect_filled(rect, CornerRadius::same(crate::gui::theme::R_SM), ui.visuals().widgets.hovered.bg_fill);
                     }

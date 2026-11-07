@@ -299,11 +299,12 @@ pub fn show_lines_since(ui: &mut egui::Ui, lines: &[(bool, String)], earlier: us
         }
         let (fill, fg) = if *theirs {
             (
-                if dark { Color32::from_rgb(44, 47, 56) } else { Color32::from_rgb(232, 235, 241) },
+                if dark { Color32::from_rgb(36, 39, 46) } else { Color32::from_rgb(234, 237, 242) },
                 ui.visuals().text_color(),
             )
         } else {
-            (crate::gui::ACCENT, Color32::WHITE)
+            // One's own messages a shade raised from the other side's, both close to the background.
+            (if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, ui.visuals().text_color())
         };
         // The corner nearest the sender stays sharp on the last bubble of a run.
         let r = crate::gui::theme::R_LG;
@@ -352,8 +353,8 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
                 );
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let ready = enabled && !input.trim().is_empty();
-                let send = egui::Button::new(RichText::new(crate::gui::ic::SEND).size(16.0).color(Color32::WHITE))
-                    .fill(if ready { crate::gui::ACCENT } else { crate::gui::ACCENT.gamma_multiply(0.4) })
+                let send = egui::Button::new(RichText::new(crate::gui::ic::SEND).size(16.0))
+                    .frame_when_inactive(false)
                     .corner_radius(crate::gui::theme::R_SM)
                     .min_size(egui::Vec2::splat(32.0));
                 if (ui.add_enabled(ready, send).on_hover_text("Send (Enter)").clicked() || enter) && ready {

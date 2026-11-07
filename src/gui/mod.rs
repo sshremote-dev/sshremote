@@ -361,33 +361,37 @@ pub(crate) fn bad() -> Color32 {
     if theme::dark() { Color32::from_rgb(240, 110, 100) } else { Color32::from_rgb(168, 24, 24) }
 }
 
-/// The fill of a button that ends something, with white on it (as the window's close button).
-pub(crate) const DANGER_FILL: Color32 = Color32::from_rgb(196, 43, 28);
 
 /// An icon button with a tooltip; `on` shows it pressed.
 pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
     ui.add(tool_button(glyph, on)).on_hover_text(tip)
 }
 
-/// A square, borderless icon button that shows its frame on hover or while on.
+/// A square icon button: the icon alone, a tint when hovered, and when on an outline over a tint
+/// close to the background, in the manner of VS Code and JetBrains.
 pub(crate) fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
-    let text = RichText::new(glyph).size(16.0);
-    let b = egui::Button::new(if on { text.color(accent_text()) } else { text })
+    let b = egui::Button::new(RichText::new(glyph).size(16.0))
         .min_size(Vec2::splat(30.0))
         .corner_radius(crate::gui::theme::R_SM)
         .frame_when_inactive(on);
-    if on { b.fill(selected_fill()) } else { b }
+    if on { b.fill(selected_fill()).stroke(egui::Stroke::new(1.0, selected_stroke())) } else { b }
 }
 
-/// The tint behind a selected icon button: light enough on a light bar for its blue icon.
+/// The tint behind something selected: barely off the background.
 pub(crate) fn selected_fill() -> Color32 {
-    ACCENT.gamma_multiply(if theme::dark() { 0.22 } else { 0.12 })
+    if theme::dark() { Color32::from_white_alpha(14) } else { Color32::from_black_alpha(10) }
 }
 
-/// Accent-coloured text and icons, a lighter blue on dark backgrounds and a deeper one on light.
-pub(crate) fn accent_text() -> Color32 {
-    if theme::dark() { Color32::from_rgb(110, 168, 255) } else { Color32::from_rgb(30, 64, 175) }
+/// The outline of something selected: neutral, plain against the tint.
+pub(crate) fn selected_stroke() -> Color32 {
+    if theme::dark() { Color32::from_white_alpha(90) } else { Color32::from_black_alpha(80) }
 }
+
+/// The outline of a button that stands out a little (the main action of a form).
+pub(crate) fn outline() -> Color32 {
+    if theme::dark() { Color32::from_white_alpha(40) } else { Color32::from_black_alpha(40) }
+}
+
 
 /// An icon button that opens a menu.
 fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
@@ -429,9 +433,13 @@ fn badge(ui: &mut egui::Ui, name: &str) {
     let bare = bare.rsplit('@').next().unwrap_or(bare);
     let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, theme::R_LG, AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()]);
+    // A quiet square tinted by the host's colour, so hosts stay apart without loud colour.
+    let tint = AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()].gamma_multiply(if theme::dark() { 0.30 } else { 0.16 });
+    ui.painter().rect_filled(rect, theme::R_LG, tint);
+    ui.painter().rect_stroke(rect.shrink(0.5), theme::R_LG, egui::Stroke::new(1.0, outline()), egui::StrokeKind::Inside);
     let initial = bare.chars().next().unwrap_or('?').to_uppercase().to_string();
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), Color32::WHITE);
+    let fg = ui.visuals().strong_text_color();
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), fg);
 }
 
 /// The cause of a failed connection in plain words, with what to try.

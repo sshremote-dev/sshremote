@@ -867,8 +867,11 @@ impl Remote {
             ui.separator();
             let row = |ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, on: bool| -> bool {
                 let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), egui::Sense::click());
+                if on {
+                    ui.painter().rect_stroke(rect, CornerRadius::same(crate::gui::theme::R_SM), egui::Stroke::new(1.0, super::selected_stroke()), egui::StrokeKind::Inside);
+                }
                 let fill = if on {
-                    ACCENT.gamma_multiply(0.3)
+                    super::selected_fill()
                 } else if r.hovered() {
                     ui.visuals().widgets.hovered.bg_fill
                 } else {
@@ -1517,7 +1520,6 @@ impl Remote {
         let host = self.host().to_string();
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
         egui::Frame::new()
-            .fill(dot.gamma_multiply(0.12))
             .corner_radius(CornerRadius::same(crate::gui::theme::R_LG))
             .inner_margin(egui::Margin::symmetric(9, 3))
             .show(ui, |ui| {
@@ -1527,17 +1529,16 @@ impl Remote {
                 let room = if compact { 90.0 } else { 160.0 };
                 ui.add_sized([width.min(room), 18.0], egui::Label::new(RichText::new(&host).strong().size(13.0)).truncate());
                 // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
-                ui.add_sized([44.0, 18.0], egui::Label::new(RichText::new(rtt).small().color(dot)));
+                ui.add_sized([44.0, 18.0], egui::Label::new(RichText::new(rtt).small().weak()));
             })
             .response
             .on_hover_text(&details);
         if self.sharing.0 != 0 {
             let name: String = self.sharing.1.chars().take(18).collect();
-            let chip = egui::Button::new(
-                RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small().color(Color32::WHITE),
-            )
-            .fill(ACCENT)
-            .corner_radius(CornerRadius::same(crate::gui::theme::R_MD));
+            let chip = egui::Button::new(RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small())
+                .fill(super::selected_fill())
+                .stroke(egui::Stroke::new(1.0, super::selected_stroke()))
+                .corner_radius(CornerRadius::same(crate::gui::theme::R_MD));
             if ui
                 .add(chip)
                 .on_hover_text(format!("Sharing {}. Click to share the whole screen again.", self.sharing.1))
@@ -1745,14 +1746,8 @@ impl Remote {
         if !compact {
             chat = icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
             shot = icon(ui, ic::CAMERA, shot_tip, false).clicked();
-            // Paused: a filled blue play button, so the frozen state is plain to see.
-            let b = if self.paused {
-                egui::Button::new(RichText::new(pause_glyph).size(16.0).color(Color32::WHITE))
-                    .fill(ACCENT)
-                    .min_size(Vec2::splat(28.0))
-            } else {
-                tool_button(pause_glyph, false)
-            };
+            // Paused: the play button shows as on, so the frozen state is plain to see.
+            let b = tool_button(pause_glyph, self.paused);
             pause = ui.add(b).on_hover_text(pause_tip).clicked();
             frame = self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked();
         }
@@ -1865,8 +1860,8 @@ impl Remote {
         // In the title bar a red X would sit beside the window's own close button, so there it
         // reads as text; the full-screen dock keeps the compact red button.
         let end = if self.fullscreen {
-            egui::Button::new(RichText::new(ic::X).size(15.0).color(Color32::WHITE))
-                .fill(DANGER_FILL)
+            egui::Button::new(RichText::new(ic::X).size(15.0).color(super::bad()))
+                .frame_when_inactive(false)
                 .min_size(Vec2::splat(28.0))
         } else if compact {
             tool_button(ic::LINK_BREAK, false)
@@ -1935,8 +1930,7 @@ fn share_list(
             ui.label(e.as_str());
             if e.starts_with(crate::capture::NEEDS_HELPER) && e.contains("Install it") {
                 ui.add_space(6.0);
-                let b = egui::Button::new(RichText::new("Install the helper on the SSH host").color(Color32::WHITE))
-                    .fill(ACCENT);
+                let b = crate::gui::theme::primary("Install the helper on the SSH host");
                 if ui.add(b).clicked() {
                     *pick = Some(ToAgent::InstallHelper);
                 }
