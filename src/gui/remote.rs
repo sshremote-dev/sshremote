@@ -1797,3 +1797,213 @@ fn share_list(
         }
     }
 }
+
+/// Every toolbar action of the remote screen, clicked as a user would, against the built-in test
+/// desktop: cargo build --release, then
+/// SSHREMOTE_EXE=target/release/sshremote.exe cargo test --release -- --ignored --test-threads=1 toolbar_actions
+#[cfg(test)]
+mod actions {
+    use super::*;
+    use egui::{Event, PointerButton};
+
+    struct Harness {
+        ctx: egui::Context,
+        r: Remote,
+        clock: f64,
+        size: Vec2,
+        shapes: Vec<egui::epaint::ClippedShape>,
+    }
+
+    impl Harness {
+        fn new(size: Vec2) -> Harness {
+            // Settings go to a scratch folder, never the user's; set once, before any agent starts
+            // (these tests run one at a time: cargo test -- --test-threads=1).
+            static SCRATCH: std::sync::Once = std::sync::Once::new();
+            SCRATCH.call_once(|| {
+                let scratch = std::env::temp_dir().join(format!("sshremote-ui-test-{}", std::process::id()));
+                std::fs::create_dir_all(&scratch).unwrap();
+                for var in ["APPDATA", "XDG_CONFIG_HOME"] {
+                    unsafe { std::env::set_var(var, &scratch) };
+                }
+            });
+            let opt = crate::parse_client(&["--gui".into(), "--local".into()]).unwrap();
+            let (sess, _tx, rx) = Session::connect(&opt).expect("a local agent (SSHREMOTE_EXE)");
+            let ctl = Control::new(&opt, Mode::True);
+            let r = Remote::new(sess, rx, ctl, "test desktop".into(), None, false);
+            let ctx = egui::Context::default();
+            crate::gui::style(&ctx);
+            let mut h = Harness { ctx, r, clock: 0.0, size, shapes: Vec::new() };
+            // The first picture arrives.
+            for _ in 0..40 {
+                h.frame(Vec::new()).unwrap();
+                if h.r.tex.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            h
+        }
+
+        fn frame(&mut self, events: Vec<Event>) -> Result<(), String> {
+            self.clock += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
+                time: Some(self.clock),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let mut result = Ok(());
+            let out = self.ctx.run_ui(input, |ui| result = self.r.frame(ui));
+            self.shapes = out.shapes;
+            result
+        }
+
+        /// Where text containing `what` was drawn, the topmost (popups are drawn last).
+        fn find(&self, what: &str) -> Option<Rect> {
+            self.find_in(what, Rect::EVERYTHING)
+        }
+
+        fn find_in(&self, what: &str, within: Rect) -> Option<Rect> {
+            let mut hits = Vec::new();
+            for c in &self.shapes {
+                collect(&c.shape, what, &mut hits);
+            }
+            hits.into_iter().rev().find(|r| within.contains(r.center()))
+        }
+
+        /// Clicks a toolbar button: `what` in the title bar, drawn first (a window shown inside this
+        /// test's single viewport, such as the file manager, may lie over it).
+        fn tool(&mut self, what: &str) -> Result<(), String> {
+            // What the last state change shows, drawn before looking.
+            self.frame(Vec::new())?;
+            let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(self.size.x, super::super::chrome::HEIGHT));
+            let mut hits = Vec::new();
+            for c in self.shapes.iter().filter(|c| c.clip_rect.intersects(bar)) {
+                collect(&c.shape, what, &mut hits);
+            }
+            let at = hits.into_iter().find(|r| bar.contains(r.center())).unwrap_or_else(|| panic!("no {what:?} in the toolbar")).center();
+            self.click_at(at)
+        }
+
+        /// Moves to and clicks the text `what`, then lets two frames pass.
+        fn click(&mut self, what: &str) -> Result<(), String> {
+            let at = self.find(what).unwrap_or_else(|| panic!("nothing drawn reads {what:?}")).center();
+            self.click_at(at)
+        }
+
+        fn click_at(&mut self, at: Pos2) -> Result<(), String> {
+            self.frame(vec![Event::PointerMoved(at)])?;
+            let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            self.frame(vec![press(true)])?;
+            self.frame(vec![press(false)])?;
+            self.frame(Vec::new())?;
+            self.frame(Vec::new())
+        }
+    }
+
+    fn collect(shape: &egui::Shape, what: &str, hits: &mut Vec<Rect>) {
+        match shape {
+            egui::Shape::Text(t) if t.galley.job.text.contains(what) => hits.push(t.galley.rect.translate(t.pos.to_vec2())),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, what, hits)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn toolbar_actions() {
+        let mut h = Harness::new(Vec2::new(1280.0, 800.0));
+        assert!(h.r.tex.is_some(), "the picture arrives");
+
+        h.tool(ic::PAUSE).unwrap();
+        assert!(h.r.paused, "pause");
+        h.tool(ic::PLAY).unwrap();
+        assert!(!h.r.paused, "resume");
+
+        h.tool(ic::FOLDER).unwrap();
+        assert!(h.r.files.is_some(), "files open");
+        // Headless, the file manager is drawn inside this window, over the toolbar; in the app it
+        // is a window of its own. It closes by its own command here.
+        h.r.file_cmd(crate::filewin::Cmd::Close).unwrap();
+        assert!(h.r.files.is_none(), "files close");
+
+        // The terminal button turns into "back to the screen" in the same place.
+        let term_at = h.find_in(ic::TERMINAL, Rect::from_min_size(Pos2::ZERO, Vec2::new(h.size.x, 40.0))).unwrap().center();
+        h.click_at(term_at).unwrap();
+        assert!(h.r.terms.is_some() && h.r.term_inline, "terminal in place of the screen");
+        h.click_at(term_at).unwrap();
+        assert!(!h.r.term_inline, "back to the screen");
+
+        h.tool(ic::CHAT).unwrap();
+        assert!(h.r.chat.is_some(), "chat opens");
+        h.tool(ic::CHAT).unwrap();
+        assert!(h.r.chat.is_none(), "chat closes");
+
+        h.tool(ic::GEAR).unwrap();
+        h.click("View only").unwrap();
+        assert!(h.r.view_only, "view only from the options");
+        h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]).unwrap();
+
+        h.tool(ic::CORNERS_OUT).unwrap();
+        assert!(h.r.fullscreen, "full screen");
+        // Ctrl+Alt+Enter leaves it; F11 is the host's.
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.frame(vec![key(egui::Key::F11, Default::default())]).unwrap();
+        assert!(h.r.fullscreen, "F11 goes to the host");
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::ALT)]).unwrap();
+        assert!(!h.r.fullscreen, "Ctrl+Alt+Enter leaves full screen");
+
+        let ended = h.tool("Disconnect").is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
+        assert!(ended, "disconnect ends the session");
+    }
+
+    /// The quality, view and special-key menus.
+    #[test]
+    #[ignore]
+    fn menu_actions() {
+        let mut h = Harness::new(Vec2::new(1280.0, 800.0));
+        let first = &crate::proto::PRESETS[0];
+        h.tool(ic::MONITOR).unwrap();
+        h.click(&crate::gui::preset_text(first)).unwrap();
+        assert!(h.r.ctl.auto.is_none() && h.r.ctl.preset == first.name, "a fixed preset");
+        h.tool(ic::MONITOR).unwrap();
+        h.click("Auto (adapts").unwrap();
+        assert!(h.r.ctl.auto.is_some(), "auto again");
+        h.tool(ic::MONITOR).unwrap();
+        h.click("Stretch to fill").unwrap();
+        assert!(h.r.fit == Fit::Stretch, "stretch");
+        h.tool(ic::MONITOR).unwrap();
+        h.click("Fit to window").unwrap();
+        assert!(h.r.fit == Fit::Window, "fit");
+
+        // Keys go to the built-in test desktop, never to this computer.
+        h.tool(ic::KEYBOARD).unwrap();
+        h.click("Start menu").unwrap();
+        h.tool(ic::KEYBOARD).unwrap();
+        h.click("Win + next key").unwrap();
+        assert!(h.r.win_next, "Win with the next key");
+        for _ in 0..5 {
+            h.frame(Vec::new()).unwrap();
+        }
+    }
+
+    /// In a narrow window the folded actions are in the options menu and still work.
+    #[test]
+    #[ignore]
+    fn narrow_toolbar_actions() {
+        let mut h = Harness::new(Vec2::new(620.0, 420.0));
+        assert!(h.find(ic::CAMERA).is_none(), "screenshot folds away");
+        h.tool(ic::GEAR).unwrap();
+        h.click("Pause").unwrap();
+        assert!(h.r.paused, "pause from the menu");
+        h.tool(ic::GEAR).unwrap();
+        h.click("Resume").unwrap();
+        assert!(!h.r.paused, "resume from the menu");
+        h.tool(ic::GEAR).unwrap();
+        h.click("Chat").unwrap();
+        assert!(h.r.chat.is_some(), "chat from the menu");
+        let ended = h.tool(ic::LINK_BREAK).is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
+        assert!(ended, "disconnect as an icon");
+    }
+}

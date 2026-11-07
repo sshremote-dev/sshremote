@@ -64,7 +64,12 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     let mut cmd = match target {
         Target::Direct { .. } => unreachable!(),
         Target::Local { capture } => {
-            let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+            // Tests run as a test binary, which is no agent: they name the built program instead.
+            #[cfg(test)]
+            let exe = std::env::var_os("SSHREMOTE_EXE").map(std::path::PathBuf::from).ok_or("set SSHREMOTE_EXE")?;
+            #[cfg(not(test))]
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let mut c = Command::new(exe);
             c.args(["--agent", "--capture", capture]);
             c
         }
