@@ -59,6 +59,10 @@ pub(crate) mod ic {
     pub const CORNERS_OUT: &str = "\u{E1D0}";
     pub const FILE: &str = "\u{E230}";
     pub const FOLDER: &str = "\u{E24A}";
+    pub const ARCHIVE: &str = "\u{E00C}";
+    pub const LOCK_KEY: &str = "\u{E2FE}";
+    pub const SHIELD: &str = "\u{E40A}";
+    pub const SHIELD_CHECK: &str = "\u{E40C}";
     pub const GEAR: &str = "\u{E272}";
     pub const KEYBOARD: &str = "\u{E2D8}";
     pub const SEARCH: &str = "\u{E30C}";
@@ -160,6 +164,8 @@ struct Form {
     host: String,
     port: String,
     password: String,
+    /// Keep the password in the system's password store once used.
+    remember: bool,
     preset: Option<usize>,
     remote: String,
     capture: String,
@@ -303,6 +309,10 @@ pub struct App {
     config: Option<crate::tools::ConfigTool>,
     logo: Option<TextureHandle>,
     show_options: bool,
+    vault: Option<crate::tools::VaultTool>,
+    backup: Option<crate::tools::BackupTool>,
+    /// Whether the sshremote service is installed here, looked up when the tools menu opens.
+    service: Option<bool>,
 }
 
 pub fn run(opt: &Options) -> Result<(), String> {
@@ -310,6 +320,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         host: opt.host.clone().unwrap_or_default(),
         port: String::new(),
         password: String::new(),
+        remember: false,
         preset: opt.preset,
         remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
         capture: opt.capture.clone(),
@@ -345,7 +356,11 @@ pub fn run(opt: &Options) -> Result<(), String> {
                 config: None,
                 logo: None,
                 show_options: false,
+                vault: None,
+                backup: None,
+                service: None,
             };
+            std::thread::spawn(crate::backup::auto);
             if auto_start {
                 app.connect(&cc.egui_ctx, local);
             }
@@ -532,13 +547,20 @@ impl App {
                 let target = Target::Direct { addr, password: f.password.clone() };
                 return self.start(ctx, target, host);
             }
+            if f.remember && !f.password.is_empty() {
+                if let Err(e) = crate::vault::set(&host, &f.password) {
+                    self.error = Some(format!("The password was not saved: {e}"));
+                }
+            }
+            // A password typed now wins over a saved one.
+            let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
             Target::Ssh {
                 host,
                 port: f.port.trim().parse().ok(),
                 args: Vec::new(),
                 remote: f.remote.clone(),
                 capture: f.capture.clone(),
-                password: (!f.password.is_empty()).then(|| f.password.clone()),
+                password,
                 unattended: true,
             }
         };
@@ -692,9 +714,85 @@ impl App {
         {
             self.config = None;
         }
+        let known: Vec<String> = if self.vault.is_some() { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
+        if let Some(v) = &mut self.vault {
+            if !v.show(ctx, &known) {
+                self.vault = None;
+            }
+        }
+        if let Some(b) = &mut self.backup
+            && !b.show(ctx, &mut changed)
+        {
+            self.backup = None;
+        }
         if changed {
             self.ssh_hosts = crate::hosts::ssh_config_hosts();
+            self.recent = crate::hosts::load_recent();
+            self.favorites = crate::hosts::favorites();
+            self.seen = crate::hosts::last_seen();
         }
+    }
+
+    /// Administrator or standard user; a click on the latter asks for the rights.
+    fn admin_badge(&mut self, ui: &mut egui::Ui) {
+        let (glyph, text, color) = if crate::admin::elevated() {
+            (ic::SHIELD_CHECK, "Administrator", GOOD)
+        } else {
+            (ic::SHIELD, "Standard user", ui.visuals().weak_text_color())
+        };
+        let b = egui::Button::new(RichText::new(format!("{glyph}  {text}")).size(12.5).color(color)).frame(false);
+        let tip = if crate::admin::elevated() {
+            crate::admin::ADDS.to_string()
+        } else {
+            format!("Click to restart with administrator rights.\n\n{}", crate::admin::ADDS)
+        };
+        if ui.add(b).on_hover_text(tip).clicked() && !crate::admin::elevated() {
+            self.restart_elevated(ui.ctx());
+        }
+    }
+
+    fn restart_elevated(&mut self, ctx: &egui::Context) {
+        match crate::admin::relaunch(&[]) {
+            Ok(true) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Ok(false) => self.error = Some("Administrator rights were not given; sshremote goes on without them.".into()),
+            Err(e) => self.error = Some(format!("Cannot ask for administrator rights: {e}")),
+        }
+    }
+
+    /// The tools menu's part about this computer: administrator rights and the service.
+    fn admin_items(&mut self, ui: &mut egui::Ui) {
+        #[cfg(windows)]
+        {
+            let admin = crate::admin::elevated();
+            ui.label(RichText::new("This computer").small().weak());
+            let installed = *self.service.get_or_insert_with(crate::admin::service_installed);
+            let need = "Needs administrator rights: restart sshremote as administrator first.";
+            let (label, tip) = if installed {
+                (format!("{}  Remove the sshremote service", ic::SHIELD), "Stop and remove the service")
+            } else {
+                (
+                    format!("{}  Install the sshremote service", ic::SHIELD_CHECK),
+                    "Lets this computer be controlled at the sign-in and lock screens and receive Ctrl+Alt+Del",
+                )
+            };
+            let r = ui.add_enabled(admin, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text(need);
+            if r.clicked() {
+                let result = if installed { crate::service::uninstall() } else { crate::service::install() };
+                self.service = None;
+                self.error = result.err().map(|e| format!("Service: {e}"));
+                ui.close();
+            }
+            if !admin && ui.button(format!("{}  Restart as administrator", ic::SHIELD_CHECK)).clicked() {
+                self.restart_elevated(ui.ctx());
+                ui.close();
+            }
+            let mut ask = crate::admin::ask_at_start();
+            if ui.checkbox(&mut ask, "Ask for administrator rights at start").changed() {
+                crate::admin::set_ask_at_start(ask);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = ui;
     }
 
     fn logo(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
@@ -754,6 +852,14 @@ impl App {
                                 self.config = Some(crate::tools::ConfigTool::new());
                                 ui.close();
                             }
+                            if ui.button(format!("{}  Saved passwords", ic::LOCK_KEY)).clicked() {
+                                self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
+                                ui.close();
+                            }
+                            if ui.button(format!("{}  Backup and restore", ic::ARCHIVE)).clicked() {
+                                self.backup = Some(crate::tools::BackupTool::new());
+                                ui.close();
+                            }
                             ui.separator();
                             ui.label(RichText::new("Local terminal").small().weak());
                             for p in crate::termwin::local_profiles() {
@@ -767,8 +873,15 @@ impl App {
                                 go = Some((String::new(), String::new(), How::TestDesktop));
                                 ui.close();
                             }
+                            if cfg!(windows) {
+                                ui.separator();
+                                self.admin_items(ui);
+                            }
                         })
                         .on_hover_text("Tools: SSH keys, SSH hosts, local terminal");
+                        if cfg!(windows) {
+                            self.admin_badge(ui);
+                        }
                         let local = icon(ui, ic::TERMINAL, "Local terminal", false);
                         if local.clicked()
                             && let Some(p) = crate::termwin::local_profiles().into_iter().next()
@@ -834,7 +947,11 @@ impl App {
                         ui.label(RichText::new("Password").weak()).on_hover_text(
                             "For the remote screen. Leave empty to sign in with SSH keys; sshremote:// addresses need the password sshremote --serve shows. Terminals ask in the tab.",
                         );
-                        ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(260.0));
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(260.0));
+                            ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
+                                .on_hover_text("Keep it in the system's password store; terminal tabs use it too");
+                        });
                         ui.end_row();
                         ui.label(RichText::new("Screen quality").weak());
                         let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));

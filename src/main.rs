@@ -1,5 +1,7 @@
+mod admin;
 mod agent;
 mod audio;
+mod backup;
 mod bilevel;
 mod capture;
 mod chat;
@@ -33,6 +35,7 @@ mod termwin;
 mod tools;
 mod transport;
 mod ui;
+mod vault;
 mod video;
 
 use color::Mode;
@@ -196,6 +199,32 @@ fn attach_console() {
     }
 }
 
+/// Runs ssh so the saved password of `host` answers its password prompt (once, so a stale password
+/// fails fast), and a new host key is accepted as `yes` would.
+fn saved_login(host: &str, argv: &[String]) -> i32 {
+    let mut cmd = std::process::Command::new(&argv[0]);
+    if let (Some(secret), Ok(exe)) = (vault::get(host), std::env::current_exe()) {
+        cmd.args(["-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new"]);
+        cmd.env("SSH_ASKPASS", exe).env("SSH_ASKPASS_REQUIRE", "force").env(transport::ASKPASS_SECRET, secret);
+    }
+    cmd.args(&argv[1..]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = cmd.exec();
+        eprintln!("sshremote: {}: {e}", argv[0]);
+        1
+    }
+    #[cfg(windows)]
+    match cmd.status() {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("sshremote: {}: {e}", argv[0]);
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ssh runs this program as its askpass helper with the prompt as the only argument.
@@ -203,8 +232,17 @@ fn main() {
         && args.len() == 1
         && !args[0].starts_with("--")
     {
+        // Only a password or passphrase prompt gets the secret; anything else is declined.
+        let prompt = args[0].to_lowercase();
+        if !prompt.contains("password") && !prompt.contains("passphrase") {
+            std::process::exit(1);
+        }
         println!("{secret}");
         return;
+    }
+    // `--saved-login HOST -- ssh ...`: ssh with the password saved for HOST answering its prompt.
+    if args.first().is_some_and(|a| a == "--saved-login") && args.len() > 3 && args[2] == "--" {
+        std::process::exit(saved_login(&args[1], &args[3..]));
     }
     if args.is_empty() {
         // Started from a file manager or a shortcut: open the window.
@@ -216,6 +254,11 @@ fn main() {
             if GetConsoleProcessList(pids.as_mut_ptr(), 2) == 1 {
                 FreeConsole();
             }
+        }
+        // Administrator rights are asked for at start; without them the window works and shows
+        // what needs them disabled.
+        if admin::ask_at_start() && !admin::elevated() && admin::relaunch(&[]).unwrap_or(false) {
+            return;
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");
         if let Err(e) = client::run(opt) {

@@ -27,7 +27,7 @@ fn parse_ssh_hosts(text: &str) -> Vec<String> {
     out
 }
 
-fn config_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
     let base: Option<std::path::PathBuf> = if cfg!(windows) {
         std::env::var_os("APPDATA").map(Into::into)
     } else {
@@ -103,15 +103,7 @@ fn write_lines(name: &str, lines: &[String]) {
         let _ = std::fs::create_dir_all(&d);
         let _ = std::fs::write(
             d.join(name),
-            lines
-                .iter()
-                .map(|l| {
-                    format!(
-                        "{l}
-"
-                    )
-                })
-                .collect::<String>(),
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
         );
     }
 }

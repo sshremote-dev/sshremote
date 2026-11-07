@@ -1628,6 +1628,14 @@ pub fn ssh_profile(host: &str, port: &str) -> Profile {
         argv.extend(["-p".into(), port.trim().to_string()]);
     }
     argv.push(host.to_string());
+    // With a saved password, sshremote answers ssh's password prompt itself.
+    if crate::vault::list().iter().any(|h| h == host)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let mut wrapped = vec![exe.to_string_lossy().to_string(), "--saved-login".into(), host.to_string(), "--".into()];
+        wrapped.extend(argv);
+        argv = wrapped;
+    }
     Profile { name: host.to_string(), icon: ic::GLOBE, launch: Launch::Local(argv) }
 }
 

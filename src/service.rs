@@ -44,7 +44,9 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
-    let out = Command::new(cmd).args(args).output().map_err(|e| format!("{cmd}: {e}"))?;
+    use std::os::windows::process::CommandExt;
+    let out =
+        Command::new(cmd).args(args).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| format!("{cmd}: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {

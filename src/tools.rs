@@ -1,5 +1,5 @@
-//! SSH helpers on the home screen: key generation and installation, and the
-//! host entries of ~/.ssh/config.
+//! SSH helpers on the home screen: key generation and installation, the host entries of
+//! ~/.ssh/config, saved passwords, and backups.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -196,10 +196,7 @@ impl KeyTool {
                     open_path(&ssh_dir());
                 }
             });
-            if let Some((ok, text)) = &self.status {
-                let color = if *ok { Color32::from_rgb(90, 200, 120) } else { Color32::from_rgb(240, 110, 100) };
-                ui.label(RichText::new(text).color(color));
-            }
+            status(ui, &self.status);
         });
         open
     }
@@ -353,6 +350,204 @@ impl ConfigTool {
             }
         });
         open
+    }
+}
+
+/// Saved SSH passwords, kept in the system's password store.
+pub struct VaultTool {
+    hosts: Vec<String>,
+    host: String,
+    password: String,
+    status: Option<(bool, String)>,
+}
+
+impl VaultTool {
+    pub fn new(host: &str) -> Self {
+        VaultTool { hosts: crate::vault::list(), host: host.to_string(), password: String::new(), status: None }
+    }
+
+    /// The window; returns false once closed. `known` are hosts to pick from.
+    pub fn show(&mut self, ctx: &egui::Context, known: &[String]) -> bool {
+        let mut open = true;
+        let title = format!("{}  Saved passwords", ic::LOCK_KEY);
+        egui::Window::new(title).open(&mut open).default_width(480.0).collapsible(false).show(ctx, |ui| {
+            let Some(store) = crate::vault::backend() else {
+                ui.label(
+                    RichText::new("This system has no password store sshremote can use. On Linux, install secret-tool (libsecret-tools).")
+                        .color(BAD),
+                );
+                return;
+            };
+            ui.label(
+                RichText::new(format!(
+                    "Passwords for SSH logins, kept in {store}. The remote screen and terminal tabs answer the password prompt with them; SSH keys are still the better choice."
+                ))
+                .weak(),
+            );
+            ui.add_space(4.0);
+            let mut remove = None;
+            if self.hosts.is_empty() {
+                ui.label(RichText::new("No saved passwords yet.").weak().italics());
+            }
+            egui::Grid::new("vault").striped(true).num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
+                for h in &self.hosts {
+                    ui.label(RichText::new(h).strong());
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(h.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+            if let Some(h) = remove {
+                self.status = Some(match crate::vault::delete(&h) {
+                    Ok(()) => (true, format!("Removed the password of {h}")),
+                    Err(e) => (false, e),
+                });
+                self.hosts = crate::vault::list();
+            }
+            ui.separator();
+            egui::Grid::new("vault-add").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label("Host");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(220.0));
+                    egui::ComboBox::from_id_salt("vault-hosts").selected_text("").width(24.0).show_ui(ui, |ui| {
+                        for h in known {
+                            if ui.selectable_label(false, h).clicked() {
+                                self.host = h.clone();
+                            }
+                        }
+                    });
+                });
+                ui.end_row();
+                ui.label("Password");
+                ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(220.0));
+                ui.end_row();
+            });
+            let ready = !self.host.trim().is_empty() && !self.password.is_empty();
+            let save = egui::Button::new(RichText::new("Save password").color(Color32::WHITE)).fill(ACCENT);
+            if ui.add_enabled(ready, save).clicked() {
+                let host = self.host.trim().to_string();
+                self.status = Some(match crate::vault::set(&host, &self.password) {
+                    Ok(()) => (true, format!("Saved the password of {host}")),
+                    Err(e) => (false, e),
+                });
+                self.password.clear();
+                self.hosts = crate::vault::list();
+            }
+            status(ui, &self.status);
+        });
+        open
+    }
+}
+
+/// Backups of hosts, settings and ~/.ssh, made by hand or automatically once a day.
+pub struct BackupTool {
+    passphrase: String,
+    restore_pass: String,
+    ssh_config: bool,
+    chosen: Option<PathBuf>,
+    list: Vec<(PathBuf, String, bool)>,
+    status: Option<(bool, String)>,
+}
+
+impl BackupTool {
+    pub fn new() -> Self {
+        let mut t = BackupTool {
+            passphrase: String::new(),
+            restore_pass: String::new(),
+            ssh_config: false,
+            chosen: None,
+            list: Vec::new(),
+            status: None,
+        };
+        t.refresh();
+        t
+    }
+
+    fn refresh(&mut self) {
+        self.list = crate::backup::list()
+            .into_iter()
+            .filter_map(|p| crate::backup::describe(&p).map(|(when, pw)| (p, when, pw)))
+            .collect();
+    }
+
+    /// The window; returns false once closed, and sets `changed` after a restore.
+    pub fn show(&mut self, ctx: &egui::Context, changed: &mut bool) -> bool {
+        let mut open = true;
+        let title = format!("{}  Backup and restore", ic::ARCHIVE);
+        egui::Window::new(title).open(&mut open).default_width(560.0).collapsible(false).show(ctx, |ui| {
+            ui.label(
+                RichText::new(
+                    "Recent and favorite hosts, settings, ~/.ssh/config and known_hosts. A copy is also made automatically each day. Private keys are not included.",
+                )
+                .weak(),
+            );
+            ui.add_space(4.0);
+            ui.label(RichText::new("Back up").strong());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(200.0))
+                    .on_hover_text("With a passphrase, saved passwords are included, encrypted with it.");
+                let now = egui::Button::new(RichText::new(format!("{}  Back up now", ic::DOWNLOAD)).color(Color32::WHITE)).fill(ACCENT);
+                if ui.add(now).clicked() {
+                    let pass = Some(self.passphrase.as_str()).filter(|p| !p.is_empty());
+                    self.status = Some(match crate::backup::save(pass) {
+                        Ok(p) => (true, format!("Saved {}", p.display())),
+                        Err(e) => (false, e),
+                    });
+                    self.refresh();
+                }
+                if ui.button(format!("{}  Folder", ic::FOLDER)).clicked() {
+                    let dir = crate::backup::folder();
+                    let _ = std::fs::create_dir_all(&dir);
+                    open_path(&dir);
+                }
+            });
+            ui.separator();
+            ui.label(RichText::new("Restore").strong());
+            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                if self.list.is_empty() {
+                    ui.label(RichText::new("No backups yet.").weak().italics());
+                }
+                for (p, when, pw) in &self.list {
+                    let auto = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("auto-"));
+                    let label =
+                        format!("{when}{}{}", if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
+                    let r = ui.selectable_label(self.chosen.as_ref() == Some(p), label).on_hover_text(p.display().to_string());
+                    if r.clicked() {
+                        self.chosen = Some(p.clone());
+                    }
+                }
+            });
+            ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords").desired_width(200.0),
+                );
+                if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD))).clicked()
+                    && let Some(p) = &self.chosen
+                {
+                    let pass = Some(self.restore_pass.as_str()).filter(|p| !p.is_empty());
+                    self.status = Some(match crate::backup::restore(p, pass, self.ssh_config) {
+                        Ok(s) => {
+                            *changed = true;
+                            (true, s)
+                        }
+                        Err(e) => (false, e),
+                    });
+                }
+            });
+            status(ui, &self.status);
+        });
+        open
+    }
+}
+
+const GOOD: Color32 = Color32::from_rgb(90, 200, 120);
+const BAD: Color32 = Color32::from_rgb(240, 110, 100);
+
+fn status(ui: &mut egui::Ui, s: &Option<(bool, String)>) {
+    if let Some((ok, text)) = s {
+        ui.label(RichText::new(text).color(if *ok { GOOD } else { BAD }));
     }
 }
 
