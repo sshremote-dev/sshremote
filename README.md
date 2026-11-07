@@ -59,11 +59,21 @@ field, and below it the connections (favorites, recent hosts and the `Host` alia
 Connecting opens an SSH terminal by default (the Terminal button, Enter, or a double click on a
 host). The `...` button next to it, and the `...` menu of each host, open the remote screen, or the
 host in the system's own terminal. The gear shows the connection options: port, a password for the
-remote screen (handed to ssh through its askpass hook, never stored), the screen quality, the agent
-command and the capture backend. A failed connection is explained with its likely cause and what to
+remote screen (handed to ssh through its askpass hook; "Remember" keeps it in the system's password
+store), the screen quality, the agent command and the capture backend. A failed connection is explained with its likely cause and what to
 try. The header holds a local terminal button, the tools menu (SSH keys, SSH hosts, local shells,
 the built-in test desktop) and the dark or light theme, remembered between runs. `sshremote --gui
-HOST` opens the remote screen straight away.
+HOST` opens the remote screen straight away; `--terminal` opens it with the host's terminal shown.
+
+### Administrator rights
+
+On Windows the window asks for administrator rights (UAC) when it starts, and goes on without them
+when they are refused. The header shows "Administrator" or "Standard user"; a click on the latter
+asks again. With the rights, local terminal tabs run elevated and the tools menu can install or
+remove the sshremote service on this computer (so it can be reached at the sign-in and lock screens
+and receive Ctrl+Alt+Del); without them those items are shown disabled. "Ask for administrator
+rights at start" in the tools menu turns the prompt off. An elevated window cannot take files
+dragged from Explorer (Windows blocks it); the file window still transfers them.
 
 In a session the toolbar at the top shows the connection state (a green, yellow or red dot with the
 round trip; hover for traffic, fps and quality) and icon buttons for:
@@ -74,7 +84,9 @@ round trip; hover for traffic, fps and quality) and icon buttons for:
 - full screen (F11; the toolbar then hides until the pointer reaches the top edge);
 - special keys (Ctrl+Alt+Del, lock screen, Win, Win+R, Win+E, Win+D, Alt+Tab, Alt+F4, Print Screen,
   Win plus the next key);
-- file transfer, terminal, chat, screenshot, pause and single frame;
+- file transfer, terminal, chat, screenshot, pause and single frame; the terminal button swaps the
+  picture for the host's terminal in the same window (and back, with the shells kept running); its
+  context menu gives the terminal a window of its own or closes the shells;
 - options: view only (watch without sending keys, clicks or the wheel; a badge on the picture says
   so), clipboard sharing, sound, system keys, theme and a full repaint;
 - a pin that keeps the toolbar shown (a filled pin on a blue button); unpinned, the toolbar folds
@@ -135,7 +147,11 @@ session, and local shells (Windows PowerShell, PowerShell 7, Command Prompt, Git
 Windows; the login shell, bash, zsh and fish elsewhere). SSH terminals from the home screen are local
 `ssh` processes in a pseudo console, so password and host-key prompts appear in the tab.
 `sshremote terminal [HOST [PORT]]` opens the window on its own; `--split HOST` and `--split-down
-HOST` add panes beside or below (`local` is a shell on this computer), as `wt split-pane` does.
+HOST` add panes beside or below (`local` is a shell on this computer), as `wt split-pane` does;
+`--view text` or `--view markdown` starts in a reading view, and `-- CMD ARGS` runs a command in the
+first tab. Input methods (Korean, Japanese, Chinese) compose at the cursor, as in a text field, and
+the result is typed when committed. An SSH tab of a host with a saved password answers the password
+prompt from the password store (once, so a stale password fails at once).
 
 A remote-screen session's shells run under the agent on a pseudo-terminal (a pseudo console on
 Windows) and travel over the same connection, so they need no second login and also work over
@@ -152,10 +168,15 @@ copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
 - Find (Ctrl+Shift+F) searches the scrollback; Ctrl+click opens a link.
 - Settings: text size (also Ctrl+= and Ctrl+-), colour schemes (One Half Dark, Campbell, Dracula,
   Solarized Dark, Tango Dark, One Half Light) and copy on select, remembered between runs.
-- Three views: the terminal itself, plain text, and Markdown. The text and Markdown views show the
-  whole scrollback for reading and copying, and can strip the frames, borders and bullets that
-  terminal agents such as Claude Code and Codex draw, so their answers read as documents: headings,
-  lists, tables and code blocks with a Copy button.
+- Three views: the terminal itself, plain text, and Markdown, styled after VS Code's editor and
+  Markdown preview (its Dark Modern and Light Modern colours, following the app's theme). The text
+  view shows the whole scrollback with line numbers, selectable with the mouse or Ctrl+A. The
+  Markdown view draws headings with rules, bold and italic text, links that open on click, lists
+  with task boxes, quotes, tables with borders, alignment and a Copy button (tab-separated, for
+  spreadsheets), and code blocks with syntax colours and a Copy button. With "Agent session" on, the
+  output of Claude Code or Codex is read as a conversation: frames go, box-drawn tables become real
+  tables, prompts appear as bubbles, each reply has its own Copy button for its Markdown, and tool
+  runs (`Bash(...)`, `Ran ...`) fold up with their output.
 - The context menu has copy, paste, select all, find, the reading views and clearing the scrollback.
 
 In a terminal viewer, `Ctrl+] t` swaps the picture for a remote shell that the terminal itself
@@ -172,6 +193,16 @@ The tools menu on the home screen has:
   passphrase.
 - SSH hosts: the `Host` entries of `~/.ssh/config` with their address, user, port and key, a form
   that adds one, and a button that opens the file in an editor.
+- Saved passwords: SSH passwords per host, kept in Windows Credential Manager, the Secret Service
+  (`secret-tool`) on Linux or the macOS keychain, never in sshremote's own files. The remote screen
+  and SSH terminal tabs use them to answer the password prompt; only prompts that ask for a password
+  or passphrase get one.
+- Backup and restore: recent and favorite hosts, settings, `~/.ssh/config` and `known_hosts` in one
+  JSON file under Documents/sshremote; with a passphrase the saved passwords go in too, encrypted
+  (ChaCha20-Poly1305, key stretched from the passphrase). A copy is made automatically once a day
+  (the last 14 are kept). Restoring merges the host lists, adds missing `known_hosts` lines and
+  replaces `~/.ssh/config` only when asked, keeping the old one as `config.bak`. Private keys are
+  never included.
 
 ## Sharing a window or an application
 
