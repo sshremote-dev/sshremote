@@ -722,6 +722,7 @@ impl Viewer {
             }
             Event::Key(k)
                 if self.key_states
+                    && self.shell.is_none()
                     && self.prompt.is_none()
                     && !self.menu
                     && !self.win_next
