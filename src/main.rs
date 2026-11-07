@@ -291,106 +291,101 @@ fn main() {
     {
         attach_console();
     }
-    if args[0] == "terminal" {
-        // HOST [PORT], then --split HOST / --split-down HOST for panes beside or below; "local" is a shell here.
-        let profile = |host: &str, port: &str| {
-            if host == "local" {
-                termwin::local_profiles().into_iter().next().expect("a local shell")
-            } else {
-                termwin::ssh_profile(host, port)
-            }
-        };
-        let mut first = None;
-        let mut panes = Vec::new();
-        let mut view = None;
-        let mut it = args[1..].iter().peekable();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--view" => view = it.next().cloned(),
-                // Everything after -- is a command to run in the first tab.
-                "--" => {
-                    let argv: Vec<String> = it.by_ref().cloned().collect();
-                    let name = argv.first().cloned().unwrap_or_default();
-                    first =
-                        Some(termwin::Profile { name, icon: gui::ic::TERMINAL, launch: termwin::Launch::Local(argv) });
-                }
-                "--split" | "--split-down" => {
-                    let host = it.next().map_or("local", |s| s.as_str());
-                    panes.push((profile(host, ""), a == "--split"));
-                }
-                host if first.is_none() => {
-                    let port = it.next_if(|p| p.parse::<u16>().is_ok()).map_or("", |s| s.as_str());
-                    first = Some(profile(host, port));
-                }
-                _ => {}
-            }
-        }
-        let first = first.unwrap_or_else(|| profile("local", ""));
-        if let Err(e) = termwin::run_window(first, panes, view) {
-            eprintln!("sshremote: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    #[cfg(windows)]
-    for (flag, f) in [
-        ("--install-service", service::install as fn() -> Result<(), String>),
-        ("--uninstall-service", service::uninstall),
-        ("--service", service::dispatch),
-    ] {
-        if args.first().is_some_and(|a| a == flag) {
-            if let Err(e) = f() {
-                eprintln!("sshremote: {e}");
-                std::process::exit(1);
-            }
-            return;
-        }
-    }
-    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());
-    if args.first().is_some_and(|a| a == "--serve") {
-        let r = net::serve(opt("--listen"), opt("--via"), opt("--password"), opt("--capture").unwrap_or("auto"));
-        if let Err(e) = r {
-            eprintln!("sshremote: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if args.first().is_some_and(|a| a == "mcp") {
-        // stdout carries JSON-RPC only; everything else goes to stderr.
-        let r = parse_client(&args[1..]).and_then(|o| mcp::run(&o));
-        if let Err(e) = r {
-            eprintln!("sshremote mcp: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if args.first().is_some_and(|a| a == "--chat-window") {
-        if let Err(e) = chat::run_window() {
-            eprintln!("sshremote: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if args.first().is_some_and(|a| a == "--relay") {
-        if let Err(e) = net::relay(opt("--listen")) {
-            eprintln!("sshremote: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    let result = if args.iter().any(|a| a == "--agent") {
-        let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str());
-        let r = agent::run(opt("--capture").unwrap_or("auto"), opt("--pipe"));
-        // A relay helper has no visible stderr; keep its failure where it can be found.
-        if let (Err(e), Some(_)) = (&r, opt("--pipe")) {
-            let _ = std::fs::write(std::env::temp_dir().join("sshremote-agent.log"), e);
-        }
-        r
-    } else {
-        parse_client(&args).and_then(client::run)
-    };
-    if let Err(e) = result {
-        eprintln!("sshremote: {e}");
+    if let Err(e) = run(&args) {
+        let who = if args[0] == "mcp" { "sshremote mcp" } else { "sshremote" };
+        eprintln!("{who}: {e}");
         std::process::exit(1);
     }
+}
+
+/// Options that take a value, from `args`: only those in `known` are accepted, and each needs its value.
+fn options(args: &[String], known: &[&str]) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !known.contains(&a.as_str()) {
+            return Err(format!("unknown option {a}\n\n{USAGE}"));
+        }
+        out.insert(a.clone(), it.next().cloned().ok_or(format!("{a} needs a value"))?);
+    }
+    Ok(out)
+}
+
+/// Runs what the command line asks for.
+fn run(args: &[String]) -> Result<(), String> {
+    match args[0].as_str() {
+        "terminal" => terminal(&args[1..]),
+        #[cfg(windows)]
+        "--install-service" => service::install(),
+        #[cfg(windows)]
+        "--uninstall-service" => service::uninstall(),
+        #[cfg(windows)]
+        "--service" => service::dispatch(),
+        "--serve" => {
+            let o = options(&args[1..], &["--listen", "--via", "--password", "--capture"])?;
+            let get = |k: &str| o.get(k).map(String::as_str);
+            net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
+        }
+        "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
+        "--chat-window" => chat::run_window(),
+        // stdout carries JSON-RPC only; everything else goes to stderr.
+        "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
+        // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
+        // adds are passed over, so the two versions still meet.
+        _ if args.iter().any(|a| a == "--agent") => {
+            let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).map(String::as_str);
+            let pipe = get("--pipe");
+            let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
+            // A relay helper has no visible stderr; keep its failure where it can be found.
+            if let (Err(e), Some(_)) = (&r, pipe) {
+                let _ = std::fs::write(std::env::temp_dir().join("sshremote-agent.log"), e);
+            }
+            r
+        }
+        _ => parse_client(args).and_then(client::run),
+    }
+}
+
+/// `terminal [HOST [PORT]] [--split HOST] [--split-down HOST] [--view V] [-- CMD...]`.
+fn terminal(args: &[String]) -> Result<(), String> {
+    // "local" is a shell here.
+    let profile = |host: &str, port: &str| {
+        if host == "local" {
+            termwin::local_profiles().into_iter().next().expect("a local shell")
+        } else {
+            termwin::ssh_profile(host, port)
+        }
+    };
+    let mut first = None;
+    let mut panes = Vec::new();
+    let mut view = None;
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--view" => {
+                let v = it.next().ok_or("--view needs a value")?;
+                if !["terminal", "text", "markdown"].contains(&v.as_str()) {
+                    return Err(format!("--view is terminal, text or markdown, not {v}"));
+                }
+                view = Some(v.clone());
+            }
+            // Everything after -- is a command to run in the first tab.
+            "--" => {
+                let argv: Vec<String> = it.by_ref().cloned().collect();
+                let name = argv.first().cloned().unwrap_or_default();
+                first = Some(termwin::Profile { name, icon: gui::ic::TERMINAL, launch: termwin::Launch::Local(argv) });
+            }
+            "--split" | "--split-down" => {
+                let host = it.next().ok_or(format!("{a} needs a host (local for a shell here)"))?;
+                panes.push((profile(host, ""), a == "--split"));
+            }
+            s if s.starts_with('-') => return Err(format!("unknown option {s}\n\n{USAGE}")),
+            host if first.is_none() => {
+                let port = it.next_if(|p| p.parse::<u16>().is_ok()).map_or("", |s| s.as_str());
+                first = Some(profile(host, port));
+            }
+            extra => return Err(format!("one host only, then --split for more panes (not {extra})")),
+        }
+    }
+    termwin::run_window(first.unwrap_or_else(|| profile("local", "")), panes, view)
 }
