@@ -287,7 +287,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
         match opened.get("passwords") {
             Some(plain) => {
                 let secrets: serde_json::Map<String, Value> =
-                    serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
+                    serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
                 for (host, s) in &secrets {
                     if let Some(s) = s.as_str() {
                         crate::vault::set(host, s)?;
@@ -301,7 +301,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
     if v.get("secrets").is_some() {
         match opened.get("secrets") {
             Some(plain) => {
-                let secrets: Value = serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
+                let secrets: Value = serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
                 let passwords = secrets["passwords"].as_object().cloned().unwrap_or_default();
                 for (host, s) in &passwords {
                     if let Some(s) = s.as_str() {

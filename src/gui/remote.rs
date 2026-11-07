@@ -198,7 +198,7 @@ impl Remote {
 
     /// The file manager filling the window, under a bar with the host, the screen and disconnect.
     fn files_view(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
-        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let host = self.host().to_string();
         let mut show_screen = false;
         let mut disconnect = false;
         let bar = super::chrome::title_bar(ui, |ui| {
@@ -243,6 +243,11 @@ impl Remote {
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
         Ok(())
+    }
+
+    /// The host's name, the first part of the label ("host  1920x1080  backend").
+    fn host(&self) -> &str {
+        self.label.split("  ").next().unwrap_or(&self.label)
     }
 
     pub(super) fn send(&mut self, m: ToAgent) -> Result<(), String> {
@@ -670,7 +675,7 @@ impl Remote {
         }
         let transfers = self.transfers();
         let Some(mut f) = self.files.take() else { return Ok(()) };
-        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let host = self.host().to_string();
         let cmds = f.show(ctx, &host, &transfers);
         self.files = Some(f);
         for c in cmds {
@@ -850,7 +855,7 @@ impl Remote {
             return Ok(());
         }
         let Some(mut t) = self.terms.take() else { return Ok(()) };
-        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let host = self.host().to_string();
         let cmds = t.show(ctx, &host);
         self.terms = Some(t);
         for c in cmds {
@@ -1353,7 +1358,7 @@ impl Remote {
             self.ctl.describe()
         );
         ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
-        let host = self.label.split("  ").next().unwrap_or(&self.label).to_string();
+        let host = self.host().to_string();
         ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(host).strong().size(13.0)).truncate())
             .on_hover_text(&details);
         // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.

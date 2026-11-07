@@ -172,13 +172,7 @@ impl App {
                 self.terms = Some(t);
             }
         }
-        let mut more = Vec::new();
-        self.torn_terms.retain_mut(|w| {
-            let cmds = w.show(ctx, "");
-            more.extend(w.take_torn());
-            !cmds.iter().any(|c| matches!(c, crate::termwin::Cmd::Close))
-        });
-        self.torn_terms.extend(more);
+        crate::termwin::TermWindow::show_torn(ctx, &mut self.torn_terms);
         let mut actions = Vec::new();
         if let Some(k) = &mut self.keys
             && !k.show(ctx, &mut actions)

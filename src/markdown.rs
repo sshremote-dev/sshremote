@@ -1085,6 +1085,9 @@ fn block(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], n: usize, id: egui::Id
     }
 }
 
+/// A document's key and width, each block's top and height, and where it ends.
+type Layout = (u64, u32, Vec<(f32, f32)>, f32);
+
 /// Where a document's blocks go: heights measured once per block content and width (kept across
 /// documents, since a growing output repeats most blocks), and for the current document and width
 /// each block's top, so the blocks in view are found by binary search.
@@ -1092,7 +1095,7 @@ fn block(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], n: usize, id: egui::Id
 pub struct Heights {
     measured: std::collections::HashMap<(u64, bool, u32), f32>,
     /// The document (its key) and width the tops are for; each block's top and height.
-    layout: Option<(u64, u32, Vec<(f32, f32)>, f32)>,
+    layout: Option<Layout>,
 }
 
 impl Heights {

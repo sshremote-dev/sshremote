@@ -13,8 +13,11 @@ pub(super) fn filled() -> FontFamily {
     FontFamily::Name("phosphor-fill".into())
 }
 
-/// Fonts that may be on this system, by family, best first; a .ttc entry names its face.
-fn system_fonts() -> (Vec<(&'static str, u32)>, Vec<(&'static str, u32)>) {
+/// Font files to try, best first, with the face to use in a .ttc collection.
+type FontFiles = Vec<(&'static str, u32)>;
+
+/// Fonts that may be on this system: for text, then for code.
+fn system_fonts() -> (FontFiles, FontFiles) {
     if cfg!(windows) {
         (
             vec![(r"C:\Windows\Fonts\segoeui.ttf", 0), (r"C:\Windows\Fonts\malgun.ttf", 0)],
