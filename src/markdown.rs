@@ -667,7 +667,7 @@ fn hover_copy(ui: &mut egui::Ui, th: &Theme, rect: Rect, id: egui::Id, text: &st
     let b = egui::Button::new(egui::RichText::new(glyph).size(14.0).color(th.fg))
         .fill(th.code_bg)
         .stroke(Stroke::new(1.0, th.rule))
-        .corner_radius(6);
+        .corner_radius(crate::gui::theme::R_SM);
     let tip = if copied { "Copied" } else { "Copy" };
     if ui.put(at, b).on_hover_text(tip).clicked() {
         ui.ctx().copy_text(text.to_string());
@@ -914,7 +914,7 @@ fn code_block(ui: &mut egui::Ui, th: &Theme, lang: &str, code: &str, id: egui::I
     let rect = egui::Frame::new()
         .fill(th.code_bg)
         .stroke(Stroke::new(1.0, th.rule))
-        .corner_radius(CornerRadius::same(6))
+        .corner_radius(CornerRadius::same(crate::gui::theme::R_SM))
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

@@ -17,6 +17,13 @@ pub(super) fn filled() -> FontFamily {
 type FontFiles = Vec<(&'static str, u32)>;
 
 /// Fonts that may be on this system: for text, then for code.
+
+/// Corners, slightly squared rather than round: controls and highlights, cards and menus, and
+/// dialogs and floating bars.
+pub const R_SM: u8 = 3;
+pub const R_MD: u8 = 4;
+pub const R_LG: u8 = 6;
+
 fn system_fonts() -> (FontFiles, FontFiles) {
     if cfg!(windows) {
         (
@@ -193,11 +200,11 @@ pub fn set_theme(ctx: &egui::Context, dark: bool) {
         &mut v.widgets.active,
         &mut v.widgets.open,
     ] {
-        w.corner_radius = CornerRadius::same(8);
+        w.corner_radius = CornerRadius::same(R_SM);
         w.expansion = 0.0;
     }
-    v.window_corner_radius = CornerRadius::same(14);
-    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_corner_radius = CornerRadius::same(R_LG);
+    v.menu_corner_radius = CornerRadius::same(R_MD);
     v.window_stroke = Stroke::new(1.0, weak_line);
     let shade = if dark { 110 } else { 40 };
     v.window_shadow = Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(shade) };

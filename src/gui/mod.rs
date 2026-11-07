@@ -19,7 +19,7 @@ use crate::transport::Target;
 pub(crate) mod chrome;
 mod home;
 mod remote;
-mod theme;
+pub(crate) mod theme;
 
 use remote::Remote;
 use theme::filled;
@@ -356,7 +356,7 @@ pub(crate) fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
     let text = RichText::new(glyph).size(16.0);
     let b = egui::Button::new(if on { text.color(ACCENT_TEXT) } else { text })
         .min_size(Vec2::splat(30.0))
-        .corner_radius(6)
+        .corner_radius(crate::gui::theme::R_SM)
         .frame_when_inactive(on);
     if on { b.fill(ACCENT.gamma_multiply(0.22)) } else { b }
 }
@@ -402,7 +402,7 @@ fn badge(ui: &mut egui::Ui, name: &str) {
     let bare = bare.rsplit('@').next().unwrap_or(bare);
     let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 18.0, COLORS[hash as usize % COLORS.len()]);
+    ui.painter().rect_filled(rect, theme::R_LG, COLORS[hash as usize % COLORS.len()]);
     let initial = bare.chars().next().unwrap_or('?').to_uppercase().to_string();
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), Color32::WHITE);
 }

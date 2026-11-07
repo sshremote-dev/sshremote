@@ -327,14 +327,17 @@ impl FileWindow {
                     ui.vertical_centered(|ui| {
                         ui.add_space(h * 0.38);
                         let up = !self.local.sel.is_empty();
-                        let b =
-                            egui::Button::new(RichText::new(ic::ARROW_RIGHT).size(18.0)).min_size(Vec2::splat(40.0));
+                        let b = egui::Button::new(RichText::new(ic::ARROW_RIGHT).size(18.0))
+                            .frame_when_inactive(false)
+                            .min_size(Vec2::splat(40.0));
                         if ui.add_enabled(up, b).on_hover_text("Upload the selection to the remote folder").clicked() {
                             let paths = self.local.selected_paths();
                             self.transfer(false, paths, out);
                         }
                         let down = !self.remote.sel.is_empty();
-                        let b = egui::Button::new(RichText::new(ic::ARROW_LEFT).size(18.0)).min_size(Vec2::splat(40.0));
+                        let b = egui::Button::new(RichText::new(ic::ARROW_LEFT).size(18.0))
+                            .frame_when_inactive(false)
+                            .min_size(Vec2::splat(40.0));
                         if ui.add_enabled(down, b).on_hover_text("Download the selection to this computer").clicked() {
                             let paths = self.remote.selected_paths();
                             self.transfer(true, paths, out);
@@ -357,7 +360,7 @@ impl FileWindow {
         egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .stroke(egui::Stroke::new(1.0, stroke))
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(CornerRadius::same(crate::gui::theme::R_MD))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
@@ -412,7 +415,7 @@ impl FileWindow {
                 let footer = 26.0;
                 let table_frame = egui::Frame::new()
                     .fill(ui.visuals().extreme_bg_color)
-                    .corner_radius(CornerRadius::same(6))
+                    .corner_radius(CornerRadius::same(crate::gui::theme::R_SM))
                     .inner_margin(2.0);
                 let table_h = ui.available_height() - footer;
                 let (drop, payload) = ui.dnd_drop_zone::<Dragged, _>(table_frame, |ui| {
@@ -500,9 +503,9 @@ impl FileWindow {
                     let on = p.sel.contains(&i);
                     let painter = ui.painter_at(rect);
                     if on {
-                        painter.rect_filled(rect, CornerRadius::same(4), ACCENT.gamma_multiply(0.35));
+                        painter.rect_filled(rect, CornerRadius::same(crate::gui::theme::R_SM), ACCENT.gamma_multiply(0.35));
                     } else if r.hovered() {
-                        painter.rect_filled(rect, CornerRadius::same(4), ui.visuals().widgets.hovered.bg_fill);
+                        painter.rect_filled(rect, CornerRadius::same(crate::gui::theme::R_SM), ui.visuals().widgets.hovered.bg_fill);
                     }
                     let text = ui.visuals().text_color();
                     let glyph = if p.path == DRIVES {

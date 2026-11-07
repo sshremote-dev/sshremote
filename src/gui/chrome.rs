@@ -243,8 +243,8 @@ mod win {
         unsafe extern "system" fn each(hwnd: HWND, _: LPARAM) -> i32 {
             let mut done = DONE.lock().unwrap();
             if done.get_or_insert_with(HashSet::new).insert(hwnd as usize) {
-                // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2.
-                let round: u32 = 2;
+                // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUNDSMALL = 3.
+                let round: u32 = 3;
                 unsafe { DwmSetWindowAttribute(hwnd, 33, &round as *const u32 as _, 4) };
             }
             1

@@ -329,7 +329,7 @@ pub(super) fn screen(
         );
         egui::Frame::new()
             .fill(Color32::from_rgb(36, 38, 46))
-            .corner_radius(CornerRadius::same(8))
+            .corner_radius(CornerRadius::same(crate::gui::theme::R_MD))
             .inner_margin(4.0)
             .show(&mut child, |ui| {
                 ui.horizontal(|ui| {
@@ -509,7 +509,7 @@ pub(super) fn screen(
     let painter = ui.painter_at(area);
     if let Some(text) = &t.exited {
         let r = Rect::from_min_size(Pos2::new(area.left(), area.bottom() - 28.0), Vec2::new(area.width(), 28.0));
-        painter.rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(40, 42, 50, 235));
+        painter.rect_filled(r, CornerRadius::same(crate::gui::theme::R_SM), Color32::from_rgba_unmultiplied(40, 42, 50, 235));
         painter.text(
             r.left_center() + Vec2::new(10.0, 0.0),
             Align2::LEFT_CENTER,

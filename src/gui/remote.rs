@@ -212,11 +212,12 @@ impl Remote {
             ui.painter().circle_filled(r.center(), 4.0, dot);
             ui.label(RichText::new(format!("{}  Files on {host}", ic::FOLDER)).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("{}  Disconnect", ic::X)).clicked() {
+                let flat = |text: String| egui::Button::new(text).frame_when_inactive(false).min_size(Vec2::new(0.0, 28.0));
+                if ui.add(flat(format!("{}  Disconnect", ic::LINK_BREAK))).clicked() {
                     disconnect = true;
                 }
                 if ui
-                    .button(format!("{}  Show the screen", ic::MONITOR))
+                    .add(flat(format!("{}  Show the screen", ic::MONITOR)))
                     .on_hover_text("Open the remote screen; the file manager keeps a window of its own")
                     .clicked()
                 {
@@ -338,7 +339,7 @@ impl Remote {
                 Pos2::new(screen.left() + 12.0, screen.bottom() - galley.size().y - 30.0),
                 galley.size() + Vec2::new(24.0, 14.0),
             );
-            painter.rect_filled(r, CornerRadius::same(8), Color32::from_rgba_unmultiplied(20, 22, 28, 220));
+            painter.rect_filled(r, CornerRadius::same(crate::gui::theme::R_MD), Color32::from_rgba_unmultiplied(20, 22, 28, 220));
             painter.galley(r.min + Vec2::new(12.0, 7.0), galley, Color32::WHITE);
         }
         if self.click_pick {
@@ -351,7 +352,7 @@ impl Remote {
                 Pos2::new(screen.center().x, screen.top() + 80.0),
                 galley.size() + Vec2::new(32.0, 18.0),
             );
-            painter.rect_filled(r, CornerRadius::same(10), ACCENT);
+            painter.rect_filled(r, CornerRadius::same(crate::gui::theme::R_MD), ACCENT);
             painter.galley(r.min + Vec2::new(16.0, 9.0), galley, Color32::WHITE);
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -718,7 +719,7 @@ impl Remote {
                 } else {
                     Color32::TRANSPARENT
                 };
-                ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+                ui.painter().rect_filled(rect, CornerRadius::same(crate::gui::theme::R_MD), fill);
                 let text = ui.visuals().text_color();
                 let weak = ui.visuals().weak_text_color();
                 ui.painter().text(
@@ -911,7 +912,7 @@ impl Remote {
             let rect = Rect::from_min_size(Pos2::new(screen.right() - 16.0 - size.x, y - size.y), size);
             painter.rect_filled(
                 rect,
-                CornerRadius::same(10),
+                CornerRadius::same(crate::gui::theme::R_MD),
                 Color32::from_rgba_unmultiplied(32, 34, 41, (235.0 * fade) as u8),
             );
             let bar = Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height()));
@@ -953,7 +954,7 @@ impl Remote {
         let galley = painter.layout_no_wrap(text, FontId::proportional(14.0), Color32::WHITE);
         let pos = Pos2::new(screen.left() + 16.0, screen.bottom() - 16.0 - galley.size().y);
         let bg = Rect::from_min_size(pos, galley.size()).expand(8.0);
-        painter.rect_filled(bg, CornerRadius::same(8), Color32::from_rgba_unmultiplied(28, 30, 36, 230));
+        painter.rect_filled(bg, CornerRadius::same(crate::gui::theme::R_MD), Color32::from_rgba_unmultiplied(28, 30, 36, 230));
         painter.galley(pos, galley, Color32::WHITE);
     }
 
@@ -1302,7 +1303,7 @@ impl Remote {
                 egui::Frame::new()
                     .fill(ctx.global_style().visuals.window_fill)
                     .stroke(ctx.global_style().visuals.window_stroke)
-                    .corner_radius(CornerRadius::same(10))
+                    .corner_radius(CornerRadius::same(crate::gui::theme::R_MD))
                     .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(90) })
                     .inner_margin(egui::Margin::symmetric(6, 4))
                     .show(ui, |ui| {
@@ -1359,7 +1360,7 @@ impl Remote {
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
         egui::Frame::new()
             .fill(dot.gamma_multiply(0.12))
-            .corner_radius(CornerRadius::same(12))
+            .corner_radius(CornerRadius::same(crate::gui::theme::R_LG))
             .inner_margin(egui::Margin::symmetric(9, 3))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1378,7 +1379,7 @@ impl Remote {
                 RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small().color(Color32::WHITE),
             )
             .fill(ACCENT)
-            .corner_radius(CornerRadius::same(10));
+            .corner_radius(CornerRadius::same(crate::gui::theme::R_MD));
             if ui
                 .add(chip)
                 .on_hover_text(format!("Sharing {}. Click to share the whole screen again.", self.sharing.1))

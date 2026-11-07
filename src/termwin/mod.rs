@@ -848,11 +848,11 @@ impl TermWindow {
             tab_rects.push((group, rect));
             let hovered = r.hovered();
             let p = ui.painter();
-            let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+            let top_round = CornerRadius { nw: crate::gui::theme::R_MD, ne: crate::gui::theme::R_MD, sw: 0, se: 0 };
             if active {
                 p.rect_filled(rect, top_round, scheme_bg());
             } else if hovered {
-                p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), hover_fill);
+                p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(crate::gui::theme::R_SM), hover_fill);
             } else if !next_active && gi + 1 < groups.len() {
                 // A thin divider between two inactive tabs.
                 let x = rect.right() - 0.5;
@@ -909,7 +909,7 @@ impl TermWindow {
             if show_close {
                 let cr = ui.interact(close_rect, ui.make_persistent_id(("close-tab", t.id)), Sense::click());
                 if cr.hovered() {
-                    ui.painter().circle_filled(close_rect.center(), 10.0, fg.gamma_multiply(0.18));
+                    ui.painter().rect_filled(Rect::from_center_size(close_rect.center(), Vec2::splat(20.0)), crate::gui::theme::R_SM, fg.gamma_multiply(0.18));
                 }
                 ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
                 if cr.clicked() {
@@ -966,7 +966,7 @@ impl TermWindow {
         ui.add_space(4.0);
         let (plus, pr) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::click());
         if pr.hovered() {
-            ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(6), hover_fill);
+            ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(crate::gui::theme::R_SM), hover_fill);
         }
         ui.painter().text(plus.center(), Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(15.0), strong);
         if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
@@ -1060,7 +1060,7 @@ impl TermWindow {
                 self.save_settings();
             }
             ui.add_space(6.0);
-            // How the active tab is shown: a segmented control, as in Windows 11.
+            // How the active tab is shown: three icon buttons, the current one filled.
             if let Some(t) = self.tabs.get_mut(self.active) {
                 let views = [
                     (View::Markdown, ic::ARTICLE, "Markdown", "Read the output as Markdown, with copy buttons on code (agent replies)"),
@@ -1084,9 +1084,7 @@ impl TermWindow {
                         .0
                         .on_hover_text("How this tab is shown");
                 } else {
-                    let track =
-                        if ui.visuals().dark_mode { Color32::from_white_alpha(10) } else { Color32::from_black_alpha(10) };
-                    egui::Frame::new().fill(track).corner_radius(8).inner_margin(2).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(2).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         for &(v, glyph, _, tip) in &views {
                             if small(ui, glyph, tip, t.view == v) {

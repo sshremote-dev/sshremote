@@ -171,7 +171,7 @@ impl eframe::App for ChatApp {
         egui::Panel::top("chat-header").frame(header).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(34.0), egui::Sense::hover());
-                ui.painter().circle_filled(r.center(), 17.0, crate::gui::ACCENT);
+                ui.painter().rect_filled(r, crate::gui::theme::R_LG, crate::gui::ACCENT);
                 let icon = egui::FontId::proportional(17.0);
                 ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::gui::ic::CHAT, icon, Color32::WHITE);
                 ui.vertical(|ui| {
@@ -238,10 +238,10 @@ pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &
             (crate::gui::ACCENT, Color32::WHITE)
         };
         // The corner nearest the sender stays sharp on the last bubble of a run.
-        let r = 16u8;
+        let r = crate::gui::theme::R_LG;
         let radius = match (*theirs, last) {
-            (true, true) => egui::CornerRadius { nw: r, ne: r, sw: 4, se: r },
-            (false, true) => egui::CornerRadius { nw: r, ne: r, sw: r, se: 4 },
+            (true, true) => egui::CornerRadius { nw: r, ne: r, sw: 1, se: r },
+            (false, true) => egui::CornerRadius { nw: r, ne: r, sw: r, se: 1 },
             _ => egui::CornerRadius::same(r),
         };
         let align = if *theirs { egui::Align::Min } else { egui::Align::Max };
@@ -262,7 +262,7 @@ pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &
     }
 }
 
-/// A rounded message field with a round send button; Enter sends. Returns the text when sent.
+/// A message field with a send button inside it; Enter sends. Returns the text when sent.
 pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option<String> {
     let mut sent = None;
     let field = ui.visuals().extreme_bg_color;
@@ -270,7 +270,7 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
     egui::Frame::new()
         .fill(field)
         .stroke(line)
-        .corner_radius(20)
+        .corner_radius(crate::gui::theme::R_MD)
         .inner_margin(egui::Margin { left: 14, right: 4, top: 4, bottom: 4 })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -286,7 +286,7 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
                 let ready = enabled && !input.trim().is_empty();
                 let send = egui::Button::new(RichText::new(crate::gui::ic::SEND).size(16.0).color(Color32::WHITE))
                     .fill(if ready { crate::gui::ACCENT } else { crate::gui::ACCENT.gamma_multiply(0.4) })
-                    .corner_radius(16)
+                    .corner_radius(crate::gui::theme::R_SM)
                     .min_size(egui::Vec2::splat(32.0));
                 if (ui.add_enabled(ready, send).on_hover_text("Send (Enter)").clicked() || enter) && ready {
                     sent = Some(std::mem::take(input).trim().to_string());

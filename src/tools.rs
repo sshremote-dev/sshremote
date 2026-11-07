@@ -129,7 +129,7 @@ impl KeyTool {
                     ui.label(RichText::new("No keys yet. Create one below.").weak());
                 }
                 for k in &self.keys {
-                    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(8).inner_margin(8.0).show(ui, |ui| {
+                    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(crate::gui::theme::R_MD).inner_margin(8.0).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{}  {}", ic::KEY, k.name)).strong());
@@ -527,7 +527,7 @@ impl ConfigTool {
             }
         });
         let th = crate::markdown::Theme::of(ui);
-        egui::Frame::new().fill(th.bg).corner_radius(6).inner_margin(6.0).show(ui, |ui| {
+        egui::Frame::new().fill(th.bg).corner_radius(crate::gui::theme::R_SM).inner_margin(6.0).show(ui, |ui| {
             egui::ScrollArea::both().max_height(ui.available_height() - 30.0).auto_shrink([false, false]).show(
                 ui,
                 |ui| {

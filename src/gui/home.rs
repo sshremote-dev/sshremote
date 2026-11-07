@@ -365,7 +365,7 @@ impl App {
             let ui = &mut ui;
 
             // Quick connect: the host, Terminal by default, everything else behind "...".
-            egui::Frame::new().fill(card).stroke(Stroke::new(1.0, line)).corner_radius(CornerRadius::same(12)).inner_margin(14.0).show(ui, |ui| {
+            egui::Frame::new().fill(card).stroke(Stroke::new(1.0, line)).corner_radius(CornerRadius::same(crate::gui::theme::R_LG)).inner_margin(14.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("Connect to a host").strong());
                 ui.horizontal(|ui| {
@@ -384,7 +384,7 @@ impl App {
                     if ui.add(b).on_hover_text("Open an SSH terminal (Enter)").clicked() || enter {
                         go = Some((self.form.host.clone(), self.form.port.clone(), How::Terminal));
                     }
-                    let more = egui::containers::menu::MenuButton::new(RichText::new(ic::DOTS).size(16.0));
+                    let more = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false).min_size(Vec2::new(32.0, 32.0)));
                     more.ui(ui, |ui| {
                         ui.set_min_width(230.0);
                         if ui.button(format!("{}  Remote screen", ic::MONITOR)).clicked() {
@@ -449,7 +449,7 @@ impl App {
                     egui::Frame::new()
                         .fill(BAD.gamma_multiply(0.15))
                         .stroke(Stroke::new(1.0, BAD.gamma_multiply(0.6)))
-                        .corner_radius(CornerRadius::same(8))
+                        .corner_radius(CornerRadius::same(crate::gui::theme::R_MD))
                         .inner_margin(10.0)
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -473,7 +473,7 @@ impl App {
             });
             ui.add_space(2.0);
             // Only the list scrolls; the header and the connect card stay put.
-            egui::Frame::new().fill(card).stroke(Stroke::new(1.0, line)).corner_radius(CornerRadius::same(12)).inner_margin(4.0).show(ui, |ui| {
+            egui::Frame::new().fill(card).stroke(Stroke::new(1.0, line)).corner_radius(CornerRadius::same(crate::gui::theme::R_LG)).inner_margin(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 // As tall as its rows, scrolling once they fill the window.
                 let room = (ui.available_height() - 12.0).max(80.0);
@@ -492,7 +492,7 @@ impl App {
                         let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), egui::Sense::click());
                         if r.hovered() || self.form.host == *h {
                             let fill = if r.hovered() { ui.visuals().widgets.hovered.bg_fill } else { ui.visuals().faint_bg_color };
-                            ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+                            ui.painter().rect_filled(rect, CornerRadius::same(crate::gui::theme::R_MD), fill);
                         }
                         if i > 0 {
                             ui.painter().hline(rect.x_range().shrink(12.0), rect.top(), Stroke::new(1.0, line.gamma_multiply(0.5)));
@@ -554,7 +554,7 @@ impl App {
                             if !direct {
                                 // A narrow window keeps the name readable: the button loses its word.
                                 let text = if rect.width() < 560.0 { ic::TERMINAL.to_string() } else { format!("{}  Terminal", ic::TERMINAL) };
-                                let b = egui::Button::new(text).min_size(Vec2::new(0.0, 28.0));
+                                let b = egui::Button::new(text).frame_when_inactive(false).min_size(Vec2::new(0.0, 28.0));
                                 if ui.add(b).on_hover_text("Open an SSH terminal").clicked() {
                                     go = Some((h.clone(), p.clone(), How::Terminal));
                                 }
