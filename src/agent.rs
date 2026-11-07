@@ -12,15 +12,27 @@ use crate::color::{Plane, Reducer, diff, pack};
 use crate::proto::{Frame, Settings, Tile, ToAgent, ToClient, read_msg, write_msg};
 use crate::{scroll, video};
 
-/// Frames sent but not yet acknowledged; more would only queue stale screens in SSH.
+/// Frames sent but not yet acknowledged; more would only queue stale screens in SSH. Small
+/// frames (the pointer, a few characters) may run further ahead, so a long round trip does not
+/// cap the frame rate of light updates.
 const IN_FLIGHT: u32 = 2;
+const IN_FLIGHT_SMALL: u32 = 6;
+/// Bytes of frames in flight under which the small-frame allowance applies.
+const SMALL_BYTES: usize = 256 << 10;
 
 type Wire = zstd::stream::write::Encoder<'static, BufWriter<Box<dyn Write>>>;
 
+/// Queues a message; the loop flushes once per turn, before it waits, so several messages share
+/// one compressed block.
 fn send(w: &mut Wire, m: &ToClient) -> io::Result<()> {
+    send_sized(w, m).map(|_| ())
+}
+
+/// [`send`], returning the message's size before compression.
+fn send_sized(w: &mut Wire, m: &ToClient) -> io::Result<usize> {
     let (k, p) = m.encode();
     write_msg(w, k, &p)?;
-    w.flush()
+    Ok(p.len())
 }
 
 fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
@@ -78,12 +90,28 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
 
     let (tx, rx) = mpsc::channel();
+    // Why the viewer's stream ended, when it ended badly, for the viewer to see.
+    let (why_tx, why) = mpsc::channel::<String>();
     thread::spawn(move || {
         let mut input = BufReader::new(input);
-        while let Ok(Some((k, p))) = read_msg(&mut input) {
-            let Ok(m) = ToAgent::decode(k, &p) else { break };
-            if tx.send(m).is_err() {
-                break;
+        loop {
+            match read_msg(&mut input) {
+                Ok(Some((k, p))) => match ToAgent::decode(k, &p) {
+                    Ok(m) => {
+                        if tx.send(m).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = why_tx.send(format!("the agent could not read message {k} (different versions?)"));
+                        break;
+                    }
+                },
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = why_tx.send(format!("the agent's input broke: {e}"));
+                    break;
+                }
             }
         }
     });
@@ -109,9 +137,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut chat = crate::chat::Window::default();
     let mut pending = String::new();
     let mut in_flight = 0u32;
+    // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
+    let mut flight_sizes: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
     let mut next_id = 1u32;
     let mut due = Instant::now();
     loop {
+        // Everything queued in the last turn goes out before waiting.
+        enc.flush().map_err(io_err)?;
         // A download in progress keeps the loop turning; otherwise wait for input or the next frame.
         let longest = if outbox.busy() { 1 } else { 8 };
         let wait = due
@@ -121,7 +153,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         match rx.recv_timeout(wait) {
             Ok(m) => msgs.push(m),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(_) => return Ok(()),
+            Err(_) => {
+                if let Ok(why) = why.try_recv() {
+                    let _ = send(enc, &ToClient::Error(why));
+                    let _ = enc.flush();
+                }
+                return Ok(());
+            }
         }
         msgs.extend(rx.try_iter());
         msgs.splice(0..0, queued.drain(..));
@@ -147,7 +185,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     }
                     settings = Some(s);
                 }
-                ToAgent::Ack(_) => in_flight = in_flight.saturating_sub(1),
+                ToAgent::Ack(_) => {
+                    in_flight = in_flight.saturating_sub(1);
+                    flight_sizes.pop_front();
+                }
                 ToAgent::Refresh => {
                     prev = None;
                     one_shot = true;
@@ -402,7 +443,8 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         };
         let now = Instant::now();
         // Grab only when a frame may go out: some backends copy the whole screen per grab.
-        if in_flight >= IN_FLIGHT || now < due || (paused && !one_shot) {
+        let light = in_flight < IN_FLIGHT_SMALL && flight_sizes.iter().sum::<usize>() < SMALL_BYTES;
+        if (in_flight >= IN_FLIGHT && !light) || now < due || (paused && !one_shot) {
             continue;
         }
         if let Some(img) = cap.grab()? {
@@ -428,10 +470,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         let plane = red.reduce(img);
         let mut rects = diff(prev.as_ref(), &plane);
         let mut moves = Vec::new();
-        if let Some(p) = prev.as_ref()
-            && let Some(m) = scroll::find(p, &plane, &rects)
+        if let Some(m) = prev.as_ref().and_then(|p| scroll::find(p, &plane, &rects))
+            && let Some(mut moved) = prev.take()
         {
-            let mut moved = p.clone();
+            // The previous screen is replaced below anyway, so it is moved in place, not copied.
             scroll::apply(&mut moved.data, moved.w, moved.mode.bpp(), &m);
             rects = diff(Some(&moved), &plane);
             moves.push(m);
@@ -478,8 +520,9 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             video: video_part,
         };
         next_id = next_id.wrapping_add(1);
-        send(enc, &ToClient::Frame(frame)).map_err(io_err)?;
+        let bytes = send_sized(enc, &ToClient::Frame(frame)).map_err(io_err)?;
         in_flight += 1;
+        flight_sizes.push_back(bytes);
         due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
     }
 }

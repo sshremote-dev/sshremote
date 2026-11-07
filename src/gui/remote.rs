@@ -966,7 +966,25 @@ impl Remote {
         let opts = TextureOptions::LINEAR;
         match self.tex.as_mut() {
             Some(t) if !resized && t.size() == [w, h] => {
+                // Tiles of one row band go up as one span, and a frame that changed most of the
+                // screen as one image: a texture upload per 32 px tile costs far more than the bytes.
+                let mut bands: Vec<(usize, usize, usize, usize)> = Vec::new();
                 for (x, y, rw, rh) in f.damage() {
+                    match bands.iter_mut().find(|b| b.1 == y && b.3 == rh) {
+                        Some(b) => {
+                            let right = (b.0 + b.2).max(x + rw);
+                            b.0 = b.0.min(x);
+                            b.2 = right - b.0;
+                        }
+                        None => bands.push((x, y, rw, rh)),
+                    }
+                }
+                let area: usize = bands.iter().map(|b| b.2 * b.3).sum();
+                if area * 2 > w * h {
+                    t.set(ColorImage::from_rgb([w, h], &self.fb.rgb), opts);
+                    return;
+                }
+                for (x, y, rw, rh) in bands {
                     let mut px = Vec::with_capacity(rw * rh * 3);
                     for row in y..y + rh {
                         px.extend_from_slice(&self.fb.rgb[(row * w + x) * 3..(row * w + x + rw) * 3]);
