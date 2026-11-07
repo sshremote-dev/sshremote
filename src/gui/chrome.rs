@@ -17,18 +17,24 @@ fn maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false))
 }
 
+/// The largest window side in pixels the GPU draws, as the renderer found it.
+pub static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8192);
+
 /// Edges that resize the window and Alt+Space for the system menu; call once per frame of every
 /// window that draws its own frame, before its content.
 pub fn behaviour(ctx: &egui::Context) {
-    // A new window is rounded in its first frames, not looked for on every frame after.
-    #[cfg(windows)]
-    {
-        let key = egui::Id::unique(("chrome-rounded", ctx.viewport_id()));
-        let seen = ctx.data(|d| d.get_temp::<u8>(key)).unwrap_or(0);
-        if seen < 3 {
-            win::round_corners();
-            ctx.data_mut(|d| d.insert_temp(key, seen + 1));
+    // A new window is set up in its first frames, not looked at on every frame after.
+    let key = egui::Id::unique(("chrome-new", ctx.viewport_id()));
+    let seen = ctx.data(|d| d.get_temp::<u8>(key)).unwrap_or(0);
+    if seen < 3 {
+        #[cfg(windows)]
+        win::round_corners();
+        if seen == 0 {
+            // No larger than the GPU can draw: past it the renderer gives up.
+            let most = MAX_SIDE.load(std::sync::atomic::Ordering::Relaxed) as f32 / ctx.pixels_per_point();
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::Vec2::splat(most)));
         }
+        ctx.data_mut(|d| d.insert_temp(key, seen + 1));
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));

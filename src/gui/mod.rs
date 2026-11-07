@@ -327,6 +327,18 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
     }
     // Some drivers block a vsynced present for a quarter second; frames are paced by the agent anyway.
     native.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+    // As large a window as the GPU can draw (eframe asks for 8192 pixels; most GPUs do 16384), so
+    // a window stretched over several monitors still fits.
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut native.wgpu_options.wgpu_setup {
+        let base = setup.device_descriptor.clone();
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut d = base(adapter);
+            let most = adapter.limits().max_texture_dimension_2d.max(d.required_limits.max_texture_dimension_2d);
+            d.required_limits.max_texture_dimension_2d = most;
+            chrome::MAX_SIDE.store(most, std::sync::atomic::Ordering::Relaxed);
+            d
+        });
+    }
     native
 }
 
