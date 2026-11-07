@@ -484,6 +484,8 @@ impl FileWindow {
         let visible = self.pane(remote).visible();
         let mut open: Option<usize> = None;
         let mut menu_action: Option<(&'static str, usize)> = None;
+        // Rows touch, and show_rows counts the spacing in each row's height when it works out the rows in view.
+        ui.spacing_mut().item_spacing.y = 0.0;
         egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("rows", remote)).show_rows(
             ui,
             row_h,

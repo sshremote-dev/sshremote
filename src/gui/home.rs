@@ -474,7 +474,8 @@ impl App {
             // Only the list scrolls; the header and the connect card stay put.
             egui::Frame::new().fill(card).stroke(Stroke::new(1.0, line)).corner_radius(CornerRadius::same(12)).inner_margin(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.set_min_height((ui.available_height() - 12.0).max(80.0));
+                // As tall as its rows, scrolling once they fill the window.
+                let room = (ui.available_height() - 12.0).max(80.0);
                 if hosts.is_empty() {
                     let text = if self.search.is_empty() {
                         "Hosts you connect to, and the aliases in ~/.ssh/config, appear here."
@@ -485,7 +486,7 @@ impl App {
                     ui.vertical_centered(|ui| ui.label(RichText::new(text).weak()));
                     return;
                 }
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(room).show(ui, |ui| {
                     for (i, (h, p, src)) in hosts.iter().enumerate() {
                         let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), egui::Sense::click());
                         if r.hovered() || self.form.host == *h {

@@ -1351,13 +1351,22 @@ impl Remote {
             self.label,
             self.ctl.describe()
         );
-        ui.label(RichText::new("●").size(14.0).color(dot)).on_hover_text(&details);
+        // One chip: the state's colour, the host and the round trip, the details on hover.
         let host = self.host().to_string();
-        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(host).strong().size(13.0)).truncate())
-            .on_hover_text(&details);
-        // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
-        ui.add_sized([46.0, 20.0], egui::Label::new(RichText::new(rtt).small().weak().monospace()))
+        egui::Frame::new()
+            .fill(dot.gamma_multiply(0.12))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(9, 3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new("●").size(10.0).color(dot));
+                let width = ui.fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(13.0), Color32::WHITE).size().x);
+                ui.add_sized([width.min(160.0), 18.0], egui::Label::new(RichText::new(&host).strong().size(13.0)).truncate());
+                // Fixed width, so a round trip going from 9 to 120 ms does not shift the buttons.
+                ui.add_sized([44.0, 18.0], egui::Label::new(RichText::new(rtt).small().color(dot)));
+            })
+            .response
             .on_hover_text(&details);
         if self.sharing.0 != 0 {
             let name: String = self.sharing.1.chars().take(18).collect();
