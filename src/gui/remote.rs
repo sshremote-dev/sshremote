@@ -216,7 +216,11 @@ impl Remote {
                     if ui.button(format!("{}  Disconnect", ic::X)).clicked() {
                         disconnect = true;
                     }
-                    if ui.button(format!("{}  Show the screen", ic::MONITOR)).on_hover_text("Open the remote screen; the file manager keeps a window of its own").clicked() {
+                    if ui
+                        .button(format!("{}  Show the screen", ic::MONITOR))
+                        .on_hover_text("Open the remote screen; the file manager keeps a window of its own")
+                        .clicked()
+                    {
                         show_screen = true;
                     }
                 });

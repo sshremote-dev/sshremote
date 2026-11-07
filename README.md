@@ -63,8 +63,8 @@ remote screen (handed to ssh through its askpass hook; "Remember" keeps it in th
 store), the screen quality, the agent command and the capture backend. A failed connection is explained with its likely cause and what to
 try. The header holds a local terminal button, the tools menu (SSH keys, SSH hosts, local shells,
 the built-in test desktop) and the dark or light theme, remembered between runs. `sshremote --gui
-HOST` opens the remote screen straight away; `--open terminal` opens it with the host's terminal shown, `--open files` with the file window
-and the screen paused.
+HOST` opens the remote screen straight away; `--open terminal` opens it with the host's terminal shown, `--open files` as a file manager alone
+(the Files button of a connection does the same; "Show the screen" brings the picture in).
 
 ### Administrator rights
 
@@ -172,7 +172,9 @@ copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
   as in VS Code and Windows Terminal by default, or a block or an underline), remembered between runs.
 - Three views: the terminal itself, plain text, and Markdown, styled after VS Code's editor and
   Markdown preview (its Dark Modern and Light Modern colours, following the app's theme). The text
-  view shows the whole scrollback with line numbers, selectable with the mouse or Ctrl+A. The
+  view is one read-only document of the scrollback and the screen with line numbers, selected as
+  in VS Code (drag, double-click, Shift+click, Ctrl+A, Ctrl+C) with the caret at the shell's cursor,
+  where typing goes to the shell. The
   Markdown view draws headings with rules, bold and italic text, links that open on click, lists
   with task boxes, quotes, tables with borders, alignment and a Copy button (tab-separated, for
   spreadsheets), and code blocks with syntax colours and a Copy button. With "Agent session" on, the

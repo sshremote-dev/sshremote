@@ -265,6 +265,8 @@ struct Tab {
     reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
+    /// The text view's document and the cursor's place in it, for an output revision and cursor.
+    editor: Option<((u64, i32, usize), std::rc::Rc<(String, usize)>)>,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
 }
@@ -616,6 +618,7 @@ impl TermWindow {
             search: None,
             preedit: String::new(),
             typed_at: 0.0,
+            editor: None,
             rev: 0,
             reading: None,
             group: id,
@@ -1192,6 +1195,13 @@ fn text_before(t: &Tab, upto: i32) -> String {
 /// cursor are, which take the keys as the terminal view does. Only those rows show a text cursor
 /// for typing; the rest can be selected and copied.
 fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut Vec<Cmd>) {
+    if t.view == View::Text {
+        let font = FontId::monospace(font_size);
+        let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let area = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(area, CornerRadius::ZERO, scheme_bg());
+        return text_editor(ui, t, &font, cw, ch, keys, out);
+    }
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let (first, last) = input_rows(t);
@@ -1201,7 +1211,7 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
         t.reading = Some((t.rev, first, std::rc::Rc::new((text, doc))));
     }
     let read = t.reading.as_ref().expect("just built").2.clone();
-    let (text, doc) = (&read.0, &read.1);
+    let doc = &read.1;
     let th = crate::markdown::Theme::terminal(scheme_bg(), scheme_fg());
     let area = ui.available_rect_before_wrap();
     ui.painter().rect_filled(area, CornerRadius::ZERO, th.bg);
@@ -1232,8 +1242,6 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
                     live = Some(live_area(ui, id, cw, ch, live_rows));
                 },
             );
-        } else {
-            text_lines(ui, &th, text, &font, cw, ch, live_rows, id, &mut live);
         }
     });
     let Some((rect, resp)) = live else { return };
@@ -1254,19 +1262,6 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
         let icon = if rect.contains(p) { egui::CursorIcon::Text } else { egui::CursorIcon::Default };
         ui.ctx().set_cursor_icon(icon);
     }
-    let all = format!("{text}\n{}", text_rows(t, first, last));
-    let menu_target = ui.interact(shown.inner_rect, egui::Id::unique(("reading-menu", t.id)), Sense::hover());
-    menu_target.context_menu(|ui| {
-        if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
-            ui.ctx().copy_text(all.trim().to_string());
-            ui.close();
-        }
-        if ui.button("Paste").clicked() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-            ui.ctx().memory_mut(|m| m.request_focus(id));
-            ui.close();
-        }
-    });
 }
 
 /// Space for the live rows at the end of a reading view.
@@ -1277,71 +1272,32 @@ fn live_area(ui: &mut egui::Ui, id: egui::Id, cw: f32, ch: f32, rows: usize) -> 
     (rect, resp)
 }
 
-/// The text of screen rows `first` to `last`, for copying.
-fn text_rows(t: &Tab, first: i32, last: i32) -> String {
-    let cols = t.term.grid().columns();
-    let s = t.term.bounds_to_string(Point::new(Line(first), Column(0)), Point::new(Line(last), Column(cols - 1)));
-    s.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
-}
-
-/// The text view: line numbers, the scrollback in the terminal's font with every column where the
-/// terminal had it (selectable, Ctrl+A and Ctrl+C), and the live rows numbered on after it.
-#[allow(clippy::too_many_arguments)]
-fn text_lines(
-    ui: &mut egui::Ui,
-    th: &crate::markdown::Theme,
-    text: &str,
-    font: &FontId,
-    cw: f32,
-    ch: f32,
-    live_rows: usize,
-    id: egui::Id,
-    live: &mut Option<(Rect, egui::Response)>,
-) {
-    let lines = if text.is_empty() { 0 } else { text.lines().count() };
-    let total = lines + live_rows;
-    let digits = total.max(1).to_string().len() as f32;
-    let gutter = cw * (digits + 2.0);
-    ui.spacing_mut().item_spacing = Vec2::ZERO;
-    let top = ui.cursor().top() + 8.0;
-    ui.add_space(8.0);
-    ui.horizontal_top(|ui| {
-        let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, total as f32 * ch), Sense::hover());
-        let clip = ui.clip_rect();
-        let from = ((clip.top() - top) / ch).floor().max(0.0) as usize;
-        let to = (((clip.bottom() - top) / ch).ceil().max(0.0) as usize).min(total);
-        let number = th.fg.gamma_multiply(0.4);
-        for n in from..to {
-            let pos = Pos2::new(g.right() - cw, top + n as f32 * ch);
-            ui.painter().text(pos, Align2::RIGHT_TOP, (n + 1).to_string(), font.clone(), number);
-        }
-        ui.vertical(|ui| {
-            if lines > 0 {
-                let color = th.fg;
-                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
-                    let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(buf.as_str(), font, color, f));
-                    ui.ctx().fonts_mut(|f| f.layout_job(job))
-                };
-                let mut view: &str = text;
-                ui.add(
-                    egui::TextEdit::multiline(&mut view)
-                        .id(id.with("text"))
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::ZERO)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(1)
-                        .layouter(&mut layouter),
-                );
-            }
-            *live = Some(live_area(ui, id, cw, ch, live_rows));
-            ui.add_space(8.0);
-        });
-    });
-}
-
 /// Keys, text, input-method compositions and pastes for the shell of `t`, typed into the widget
 /// `id`, whose input method composes at `cursor`. `grab` takes the keyboard focus for it.
 fn keyboard(ui: &egui::Ui, t: &mut Tab, id: egui::Id, area: Rect, cursor: Rect, grab: bool, out: &mut Vec<Cmd>) {
+    keyboard_with(ui, t, id, area, cursor, grab, KeySkip::default(), out);
+}
+
+/// Keys the text view keeps for its own selection instead of sending them to the shell.
+#[derive(Default, Clone, Copy)]
+struct KeySkip {
+    /// Ctrl+A selects the whole text.
+    select_all: bool,
+    /// Ctrl+C copies the selected text.
+    copy: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn keyboard_with(
+    ui: &egui::Ui,
+    t: &mut Tab,
+    id: egui::Id,
+    area: Rect,
+    cursor: Rect,
+    grab: bool,
+    skip: KeySkip,
+    out: &mut Vec<Cmd>,
+) {
     // Holding the focus keeps Tab, the arrows and Escape for the shell instead of moving between the
     // window's buttons, where Enter or Space would then press one. It is asked for only when it is
     // elsewhere: each request also ends an input method's composition.
@@ -1378,6 +1334,8 @@ fn keyboard(ui: &egui::Ui, t: &mut Tab, id: egui::Id, area: Rect, cursor: Rect, 
                 t.preedit.clear();
                 send.extend_from_slice(s.as_bytes());
             }
+            Event::Copy if skip.copy => {}
+            Event::Key { key: Key::A, modifiers, .. } if skip.select_all && modifiers.command => {}
             Event::Copy => match t.term.selection_to_string() {
                 Some(s) if !s.is_empty() => {
                     ui.ctx().copy_text(s);
@@ -1563,6 +1521,157 @@ fn input_rows(t: &Tab) -> (i32, i32) {
     let last = (cursor..screen).rev().find(|&r| written(r)).unwrap_or(cursor).max(cursor);
     let first = (cursor - 3).max(0).max(last - 9);
     (first, last)
+}
+
+/// The rows `from` to `to` of the scrollback and screen, one line each as shown, without trailing
+/// spaces, and the character offset of the terminal cursor in their joined text.
+fn screen_text(t: &Tab, from: i32, to: i32) -> (String, usize) {
+    let grid = t.term.grid();
+    let cols = grid.columns();
+    let cursor = grid.cursor.point;
+    let mut out = String::new();
+    let mut at = 0;
+    for line in from..=to {
+        if line > from {
+            out.push('\n');
+        }
+        let row = &grid[Line(line)];
+        let mut text = String::new();
+        let mut upto_cursor = 0;
+        for c in 0..cols {
+            let cell = &row[Column(c)];
+            if line == cursor.line.0 && c == cursor.column.0 {
+                upto_cursor = text.chars().count();
+            }
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            text.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+        if line == cursor.line.0 {
+            // The cursor's row keeps its spaces up to the cursor, so the caret sits where it is.
+            let keep = text.trim_end().chars().count().max(upto_cursor);
+            let kept: String = text.chars().take(keep).collect();
+            at = out.chars().count() + upto_cursor;
+            out.push_str(&kept);
+        } else {
+            out.push_str(text.trim_end());
+        }
+    }
+    (out, at)
+}
+
+/// The text view: one read-only document of the whole scrollback and screen in the terminal's font,
+/// with line numbers, selected as in VS Code (drag, double-click for a word, Shift+click, Ctrl+A,
+/// Ctrl+C) and a caret where the shell's cursor is, which takes typing for the shell.
+fn text_editor(ui: &mut egui::Ui, t: &mut Tab, font: &FontId, cw: f32, ch: f32, keys: bool, out: &mut Vec<Cmd>) {
+    let grid = t.term.grid();
+    let history = (grid.total_lines() - grid.screen_lines()) as i32;
+    let (_, last) = input_rows(t);
+    let key = (t.rev, t.term.grid().cursor.point.line.0, t.term.grid().cursor.point.column.0);
+    if t.editor.as_ref().is_none_or(|e| e.0 != key) {
+        let (text, at) = screen_text(t, -history, last);
+        t.editor = Some((key, std::rc::Rc::new((text, at))));
+    }
+    let doc = t.editor.as_ref().expect("just built").1.clone();
+    let (text, at) = (&doc.0, doc.1);
+    let fg = scheme_fg();
+    let id = egui::Id::unique(("text-view", t.id));
+    // Typing collapses a selection onto the shell's cursor, as typing would in an editor.
+    let typing = ui.input(|i| {
+        i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_) | Event::Paste(_)))
+            || i.events.iter().any(|e| {
+                matches!(e, Event::Key { pressed: true, key, modifiers, .. }
+                if !modifiers.ctrl && !modifiers.command && !matches!(key, Key::A | Key::C))
+            })
+    });
+    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    let selecting = state.cursor.char_range().is_some_and(|r| !r.is_empty());
+    if typing && selecting {
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+        state.store(ui.ctx(), id);
+    }
+    let lines = text.lines().count().max(1);
+    let gutter = cw * (lines.to_string().len() as f32 + 2.0);
+    let mut caret_rect = None;
+    let scroll = egui::ScrollArea::both()
+        .id_salt(("text-scroll", t.id))
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR);
+    let shown = scroll.show(ui, |ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            let top = ui.cursor().top();
+            let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, lines as f32 * ch), Sense::hover());
+            let clip = ui.clip_rect();
+            let from = ((clip.top() - top) / ch).floor().max(0.0) as usize;
+            let to = (((clip.bottom() - top) / ch).ceil().max(0.0) as usize).min(lines);
+            for n in from..to {
+                let pos = Pos2::new(g.right() - cw, top + n as f32 * ch);
+                ui.painter().text(pos, Align2::RIGHT_TOP, (n + 1).to_string(), font.clone(), fg.gamma_multiply(0.4));
+            }
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
+                let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(buf.as_str(), font, fg, f));
+                ui.ctx().fonts_mut(|f| f.layout_job(job))
+            };
+            let mut view: &str = text;
+            let edit = egui::TextEdit::multiline(&mut view)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .desired_width(f32::INFINITY)
+                .desired_rows(1)
+                .layouter(&mut layouter)
+                .show(ui);
+            edit.response.context_menu(|ui| {
+                if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
+                    ui.ctx().copy_text(text.clone());
+                    ui.close();
+                }
+                if ui.button("Paste").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    ui.ctx().memory_mut(|m| m.request_focus(id));
+                    ui.close();
+                }
+            });
+            let p = edit.galley.pos_from_cursor(egui::text::CCursor::new(at));
+            caret_rect = Some(p.translate(edit.galley_pos.to_vec2()).with_max_x(p.min.x + edit.galley_pos.x + cw));
+        });
+        ui.add_space(8.0);
+    });
+    let Some(caret) = caret_rect else { return };
+    let caret = Rect::from_min_size(caret.min, Vec2::new(cw, ch));
+    let selecting = egui::text_edit::TextEditState::load(ui.ctx(), id)
+        .and_then(|s| s.cursor.char_range())
+        .is_some_and(|r| !r.is_empty());
+    // The keys go to the shell while the text has the focus; the view takes it when nothing has.
+    let grab = keys && (typing || ui.memory(|m| m.focused().is_none()));
+    if keys {
+        let skip = KeySkip { select_all: true, copy: selecting };
+        keyboard_with(ui, t, id, shown.inner_rect, caret, grab, skip, out);
+    }
+    let focused = ui.memory(|m| m.has_focus(id));
+    let painter = ui.painter_at(shown.inner_rect);
+    if !t.preedit.is_empty() {
+        let galley = painter.layout_no_wrap(t.preedit.clone(), font.clone(), fg);
+        let r = Rect::from_min_size(caret.min, Vec2::new(galley.size().x.max(cw), ch));
+        painter.rect_filled(r, CornerRadius::ZERO, scheme_bg());
+        painter.galley(caret.min, galley, fg);
+        painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(r.right(), r.top()), Vec2::new(2.0, ch)),
+            CornerRadius::ZERO,
+            fg,
+        );
+    } else if focused && !selecting && t.exited.is_none() {
+        let since = ui.input(|i| i.time) - t.typed_at;
+        if since < 0.6 || ((since - 0.6) / 0.53) as u64 % 2 == 1 {
+            painter.rect_filled(Rect::from_min_size(caret.min, Vec2::new(2.0, ch)), CornerRadius::ZERO, fg);
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.53 - (since - 0.6).rem_euclid(0.53)));
+    }
 }
 
 /// A web address under column `col` of a line, for Ctrl+click.
@@ -2172,5 +2281,39 @@ mod tests {
             }
             assert!(after > bottom + 50.0, "{view:?}: the wheel scrolls back ({bottom} -> {after})");
         }
+    }
+
+    #[test]
+    fn the_text_view_selects_and_copies_like_an_editor() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.parser.advance(&mut t.term, b"hello world\r\n$ ");
+        t.rev += 1;
+        w.tabs[0].view = View::Text;
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+        let select_all = Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: ctrl };
+        assert_eq!(typed(&frame(&ctx, &mut w, vec![select_all])), "", "Ctrl+A selects the text, not the shell's line");
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+            focused: true,
+            events: vec![Event::Copy],
+            ..Default::default()
+        };
+        let mut cmds = Vec::new();
+        let out = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+        assert_eq!(typed(&cmds), "", "Ctrl+C with a selection copies instead of interrupting");
+        let copied = out
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s.contains("hello world")));
+        assert!(copied, "the selection is copied");
+        // Typing still reaches the shell, and the selection gives way to the caret.
+        assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Text("ls".into())])), "ls");
     }
 }
