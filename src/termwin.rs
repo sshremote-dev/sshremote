@@ -133,6 +133,44 @@ struct Tab {
     search: Option<Search>,
     /// Agent markers and frames removed in the Markdown view.
     clean: bool,
+    /// The tab of the strip this pane belongs to; panes of one tab share its area.
+    group: u32,
+    /// How this pane divides the area of the pane before it: Some(true) side by side, Some(false)
+    /// one above the other; None for a tab's first pane.
+    dir: Option<bool>,
+    /// What it runs, to open the same in a new pane.
+    profile: Profile,
+}
+
+/// A tab or pane waiting for the window's context: what it runs, and the pane it splits (with the
+/// direction) if any.
+type Pending = (Profile, Option<(u32, bool)>);
+
+/// What a pane asks of its window.
+#[derive(Default)]
+struct PaneAsk {
+    focus: bool,
+    split: Option<bool>,
+    close: bool,
+}
+
+/// Areas of a tab's panes: each pane takes half of the area of the pane before it.
+fn pane_rects(area: Rect, dirs: &[Option<bool>]) -> Vec<Rect> {
+    const GAP: f32 = 3.0;
+    let mut rects = vec![area];
+    for d in dirs.iter().skip(1) {
+        let prev = rects.pop().unwrap();
+        let (a, b) = if *d == Some(true) {
+            let x = prev.center().x;
+            (Rect::from_min_max(prev.min, Pos2::new(x - GAP, prev.max.y)), Rect::from_min_max(Pos2::new(x + GAP, prev.min.y), prev.max))
+        } else {
+            let y = prev.center().y;
+            (Rect::from_min_max(prev.min, Pos2::new(prev.max.x, y - GAP)), Rect::from_min_max(Pos2::new(prev.min.x, y + GAP), prev.max))
+        };
+        rects.push(a);
+        rects.push(b);
+    }
+    rects
 }
 
 /// What a new tab runs.
@@ -171,8 +209,8 @@ pub struct TermWindow {
     title: String,
     copy_on_select: bool,
     renaming: Option<(usize, String)>,
-    /// Tabs to open on the next frame (the window's context is needed to wake it for output).
-    pending: Vec<Profile>,
+    /// Tabs and panes to open on the next frame (the window's context is needed to wake it for output).
+    pending: Vec<Pending>,
     /// The window closes with its last tab instead of opening a fresh shell.
     standalone: bool,
 }
@@ -308,7 +346,7 @@ impl TermWindow {
         let mut profiles = local_profiles();
         profiles.append(&mut more);
         let mut w = Self::with_profiles(profiles, "sshremote-standalone-terminal", "SSH Remote Terminal");
-        w.pending.push(first);
+        w.pending.push((first, None));
         w.standalone = true;
         w
     }
@@ -336,18 +374,75 @@ impl TermWindow {
 
     /// Opens a tab for `profile` in this window (shown from the next frame).
     pub fn open(&mut self, profile: Profile) {
-        self.pending.push(profile);
+        self.pending.push((profile, None));
     }
 
-    fn open_tab(&mut self, out: &mut Vec<Cmd>) {
-        let first = self.profiles.first().cloned();
-        if let Some(p) = first {
-            self.pending.push(p);
+    fn open_tab(&mut self) {
+        if let Some(p) = self.profiles.first().cloned() {
+            self.pending.push((p, None));
         }
-        let _ = out;
     }
 
-    fn start(&mut self, ctx: &egui::Context, profile: Profile, out: &mut Vec<Cmd>) {
+    /// Opens the focused pane's program again beside it (`side`) or below it, as Windows Terminal's
+    /// Alt+Shift+Plus and Alt+Shift+Minus do.
+    fn split(&mut self, side: bool) {
+        if let Some(t) = self.tabs.get(self.active) {
+            self.pending.push((t.profile.clone(), Some((t.id, side))));
+        }
+    }
+
+    /// Indices of the panes of `group`, in layout order.
+    fn panes(&self, group: u32) -> Vec<usize> {
+        (0..self.tabs.len()).filter(|&i| self.tabs[i].group == group).collect()
+    }
+
+    /// The tabs of the strip, in order: each one's group and the pane that stands for it.
+    fn groups(&self) -> Vec<(u32, usize)> {
+        let mut out: Vec<(u32, usize)> = Vec::new();
+        for (i, t) in self.tabs.iter().enumerate() {
+            match out.iter_mut().find(|g| g.0 == t.group) {
+                // The focused pane names its tab.
+                Some(g) if i == self.active => g.1 = i,
+                Some(_) => {}
+                None => out.push((t.group, i)),
+            }
+        }
+        out
+    }
+
+    /// Ends one pane; the next pane of its tab takes over its place in the layout.
+    fn close_pane(&mut self, i: usize, out: &mut Vec<Cmd>) {
+        let t = self.tabs.remove(i);
+        if t.exited.is_none() {
+            out.push(Cmd::Send(ToAgent::TermClose { id: t.id }));
+        }
+        if t.dir.is_none()
+            && let Some(next) = self.tabs.iter_mut().skip(i).find(|n| n.group == t.group)
+        {
+            next.dir = None;
+        }
+        if self.tabs.is_empty() {
+            out.push(Cmd::Close);
+            self.active = 0;
+            return;
+        }
+        if self.active > i {
+            self.active -= 1;
+        } else if self.active == i {
+            // Stay in the same tab when it has panes left.
+            let same = self.panes(t.group);
+            self.active = same.iter().copied().find(|&k| k >= i).or(same.last().copied()).unwrap_or(i.min(self.tabs.len() - 1));
+        }
+    }
+
+    /// Ends every pane of a tab.
+    fn close_group(&mut self, group: u32, out: &mut Vec<Cmd>) {
+        while let Some(&i) = self.panes(group).last() {
+            self.close_pane(i, out);
+        }
+    }
+
+    fn start(&mut self, ctx: &egui::Context, profile: Profile, split: Option<(u32, bool)>, out: &mut Vec<Cmd>) {
         let (tx, rx) = mpsc::channel();
         let size = (100u16, 30u16);
         let term = Term::new(Config::default(), &Size { cols: size.0 as usize, rows: size.1 as usize }, Listener(tx));
@@ -366,7 +461,7 @@ impl TermWindow {
                 }
             }
         };
-        self.tabs.push(Tab {
+        let tab = Tab {
             id,
             term,
             parser: Processor::new(),
@@ -379,8 +474,26 @@ impl TermWindow {
             view: View::Terminal,
             search: None,
             clean: true,
+            group: id,
+            dir: None,
+            profile,
+        };
+        // Pane 0 is whichever pane is focused when this one starts.
+        let at = split.and_then(|(of, side)| {
+            let of = if of == 0 { self.tabs.get(self.active)?.id } else { of };
+            self.tabs.iter().position(|t| t.id == of).map(|i| (i, side))
         });
-        self.active = self.tabs.len() - 1;
+        match at {
+            Some((i, side)) => {
+                let tab = Tab { group: self.tabs[i].group, dir: Some(side), ..tab };
+                self.tabs.insert(i + 1, tab);
+                self.active = i + 1;
+            }
+            None => {
+                self.tabs.push(tab);
+                self.active = self.tabs.len() - 1;
+            }
+        }
     }
 
     /// Hands keystrokes and sizes of local tabs to their programs instead of the agent.
@@ -456,10 +569,10 @@ impl TermWindow {
             if self.standalone {
                 return false;
             }
-            self.open_tab(out);
+            self.open_tab();
         }
-        for p in std::mem::take(&mut self.pending) {
-            self.start(ctx, p, out);
+        for (p, split) in std::mem::take(&mut self.pending) {
+            self.start(ctx, p, split, out);
         }
         // Output of local programs.
         for t in &mut self.tabs {
@@ -510,11 +623,14 @@ impl TermWindow {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
             ui.horizontal(|ui| {
                 let mut close = None;
-                let n = self.tabs.len().max(1) as f32;
+                let groups = self.groups();
+                let current = self.tabs.get(self.active).map(|t| t.group);
+                let n = groups.len().max(1) as f32;
                 let room = (ui.available_width() - 150.0).max(120.0);
                 let tab_w = (room / n).clamp(110.0, 220.0);
-                for i in 0..self.tabs.len() {
-                    let active = i == self.active;
+                for (gi, &(group, i)) in groups.iter().enumerate() {
+                    let active = Some(group) == current;
+                    let next_active = groups.get(gi + 1).is_some_and(|g| Some(g.0) == current);
                     let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 34.0), Sense::click());
                     let hovered = r.hovered();
                     let p = ui.painter();
@@ -523,7 +639,7 @@ impl TermWindow {
                         p.rect_filled(rect, top_round, scheme_bg());
                     } else if hovered {
                         p.rect_filled(rect.shrink2(Vec2::new(2.0, 3.0)), CornerRadius::same(6), TAB_HOVER);
-                    } else if i + 1 != self.active && i + 1 < self.tabs.len() {
+                    } else if !next_active && gi + 1 < groups.len() {
                         // A thin divider between two inactive tabs.
                         let x = rect.right() - 0.5;
                         p.vline(x, rect.y_range().shrink(9.0), egui::Stroke::new(1.0, TAB_DIVIDER));
@@ -547,6 +663,10 @@ impl TermWindow {
                     let mut title = t.custom.clone().unwrap_or_else(|| t.title.clone());
                     if ended {
                         title.push_str(" (ended)");
+                    }
+                    let count = self.panes(group).len();
+                    if count > 1 {
+                        title = format!("{title}  ({count} panes)");
                     }
                     let title_rect = Rect::from_min_max(
                         Pos2::new(rect.left() + 32.0, rect.top()),
@@ -593,7 +713,7 @@ impl TermWindow {
                             fg,
                         );
                         if cr.clicked() {
-                            close = Some(i);
+                            close = Some(group);
                         }
                         cr.on_hover_text("Close (middle click on the tab also closes)");
                     }
@@ -601,7 +721,7 @@ impl TermWindow {
                         self.active = i;
                     }
                     if r.middle_clicked() {
-                        close = Some(i);
+                        close = Some(group);
                     }
                     if r.double_clicked() {
                         let name = self.tabs[i].custom.clone().unwrap_or_else(|| self.tabs[i].title.clone());
@@ -622,7 +742,7 @@ impl TermWindow {
                     Color32::from_gray(200),
                 );
                 if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
-                    self.open_tab(out);
+                    self.open_tab();
                 }
                 // The profiles: local shells, ssh hosts, the SSH host's own shell.
                 let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
@@ -634,22 +754,13 @@ impl TermWindow {
                     for (k, p) in profiles.iter().enumerate() {
                         let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
                         if ui.add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut)).clicked() {
-                            self.pending.push(p.clone());
+                            self.pending.push((p.clone(), None));
                             ui.close();
                         }
                     }
                 });
-                if let Some(i) = close {
-                    let t = self.tabs.remove(i);
-                    if t.exited.is_none() {
-                        out.push(Cmd::Send(ToAgent::TermClose { id: t.id }));
-                    }
-                    if self.tabs.is_empty() {
-                        out.push(Cmd::Close);
-                    }
-                    if self.active > i || self.active >= self.tabs.len() {
-                        self.active = self.active.saturating_sub(1);
-                    }
+                if let Some(group) = close {
+                    self.close_group(group, out);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -690,8 +801,12 @@ impl TermWindow {
                             ui.separator();
                             ui.label(RichText::new("Shortcuts").strong());
                             for (k, v) in [
-                                ("Ctrl+Shift+T / W", "New / close tab"),
+                                ("Ctrl+Shift+T", "New tab"),
+                                ("Ctrl+Shift+W", "Close pane or tab"),
                                 ("Ctrl+Tab", "Next tab"),
+                                ("Alt+Shift+= / -", "Split right / down"),
+                                ("Alt+Shift+D", "Split along the longer side"),
+                                ("Alt+arrows", "Move between panes"),
                                 ("Ctrl+Shift+F", "Find"),
                                 ("Ctrl+Shift+C / V", "Copy / paste"),
                                 ("Ctrl+= / Ctrl+-", "Text size"),
@@ -731,25 +846,53 @@ impl TermWindow {
                 cs && i.key_pressed(Key::T),
                 cs && i.key_pressed(Key::W),
                 i.modifiers.ctrl && i.key_pressed(Key::Tab),
-                i.modifiers.ctrl && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
-                i.modifiers.ctrl && i.key_pressed(Key::Minus),
+                i.modifiers.ctrl && !i.modifiers.alt && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
+                i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::Minus),
             )
         });
+        let (split, step) = ui.ctx().input(|i| {
+            let alt_shift = i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl;
+            let split = if alt_shift && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)) {
+                Some(Some(true))
+            } else if alt_shift && i.key_pressed(Key::Minus) {
+                Some(Some(false))
+            } else if alt_shift && i.key_pressed(Key::D) {
+                Some(None)
+            } else {
+                None
+            };
+            let alt = i.modifiers.alt && !i.modifiers.shift && !i.modifiers.ctrl;
+            let step = if alt && (i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowUp)) {
+                -1
+            } else if alt && (i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowDown)) {
+                1
+            } else {
+                0
+            };
+            (split, step)
+        });
         if new_tab {
-            self.open_tab(out);
+            self.open_tab();
         }
         if close_tab && !self.tabs.is_empty() {
-            let t = self.tabs.remove(self.active);
-            if t.exited.is_none() {
-                out.push(Cmd::Send(ToAgent::TermClose { id: t.id }));
-            }
-            if self.tabs.is_empty() {
-                out.push(Cmd::Close);
-            }
-            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+            self.close_pane(self.active, out);
         }
         if next && !self.tabs.is_empty() {
-            self.active = (self.active + 1) % self.tabs.len();
+            let groups = self.groups();
+            let current = self.tabs[self.active].group;
+            let at = groups.iter().position(|g| g.0 == current).unwrap_or(0);
+            self.active = groups[(at + 1) % groups.len()].1;
+        }
+        if let Some(side) = split {
+            // Alt+Shift+D splits along the longer side of the area.
+            let wide = ui.available_rect_before_wrap().aspect_ratio() > 1.6;
+            self.split(side.unwrap_or(wide));
+        }
+        if step != 0 && let Some(t) = self.tabs.get(self.active) {
+            let panes = self.panes(t.group);
+            if let Some(k) = panes.iter().position(|&i| i == self.active) {
+                self.active = panes[(k as isize + step).rem_euclid(panes.len() as isize) as usize];
+            }
         }
         if bigger {
             self.font_size = (self.font_size + 1.0).min(32.0);
@@ -759,14 +902,49 @@ impl TermWindow {
         }
         let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
+        let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let font_size = self.font_size;
-            let Some(t) = self.tabs.get_mut(self.active) else { return };
-            match t.view {
-                View::Terminal => screen(ui, t, font_size, copy_on_select, out),
-                View::Text | View::Markdown => reader(ui, t),
+            let Some(group) = self.tabs.get(self.active).map(|t| t.group) else { return };
+            let panes = self.panes(group);
+            let dirs: Vec<Option<bool>> = panes.iter().map(|&i| self.tabs[i].dir).collect();
+            let rects = pane_rects(ui.available_rect_before_wrap(), &dirs);
+            let several = panes.len() > 1;
+            for (&i, &r) in panes.iter().zip(&rects) {
+                let focused = i == self.active;
+                let t = &mut self.tabs[i];
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(("pane", t.id)));
+                let ask = match t.view {
+                    View::Terminal => screen(&mut child, t, font_size, copy_on_select, focused, out),
+                    View::Text | View::Markdown => {
+                        reader(&mut child, t);
+                        PaneAsk { focus: child.response().contains_pointer() && child.input(|i| i.pointer.any_pressed()), ..Default::default() }
+                    }
+                };
+                if several {
+                    // The focused pane is outlined, as in Windows Terminal.
+                    let color = if focused { ACCENT } else { Color32::from_white_alpha(18) };
+                    ui.painter().rect_stroke(r.expand(1.5), CornerRadius::same(3), egui::Stroke::new(1.0, color), egui::StrokeKind::Outside);
+                }
+                asks.push((i, ask));
             }
         });
+        let mut close = None;
+        for (i, ask) in asks {
+            if ask.focus {
+                self.active = i;
+            }
+            if let Some(side) = ask.split {
+                self.active = i;
+                self.split(side);
+            }
+            if ask.close {
+                close = Some(i);
+            }
+        }
+        if let Some(i) = close {
+            self.close_pane(i, out);
+        }
         if let Some((i, mut name)) = self.renaming.take() {
             let mut done = None;
             let modal = egui::Modal::new(egui::Id::unique("rename-tab")).show(ui.ctx(), |ui| {
@@ -866,7 +1044,8 @@ fn open_url(url: &str) {
     }
 }
 
-fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, out: &mut Vec<Cmd>) {
+fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, focused: bool, out: &mut Vec<Cmd>) -> PaneAsk {
+    let mut ask = PaneAsk::default();
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let area = ui.available_rect_before_wrap();
@@ -880,6 +1059,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         }
     }
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
+    ask.focus = resp.clicked() || resp.drag_started() || resp.secondary_clicked() || resp.middle_clicked();
     let origin = area.min;
     let offset = t.term.grid().display_offset() as i32;
     // Cell under a screen position, as a grid point.
@@ -930,12 +1110,12 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         }
     }
     // Find (Ctrl+Shift+F): a bar at the top right, Enter for the next match upwards.
-    if ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::F)) {
+    if focused && ui.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::F)) {
         t.search = Some(t.search.take().unwrap_or_default());
     }
     let mut close_search = false;
     let mut search_step: Option<alacritty_terminal::index::Direction> = None;
-    if let Some(search) = t.search.as_mut() {
+    if let Some(search) = t.search.as_mut().filter(|_| focused) {
         let bar = Rect::from_min_size(Pos2::new(area.right() - 330.0, area.top() + 4.0), Vec2::new(322.0, 34.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar).layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("find", t.id)))));
         egui::Frame::new().fill(Color32::from_rgb(36, 38, 46)).corner_radius(CornerRadius::same(8)).inner_margin(4.0).show(&mut child, |ui| {
@@ -1035,6 +1215,19 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
             ui.close();
         }
         ui.separator();
+        if ui.add(egui::Button::new("Split right").shortcut_text("Alt+Shift+=")).clicked() {
+            ask.split = Some(true);
+            ui.close();
+        }
+        if ui.add(egui::Button::new("Split down").shortcut_text("Alt+Shift+-")).clicked() {
+            ask.split = Some(false);
+            ui.close();
+        }
+        if ui.add(egui::Button::new("Close pane").shortcut_text("Ctrl+Shift+W")).clicked() {
+            ask.close = true;
+            ui.close();
+        }
+        ui.separator();
         if ui.button("Clear scrollback").clicked() {
             clear = true;
             ui.close();
@@ -1068,6 +1261,10 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
     let mut send: Vec<u8> = Vec::new();
     let events = ui.ctx().input(|i| i.events.clone());
     for e in events {
+        // Only the focused pane types; the wheel scrolls the pane under the pointer.
+        if !focused && !matches!(e, Event::MouseWheel { .. }) {
+            continue;
+        }
         match e {
             Event::Text(s) => send.extend_from_slice(s.as_bytes()),
             Event::Copy => match t.term.selection_to_string() {
@@ -1111,8 +1308,12 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
             Event::Key { key, pressed: true, modifiers, .. } => {
                 // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
                 let cs = modifiers.ctrl && modifiers.shift;
+                let alt_shift = modifiers.alt && modifiers.shift && !modifiers.ctrl;
+                let alt = modifiers.alt && !modifiers.shift && !modifiers.ctrl;
                 if (cs && matches!(key, Key::T | Key::W))
                     || (modifiers.ctrl && matches!(key, Key::Tab | Key::Equals | Key::Plus | Key::Minus))
+                    || (alt_shift && matches!(key, Key::Equals | Key::Plus | Key::Minus | Key::D))
+                    || (alt && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown))
                 {
                     continue;
                 }
@@ -1150,6 +1351,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         run.clear();
     };
     let mut last_row = i32::MIN;
+    let mut hollow = None;
     for cell in content.display_iter {
         let row = cell.point.line.0 + offset;
         let col = cell.point.column.0;
@@ -1183,10 +1385,13 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
             bg = ACCENT.gamma_multiply(0.55);
         }
         let at_cursor = show_cursor && cell.point == cursor;
-        if at_cursor {
-            (fg, bg) = (scheme_bg(), scheme_fg());
-        }
         let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
+        if at_cursor && focused {
+            (fg, bg) = (scheme_bg(), scheme_fg());
+        } else if at_cursor {
+            // A pane without the focus shows a hollow cursor.
+            hollow = Some(cell_rect);
+        }
         if bg != scheme_bg() {
             painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
         }
@@ -1209,8 +1414,8 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         }
     }
     flush(&mut run, run_start, run_color);
-    if !show_cursor || t.exited.is_some() {
-        // Nothing more to draw for the cursor.
+    if let Some(r) = hollow {
+        painter.rect_stroke(r.shrink(0.5), CornerRadius::ZERO, egui::Stroke::new(1.0, scheme_fg()), egui::StrokeKind::Inside);
     }
     if let Some(text) = &t.exited {
         let r = Rect::from_min_size(Pos2::new(area.left(), area.bottom() - 28.0), Vec2::new(area.width(), 28.0));
@@ -1226,6 +1431,7 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
     }
+    ask
 }
 
 /// A shell's title made short for a tab: "Administrator: C:\...\powershell.exe" becomes "powershell".
@@ -1273,7 +1479,7 @@ pub fn local_profiles() -> Vec<Profile> {
 }
 
 /// The terminal as a program of its own (`sshremote terminal [HOST]`).
-pub fn run_window(first: Profile) -> Result<(), String> {
+pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>) -> Result<(), String> {
     struct Solo(TermWindow);
     impl eframe::App for Solo {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1293,7 +1499,9 @@ pub fn run_window(first: Profile) -> Result<(), String> {
         native,
         Box::new(move |cc| {
             crate::gui::style(&cc.egui_ctx);
-            Ok(Box::new(Solo(TermWindow::standalone(first, Vec::new()))))
+            let mut w = TermWindow::standalone(first, Vec::new());
+            w.pending.extend(panes.into_iter().map(|(p, side)| (p, Some((0, side)))));
+            Ok(Box::new(Solo(w)))
         }),
     )
     .map_err(|e| e.to_string())

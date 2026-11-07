@@ -44,7 +44,9 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --term [options]      choose a recent or ~/.ssh/config host, then view it here
        sshremote mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
        sshremote mcp --here            the same for this computer's own screen
-       sshremote terminal [HOST [PORT]] the terminal window: a local shell, or ssh to HOST
+       sshremote terminal [HOST [PORT]] [--split HOST] [--split-down HOST]
+                                  the terminal window: a local shell, or ssh to HOST; --split adds
+                                  panes beside or below (HOST local: a shell here)
        sshremote --local [options]     view a built-in test desktop (no ssh)
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
@@ -230,11 +232,32 @@ fn main() {
         attach_console();
     }
     if args[0] == "terminal" {
-        let profile = match args.get(1) {
-            Some(host) => termwin::ssh_profile(host, args.get(2).map_or("", |s| s.as_str())),
-            None => termwin::local_profiles().into_iter().next().expect("a local shell"),
+        // HOST [PORT], then --split HOST / --split-down HOST for panes beside or below; "local" is a shell here.
+        let profile = |host: &str, port: &str| {
+            if host == "local" {
+                termwin::local_profiles().into_iter().next().expect("a local shell")
+            } else {
+                termwin::ssh_profile(host, port)
+            }
         };
-        if let Err(e) = termwin::run_window(profile) {
+        let mut first = None;
+        let mut panes = Vec::new();
+        let mut it = args[1..].iter().peekable();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--split" | "--split-down" => {
+                    let host = it.next().map_or("local", |s| s.as_str());
+                    panes.push((profile(host, ""), a == "--split"));
+                }
+                host if first.is_none() => {
+                    let port = it.next_if(|p| p.parse::<u16>().is_ok()).map_or("", |s| s.as_str());
+                    first = Some(profile(host, port));
+                }
+                _ => {}
+            }
+        }
+        let first = first.unwrap_or_else(|| profile("local", ""));
+        if let Err(e) = termwin::run_window(first, panes) {
             eprintln!("sshremote: {e}");
             std::process::exit(1);
         }

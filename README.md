@@ -134,7 +134,8 @@ default profile and the arrow beside it lists the others: the shell on the SSH h
 session, and local shells (Windows PowerShell, PowerShell 7, Command Prompt, Git Bash and WSL on
 Windows; the login shell, bash, zsh and fish elsewhere). SSH terminals from the home screen are local
 `ssh` processes in a pseudo console, so password and host-key prompts appear in the tab.
-`sshremote terminal [HOST [PORT]]` opens the window on its own.
+`sshremote terminal [HOST [PORT]]` opens the window on its own; `--split HOST` and `--split-down
+HOST` add panes beside or below (`local` is a shell on this computer), as `wt split-pane` does.
 
 A remote-screen session's shells run under the agent on a pseudo-terminal (a pseudo console on
 Windows) and travel over the same connection, so they need no second login and also work over
@@ -142,7 +143,12 @@ Windows) and travel over the same connection, so they need no second login and a
 programs such as vim, top and less, wide characters, scrollback (wheel, Shift+PageUp), selection with
 copy (Ctrl+C with a selection, otherwise it interrupts) and paste.
 
-- Tabs: double-click to rename, Ctrl+Shift+T new, Ctrl+Shift+W close, Ctrl+Tab next.
+- Tabs: double-click to rename, Ctrl+Shift+T new, Ctrl+Tab next.
+- Panes: Alt+Shift+= splits the focused pane side by side and Alt+Shift+- one above the other (also
+  in the context menu), Alt+Shift+D along the longer side; the new pane runs the same profile. Alt and
+  the arrow keys or a click move the focus, which is outlined; only the focused pane takes keys, the
+  wheel scrolls the pane under the pointer, and Ctrl+Shift+W closes the focused pane (the tab with
+  its last pane).
 - Find (Ctrl+Shift+F) searches the scrollback; Ctrl+click opens a link.
 - Settings: text size (also Ctrl+= and Ctrl+-), colour schemes (One Half Dark, Campbell, Dracula,
   Solarized Dark, Tango Dark, One Half Light) and copy on select, remembered between runs.
