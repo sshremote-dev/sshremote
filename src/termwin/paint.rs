@@ -63,6 +63,15 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
     };
     let mut last_row = i32::MIN;
     let mut caret_cell: Option<Rect> = None;
+    // Backgrounds go under all the text, a rectangle per run of one colour along a row.
+    let bg_slot = painter.add(egui::Shape::Noop);
+    let mut bgs: Vec<egui::Shape> = Vec::new();
+    let mut bg_run: Option<(Rect, Color32)> = None;
+    let end_bg = |bg_run: &mut Option<(Rect, Color32)>, bgs: &mut Vec<egui::Shape>| {
+        if let Some((r, c)) = bg_run.take() {
+            bgs.push(egui::Shape::rect_filled(r, CornerRadius::ZERO, c));
+        }
+    };
     let shape = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
     let block = shape == 1;
     // Blinking as in VS Code: on and off every half second, and steady for a moment after typing.
@@ -114,8 +123,18 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
                 (fg, bg) = (scheme_bg(), scheme_fg());
             }
         }
-        if bg != scheme_bg() {
-            painter.rect_filled(cell_rect, CornerRadius::ZERO, bg);
+        if bg == scheme_bg() {
+            end_bg(&mut bg_run, &mut bgs);
+        } else {
+            match &mut bg_run {
+                Some((r, c)) if *c == bg && r.top() == cell_rect.top() && (r.right() - cell_rect.left()).abs() < 0.5 => {
+                    r.max.x = cell_rect.right();
+                }
+                _ => {
+                    end_bg(&mut bg_run, &mut bgs);
+                    bg_run = Some((cell_rect, bg));
+                }
+            }
         }
         if flags.contains(Flags::UNDERLINE) {
             painter.hline(cell_rect.x_range(), cell_rect.bottom() - 1.5, egui::Stroke::new(1.0, fg));
@@ -136,6 +155,8 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
         }
     }
     flush(&mut run, run_start, run_color);
+    end_bg(&mut bg_run, &mut bgs);
+    painter.set(bg_slot, egui::Shape::Vec(bgs));
     let mut caret = caret_cell;
     if !t.preedit.is_empty() && show_cursor {
         // The composition in progress, underlined, with the caret after it as in a text field.
