@@ -40,9 +40,7 @@ mod sys {
 
     const PREFIX: &str = "sshremote:";
 
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain([0]).collect()
-    }
+    use crate::sys::wide;
 
     unsafe fn text(p: *const u16) -> String {
         if p.is_null() {

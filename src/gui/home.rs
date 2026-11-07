@@ -138,7 +138,7 @@ impl App {
         self.open_profile(profile);
         self.recent.retain(|(r, _)| r != host);
         self.recent.insert(0, (host.to_string(), port.trim().to_string()));
-        self.recent.truncate(12);
+        self.recent.truncate(crate::hosts::RECENT_MAX);
         crate::hosts::save_recent(&self.recent);
         crate::hosts::mark_seen(host);
         self.seen = crate::hosts::last_seen();

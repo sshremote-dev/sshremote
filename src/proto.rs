@@ -442,7 +442,8 @@ pub fn read_msg(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
         r => r?,
     }
     let len = u32::from_le_bytes(head[1..].try_into().unwrap()) as usize;
-    if len > 256 << 20 {
+    // Frames, snapshots and file chunks stay far below this; anything bigger is a broken peer.
+    if len > 64 << 20 {
         return Err(bad());
     }
     let mut payload = vec![0u8; len];

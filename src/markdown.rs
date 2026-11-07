@@ -1156,7 +1156,10 @@ pub fn show_in_view(
         }
         let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
         let mut child = ui.new_child(
-            egui::UiBuilder::new().max_rect(rect).id_salt(("block", n)).layout(egui::Layout::top_down(egui::Align::Min)),
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("block", n))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         block(&mut child, th, &doc.blocks, n, id);
     }
@@ -1284,7 +1287,8 @@ mod speed {
         let mut heights = Heights::default();
         let lazy = time(&mut |ui| {
             egui::ScrollArea::vertical().id_salt("lazy").show_viewport(ui, |ui, view| {
-                let end = show_in_view(ui, &doc, 1, egui::Id::unique("lazy"), &th, &mut heights, view, 20.0, 900.0, 0.0);
+                let end =
+                    show_in_view(ui, &doc, 1, egui::Id::unique("lazy"), &th, &mut heights, view, 20.0, 900.0, 0.0);
                 let o = ui.max_rect().min;
                 ui.allocate_rect(Rect::from_min_size(o, Vec2::new(940.0, end)), Sense::hover());
             });

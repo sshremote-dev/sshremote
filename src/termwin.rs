@@ -1408,7 +1408,8 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut 
             let pad = ((full - width) / 2.0).max(0.0) + 20.0;
             let column = width - 40.0;
             ui.spacing_mut().item_spacing.y = 6.0;
-            let end = crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
+            let end =
+                crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
             let origin = ui.max_rect().min;
             let rows = Rect::from_min_size(
                 origin + Vec2::new(pad, end),

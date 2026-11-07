@@ -8,21 +8,7 @@ use eframe::egui::{self, Color32, RichText};
 
 use crate::gui::{ic, primary};
 
-fn ssh_dir() -> PathBuf {
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
-    home.join(".ssh")
-}
-
-/// Runs a program without a console window flashing up.
-fn quiet(cmd: &mut Command) -> &mut Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    cmd
-}
+use crate::sys::{quiet, ssh_dir};
 
 /// A key pair in ~/.ssh: file stem and the public key line.
 pub struct KeyPair {

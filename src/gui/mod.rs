@@ -448,7 +448,7 @@ impl eframe::App for App {
                     if let Some((h, p)) = self.pending_host.take() {
                         self.recent.retain(|(r, _)| *r != h);
                         self.recent.insert(0, (h.clone(), p));
-                        self.recent.truncate(8);
+                        self.recent.truncate(crate::hosts::RECENT_MAX);
                         crate::hosts::save_recent(&self.recent);
                         crate::hosts::mark_seen(&h);
                         self.seen = crate::hosts::last_seen();

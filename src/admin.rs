@@ -64,17 +64,13 @@ pub fn set_ask_at_start(on: bool) {
 /// the user declined.
 #[cfg(windows)]
 pub fn relaunch(args: &[String]) -> Result<bool, String> {
+    use crate::sys::wide;
     use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let file = wide(&exe.to_string_lossy());
     // Quoted the way the C runtime reads a command line: backslashes before a quote are doubled.
-    let quote = |a: &String| {
-        let trailing = a.len() - a.trim_end_matches('\\').len();
-        format!("\"{}{}\"", a.replace('"', "\\\""), "\\".repeat(trailing))
-    };
-    let params = wide(&args.iter().map(quote).collect::<Vec<_>>().join(" "));
+    let params = wide(&crate::sys::command_line(args));
     let verb = wide("runas");
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;

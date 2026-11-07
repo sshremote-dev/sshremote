@@ -39,9 +39,7 @@ pub const NAME: &str = "sshremote";
 const PIPE: &str = r"\\.\pipe\sshremote-service";
 const POLICY_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
+use crate::sys::wide;
 
 fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     use std::os::windows::process::CommandExt;

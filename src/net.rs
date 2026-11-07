@@ -179,8 +179,17 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
 
 fn relay_hello(stream: &mut TcpStream, role: &str, id: &str) -> io::Result<()> {
     writeln!(stream, "{role} {id}")?;
-    let mut line = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+    // Byte by byte: a buffered reader could take in the start of the handshake that follows.
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < 256 {
+        stream.read_exact(&mut byte)?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+    }
+    let line = String::from_utf8_lossy(&line);
     if line.trim() == "ok" { Ok(()) } else { Err(io::Error::other(format!("relay: {}", line.trim()))) }
 }
 
@@ -259,7 +268,7 @@ pub fn relay(listen: Option<&str>) -> Result<(), String> {
     let addr = listen.unwrap_or("0.0.0.0:7071");
     let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
     println!("sshremote relay listening on {addr}");
-    let waiting: Arc<Mutex<HashMap<String, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+    let waiting: Arc<Mutex<HashMap<String, (TcpStream, std::time::Instant)>>> = Arc::new(Mutex::new(HashMap::new()));
     for s in listener.incoming().flatten() {
         let waiting = waiting.clone();
         thread::spawn(move || {
@@ -275,10 +284,14 @@ pub fn relay(listen: Option<&str>) -> Result<(), String> {
             };
             let mut s = s;
             if role == "agent" {
-                waiting.lock().unwrap().insert(id, s);
+                let mut w = waiting.lock().unwrap_or_else(|e| e.into_inner());
+                // Agents that waited a day without a viewer are gone or will reconnect.
+                w.retain(|_, (_, since)| since.elapsed() < Duration::from_secs(24 * 3600));
+                w.insert(id, (s, std::time::Instant::now()));
                 return;
             }
-            let Some(mut agent) = waiting.lock().unwrap().remove(&id) else {
+            let found = waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).map(|(s, _)| s);
+            let Some(mut agent) = found else {
                 let _ = writeln!(s, "no agent with that ID");
                 return;
             };

@@ -54,6 +54,22 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
     p
 }
 
+/// Creates a new file named `name` in `dir`, or "name (2)" and so on: the name is claimed when
+/// the file is created, so two transfers at once cannot take the same one.
+fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, PathBuf)> {
+    loop {
+        let path = free_path(dir, name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        }
+    }
+}
+
+/// Transfers open at once; more are refused rather than holding ever more files open.
+const MAX_OPEN: usize = 64;
+
 /// What the receiving side has to tell the sender.
 pub enum Note {
     Progress { id: u32, received: u64 },
@@ -97,18 +113,25 @@ impl Inbox {
             dir.push(p);
         }
         let _ = std::fs::create_dir_all(&dir);
-        let path = free_path(&dir, &parts[parts.len() - 1]);
-        match File::create(&path) {
-            Ok(file) => {
+        if self.open.len() >= MAX_OPEN {
+            return Some(Note::Done { id, ok: false, text: "too many transfers at once".into() });
+        }
+        match create_free(&dir, &parts[parts.len() - 1]) {
+            Ok((file, path)) => {
                 self.open.insert(id, Incoming { file, path, size, received: 0, reported: 0 });
                 None
             }
-            Err(e) => Some(Note::Done { id, ok: false, text: format!("{}: {e}", path.display()) }),
+            Err(e) => Some(Note::Done { id, ok: false, text: e.to_string() }),
         }
     }
 
     pub fn data(&mut self, id: u32, data: &[u8]) -> Option<Note> {
         let u = self.open.get_mut(&id)?;
+        if u.received + data.len() as u64 > u.size {
+            let u = self.open.remove(&id)?;
+            let _ = std::fs::remove_file(&u.path);
+            return Some(Note::Done { id, ok: false, text: "more data than the file's size".into() });
+        }
         if let Err(e) = u.file.write_all(data) {
             let u = self.open.remove(&id)?;
             let _ = std::fs::remove_file(&u.path);
@@ -329,7 +352,7 @@ pub fn list(path: &str) -> ToClient {
                     })
                 })
                 .collect();
-            entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            entries.sort_by_cached_key(|e| (!e.dir, e.name.to_lowercase()));
             ToClient::DirList { path: shown, entries, error: String::new() }
         }
         Err(e) => ToClient::DirList { path: shown, entries: Vec::new(), error: e.to_string() },

@@ -547,7 +547,12 @@ pub fn run(opt: &Options) -> Result<(), String> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            let err =
+                serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}});
+            println!("{err}");
+            continue;
+        };
         let Some(id) = req.get("id").cloned() else { continue }; // notifications need no answer
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(Value::Null);

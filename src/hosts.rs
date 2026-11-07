@@ -28,6 +28,17 @@ fn parse_ssh_hosts(text: &str) -> Vec<String> {
 }
 
 pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
+    // Found once: it does not move while the program runs (tests that change HOME run alone).
+    #[cfg(not(test))]
+    {
+        static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+        DIR.get_or_init(find_config_dir).clone()
+    }
+    #[cfg(test)]
+    find_config_dir()
+}
+
+fn find_config_dir() -> Option<std::path::PathBuf> {
     let base: Option<std::path::PathBuf> = if cfg!(windows) {
         std::env::var_os("APPDATA").map(Into::into)
     } else {
@@ -44,6 +55,9 @@ pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
     }
     Some(dir)
 }
+
+/// How many recent hosts are remembered.
+pub const RECENT_MAX: usize = 12;
 
 /// Recent connections as `host port` lines; passwords are never stored.
 pub fn load_recent() -> Vec<(String, String)> {
@@ -156,14 +170,31 @@ pub fn ago(when: u64) -> String {
 
 /// A small persisted preference such as the theme.
 pub fn setting(key: &str) -> Option<String> {
-    read_lines("settings.txt").iter().find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
+    let prefix = format!("{key}=");
+    with_settings(|lines| lines.iter().find_map(|l| l.strip_prefix(&prefix).map(str::to_string)))
 }
 
+/// Sets a preference; the file is written at once, so a crash loses nothing.
 pub fn set_setting(key: &str, value: &str) {
-    let mut lines: Vec<String> =
-        read_lines("settings.txt").into_iter().filter(|l| !l.starts_with(&format!("{key}="))).collect();
-    lines.push(format!("{key}={value}"));
-    write_lines("settings.txt", &lines);
+    let prefix = format!("{key}=");
+    with_settings(|lines| {
+        lines.retain(|l| !l.starts_with(&prefix));
+        lines.push(format!("{prefix}{value}"));
+        write_lines("settings.txt", lines);
+    });
+}
+
+/// The settings, read from disk once and kept: windows ask for them every frame.
+static SETTINGS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+fn with_settings<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
+    let mut cache = SETTINGS.lock().unwrap_or_else(|e| e.into_inner());
+    f(cache.get_or_insert_with(|| read_lines("settings.txt")))
+}
+
+/// Reads the settings from disk again (after a restore wrote them).
+pub fn reload_settings() {
+    *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Puts `host` first in the recent list.
@@ -171,7 +202,7 @@ pub fn remember(host: &str) {
     let mut list = load_recent();
     list.retain(|(h, _)| h != host);
     list.insert(0, (host.to_string(), String::new()));
-    list.truncate(8);
+    list.truncate(RECENT_MAX);
     save_recent(&list);
     mark_seen(host);
 }

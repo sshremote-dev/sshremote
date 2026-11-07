@@ -17,7 +17,7 @@ pub const MIN_PASSPHRASE: usize = 8;
 const MAX_SSH_FILE: u64 = 1 << 20;
 
 fn ssh_dir() -> Option<PathBuf> {
-    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| Path::new(&h).join(".ssh"))
+    Some(crate::sys::ssh_dir())
 }
 
 /// Where backups made by hand go: Documents/sshremote.
@@ -235,9 +235,11 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
     }
     // A wrong passphrase stops the restore before anything has been changed.
     let pass = passphrase.filter(|p| !p.is_empty());
+    // Each sealed part is opened once (the key takes a while to stretch), before anything changes.
+    let mut opened = std::collections::HashMap::new();
     for key in ["passwords", "secrets"] {
         if let (Some(sealed), Some(p)) = (v.get(key), pass) {
-            open(sealed, p)?;
+            opened.insert(key, open(sealed, p)?);
         }
     }
     let dir = crate::hosts::config_dir().ok_or("no settings folder")?;
@@ -281,10 +283,9 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             done.push("~/.ssh/config (the old one is config.bak)".into());
         }
     }
-    if let Some(sealed) = v.get("passwords") {
-        match passphrase.filter(|p| !p.is_empty()) {
-            Some(p) => {
-                let plain = open(sealed, p)?;
+    if v.get("passwords").is_some() {
+        match opened.get("passwords") {
+            Some(plain) => {
                 let secrets: serde_json::Map<String, Value> =
                     serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
                 for (host, s) in &secrets {
@@ -297,10 +298,9 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             None => done.push("passwords skipped (no passphrase)".into()),
         }
     }
-    if let Some(sealed) = v.get("secrets") {
-        match passphrase.filter(|p| !p.is_empty()) {
-            Some(p) => {
-                let plain = open(sealed, p)?;
+    if v.get("secrets").is_some() {
+        match opened.get("secrets") {
+            Some(plain) => {
                 let secrets: Value = serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
                 let passwords = secrets["passwords"].as_object().cloned().unwrap_or_default();
                 for (host, s) in &passwords {
@@ -328,6 +328,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             None => done.push("passwords and ~/.ssh files skipped (no passphrase)".into()),
         }
     }
+    crate::hosts::reload_settings();
     Ok(format!("Restored {}", done.join(", ")))
 }
 

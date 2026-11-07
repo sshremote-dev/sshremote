@@ -75,8 +75,9 @@ fn pipe(name: &str, access: u32, sddl: &[u16]) -> Result<File, String> {
 }
 
 fn schtasks(args: &[&str]) -> Result<(), String> {
-    let out =
-        Command::new("schtasks").args(args).stdin(Stdio::null()).output().map_err(|e| format!("schtasks: {e}"))?;
+    let out = crate::sys::quiet(Command::new("schtasks").args(args).stdin(Stdio::null()))
+        .output()
+        .map_err(|e| format!("schtasks: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
