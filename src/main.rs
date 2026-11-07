@@ -188,7 +188,15 @@ fn attach_console() {
         }
         let open = |name: &str, access: u32| {
             let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-            CreateFileW(w.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut())
+            CreateFileW(
+                w.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
         };
         let conout = open("CONOUT$", GENERIC_READ | GENERIC_WRITE);
         let conin = open("CONIN$", GENERIC_READ | GENERIC_WRITE);
@@ -298,7 +306,8 @@ fn main() {
                 "--" => {
                     let argv: Vec<String> = it.by_ref().cloned().collect();
                     let name = argv.first().cloned().unwrap_or_default();
-                    first = Some(termwin::Profile { name, icon: gui::ic::TERMINAL, launch: termwin::Launch::Local(argv) });
+                    first =
+                        Some(termwin::Profile { name, icon: gui::ic::TERMINAL, launch: termwin::Launch::Local(argv) });
                 }
                 "--split" | "--split-down" => {
                     let host = it.next().map_or("local", |s| s.as_str());

@@ -211,7 +211,7 @@ impl Gdi {
             let row = &mut data[y * tw * 4..(y + 1) * tw * 4];
             let mut x = 0;
             for &(a, b) in spans.iter().chain(std::iter::once(&(tw, tw))) {
-                for px in row[x * 4..a.max(x) * 4].chunks_exact_mut(4) {
+                for px in row[x * 4..a.max(x) * 4].as_chunks_mut::<4>().0 {
                     px.copy_from_slice(&super::region::HIDDEN);
                 }
                 x = x.max(b);

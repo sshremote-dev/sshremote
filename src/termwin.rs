@@ -23,30 +23,144 @@ const TAB_DIVIDER: Color32 = Color32::from_rgb(52, 55, 64);
 struct Scheme(&'static str, [u8; 3], [u8; 3], [[u8; 3]; 16]);
 
 const SCHEMES: [Scheme; 6] = [
-    Scheme("One Half Dark", [22, 23, 28], [215, 218, 224], [
-        [59, 63, 74], [224, 108, 117], [152, 195, 121], [229, 192, 123], [97, 175, 239], [198, 120, 221], [86, 182, 194], [215, 218, 224],
-        [92, 99, 112], [239, 123, 132], [169, 212, 138], [240, 207, 141], [124, 192, 245], [212, 143, 234], [111, 203, 214], [255, 255, 255],
-    ]),
-    Scheme("Campbell", [12, 12, 12], [204, 204, 204], [
-        [12, 12, 12], [197, 15, 31], [19, 161, 14], [193, 156, 0], [0, 55, 218], [136, 23, 152], [58, 150, 221], [204, 204, 204],
-        [118, 118, 118], [231, 72, 86], [22, 198, 12], [249, 241, 165], [59, 120, 255], [180, 0, 158], [97, 214, 214], [242, 242, 242],
-    ]),
-    Scheme("Dracula", [40, 42, 54], [248, 248, 242], [
-        [33, 34, 44], [255, 85, 85], [80, 250, 123], [241, 250, 140], [189, 147, 249], [255, 121, 198], [139, 233, 253], [248, 248, 242],
-        [98, 114, 164], [255, 110, 110], [105, 255, 148], [255, 255, 165], [214, 172, 255], [255, 146, 223], [164, 255, 255], [255, 255, 255],
-    ]),
-    Scheme("Solarized Dark", [0, 43, 54], [131, 148, 150], [
-        [7, 54, 66], [220, 50, 47], [133, 153, 0], [181, 137, 0], [38, 139, 210], [211, 54, 130], [42, 161, 152], [238, 232, 213],
-        [0, 43, 54], [203, 75, 22], [88, 110, 117], [101, 123, 131], [131, 148, 150], [108, 113, 196], [147, 161, 161], [253, 246, 227],
-    ]),
-    Scheme("Tango Dark", [0, 0, 0], [211, 215, 207], [
-        [0, 0, 0], [204, 0, 0], [78, 154, 6], [196, 160, 0], [52, 101, 164], [117, 80, 123], [6, 152, 154], [211, 215, 207],
-        [85, 87, 83], [239, 41, 41], [138, 226, 52], [252, 233, 79], [114, 159, 207], [173, 127, 168], [52, 226, 226], [238, 238, 236],
-    ]),
-    Scheme("One Half Light", [250, 250, 250], [56, 58, 66], [
-        [56, 58, 66], [228, 86, 73], [80, 161, 79], [193, 132, 1], [1, 132, 188], [166, 38, 164], [9, 151, 179], [250, 250, 250],
-        [79, 82, 93], [223, 108, 117], [152, 195, 121], [228, 192, 122], [97, 175, 239], [197, 119, 221], [86, 181, 193], [255, 255, 255],
-    ]),
+    Scheme(
+        "One Half Dark",
+        [22, 23, 28],
+        [215, 218, 224],
+        [
+            [59, 63, 74],
+            [224, 108, 117],
+            [152, 195, 121],
+            [229, 192, 123],
+            [97, 175, 239],
+            [198, 120, 221],
+            [86, 182, 194],
+            [215, 218, 224],
+            [92, 99, 112],
+            [239, 123, 132],
+            [169, 212, 138],
+            [240, 207, 141],
+            [124, 192, 245],
+            [212, 143, 234],
+            [111, 203, 214],
+            [255, 255, 255],
+        ],
+    ),
+    Scheme(
+        "Campbell",
+        [12, 12, 12],
+        [204, 204, 204],
+        [
+            [12, 12, 12],
+            [197, 15, 31],
+            [19, 161, 14],
+            [193, 156, 0],
+            [0, 55, 218],
+            [136, 23, 152],
+            [58, 150, 221],
+            [204, 204, 204],
+            [118, 118, 118],
+            [231, 72, 86],
+            [22, 198, 12],
+            [249, 241, 165],
+            [59, 120, 255],
+            [180, 0, 158],
+            [97, 214, 214],
+            [242, 242, 242],
+        ],
+    ),
+    Scheme(
+        "Dracula",
+        [40, 42, 54],
+        [248, 248, 242],
+        [
+            [33, 34, 44],
+            [255, 85, 85],
+            [80, 250, 123],
+            [241, 250, 140],
+            [189, 147, 249],
+            [255, 121, 198],
+            [139, 233, 253],
+            [248, 248, 242],
+            [98, 114, 164],
+            [255, 110, 110],
+            [105, 255, 148],
+            [255, 255, 165],
+            [214, 172, 255],
+            [255, 146, 223],
+            [164, 255, 255],
+            [255, 255, 255],
+        ],
+    ),
+    Scheme(
+        "Solarized Dark",
+        [0, 43, 54],
+        [131, 148, 150],
+        [
+            [7, 54, 66],
+            [220, 50, 47],
+            [133, 153, 0],
+            [181, 137, 0],
+            [38, 139, 210],
+            [211, 54, 130],
+            [42, 161, 152],
+            [238, 232, 213],
+            [0, 43, 54],
+            [203, 75, 22],
+            [88, 110, 117],
+            [101, 123, 131],
+            [131, 148, 150],
+            [108, 113, 196],
+            [147, 161, 161],
+            [253, 246, 227],
+        ],
+    ),
+    Scheme(
+        "Tango Dark",
+        [0, 0, 0],
+        [211, 215, 207],
+        [
+            [0, 0, 0],
+            [204, 0, 0],
+            [78, 154, 6],
+            [196, 160, 0],
+            [52, 101, 164],
+            [117, 80, 123],
+            [6, 152, 154],
+            [211, 215, 207],
+            [85, 87, 83],
+            [239, 41, 41],
+            [138, 226, 52],
+            [252, 233, 79],
+            [114, 159, 207],
+            [173, 127, 168],
+            [52, 226, 226],
+            [238, 238, 236],
+        ],
+    ),
+    Scheme(
+        "One Half Light",
+        [250, 250, 250],
+        [56, 58, 66],
+        [
+            [56, 58, 66],
+            [228, 86, 73],
+            [80, 161, 79],
+            [193, 132, 1],
+            [1, 132, 188],
+            [166, 38, 164],
+            [9, 151, 179],
+            [250, 250, 250],
+            [79, 82, 93],
+            [223, 108, 117],
+            [152, 195, 121],
+            [228, 192, 122],
+            [97, 175, 239],
+            [197, 119, 221],
+            [86, 181, 193],
+            [255, 255, 255],
+        ],
+    ),
 ];
 
 /// The scheme in use, shared by every terminal window.
@@ -143,10 +257,13 @@ struct Tab {
     /// Bumped by output, so the text and Markdown views rebuild only after a change.
     rev: u64,
     /// The text view's text and the Markdown view's document, for `rev` and the session choice.
-    reading: Option<(u64, bool, std::rc::Rc<(String, crate::markdown::Doc)>)>,
+    reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
 }
+
+/// The text and Markdown views' content, with the output revision and the session choice it was made for.
+type Reading = (u64, bool, std::rc::Rc<(String, crate::markdown::Doc)>);
 
 /// A tab or pane waiting for the window's context: what it runs, and the pane it splits (with the
 /// direction) if any.
@@ -168,10 +285,16 @@ fn pane_rects(area: Rect, dirs: &[Option<bool>]) -> Vec<Rect> {
         let prev = rects.pop().unwrap();
         let (a, b) = if *d == Some(true) {
             let x = prev.center().x;
-            (Rect::from_min_max(prev.min, Pos2::new(x - GAP, prev.max.y)), Rect::from_min_max(Pos2::new(x + GAP, prev.min.y), prev.max))
+            (
+                Rect::from_min_max(prev.min, Pos2::new(x - GAP, prev.max.y)),
+                Rect::from_min_max(Pos2::new(x + GAP, prev.min.y), prev.max),
+            )
         } else {
             let y = prev.center().y;
-            (Rect::from_min_max(prev.min, Pos2::new(prev.max.x, y - GAP)), Rect::from_min_max(Pos2::new(prev.min.x, y + GAP), prev.max))
+            (
+                Rect::from_min_max(prev.min, Pos2::new(prev.max.x, y - GAP)),
+                Rect::from_min_max(Pos2::new(prev.min.x, y + GAP), prev.max),
+            )
         };
         rects.push(a);
         rects.push(b);
@@ -340,7 +463,8 @@ fn key_bytes(key: Key, m: egui::Modifiers, app_cursor: bool) -> Option<Vec<u8>> 
 impl TermWindow {
     /// The terminal of a remote-screen session: shells on its SSH host.
     pub fn new(system: Option<Vec<String>>) -> Self {
-        let mut profiles = vec![Profile { name: "Shell on the SSH host".into(), icon: ic::MONITOR, launch: Launch::Agent }];
+        let mut profiles =
+            vec![Profile { name: "Shell on the SSH host".into(), icon: ic::MONITOR, launch: Launch::Agent }];
         profiles.extend(local_profiles());
         let mut w = Self::with_profiles(profiles, "sshremote-terminal", "Terminal");
         w.system = system;
@@ -437,7 +561,8 @@ impl TermWindow {
         } else if self.active == i {
             // Stay in the same tab when it has panes left.
             let same = self.panes(t.group);
-            self.active = same.iter().copied().find(|&k| k >= i).or(same.last().copied()).unwrap_or(i.min(self.tabs.len() - 1));
+            self.active =
+                same.iter().copied().find(|&k| k >= i).or(same.last().copied()).unwrap_or(i.min(self.tabs.len() - 1));
         }
     }
 
@@ -766,15 +891,19 @@ impl TermWindow {
                     self.open_tab();
                 }
                 // The profiles: local shells, ssh hosts, the SSH host's own shell.
-                let menu_btn = egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
-                    .frame_when_inactive(false)
-                    .min_size(Vec2::new(22.0, 30.0));
+                let menu_btn =
+                    egui::Button::new(RichText::new(ic::CARET_DOWN).size(12.0).color(Color32::from_gray(200)))
+                        .frame_when_inactive(false)
+                        .min_size(Vec2::new(22.0, 30.0));
                 let profiles = self.profiles.clone();
                 egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
                     ui.set_min_width(240.0);
                     for (k, p) in profiles.iter().enumerate() {
                         let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
-                        if ui.add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut)).clicked() {
+                        if ui
+                            .add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut))
+                            .clicked()
+                        {
                             self.pending.push((p.clone(), None));
                             ui.close();
                         }
@@ -805,11 +934,15 @@ impl TermWindow {
                         .frame_when_inactive(false)
                         .min_size(Vec2::splat(28.0));
                     egui::containers::menu::MenuButton::from_button(gear)
-                        .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                        .config(
+                            egui::containers::menu::MenuConfig::new()
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                        )
                         .ui(ui, |ui| {
                             ui.set_min_width(240.0);
                             ui.label(RichText::new("Appearance").strong());
-                            changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
+                            changed |=
+                                ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
                             let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed) % SCHEMES.len();
                             for (k, sc) in SCHEMES.iter().enumerate() {
                                 if ui.selectable_label(k == current, sc.0).clicked() {
@@ -848,7 +981,11 @@ impl TermWindow {
                     // How the active tab is shown.
                     if let Some(t) = self.tabs.get_mut(self.active) {
                         for (v, glyph, tip) in [
-                            (View::Markdown, ic::ARTICLE, "Read the output as Markdown, with copy buttons on code (agent replies)"),
+                            (
+                                View::Markdown,
+                                ic::ARTICLE,
+                                "Read the output as Markdown, with copy buttons on code (agent replies)",
+                            ),
                             (View::Text, ic::TEXT_T, "Plain text of the whole buffer, to select and copy"),
                             (View::Terminal, ic::TERMINAL, "Terminal"),
                         ] {
@@ -909,7 +1046,9 @@ impl TermWindow {
             let wide = ui.available_rect_before_wrap().aspect_ratio() > 1.6;
             self.split(side.unwrap_or(wide));
         }
-        if step != 0 && let Some(t) = self.tabs.get(self.active) {
+        if step != 0
+            && let Some(t) = self.tabs.get(self.active)
+        {
             let panes = self.panes(t.group);
             if let Some(k) = panes.iter().position(|&i| i == self.active) {
                 self.active = panes[(k as isize + step).rem_euclid(panes.len() as isize) as usize];
@@ -942,13 +1081,21 @@ impl TermWindow {
                     View::Terminal => screen(&mut child, t, font_size, copy_on_select, focused, keys, out),
                     View::Text | View::Markdown => {
                         reader(&mut child, t);
-                        PaneAsk { focus: child.response().contains_pointer() && child.input(|i| i.pointer.any_pressed()), ..Default::default() }
+                        PaneAsk {
+                            focus: child.response().contains_pointer() && child.input(|i| i.pointer.any_pressed()),
+                            ..Default::default()
+                        }
                     }
                 };
                 if several {
                     // The focused pane is outlined, as in Windows Terminal.
                     let color = if focused { ACCENT } else { Color32::from_white_alpha(18) };
-                    ui.painter().rect_stroke(r.expand(1.5), CornerRadius::same(3), egui::Stroke::new(1.0, color), egui::StrokeKind::Outside);
+                    ui.painter().rect_stroke(
+                        r.expand(1.5),
+                        CornerRadius::same(3),
+                        egui::Stroke::new(1.0, color),
+                        egui::StrokeKind::Outside,
+                    );
                 }
                 asks.push((i, ask));
             }
@@ -1041,16 +1188,22 @@ fn reader(ui: &mut egui::Ui, t: &mut Tab) {
     });
     ui.add_space(4.0);
     if markdown {
-        egui::ScrollArea::vertical().id_salt(("md", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            // A readable column, as in the preview.
-            let width = ui.available_width().min(900.0);
-            let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 12.0;
-            egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 12, top: 8, bottom: 24 }).show(ui, |ui| {
-                ui.set_max_width(width - 24.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
-            });
-        });
+        egui::ScrollArea::vertical().id_salt(("md", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(
+            ui,
+            |ui| {
+                // A readable column, as in the preview.
+                let width = ui.available_width().min(900.0);
+                let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 12.0;
+                egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 12, top: 8, bottom: 24 }).show(
+                    ui,
+                    |ui| {
+                        ui.set_max_width(width - 24.0);
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
+                    },
+                );
+            },
+        );
         return;
     }
     // The text view: an editor with line numbers, where text is selected with the mouse or Ctrl+A.
@@ -1120,7 +1273,15 @@ pub(crate) fn open_url(url: &str) {
     }
 }
 
-fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, focused: bool, keys: bool, out: &mut Vec<Cmd>) -> PaneAsk {
+fn screen(
+    ui: &mut egui::Ui,
+    t: &mut Tab,
+    font_size: f32,
+    copy_on_select: bool,
+    focused: bool,
+    keys: bool,
+    out: &mut Vec<Cmd>,
+) -> PaneAsk {
     let mut ask = PaneAsk::default();
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -1159,13 +1320,20 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         let (pt, side) = cell_at(p);
         sel.update(pt, side);
     }
-    if resp.drag_stopped() && copy_on_select && let Some(s) = t.term.selection_to_string().filter(|s| !s.is_empty()) {
+    if resp.drag_stopped()
+        && copy_on_select
+        && let Some(s) = t.term.selection_to_string().filter(|s| !s.is_empty())
+    {
         ui.ctx().copy_text(s);
     }
     let ctrl = ui.input(|i| i.modifiers.ctrl);
-    if resp.hovered() && ctrl && let Some(p) = resp.hover_pos() {
+    if resp.hovered()
+        && ctrl
+        && let Some(p) = resp.hover_pos()
+    {
         let (pt, _) = cell_at(p);
-        let line = t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
+        let line =
+            t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
         if url_at(&line, pt.column.0).is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -1179,7 +1347,8 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         t.term.selection = None;
         if ctrl && let Some(p) = resp.interact_pointer_pos() {
             let (pt, _) = cell_at(p);
-            let line = t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
+            let line =
+                t.term.bounds_to_string(Point::new(pt.line, Column(0)), Point::new(pt.line, Column(cols as usize - 1)));
             if let Some(url) = url_at(&line, pt.column.0) {
                 open_url(&url);
             }
@@ -1193,36 +1362,49 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
     let mut search_step: Option<alacritty_terminal::index::Direction> = None;
     if let Some(search) = t.search.as_mut().filter(|_| focused) {
         let bar = Rect::from_min_size(Pos2::new(area.right() - 330.0, area.top() + 4.0), Vec2::new(322.0, 34.0));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar).layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("find", t.id)))));
-        egui::Frame::new().fill(Color32::from_rgb(36, 38, 46)).corner_radius(CornerRadius::same(8)).inner_margin(4.0).show(&mut child, |ui| {
-            ui.horizontal(|ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut search.query).hint_text("Find").desired_width(170.0));
-                if !edit.has_focus() && search.found.is_none() && !search.missing {
-                    edit.request_focus();
-                }
-                if edit.changed() {
-                    search.found = None;
-                    search.missing = false;
-                }
-                let enter = ui.input(|i| i.key_pressed(Key::Enter));
-                let shift = ui.input(|i| i.modifiers.shift);
-                if enter {
-                    search_step = Some(if shift { alacritty_terminal::index::Direction::Right } else { alacritty_terminal::index::Direction::Left });
-                }
-                if ui.small_button(ic::CARET_UP).on_hover_text("Previous (Enter)").clicked() {
-                    search_step = Some(alacritty_terminal::index::Direction::Left);
-                }
-                if ui.small_button(ic::CARET_DOWN).on_hover_text("Next (Shift+Enter)").clicked() {
-                    search_step = Some(alacritty_terminal::index::Direction::Right);
-                }
-                if search.missing {
-                    ui.label(RichText::new("none").small().color(Color32::from_rgb(240, 120, 110)));
-                }
-                if ui.small_button(ic::X).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                    close_search = true;
-                }
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(bar)
+                .layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("find", t.id)))),
+        );
+        egui::Frame::new()
+            .fill(Color32::from_rgb(36, 38, 46))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(4.0)
+            .show(&mut child, |ui| {
+                ui.horizontal(|ui| {
+                    let edit =
+                        ui.add(egui::TextEdit::singleline(&mut search.query).hint_text("Find").desired_width(170.0));
+                    if !edit.has_focus() && search.found.is_none() && !search.missing {
+                        edit.request_focus();
+                    }
+                    if edit.changed() {
+                        search.found = None;
+                        search.missing = false;
+                    }
+                    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if enter {
+                        search_step = Some(if shift {
+                            alacritty_terminal::index::Direction::Right
+                        } else {
+                            alacritty_terminal::index::Direction::Left
+                        });
+                    }
+                    if ui.small_button(ic::CARET_UP).on_hover_text("Previous (Enter)").clicked() {
+                        search_step = Some(alacritty_terminal::index::Direction::Left);
+                    }
+                    if ui.small_button(ic::CARET_DOWN).on_hover_text("Next (Shift+Enter)").clicked() {
+                        search_step = Some(alacritty_terminal::index::Direction::Right);
+                    }
+                    if search.missing {
+                        ui.label(RichText::new("none").small().color(Color32::from_rgb(240, 120, 110)));
+                    }
+                    if ui.small_button(ic::X).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close_search = true;
+                    }
+                });
             });
-        });
     }
     if close_search {
         t.search = None;
@@ -1230,7 +1412,11 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
     if let (Some(dir), Some(search)) = (search_step, t.search.as_mut())
         && !search.query.is_empty()
     {
-        let escaped: String = search.query.chars().map(|c| if "\\.+*?()|[]{}^$#&-~".contains(c) { format!("\\{c}") } else { c.to_string() }).collect();
+        let escaped: String = search
+            .query
+            .chars()
+            .map(|c| if "\\.+*?()|[]{}^$#&-~".contains(c) { format!("\\{c}") } else { c.to_string() })
+            .collect();
         if let Ok(mut re) = alacritty_terminal::term::search::RegexSearch::new(&escaped) {
             let origin = match (&search.found, dir) {
                 (Some(m), alacritty_terminal::index::Direction::Left) => *m.start(),
@@ -1239,7 +1425,9 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
             };
             let origin = if search.found.is_some() {
                 match dir {
-                    alacritty_terminal::index::Direction::Left => origin.sub(&t.term, alacritty_terminal::index::Boundary::Grid, 1),
+                    alacritty_terminal::index::Direction::Left => {
+                        origin.sub(&t.term, alacritty_terminal::index::Boundary::Grid, 1)
+                    }
                     _ => origin.add(&t.term, alacritty_terminal::index::Boundary::Grid, 1),
                 }
             } else {
@@ -1528,7 +1716,12 @@ fn screen(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, copy_on_select: bool, 
         painter.hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.5, ACCENT));
     }
     if let Some(r) = hollow {
-        painter.rect_stroke(r.shrink(0.5), CornerRadius::ZERO, egui::Stroke::new(1.0, scheme_fg()), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            r.shrink(0.5),
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, scheme_fg()),
+            egui::StrokeKind::Inside,
+        );
     }
     if let Some(text) = &t.exited {
         let r = Rect::from_min_size(Pos2::new(area.left(), area.bottom() - 28.0), Vec2::new(area.width(), 28.0));
@@ -1642,7 +1835,8 @@ pub fn ssh_profile(host: &str, port: &str) -> Profile {
     if crate::vault::list().iter().any(|h| h == host)
         && let Ok(exe) = std::env::current_exe()
     {
-        let mut wrapped = vec![exe.to_string_lossy().to_string(), "--saved-login".into(), host.to_string(), "--".into()];
+        let mut wrapped =
+            vec![exe.to_string_lossy().to_string(), "--saved-login".into(), host.to_string(), "--".into()];
         wrapped.extend(argv);
         argv = wrapped;
     }

@@ -46,7 +46,7 @@ impl Synthetic {
             }
         };
         fill(0, 0, W, H, [40, 44, 52]);
-        let bar = if self.clicks % 2 == 0 { [60, 64, 72] } else { [30, 90, 160] };
+        let bar = if self.clicks.is_multiple_of(2) { [60, 64, 72] } else { [30, 90, 160] };
         fill(0, 0, W, 40, bar);
         for row in 0..24 {
             let y = 60 + row * 22;

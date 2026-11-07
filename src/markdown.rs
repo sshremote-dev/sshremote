@@ -45,10 +45,20 @@ pub fn install_bold(ctx: &egui::Context) {
 pub enum Block {
     Heading(u8, String),
     Para(String),
-    Code { lang: String, code: String },
-    Table { align: Vec<Align>, rows: Vec<Vec<String>> },
+    Code {
+        lang: String,
+        code: String,
+    },
+    Table {
+        align: Vec<Align>,
+        rows: Vec<Vec<String>>,
+    },
     /// One line of a list: its depth, marker ("-", "3.", "[ ]", "[x]") and text.
-    Item { depth: usize, marker: String, text: String },
+    Item {
+        depth: usize,
+        marker: String,
+        text: String,
+    },
     Quote(Vec<Block>),
     Rule,
 }
@@ -112,7 +122,8 @@ pub fn tidy(text: &str) -> String {
         }
         let core = t.trim_matches(|c: char| c.is_whitespace() || "│┃║".contains(c));
         // Lines that are only frame (╭───╮, ╰───╯, ────) carry nothing.
-        if !core.is_empty() && core.chars().all(|c| "─━═╭╮╰╯┌┐└┘├┤┬┴┼╌╍┄┅ ▔▁".contains(c)) {
+        if !core.is_empty() && core.chars().all(|c| "─━═╭╮╰╯┌┐└┘├┤┬┴┼╌╍┄┅ ▔▁".contains(c))
+        {
             i += 1;
             continue;
         }
@@ -259,12 +270,7 @@ fn is_tool_call(s: &str) -> bool {
 
 /// Removes the indentation all non-blank lines share.
 fn dedent(text: &str) -> String {
-    let n = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
+    let n = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
     text.lines().map(|l| l.get(n..).unwrap_or("").trim_end()).collect::<Vec<_>>().join("\n")
 }
 
@@ -381,7 +387,11 @@ pub fn parse(text: &str) -> Vec<Block> {
             while i + 1 < lines.len() {
                 let next = lines[i + 1];
                 let nt = next.trim_start();
-                if nt.is_empty() || list_marker(nt).is_some() || next.len() - nt.len() <= indent || nt.starts_with("```") {
+                if nt.is_empty()
+                    || list_marker(nt).is_some()
+                    || next.len() - nt.len() <= indent
+                    || nt.starts_with("```")
+                {
                     break;
                 }
                 text.push(' ');
@@ -396,7 +406,9 @@ pub fn parse(text: &str) -> Vec<Block> {
             flush(&mut para, &mut blocks);
             let mut inner = vec![q.strip_prefix(' ').unwrap_or(q).to_string()];
             i += 1;
-            while i < lines.len() && let Some(q) = lines[i].trim_start().strip_prefix('>') {
+            while i < lines.len()
+                && let Some(q) = lines[i].trim_start().strip_prefix('>')
+            {
                 inner.push(q.strip_prefix(' ').unwrap_or(q).to_string());
                 i += 1;
             }
@@ -629,7 +641,8 @@ fn rich(ui: &mut egui::Ui, text: &str, size: f32, th: &Theme, strong: bool) {
 fn copy_button(ui: &mut egui::Ui, id: egui::Id, text: &str) {
     let now = ui.input(|i| i.time);
     let copied = ui.ctx().data(|d| d.get_temp::<f64>(id)).is_some_and(|t| now - t < 1.5);
-    let label = if copied { format!("{}  Copied", crate::gui::ic::CHECK) } else { format!("{}  Copy", crate::gui::ic::COPY) };
+    let label =
+        if copied { format!("{}  Copied", crate::gui::ic::CHECK) } else { format!("{}  Copy", crate::gui::ic::COPY) };
     if ui.add(egui::Button::new(egui::RichText::new(label).size(12.0)).small()).clicked() {
         ui.ctx().copy_text(text.to_string());
         ui.ctx().data_mut(|d| d.insert_temp(id, now));
@@ -640,30 +653,154 @@ fn copy_button(ui: &mut egui::Ui, id: egui::Id, text: &str) {
 /// common languages, close to what VS Code shows.
 pub fn highlight(code: &str, lang: &str, th: &Theme, size: f32) -> LayoutJob {
     const KEYWORDS: &[&str] = &[
-        "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "def", "default", "do",
-        "elif", "else", "enum", "except", "export", "extends", "false", "finally", "fn", "for", "from", "func",
-        "function", "if", "impl", "import", "in", "interface", "is", "lambda", "let", "loop", "match", "mod",
-        "mut", "new", "nil", "None", "not", "null", "or", "and", "package", "pass", "pub", "raise", "return",
-        "self", "Self", "static", "struct", "super", "switch", "then", "this", "throw", "trait", "true", "True",
-        "False", "try", "type", "typeof", "use", "var", "void", "where", "while", "with", "yield", "fi", "done",
-        "esac", "local", "echo", "export", "unsafe", "dyn", "ref", "crate", "extern", "public", "private",
-        "protected", "readonly", "int", "char", "bool", "string", "float", "double", "long", "unsigned",
+        "as",
+        "async",
+        "await",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "def",
+        "default",
+        "do",
+        "elif",
+        "else",
+        "enum",
+        "except",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "fn",
+        "for",
+        "from",
+        "func",
+        "function",
+        "if",
+        "impl",
+        "import",
+        "in",
+        "interface",
+        "is",
+        "lambda",
+        "let",
+        "loop",
+        "match",
+        "mod",
+        "mut",
+        "new",
+        "nil",
+        "None",
+        "not",
+        "null",
+        "or",
+        "and",
+        "package",
+        "pass",
+        "pub",
+        "raise",
+        "return",
+        "self",
+        "Self",
+        "static",
+        "struct",
+        "super",
+        "switch",
+        "then",
+        "this",
+        "throw",
+        "trait",
+        "true",
+        "True",
+        "False",
+        "try",
+        "type",
+        "typeof",
+        "use",
+        "var",
+        "void",
+        "where",
+        "while",
+        "with",
+        "yield",
+        "fi",
+        "done",
+        "esac",
+        "local",
+        "echo",
+        "export",
+        "unsafe",
+        "dyn",
+        "ref",
+        "crate",
+        "extern",
+        "public",
+        "private",
+        "protected",
+        "readonly",
+        "int",
+        "char",
+        "bool",
+        "string",
+        "float",
+        "double",
+        "long",
+        "unsigned",
     ];
-    const CONTROL: &[&str] =
-        &["if", "else", "elif", "for", "while", "loop", "match", "return", "break", "continue", "switch", "case", "try", "catch", "except", "finally", "throw", "raise", "await", "yield", "do", "then", "fi", "done", "esac", "import", "from", "use", "export"];
+    const CONTROL: &[&str] = &[
+        "if", "else", "elif", "for", "while", "loop", "match", "return", "break", "continue", "switch", "case", "try",
+        "catch", "except", "finally", "throw", "raise", "await", "yield", "do", "then", "fi", "done", "esac", "import",
+        "from", "use", "export",
+    ];
     let lang = lang.to_ascii_lowercase();
     if matches!(lang.as_str(), "" | "text" | "txt" | "plain" | "output" | "log") {
         let mut job = LayoutJob::default();
-        job.append(code, 0.0, TextFormat { font_id: FontId::monospace(size), color: th.fg, line_height: Some(size * 1.5), ..Default::default() });
+        job.append(
+            code,
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(size),
+                color: th.fg,
+                line_height: Some(size * 1.5),
+                ..Default::default()
+            },
+        );
         return job;
     }
     let hash_comment = matches!(
         lang.as_str(),
-        "sh" | "bash" | "zsh" | "shell" | "console" | "python" | "py" | "ruby" | "rb" | "yaml" | "yml" | "toml" | "ini" | "conf" | "powershell" | "ps1" | "pwsh" | "perl" | "r" | "dockerfile" | "makefile" | "nix"
+        "sh" | "bash"
+            | "zsh"
+            | "shell"
+            | "console"
+            | "python"
+            | "py"
+            | "ruby"
+            | "rb"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "conf"
+            | "powershell"
+            | "ps1"
+            | "pwsh"
+            | "perl"
+            | "r"
+            | "dockerfile"
+            | "makefile"
+            | "nix"
     );
     let dash_comment = matches!(lang.as_str(), "sql" | "lua" | "haskell" | "hs");
     let mono = FontId::monospace(size);
-    let fmt = |c: Color32| TextFormat { font_id: mono.clone(), color: c, line_height: Some(size * 1.5), ..Default::default() };
+    let fmt = |c: Color32| TextFormat {
+        font_id: mono.clone(),
+        color: c,
+        line_height: Some(size * 1.5),
+        ..Default::default()
+    };
     let mut job = LayoutJob::default();
     let mut block_comment = false;
     for (n, line) in code.split('\n').enumerate() {
@@ -710,13 +847,15 @@ pub fn highlight(code: &str, lang: &str, th: &Theme, size: f32) -> LayoutJob {
                 continue;
             }
             if c.is_ascii_digit() {
-                let end = rest.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_')).unwrap_or(rest.len());
+                let end =
+                    rest.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_')).unwrap_or(rest.len());
                 job.append(&rest[..end], 0.0, fmt(th.number));
                 i += end;
                 continue;
             }
             if c.is_ascii_alphabetic() || c == b'_' || (c == b'$' && hash_comment) {
-                let end = 1 + rest[1..].find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')).unwrap_or(rest.len() - 1);
+                let end =
+                    1 + rest[1..].find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')).unwrap_or(rest.len() - 1);
                 let word = &rest[..end];
                 let next = rest[end..].trim_start();
                 let color = if c == b'$' {
@@ -794,7 +933,9 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
         let galleys: Vec<Vec<_>> = rows
             .iter()
             .enumerate()
-            .map(|(r, row)| (0..cols).map(|c| lay(ui, row.get(c).map_or("", |s| s.as_str()), r == 0, widths[c])).collect())
+            .map(|(r, row)| {
+                (0..cols).map(|c| lay(ui, row.get(c).map_or("", |s| s.as_str()), r == 0, widths[c])).collect()
+            })
             .collect();
         let heights: Vec<f32> =
             galleys.iter().map(|row| row.iter().map(|g| g.size().y).fold(0.0, f32::max) + 2.0 * pad.y).collect();
@@ -803,8 +944,18 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
         let mut y = rect.top();
         for (r, row) in galleys.iter().enumerate() {
             let h = heights[r];
-            let fill = if r == 0 { th.table_head } else if r % 2 == 0 { th.table_alt } else { th.bg };
-            p.rect_filled(Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(total, h)), CornerRadius::ZERO, fill);
+            let fill = if r == 0 {
+                th.table_head
+            } else if r % 2 == 0 {
+                th.table_alt
+            } else {
+                th.bg
+            };
+            p.rect_filled(
+                Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(total, h)),
+                CornerRadius::ZERO,
+                fill,
+            );
             let mut x = rect.left();
             for (c, g) in row.iter().enumerate() {
                 let w = widths[c] + 2.0 * pad.x;
@@ -815,7 +966,12 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
                     Align::Right => free,
                 };
                 p.galley(Pos2::new(x + pad.x + dx, y + pad.y), g.clone(), th.fg);
-                p.rect_stroke(Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)), CornerRadius::ZERO, Stroke::new(1.0, th.rule), egui::StrokeKind::Inside);
+                p.rect_stroke(
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)),
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, th.rule),
+                    egui::StrokeKind::Inside,
+                );
                 x += w;
             }
             y += h;
@@ -863,7 +1019,13 @@ pub fn blocks(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], id: egui::Id) {
                         m => m.to_string(),
                     };
                     let (r, _) = ui.allocate_exact_size(Vec2::new(18.0, BODY * 1.55), Sense::hover());
-                    ui.painter().text(r.right_center(), Align2::RIGHT_CENTER, glyph, FontId::proportional(BODY), th.weak);
+                    ui.painter().text(
+                        r.right_center(),
+                        Align2::RIGHT_CENTER,
+                        glyph,
+                        FontId::proportional(BODY),
+                        th.weak,
+                    );
                     ui.vertical(|ui| rich(ui, text, BODY, th, false));
                 });
                 if !matches!(blocks.get(n + 1), Some(Block::Item { .. })) {
@@ -903,10 +1065,16 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id) {
             Part::Doc(b) => blocks(ui, &th, b, pid),
             Part::Prompt(text) => {
                 ui.add_space(6.0);
-                egui::Frame::new().fill(th.prompt_bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.add(egui::Label::new(egui::RichText::new(text).size(BODY).color(th.fg)).selectable(true).wrap());
-                });
+                egui::Frame::new()
+                    .fill(th.prompt_bg)
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).size(BODY).color(th.fg)).selectable(true).wrap(),
+                        );
+                    });
                 ui.add_space(8.0);
             }
             Part::Reply { source, blocks: b } => {
@@ -918,12 +1086,18 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id) {
             Part::Tool { title, output } => {
                 let lines = output.lines().count();
                 let header = if title.is_empty() { "Output".to_string() } else { title.clone() };
-                let header = egui::RichText::new(format!("{}  {header}", crate::gui::ic::TERMINAL)).monospace().size(12.5).color(th.weak);
-                egui::CollapsingHeader::new(header).id_salt(pid).default_open(lines > 0 && lines <= 12).show(ui, |ui| {
-                    if !output.trim().is_empty() {
-                        code_block(ui, &th, "", output, pid.with("out"));
-                    }
-                });
+                let header = egui::RichText::new(format!("{}  {header}", crate::gui::ic::TERMINAL))
+                    .monospace()
+                    .size(12.5)
+                    .color(th.weak);
+                egui::CollapsingHeader::new(header).id_salt(pid).default_open(lines > 0 && lines <= 12).show(
+                    ui,
+                    |ui| {
+                        if !output.trim().is_empty() {
+                            code_block(ui, &th, "", output, pid.with("out"));
+                        }
+                    },
+                );
                 ui.add_space(4.0);
             }
         }
@@ -960,7 +1134,9 @@ mod tests {
 
     #[test]
     fn markdown_blocks_parse() {
-        let b = parse("# Title\n\nSome *text*\nmore.\n\n- one\n  - two\n1. three\n- [x] done\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n> quoted\n\n---");
+        let b = parse(
+            "# Title\n\nSome *text*\nmore.\n\n- one\n  - two\n1. three\n- [x] done\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n> quoted\n\n---",
+        );
         assert_eq!(b[0], Block::Heading(1, "Title".into()));
         assert_eq!(b[1], Block::Para("Some *text* more.".into()));
         assert_eq!(b[2], Block::Item { depth: 0, marker: "-".into(), text: "one".into() });
@@ -968,7 +1144,13 @@ mod tests {
         assert_eq!(b[4], Block::Item { depth: 0, marker: "1.".into(), text: "three".into() });
         assert_eq!(b[5], Block::Item { depth: 0, marker: "[x]".into(), text: "done".into() });
         assert_eq!(b[6], Block::Code { lang: "rust".into(), code: "fn main() {}".into() });
-        assert_eq!(b[7], Block::Table { align: vec![Align::Left, Align::Right], rows: vec![vec!["a".into(), "b".into()], vec!["1".into(), "2".into()]] });
+        assert_eq!(
+            b[7],
+            Block::Table {
+                align: vec![Align::Left, Align::Right],
+                rows: vec![vec!["a".into(), "b".into()], vec!["1".into(), "2".into()]]
+            }
+        );
         assert_eq!(b[8], Block::Quote(vec![Block::Para("quoted".into())]));
         assert_eq!(b[9], Block::Rule);
     }

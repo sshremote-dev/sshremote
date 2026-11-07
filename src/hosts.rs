@@ -101,10 +101,7 @@ fn read_lines(name: &str) -> Vec<String> {
 fn write_lines(name: &str, lines: &[String]) {
     if let Some(d) = config_dir() {
         let _ = std::fs::create_dir_all(&d);
-        let _ = std::fs::write(
-            d.join(name),
-            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
-        );
+        let _ = std::fs::write(d.join(name), lines.iter().map(|l| format!("{l}\n")).collect::<String>());
     }
 }
 
@@ -141,7 +138,7 @@ pub fn mark_seen(host: &str) {
     let mut seen = last_seen();
     seen.insert(host.to_string(), now());
     let mut lines: Vec<(String, u64)> = seen.into_iter().collect();
-    lines.sort_by(|a, b| b.1.cmp(&a.1));
+    lines.sort_by_key(|l| std::cmp::Reverse(l.1));
     lines.truncate(64);
     write_lines("seen.txt", &lines.iter().map(|(h, t)| format!("{h} {t}")).collect::<Vec<_>>());
 }

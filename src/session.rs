@@ -256,7 +256,7 @@ impl Framebuffer {
                 if f.mode == Mode::True {
                     line.copy_from_slice(&px[row * tw * 3..(row + 1) * tw * 3]);
                 } else {
-                    for (col, rgb) in line.chunks_exact_mut(3).enumerate() {
+                    for (col, rgb) in line.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                         rgb.copy_from_slice(self.pal.get(px[row * tw + col] as usize).unwrap_or(&[0, 0, 0]));
                     }
                 }

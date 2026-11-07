@@ -21,7 +21,13 @@ fn check() -> bool {
         }
         let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut len = 0;
-        let ok = GetTokenInformation(token, TokenElevation, &mut e as *mut _ as _, size_of::<TOKEN_ELEVATION>() as u32, &mut len);
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut e as *mut _ as _,
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
         CloseHandle(token);
         ok != 0 && e.TokenIsElevated != 0
     }
@@ -37,6 +43,7 @@ pub fn ask_at_start() -> bool {
     cfg!(windows) && crate::hosts::setting("elevate").is_none_or(|v| v != "no")
 }
 
+#[cfg(windows)]
 pub fn set_ask_at_start(on: bool) {
     crate::hosts::set_setting("elevate", if on { "yes" } else { "no" });
 }
@@ -81,11 +88,6 @@ pub fn service_installed() -> bool {
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-#[cfg(not(windows))]
-pub fn service_installed() -> bool {
-    false
 }
 
 /// What administrator rights add, for the tooltip of the badge.

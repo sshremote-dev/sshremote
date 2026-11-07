@@ -55,7 +55,7 @@ mod sys {
         }
         let c = unsafe { &*cred };
         let blob = unsafe { std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize) };
-        let units: Vec<u16> = blob.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let units: Vec<u16> = blob.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         unsafe { CredFree(cred as _) };
         Some(String::from_utf16_lossy(&units))
     }
@@ -114,7 +114,10 @@ mod sys {
     use std::process::{Command, Stdio};
 
     pub fn get(host: &str) -> Option<String> {
-        let out = Command::new("security").args(["find-generic-password", "-s", "sshremote", "-a", host, "-w"]).output().ok()?;
+        let out = Command::new("security")
+            .args(["find-generic-password", "-s", "sshremote", "-a", host, "-w"])
+            .output()
+            .ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
 
@@ -128,7 +131,10 @@ mod sys {
     }
 
     pub fn delete(host: &str) -> Result<(), String> {
-        let out = Command::new("security").args(["delete-generic-password", "-s", "sshremote", "-a", host]).output().map_err(|e| e.to_string())?;
+        let out = Command::new("security")
+            .args(["delete-generic-password", "-s", "sshremote", "-a", host])
+            .output()
+            .map_err(|e| e.to_string())?;
         if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
     }
 
@@ -180,8 +186,10 @@ mod sys {
     }
 
     pub fn delete(host: &str) -> Result<(), String> {
-        let out =
-            Command::new("secret-tool").args(["clear", "service", "sshremote", "host", host]).output().map_err(|e| e.to_string())?;
+        let out = Command::new("secret-tool")
+            .args(["clear", "service", "sshremote", "host", host])
+            .output()
+            .map_err(|e| e.to_string())?;
         if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
     }
 

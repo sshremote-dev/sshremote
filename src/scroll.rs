@@ -15,7 +15,7 @@ pub struct Move {
     pub dy: isize,
 }
 
-fn row<'a>(p: &'a Plane, y: usize, x0: usize, x1: usize) -> &'a [u8] {
+fn row(p: &Plane, y: usize, x0: usize, x1: usize) -> &[u8] {
     let bpp = p.mode.bpp();
     &p.data[(y * p.w + x0) * bpp..(y * p.w + x1) * bpp]
 }

@@ -7,7 +7,7 @@ use crate::capture::Image;
 pub fn png_from_bgrx(img: &Image) -> Result<Vec<u8>, String> {
     let mut rgb = Vec::with_capacity(img.w * img.h * 3);
     for y in 0..img.h {
-        for p in img.data[y * img.stride..y * img.stride + img.w * 4].chunks_exact(4) {
+        for p in img.data[y * img.stride..y * img.stride + img.w * 4].as_chunks::<4>().0 {
             rgb.extend_from_slice(&[p[2], p[1], p[0]]);
         }
     }
@@ -23,7 +23,7 @@ pub fn png_from_rgb(w: usize, h: usize, rgb: &[u8], grey: bool) -> Result<Vec<u8
     if grey {
         enc.set_color(png::ColorType::Grayscale);
         let g: Vec<u8> = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8)
             .collect();
         enc.write_header().and_then(|mut w| w.write_image_data(&g)).map_err(|e| e.to_string())?;
@@ -42,7 +42,7 @@ pub fn rgb_from_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let (w, h) = (info.width as usize, info.height as usize);
     let rgb = match info.color_type {
         png::ColorType::Rgb => buf[..w * h * 3].to_vec(),
-        png::ColorType::Rgba => buf[..w * h * 4].chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+        png::ColorType::Rgba => buf[..w * h * 4].as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
         png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&g| [g, g, g]).collect(),
         c => return Err(format!("unsupported PNG colour type {c:?}")),
     };

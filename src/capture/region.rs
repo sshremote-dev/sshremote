@@ -83,7 +83,7 @@ pub fn crop_masked(img: &Image, area: R, shown: &[R]) -> Image {
     let area = area.and(&R { l: 0, t: 0, r: img.w as i32, b: img.h as i32 });
     let (w, h) = ((area.r - area.l).max(1) as usize, (area.b - area.t).max(1) as usize);
     let mut data = vec![0u8; w * h * 4];
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&HIDDEN);
     }
     for s in shown {

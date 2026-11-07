@@ -9,7 +9,8 @@ use eframe::egui::{self, Color32, RichText};
 use crate::gui::{ACCENT, ic};
 
 fn ssh_dir() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
     home.join(".ssh")
 }
 
@@ -77,7 +78,16 @@ impl KeyTool {
         let host = std::env::var(if cfg!(windows) { "COMPUTERNAME" } else { "HOSTNAME" }).unwrap_or_default();
         let keys = list_keys();
         let name = if keys.iter().any(|k| k.name == "id_ed25519") { String::new() } else { "id_ed25519".into() };
-        KeyTool { name, kind: 0, comment: format!("{user}@{host}").to_lowercase(), pass: String::new(), pass2: String::new(), status: None, keys, host: String::new() }
+        KeyTool {
+            name,
+            kind: 0,
+            comment: format!("{user}@{host}").to_lowercase(),
+            pass: String::new(),
+            pass2: String::new(),
+            status: None,
+            keys,
+            host: String::new(),
+        }
     }
 
     fn generate(&mut self) {
@@ -269,7 +279,11 @@ impl ConfigTool {
         let dir = ssh_dir();
         let _ = std::fs::create_dir_all(&dir);
         use std::io::Write;
-        let r = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("config")).and_then(|mut f| f.write_all(block.as_bytes()));
+        let r = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("config"))
+            .and_then(|mut f| f.write_all(block.as_bytes()));
         match r {
             Ok(()) => {
                 self.status = Some((true, format!("Added {} to ~/.ssh/config", h.alias.trim())));
@@ -287,68 +301,83 @@ impl ConfigTool {
     /// The window; returns false once closed, and whether the host list changed.
     pub fn show(&mut self, ctx: &egui::Context, changed: &mut bool) -> bool {
         let mut open = true;
-        egui::Window::new(format!("{}  SSH hosts", ic::GLOBE)).open(&mut open).default_width(600.0).collapsible(false).show(ctx, |ui| {
-            ui.label(RichText::new("Hosts in ~/.ssh/config. ssh, this app and other tools use these names, users, ports and keys.").weak());
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                egui::Grid::new("hosts").striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
-                    for t in ["Alias", "Host", "User", "Port", "Key"] {
-                        ui.label(RichText::new(t).weak().small());
-                    }
-                    ui.end_row();
-                    for h in &self.hosts {
-                        ui.label(RichText::new(&h.alias).strong());
-                        ui.label(&h.hostname);
-                        ui.label(&h.user);
-                        ui.label(if h.port.is_empty() { "22" } else { &h.port });
-                        ui.label(RichText::new(&h.identity).small());
+        egui::Window::new(format!("{}  SSH hosts", ic::GLOBE))
+            .open(&mut open)
+            .default_width(600.0)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Hosts in ~/.ssh/config. ssh, this app and other tools use these names, users, ports and keys.",
+                    )
+                    .weak(),
+                );
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    egui::Grid::new("hosts").striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
+                        for t in ["Alias", "Host", "User", "Port", "Key"] {
+                            ui.label(RichText::new(t).weak().small());
+                        }
                         ui.end_row();
+                        for h in &self.hosts {
+                            ui.label(RichText::new(&h.alias).strong());
+                            ui.label(&h.hostname);
+                            ui.label(&h.user);
+                            ui.label(if h.port.is_empty() { "22" } else { &h.port });
+                            ui.label(RichText::new(&h.identity).small());
+                            ui.end_row();
+                        }
+                    });
+                });
+                ui.separator();
+                ui.label(RichText::new("Add a host").strong());
+                let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
+                egui::Grid::new("addhost").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label("Alias");
+                    ui.add(egui::TextEdit::singleline(&mut self.new.alias).hint_text("web1"));
+                    ui.end_row();
+                    ui.label("Host name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new.hostname)
+                            .hint_text("192.168.1.20 or server.example.com"),
+                    );
+                    ui.end_row();
+                    ui.label("User");
+                    ui.add(egui::TextEdit::singleline(&mut self.new.user));
+                    ui.end_row();
+                    ui.label("Port");
+                    ui.add(egui::TextEdit::singleline(&mut self.new.port).desired_width(60.0));
+                    ui.end_row();
+                    ui.label("Key");
+                    let shown =
+                        if self.new.identity.is_empty() { "default".to_string() } else { self.new.identity.clone() };
+                    egui::ComboBox::from_id_salt("hostkey").selected_text(shown).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.new.identity, String::new(), "default");
+                        for k in &keys {
+                            ui.selectable_value(&mut self.new.identity, k.clone(), k);
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Add host").color(Color32::WHITE)).fill(ACCENT)).clicked()
+                        && self.add()
+                    {
+                        *changed = true;
+                    }
+                    if ui.button("Edit the file").clicked() {
+                        let path = ssh_dir().join("config");
+                        if !path.exists() {
+                            let _ = std::fs::create_dir_all(ssh_dir());
+                            let _ = std::fs::write(&path, "");
+                        }
+                        open_path(&path);
                     }
                 });
-            });
-            ui.separator();
-            ui.label(RichText::new("Add a host").strong());
-            let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
-            egui::Grid::new("addhost").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                ui.label("Alias");
-                ui.add(egui::TextEdit::singleline(&mut self.new.alias).hint_text("web1"));
-                ui.end_row();
-                ui.label("Host name");
-                ui.add(egui::TextEdit::singleline(&mut self.new.hostname).hint_text("192.168.1.20 or server.example.com"));
-                ui.end_row();
-                ui.label("User");
-                ui.add(egui::TextEdit::singleline(&mut self.new.user));
-                ui.end_row();
-                ui.label("Port");
-                ui.add(egui::TextEdit::singleline(&mut self.new.port).desired_width(60.0));
-                ui.end_row();
-                ui.label("Key");
-                let shown = if self.new.identity.is_empty() { "default".to_string() } else { self.new.identity.clone() };
-                egui::ComboBox::from_id_salt("hostkey").selected_text(shown).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.new.identity, String::new(), "default");
-                    for k in &keys {
-                        ui.selectable_value(&mut self.new.identity, k.clone(), k);
-                    }
-                });
-                ui.end_row();
-            });
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Add host").color(Color32::WHITE)).fill(ACCENT)).clicked() && self.add() {
-                    *changed = true;
-                }
-                if ui.button("Edit the file").clicked() {
-                    let path = ssh_dir().join("config");
-                    if !path.exists() {
-                        let _ = std::fs::create_dir_all(ssh_dir());
-                        let _ = std::fs::write(&path, "");
-                    }
-                    open_path(&path);
+                if let Some((ok, text)) = &self.status {
+                    let color = if *ok { Color32::from_rgb(90, 200, 120) } else { Color32::from_rgb(240, 110, 100) };
+                    ui.label(RichText::new(text).color(color));
                 }
             });
-            if let Some((ok, text)) = &self.status {
-                let color = if *ok { Color32::from_rgb(90, 200, 120) } else { Color32::from_rgb(240, 110, 100) };
-                ui.label(RichText::new(text).color(color));
-            }
-        });
         open
     }
 }
@@ -578,6 +607,9 @@ Host *
         let hosts = super::parse_config(text);
         assert_eq!(hosts.len(), 1);
         let h = &hosts[0];
-        assert_eq!((h.alias.as_str(), h.hostname.as_str(), h.user.as_str(), h.port.as_str()), ("web1", "10.0.0.5", "ana", "2222"));
+        assert_eq!(
+            (h.alias.as_str(), h.hostname.as_str(), h.user.as_str(), h.port.as_str()),
+            ("web1", "10.0.0.5", "ana", "2222")
+        );
     }
 }

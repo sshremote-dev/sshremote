@@ -50,7 +50,8 @@ pub fn is_menu(ev: &KeyEvent) -> bool {
 }
 
 /// Modifier bits and the keys that hold them on the host.
-pub const MODIFIERS: [(u8, u32); 4] = [(MOD_SHIFT, 0xffe1), (MOD_CTRL, 0xffe3), (MOD_ALT, 0xffe9), (MOD_SUPER, SUPER_L)];
+pub const MODIFIERS: [(u8, u32); 4] =
+    [(MOD_SHIFT, 0xffe1), (MOD_CTRL, 0xffe3), (MOD_ALT, 0xffe9), (MOD_SUPER, SUPER_L)];
 
 /// AltGr arrives as Ctrl+Alt with the character it made ('@', '{' on European layouts); the
 /// character is what was meant, so the two modifiers are dropped.

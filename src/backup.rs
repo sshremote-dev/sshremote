@@ -17,7 +17,8 @@ fn ssh_dir() -> Option<PathBuf> {
 
 /// Where backups made by hand go: Documents/sshremote.
 pub fn folder() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
     let docs = home.join("Documents");
     (if docs.is_dir() { docs } else { home }).join("sshremote")
 }
@@ -61,7 +62,9 @@ fn seal(plain: &[u8], passphrase: &str) -> Value {
 fn open(sealed: &Value, passphrase: &str) -> Result<Vec<u8>, String> {
     let field = |k: &str| sealed[k].as_str().and_then(unhex).ok_or("damaged backup");
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key(passphrase, &field("salt")?)));
-    cipher.decrypt(Nonce::from_slice(&field("nonce")?), field("data")?.as_slice()).map_err(|_| "wrong passphrase".to_string())
+    cipher
+        .decrypt(Nonce::from_slice(&field("nonce")?), field("data")?.as_slice())
+        .map_err(|_| "wrong passphrase".to_string())
 }
 
 /// The backup as JSON; with a passphrase the saved passwords are included, encrypted.
@@ -87,8 +90,10 @@ pub fn create(passphrase: Option<&str>) -> String {
     }
     let mut out = json!({ "sshremote_backup": 1, "created": stamp(), "files": files, "ssh": ssh });
     if let Some(p) = passphrase.filter(|p| !p.is_empty()) {
-        let secrets: serde_json::Map<String, Value> =
-            crate::vault::list().into_iter().filter_map(|h| crate::vault::get(&h).map(|s| (h, Value::String(s)))).collect();
+        let secrets: serde_json::Map<String, Value> = crate::vault::list()
+            .into_iter()
+            .filter_map(|h| crate::vault::get(&h).map(|s| (h, Value::String(s))))
+            .collect();
         out["passwords"] = seal(Value::Object(secrets).to_string().as_bytes(), p);
     }
     serde_json::to_string_pretty(&out).expect("json")
@@ -171,13 +176,18 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool) -> Resul
     let mut done = Vec::new();
     if let Some(files) = v["files"].as_object() {
         for (name, text) in files {
-            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !name.contains(['/', '\\'])) else { continue };
+            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !name.contains(['/', '\\'])) else {
+                continue;
+            };
             let here = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
             let merged = if name == "settings.txt" {
                 // The backup's value wins for each key.
                 let keys: Vec<&str> = text.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
-                let kept: String =
-                    here.lines().filter(|l| !l.split_once('=').is_some_and(|(k, _)| keys.contains(&k))).map(|l| format!("{l}\n")).collect();
+                let kept: String = here
+                    .lines()
+                    .filter(|l| !l.split_once('=').is_some_and(|(k, _)| keys.contains(&k)))
+                    .map(|l| format!("{l}\n"))
+                    .collect();
                 union(text, &kept)
             } else {
                 union(text, &here)
@@ -206,7 +216,8 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool) -> Resul
         match passphrase.filter(|p| !p.is_empty()) {
             Some(p) => {
                 let plain = open(sealed, p)?;
-                let secrets: serde_json::Map<String, Value> = serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
+                let secrets: serde_json::Map<String, Value> =
+                    serde_json::from_slice(&plain).map_err(|_| "damaged backup")?;
                 for (host, s) in &secrets {
                     if let Some(s) = s.as_str() {
                         crate::vault::set(host, s)?;

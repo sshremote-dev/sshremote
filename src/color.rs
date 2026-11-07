@@ -171,18 +171,18 @@ impl Reducer {
             let row = &img.data[y * img.stride..y * img.stride + w * 4];
             match self.mode {
                 Mode::True => {
-                    for p in row.chunks_exact(4) {
+                    for p in row.as_chunks::<4>().0 {
                         data.extend_from_slice(&[p[2], p[1], p[0]]);
                     }
                 }
                 Mode::Color16 | Mode::Color256 => {
                     let lut = self.lut.as_ref().unwrap();
-                    data.extend(row.chunks_exact(4).map(|p| lut.get(p[2], p[1], p[0])));
+                    data.extend(row.as_chunks::<4>().0.iter().map(|p| lut.get(p[2], p[1], p[0])));
                 }
                 Mode::Mono => {}
                 Mode::Gray4 | Mode::Gray16 => {
                     let levels = if self.mode == Mode::Gray4 { 3 } else { 15 };
-                    data.extend(row.chunks_exact(4).map(|p| {
+                    data.extend(row.as_chunks::<4>().0.iter().map(|p| {
                         let luma = (77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8;
                         ((luma * levels + 127) / 255) as u8
                     }));
@@ -248,7 +248,7 @@ fn med(a: u8, b: u8, c: u8) -> u8 {
 /// LOCO-I median prediction per channel, with green removed from red and blue.
 /// Flat areas and gradients become runs of zeros that zstd compresses well.
 fn med_forward(px: &mut [u8], w: usize, h: usize) {
-    for p in px.chunks_exact_mut(3) {
+    for p in px.as_chunks_mut::<3>().0 {
         p[0] = p[0].wrapping_sub(p[1]);
         p[2] = p[2].wrapping_sub(p[1]);
     }
@@ -280,7 +280,7 @@ fn med_inverse(px: &mut [u8], w: usize, h: usize) {
             }
         }
     }
-    for p in px.chunks_exact_mut(3) {
+    for p in px.as_chunks_mut::<3>().0 {
         p[0] = p[0].wrapping_add(p[1]);
         p[2] = p[2].wrapping_add(p[1]);
     }
