@@ -61,6 +61,8 @@ pub enum Block {
     },
     Quote(Vec<Block>),
     Rule,
+    /// Text laid out in columns (command output, listings), kept exactly as it is.
+    Pre(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,8 +91,11 @@ pub struct Doc {
 }
 
 impl Doc {
-    /// `agent` reads the text as an agent session: frames removed, replies split out.
-    pub fn new(text: &str, agent: bool) -> Self {
+    /// Reads Claude Code or Codex output as a session (frames removed, replies split out) when
+    /// their markers are there, and anything else as Markdown.
+    pub fn new(text: &str) -> Self {
+        let agent = text.lines().any(|l| l.starts_with("⏺ ") || l.starts_with("● "))
+            || (text.lines().any(|l| l.starts_with("› ")) && text.lines().any(|l| l.starts_with("• ")));
         if !agent {
             return Doc { parts: vec![Part::Doc(parse(text))] };
         }
@@ -314,6 +319,46 @@ fn list_marker(t: &str) -> Option<(String, &str)> {
         .then(|| (format!("{n}."), &rest[1..]))
 }
 
+/// A line laid out with spaces rather than written as prose: indented, or with a gap of several
+/// spaces or a tab between words, as in `dir`, `ls -l` or a table of numbers.
+fn columned(line: &str) -> bool {
+    let t = line.trim_end();
+    t.starts_with([' ', '\t']) || t.contains('\t') || t.trim_start().contains("  ")
+}
+
+/// Text in the terminal's own font with each character on the grid: wide characters (Korean,
+/// Chinese, Japanese) take exactly two cells, as in the terminal and in an editor.
+pub fn mono_job(text: &str, font: &FontId, color: Color32, fonts: &mut egui::epaint::FontsView<'_>) -> LayoutJob {
+    use unicode_width::UnicodeWidthChar;
+    let cell = fonts.glyph_width(font, 'M');
+    // Every row as tall as the terminal font's, whichever font draws a character, so rows with
+    // Korean keep the grid and the line numbers.
+    let plain = TextFormat {
+        font_id: font.clone(),
+        color,
+        line_height: Some(fonts.row_height(font)),
+        valign: egui::Align::Center,
+        ..Default::default()
+    };
+    let mut job = LayoutJob::default();
+    let mut run_start = 0;
+    for (i, c) in text.char_indices() {
+        if c.width().unwrap_or(1) == 2 {
+            if run_start < i {
+                job.append(&text[run_start..i], 0.0, plain.clone());
+            }
+            let gap = (2.0 * cell - fonts.glyph_width(font, c)).max(0.0);
+            job.append(&text[i..i + c.len_utf8()], 0.0, TextFormat { extra_letter_spacing: gap, ..plain.clone() });
+            run_start = i + c.len_utf8();
+        }
+    }
+    if run_start < text.len() || text.is_empty() {
+        job.append(&text[run_start..], 0.0, plain);
+    }
+    job.wrap.max_width = f32::INFINITY;
+    job
+}
+
 /// Parses Markdown into blocks.
 pub fn parse(text: &str) -> Vec<Block> {
     let lines: Vec<&str> = text.lines().collect();
@@ -321,7 +366,11 @@ pub fn parse(text: &str) -> Vec<Block> {
     let mut para: Vec<&str> = Vec::new();
     let flush = |para: &mut Vec<&str>, blocks: &mut Vec<Block>| {
         if !para.is_empty() {
-            blocks.push(Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")));
+            if para.iter().any(|l| columned(l)) {
+                blocks.push(Block::Pre(para.join("\n")));
+            } else {
+                blocks.push(Block::Para(para.iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n")));
+            }
             para.clear();
         }
     };
@@ -463,7 +512,26 @@ pub struct Theme {
 
 impl Theme {
     pub fn of(ui: &egui::Ui) -> Self {
-        if ui.visuals().dark_mode {
+        Self::palette(ui.visuals().dark_mode)
+    }
+
+    /// The palette that suits the terminal's colour scheme, on its background and foreground.
+    pub fn terminal(bg: Color32, fg: Color32) -> Self {
+        let dark = bg.r() as u32 + bg.g() as u32 + bg.b() as u32 <= 3 * 128;
+        let mut t = Self::palette(dark);
+        t.bg = bg;
+        t.fg = fg;
+        let shade = if dark { Color32::WHITE } else { Color32::BLACK };
+        t.code_bg = bg.lerp_to_gamma(shade, 0.05);
+        t.table_head = bg.lerp_to_gamma(shade, 0.06);
+        t.table_alt = bg.lerp_to_gamma(shade, 0.025);
+        t.rule = bg.lerp_to_gamma(shade, 0.16);
+        t.weak = bg.lerp_to_gamma(fg, 0.6);
+        t
+    }
+
+    fn palette(dark: bool) -> Self {
+        if dark {
             Theme {
                 bg: Color32::from_rgb(31, 31, 31),
                 fg: Color32::from_rgb(204, 204, 204),
@@ -638,12 +706,22 @@ fn rich(ui: &mut egui::Ui, text: &str, size: f32, th: &Theme, strong: bool) {
     }
 }
 
-fn copy_button(ui: &mut egui::Ui, id: egui::Id, text: &str) {
+/// A small copy button at the top right of `rect`, shown while the pointer is over it, as on
+/// code blocks in VS Code and on GitHub.
+fn hover_copy(ui: &mut egui::Ui, th: &Theme, rect: Rect, id: egui::Id, text: &str) {
     let now = ui.input(|i| i.time);
     let copied = ui.ctx().data(|d| d.get_temp::<f64>(id)).is_some_and(|t| now - t < 1.5);
-    let label =
-        if copied { format!("{}  Copied", crate::gui::ic::CHECK) } else { format!("{}  Copy", crate::gui::ic::COPY) };
-    if ui.add(egui::Button::new(egui::RichText::new(label).size(12.0)).small()).clicked() {
+    if !copied && !ui.rect_contains_pointer(rect) {
+        return;
+    }
+    let glyph = if copied { crate::gui::ic::CHECK } else { crate::gui::ic::COPY };
+    let at = Rect::from_min_size(Pos2::new(rect.right() - 34.0, rect.top() + 6.0), Vec2::splat(28.0));
+    let b = egui::Button::new(egui::RichText::new(glyph).size(14.0).color(th.fg))
+        .fill(th.code_bg)
+        .stroke(Stroke::new(1.0, th.rule))
+        .corner_radius(6);
+    let tip = if copied { "Copied" } else { "Copy" };
+    if ui.put(at, b).on_hover_text(tip).clicked() {
         ui.ctx().copy_text(text.to_string());
         ui.ctx().data_mut(|d| d.insert_temp(id, now));
     }
@@ -885,24 +963,33 @@ pub fn highlight(code: &str, lang: &str, th: &Theme, size: f32) -> LayoutJob {
 }
 
 fn code_block(ui: &mut egui::Ui, th: &Theme, lang: &str, code: &str, id: egui::Id) {
-    egui::Frame::new()
+    let rect = egui::Frame::new()
         .fill(th.code_bg)
         .stroke(Stroke::new(1.0, th.rule))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 12 })
+        .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(if lang.is_empty() { "text" } else { lang }).size(11.5).color(th.weak));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_button(ui, id, code));
-            });
             egui::ScrollArea::horizontal().id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
                 let mut job = highlight(code, lang, th, 13.0);
                 job.wrap.max_width = f32::INFINITY;
                 let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
                 ui.add(egui::Label::new(galley).selectable(true).extend());
             });
-        });
+        })
+        .response
+        .rect;
+    hover_copy(ui, th, rect, id, code);
+}
+
+/// Command output and other aligned text: the terminal's font, every column where it was.
+fn pre(ui: &mut egui::Ui, th: &Theme, text: &str) {
+    let font = FontId::monospace(13.0);
+    egui::ScrollArea::horizontal().id_salt(ui.next_auto_id()).auto_shrink([false, true]).show(ui, |ui| {
+        let job = ui.ctx().fonts_mut(|f| mono_job(text, &font, th.fg, f));
+        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+        ui.add(egui::Label::new(galley).selectable(true).extend());
+    });
 }
 
 fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], id: egui::Id) {
@@ -923,13 +1010,7 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
             widths[c] = widths[c].max(lay(ui, cell, r == 0, f32::INFINITY).size().x.min(380.0));
         }
     }
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            let tsv: String = rows.iter().map(|r| r.join("\t")).collect::<Vec<_>>().join("\n");
-            copy_button(ui, id.with("copy"), &tsv);
-        });
-    });
-    egui::ScrollArea::horizontal().id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
+    let shown = egui::ScrollArea::horizontal().id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
         let total: f32 = widths.iter().map(|w| w + 2.0 * pad.x).sum();
         let galleys: Vec<Vec<_>> = rows
             .iter()
@@ -978,6 +1059,13 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
             y += h;
         }
     });
+    // Copied as tab-separated text, which spreadsheets take as cells.
+    let tsv: String = rows.iter().map(|r| r.join("	")).collect::<Vec<_>>().join(
+        "
+",
+    );
+    let rect = shown.inner_rect.intersect(Rect::from_min_size(shown.inner_rect.min, shown.content_size));
+    hover_copy(ui, th, rect, id.with("copy"), &tsv);
 }
 
 fn heading(ui: &mut egui::Ui, th: &Theme, level: u8, text: &str) {
@@ -997,6 +1085,10 @@ pub fn blocks(ui: &mut egui::Ui, th: &Theme, blocks: &[Block], id: egui::Id) {
         let bid = id.with(n);
         match b {
             Block::Heading(level, text) => heading(ui, th, *level, text),
+            Block::Pre(text) => {
+                pre(ui, th, text);
+                ui.add_space(6.0);
+            }
             Block::Para(text) => {
                 rich(ui, text, BODY, th, false);
                 ui.add_space(6.0);
@@ -1079,9 +1171,9 @@ pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id) {
                 ui.add_space(8.0);
             }
             Part::Reply { source, blocks: b } => {
-                blocks(ui, &th, b, pid);
-                // As in chat apps, the reply's own copy button sits under it.
-                copy_button(ui, pid.with("copy"), source);
+                let rect = ui.scope(|ui| blocks(ui, &th, b, pid)).response.rect;
+                // The reply's own Markdown, copied with the button at its corner.
+                hover_copy(ui, &th, rect.expand2(Vec2::new(4.0, 0.0)), pid.with("copy"), source);
                 ui.add_space(10.0);
             }
             Part::Tool { title, output } => {
@@ -1139,7 +1231,7 @@ mod tests {
             "# Title\n\nSome *text*\nmore.\n\n- one\n  - two\n1. three\n- [x] done\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n> quoted\n\n---",
         );
         assert_eq!(b[0], Block::Heading(1, "Title".into()));
-        assert_eq!(b[1], Block::Para("Some *text* more.".into()));
+        assert_eq!(b[1], Block::Para("Some *text*\nmore.".into()));
         assert_eq!(b[2], Block::Item { depth: 0, marker: "-".into(), text: "one".into() });
         assert_eq!(b[3], Block::Item { depth: 1, marker: "-".into(), text: "two".into() });
         assert_eq!(b[4], Block::Item { depth: 0, marker: "1.".into(), text: "three".into() });

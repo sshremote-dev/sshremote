@@ -3610,6 +3610,7 @@ dependencies = [
  "sha2",
  "spake2",
  "uiautomation",
+ "unicode-width",
  "windows-sys 0.61.2",
  "zbus",
  "zstd",

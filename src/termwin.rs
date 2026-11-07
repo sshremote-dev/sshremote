@@ -166,6 +166,9 @@ const SCHEMES: [Scheme; 6] = [
 /// The scheme in use, shared by every terminal window.
 static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Selected cells, in VS Code's dark selection colour.
+const SELECTION: Color32 = Color32::from_rgb(38, 79, 120);
+
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
@@ -217,7 +220,7 @@ enum Backend {
 }
 
 /// How a tab is shown: the live terminal, its text, or its text read as Markdown.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum View {
     Terminal,
     Text,
@@ -245,8 +248,6 @@ struct Tab {
     backend: Backend,
     view: View,
     search: Option<Search>,
-    /// Agent markers and frames removed in the Markdown view.
-    clean: bool,
     /// The tab of the strip this pane belongs to; panes of one tab share its area.
     group: u32,
     /// How this pane divides the area of the pane before it: Some(true) side by side, Some(false)
@@ -262,8 +263,8 @@ struct Tab {
     preedit: String,
 }
 
-/// The text and Markdown views' content, with the output revision and the session choice it was made for.
-type Reading = (u64, bool, std::rc::Rc<(String, crate::markdown::Doc)>);
+/// The text and Markdown views' content, with the output revision and the first live row it ends above.
+type Reading = (u64, i32, std::rc::Rc<(String, crate::markdown::Doc)>);
 
 /// A tab or pane waiting for the window's context: what it runs, and the pane it splits (with the
 /// direction) if any.
@@ -607,7 +608,6 @@ impl TermWindow {
             preedit: String::new(),
             rev: 0,
             reading: None,
-            clean: true,
             group: id,
             dir: None,
             profile,
@@ -1153,123 +1153,167 @@ impl TermWindow {
 
 /// Draws a shell and passes keys, paste and the mouse wheel to it.
 /// The whole buffer as text, plain or read as Markdown.
-fn buffer_text(t: &Tab) -> String {
+/// The text of the scrollback and the screen above row `upto`, without trailing spaces.
+fn text_before(t: &Tab, upto: i32) -> String {
     let grid = t.term.grid();
-    let history = grid.total_lines() - grid.screen_lines();
-    let start = Point::new(Line(-(history as i32)), Column(0));
-    let end = Point::new(Line(grid.screen_lines() as i32 - 1), Column(grid.columns().saturating_sub(1)));
+    let history = (grid.total_lines() - grid.screen_lines()) as i32;
+    if upto <= -history {
+        return String::new();
+    }
+    let start = Point::new(Line(-history), Column(0));
+    let end = Point::new(Line(upto - 1), Column(grid.columns().saturating_sub(1)));
     let text = t.term.bounds_to_string(start, end);
     text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string()
 }
 
-/// The text and Markdown views of a tab, styled as VS Code's editor and Markdown preview.
+/// The text and Markdown views of a tab, as one document in the manner of VS Code's editor and
+/// Markdown preview: the scrollback above, and at its end the live rows where the prompt and the
+/// cursor are, which take the keys as the terminal view does. Only those rows show a text cursor
+/// for typing; the rest can be selected and copied.
 fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut Vec<Cmd>) {
-    // The live rows around the cursor stay at the bottom, where typing goes to the shell as in
-    // the terminal view.
-    let full = ui.available_rect_before_wrap();
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let (first, last) = input_rows(t);
-    let strip =
-        Rect::from_min_max(Pos2::new(full.left(), full.bottom() - (last - first + 1) as f32 * ch - 14.0), full.max);
-    let id = egui::Id::unique(("reader-input", t.id));
-    let resp = ui.interact(strip, id, Sense::click());
-    ui.painter().rect_filled(strip, CornerRadius::ZERO, scheme_bg());
-    ui.painter().hline(strip.x_range(), strip.top(), egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.6)));
-    let inner = strip.shrink2(Vec2::new(8.0, 7.0));
-    let c = t.term.grid().cursor.point;
-    let at = Pos2::new(inner.left() + c.column.0 as f32 * cw, inner.top() + (c.line.0 - first) as f32 * ch);
-    // The keys come here unless the text view's selectable text has them; typing takes them back.
-    let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_))));
-    let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
-    let grab = keys && (resp.clicked() || typing || !elsewhere);
-    if keys {
-        keyboard(ui, t, id, strip, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, out);
-    }
-    let focused = ui.memory(|m| m.has_focus(id));
-    paint(ui, t, inner, &font, cw, ch, first, focused);
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-    }
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_y(strip.top() - 1.0)));
-    let ui = &mut child;
-    let markdown = t.view == View::Markdown;
-    if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != t.clean) {
-        let raw = buffer_text(t);
-        let doc = crate::markdown::Doc::new(&raw, t.clean);
-        t.reading = Some((t.rev, t.clean, std::rc::Rc::new((raw, doc))));
+    if t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
+        let text = text_before(t, first);
+        let doc = crate::markdown::Doc::new(&text);
+        t.reading = Some((t.rev, first, std::rc::Rc::new((text, doc))));
     }
     let read = t.reading.as_ref().expect("just built").2.clone();
     let (text, doc) = (&read.0, &read.1);
-    let th = crate::markdown::Theme::of(ui);
-    ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, th.bg);
+    let th = crate::markdown::Theme::terminal(scheme_bg(), scheme_fg());
+    let area = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(area, CornerRadius::ZERO, th.bg);
     ui.visuals_mut().override_text_color = Some(th.fg);
-    ui.horizontal(|ui| {
-        if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
-            ui.ctx().copy_text(text.clone());
-        }
+    let markdown = t.view == View::Markdown;
+    let id = egui::Id::unique(("reader-input", t.id));
+    let live_rows = (last - first + 1) as usize;
+    let mut live: Option<(Rect, egui::Response)> = None;
+    // The keys come to the live rows unless selected text has them; typing takes them back.
+    let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_) | Event::Paste(_))));
+    let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
+    let scroll = egui::ScrollArea::both()
+        .id_salt(("reading", t.id, markdown))
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL | egui::scroll_area::ScrollSource::SCROLL_BAR);
+    let shown = scroll.show(ui, |ui| {
         if markdown {
-            ui.checkbox(&mut t.clean, "Agent session").on_hover_text(
-                "Claude Code or Codex output: frames removed; prompts, replies and tool runs apart, with a copy button under each reply",
+            // A readable column, as in the preview; the live rows sit under it on the same edge.
+            let width = ui.available_width().min(960.0);
+            let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 20.0;
+            egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 20, top: 14, bottom: 6 }).show(
+                ui,
+                |ui| {
+                    ui.set_max_width(width - 40.0);
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
+                    live = Some(live_area(ui, id, cw, ch, live_rows));
+                },
             );
+        } else {
+            text_lines(ui, &th, text, &font, cw, ch, live_rows, id, &mut live);
         }
-        ui.label(RichText::new(format!("{} lines", text.lines().count())).color(th.fg.gamma_multiply(0.6)).small());
     });
-    ui.add_space(4.0);
-    if markdown {
-        egui::ScrollArea::vertical().id_salt(("md", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(
-            ui,
-            |ui| {
-                // A readable column, as in the preview.
-                let width = ui.available_width().min(900.0);
-                let pad = ((ui.available_width() - width) / 2.0).max(0.0) + 12.0;
-                egui::Frame::new().inner_margin(egui::Margin { left: pad as i8, right: 12, top: 8, bottom: 24 }).show(
-                    ui,
-                    |ui| {
-                        ui.set_max_width(width - 24.0);
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        crate::markdown::show(ui, doc, egui::Id::unique(("md-doc", t.id)));
-                    },
-                );
-            },
-        );
-        return;
+    let Some((rect, resp)) = live else { return };
+    let rect = rect.intersect(shown.inner_rect);
+    let grab = keys && (resp.clicked() || typing || !elsewhere);
+    let c = t.term.grid().cursor.point;
+    let full = resp.rect;
+    let at = Pos2::new(full.left() + c.column.0 as f32 * cw, full.top() + (c.line.0 - first) as f32 * ch);
+    if keys {
+        keyboard(ui, t, id, rect, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, out);
     }
-    // The text view: an editor with line numbers, where text is selected with the mouse or Ctrl+A.
-    let font = FontId::monospace(13.5);
-    let row = ui.ctx().fonts_mut(|f| f.row_height(&font));
-    let lines = text.lines().count().max(1);
-    let digit = ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'));
-    let gutter = digit * (lines.to_string().len() as f32 + 1.0) + 12.0;
-    egui::ScrollArea::both().id_salt(("text", t.id)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, row * lines as f32), Sense::hover());
-            let clip = ui.clip_rect();
-            let first = ((clip.top() - g.top()) / row).floor().max(0.0) as usize;
-            let last = (((clip.bottom() - g.top()) / row).ceil().max(0.0) as usize).min(lines);
-            for n in first..last {
-                ui.painter().text(
-                    Pos2::new(g.right() - 6.0, g.top() + n as f32 * row),
-                    Align2::RIGHT_TOP,
-                    (n + 1).to_string(),
-                    font.clone(),
-                    th.fg.gamma_multiply(0.45),
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut clip = ui.new_child(egui::UiBuilder::new().max_rect(shown.inner_rect));
+    clip.set_clip_rect(shown.inner_rect);
+    paint(&clip, t, full, &font, cw, ch, first, focused);
+    // Only where typing goes shows a text cursor; elsewhere the pointer stays an arrow.
+    if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| shown.inner_rect.contains(*p)) {
+        let icon = if rect.contains(p) { egui::CursorIcon::Text } else { egui::CursorIcon::Default };
+        ui.ctx().set_cursor_icon(icon);
+    }
+    let all = format!("{text}\n{}", text_rows(t, first, last));
+    let menu_target = ui.interact(shown.inner_rect, egui::Id::unique(("reading-menu", t.id)), Sense::hover());
+    menu_target.context_menu(|ui| {
+        if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
+            ui.ctx().copy_text(all.trim().to_string());
+            ui.close();
+        }
+        if ui.button("Paste").clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            ui.ctx().memory_mut(|m| m.request_focus(id));
+            ui.close();
+        }
+    });
+}
+
+/// Space for the live rows at the end of a reading view.
+fn live_area(ui: &mut egui::Ui, id: egui::Id, cw: f32, ch: f32, rows: usize) -> (Rect, egui::Response) {
+    let width = ui.available_width().max(cw * 20.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, rows as f32 * ch), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
+    (rect, resp)
+}
+
+/// The text of screen rows `first` to `last`, for copying.
+fn text_rows(t: &Tab, first: i32, last: i32) -> String {
+    let cols = t.term.grid().columns();
+    let s = t.term.bounds_to_string(Point::new(Line(first), Column(0)), Point::new(Line(last), Column(cols - 1)));
+    s.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
+}
+
+/// The text view: line numbers, the scrollback in the terminal's font with every column where the
+/// terminal had it (selectable, Ctrl+A and Ctrl+C), and the live rows numbered on after it.
+#[allow(clippy::too_many_arguments)]
+fn text_lines(
+    ui: &mut egui::Ui,
+    th: &crate::markdown::Theme,
+    text: &str,
+    font: &FontId,
+    cw: f32,
+    ch: f32,
+    live_rows: usize,
+    id: egui::Id,
+    live: &mut Option<(Rect, egui::Response)>,
+) {
+    let lines = if text.is_empty() { 0 } else { text.lines().count() };
+    let total = lines + live_rows;
+    let digits = total.max(1).to_string().len() as f32;
+    let gutter = cw * (digits + 2.0);
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
+    let top = ui.cursor().top() + 8.0;
+    ui.add_space(8.0);
+    ui.horizontal_top(|ui| {
+        let (g, _) = ui.allocate_exact_size(Vec2::new(gutter, total as f32 * ch), Sense::hover());
+        let clip = ui.clip_rect();
+        let from = ((clip.top() - top) / ch).floor().max(0.0) as usize;
+        let to = (((clip.bottom() - top) / ch).ceil().max(0.0) as usize).min(total);
+        let number = th.fg.gamma_multiply(0.4);
+        for n in from..to {
+            let pos = Pos2::new(g.right() - cw, top + n as f32 * ch);
+            ui.painter().text(pos, Align2::RIGHT_TOP, (n + 1).to_string(), font.clone(), number);
+        }
+        ui.vertical(|ui| {
+            if lines > 0 {
+                let color = th.fg;
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
+                    let job = ui.ctx().fonts_mut(|f| crate::markdown::mono_job(buf.as_str(), font, color, f));
+                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                };
+                let mut view: &str = text;
+                ui.add(
+                    egui::TextEdit::multiline(&mut view)
+                        .id(id.with("text"))
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(1)
+                        .layouter(&mut layouter),
                 );
             }
-            let color = th.fg;
-            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
-                let job = egui::text::LayoutJob::simple(buf.as_str().to_string(), font.clone(), color, f32::INFINITY);
-                ui.ctx().fonts_mut(|f| f.layout_job(job))
-            };
-            let mut view: &str = text;
-            ui.add(
-                egui::TextEdit::multiline(&mut view)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .desired_width(f32::INFINITY)
-                    .layouter(&mut layouter),
-            );
+            *live = Some(live_area(ui, id, cw, ch, live_rows));
+            ui.add_space(8.0);
         });
     });
 }
@@ -1415,7 +1459,7 @@ fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, ch: f32, fi
             std::mem::swap(&mut fg, &mut bg);
         }
         if sel.is_some_and(|s| s.contains(cell.point)) {
-            bg = ACCENT.gamma_multiply(0.55);
+            bg = SELECTION;
         }
         let at_cursor = show_cursor && cell.point == cursor;
         let cell_rect = Rect::from_min_size(pos, Vec2::new(width, ch));
@@ -2033,6 +2077,54 @@ mod tests {
                 vec![Event::Ime(egui::ImeEvent::Commit("\u{D55C}".into())), Event::Text("a".into())],
             );
             assert_eq!(typed(&done), "\u{D55C}a");
+        }
+    }
+
+    /// Where the input method's cursor is after a frame with `events`.
+    fn ime_y(ctx: &egui::Context, w: &mut TermWindow, events: Vec<Event>) -> f32 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            w.embedded(ui);
+        });
+        out.platform_output.ime.map_or(f32::NAN, |i| i.cursor_rect.top())
+    }
+
+    #[test]
+    fn reading_views_scroll_with_the_wheel() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        for n in 0..300 {
+            t.parser.advance(&mut t.term, format!("line {n}\r\n").as_bytes());
+        }
+        t.rev += 1;
+        for view in [View::Text, View::Markdown] {
+            w.tabs[0].view = view;
+            for _ in 0..3 {
+                ime_y(&ctx, &mut w, Vec::new());
+            }
+            let bottom = ime_y(&ctx, &mut w, Vec::new());
+            assert!(bottom < 500.0, "{view:?}: the live rows start in view at the bottom ({bottom})");
+            let wheel = Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 10.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+                source: egui::MouseWheelSource::Wheel,
+            };
+            ime_y(&ctx, &mut w, vec![Event::PointerMoved(Pos2::new(400.0, 250.0)), wheel]);
+            let mut after = bottom;
+            for _ in 0..30 {
+                after = ime_y(&ctx, &mut w, vec![Event::PointerMoved(Pos2::new(400.0, 250.0))]);
+            }
+            assert!(after > bottom + 50.0, "{view:?}: the wheel scrolls back ({bottom} -> {after})");
         }
     }
 }

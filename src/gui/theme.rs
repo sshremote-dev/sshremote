@@ -152,8 +152,9 @@ pub fn set_theme(ctx: &egui::Context, dark: bool) {
     // Flat buttons: no outline until hovered.
     v.widgets.inactive.bg_stroke = Stroke::NONE;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, weak_line);
-    v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    // Selected text and items in VS Code's selection colours, readable in both themes.
+    v.selection.bg_fill = if dark { Color32::from_rgb(38, 79, 120) } else { Color32::from_rgb(173, 214, 255) };
+    v.selection.stroke = Stroke::new(1.0, text);
     v.hyperlink_color = Color32::from_rgb(90, 160, 255);
     for w in [
         &mut v.widgets.noninteractive,
