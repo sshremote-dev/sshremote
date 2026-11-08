@@ -1363,9 +1363,7 @@ impl Workspace {
     /// The active pane's own controls (the screen's quality, keys, chat...).
     fn controls(&mut self, ui: &mut egui::Ui, id: u64, action: &mut Option<(u64, remote::Deferred)>) {
         let Some(i) = self.index(id) else { return };
-        // The screen has its own full-screen button among its controls; a terminal or the files
-        // get theirs here, after their controls.
-        let own_full = matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen);
+        // Every pane's full screen and disconnect come last, after its mode's controls.
         match &mut self.panes[i].state {
             State::Live(r) => {
                 let mut a = None;
@@ -1378,17 +1376,15 @@ impl Workspace {
             State::Shell(t) => t.controls(ui),
             State::Down(_) => {}
         }
-        if !own_full {
-            let on = self.zoom == Some(id);
-            let (glyph, tip) = if on {
-                (ic::CORNERS_IN, "Leave full screen: back to the window as it was")
-            } else {
-                (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it (Ctrl+Shift+Enter)")
-            };
-            if ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
-                let ctx = ui.ctx().clone();
-                self.set_zoom(&ctx, if on { None } else { Some(id) });
-            }
+        let on = self.zoom == Some(id);
+        let (glyph, tip) = if on {
+            (ic::CORNERS_IN, "Leave full screen: back to the window as it was")
+        } else {
+            (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it (Ctrl+Shift+Enter)")
+        };
+        if ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
+            let ctx = ui.ctx().clone();
+            self.set_zoom(&ctx, if on { None } else { Some(id) });
         }
         // Disconnect last: the pane closes, and with the tab's last pane the tab.
         let (glyph, tip) = if self.is_remote(id) || !self.is_shell(id) {

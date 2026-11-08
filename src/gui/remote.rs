@@ -1691,7 +1691,8 @@ impl Remote {
         let fs = if self.in_pane { self.zoomed } else { self.fullscreen };
         let fs_tip = if fs { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
         let fs_glyph = if fs { ic::CORNERS_IN } else { ic::CORNERS_OUT };
-        if icon(ui, fs_glyph, fs_tip, fs).clicked() {
+        // In a pane the workspace puts this button last, beside Disconnect, as for every pane.
+        if !self.in_pane && icon(ui, fs_glyph, fs_tip, fs).clicked() {
             *action = Some(Box::new(move |r, c| {
                 r.set_fullscreen(c, !fs);
                 Ok(())
