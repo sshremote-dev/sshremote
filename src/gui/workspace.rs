@@ -97,6 +97,16 @@ enum Node {
 }
 
 impl Node {
+    fn renumber(&mut self, map: &std::collections::HashMap<u64, u64>) {
+        match self {
+            Node::Leaf(id) => *id = map.get(id).copied().unwrap_or(*id),
+            Node::Split { a, b, .. } => {
+                a.renumber(map);
+                b.renumber(map);
+            }
+        }
+    }
+
     fn leaves(&self, out: &mut Vec<u64>) {
         match self {
             Node::Leaf(id) => out.push(*id),
@@ -212,8 +222,18 @@ pub(super) struct Workspace {
     controls_w: f32,
     /// The tab being dragged (to a new place, or out into a window of its own).
     dragging: Option<usize>,
-    /// Tabs dragged out of the bar: each becomes a window of its own (the app opens them).
-    pub(super) torn_out: Vec<Workspace>,
+    /// Where the dragged tab was grabbed, from its left edge, so it follows the pointer from there.
+    grab_dx: f32,
+    /// The dragged tab is away from this bar: where the pointer is on the screen.
+    pub(super) drag_out: Option<Pos2>,
+    /// A tab let go away from this bar, and where on the screen: the app moves it into the
+    /// window whose tabs it was dropped on, or into a window of its own.
+    pub(super) dropped: Option<(usize, Pos2)>,
+    /// The tab strip and each tab on the screen last frame, for tabs dropped from other windows.
+    pub(super) strip_screen: Rect,
+    pub(super) tabs_screen: Vec<Rect>,
+    /// Where a tab dragged over from another window would go in: the app sets it each frame.
+    pub(super) drop_hint: Option<usize>,
     /// The mode drop-down's width last frame.
     mode_w: f32,
     title: String,
@@ -246,7 +266,12 @@ impl Workspace {
             reached: Vec::new(),
             controls_w: 260.0,
             dragging: None,
-            torn_out: Vec::new(),
+            grab_dx: 0.0,
+            drag_out: None,
+            dropped: None,
+            strip_screen: Rect::NOTHING,
+            tabs_screen: Vec::new(),
+            drop_hint: None,
             mode_w: 150.0,
             title: String::new(),
             tab_first: 0,
@@ -376,7 +401,7 @@ impl Workspace {
     }
 
     /// Takes tab `t` with its panes into a workspace of its own.
-    fn take_tab(&mut self, t: usize) -> Workspace {
+    pub(super) fn take_tab(&mut self, t: usize) -> Workspace {
         let tab = self.tabs.remove(t);
         let mut ids = Vec::new();
         tab.root.leaves(&mut ids);
@@ -392,6 +417,39 @@ impl Workspace {
         }
         self.current = self.current.min(self.tabs.len().saturating_sub(1));
         w
+    }
+
+    /// Takes in the tab of a workspace from another window (one `take_tab` made), at `at`, and
+    /// shows it. Its panes are numbered again after this one's.
+    pub(super) fn put_tab(&mut self, mut from: Workspace, at: usize) {
+        let Some(mut tab) = from.tabs.pop() else { return };
+        let mut map = std::collections::HashMap::new();
+        for p in &mut from.panes {
+            map.insert(p.id, self.next_id);
+            p.id = self.next_id;
+            self.next_id += 1;
+        }
+        tab.root.renumber(&map);
+        tab.active = map.get(&tab.active).copied().unwrap_or(tab.active);
+        self.panes.append(&mut from.panes);
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.current = at;
+        self.zoom = None;
+    }
+
+    pub(super) fn dragging_tab(&self) -> Option<usize> {
+        self.dragging
+    }
+
+    pub(super) fn tabs_len(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// What a dragged tab shows of itself: its icon, name and number of panes.
+    pub(super) fn tab_label(&self, t: usize) -> (&'static str, String, usize) {
+        let Some(tab) = self.tabs.get(t) else { return (ic::TERMINAL, String::new(), 0) };
+        (self.glyph(tab.active).0, self.name(tab.active).0, self.order(t).len())
     }
 
     fn close_tab(&mut self, tab: usize) {
@@ -813,26 +871,49 @@ impl Workspace {
         let first = self.tab_first;
         let painter = ui.painter().with_clip_rect(view.intersect(ui.clip_rect()));
         let visuals = ui.visuals().clone();
-        let mut rects = Vec::with_capacity(n);
+        let mut rects = vec![Rect::NOTHING; n];
         let mut hovered = None;
         let mut shapes = Vec::new();
-        for t in 0..n {
-            if t < first || t >= first + shown {
-                rects.push(Rect::NOTHING);
-                continue;
-            }
+        // Each tab has its slot; the one being dragged along the bar floats under the pointer,
+        // drawn over the others.
+        let floating = self.dragging.filter(|_| self.drag_out.is_none());
+        let pointer_x = ui.input(|i| i.pointer.latest_pos()).map(|p| p.x);
+        let float_painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("tab-float"))).with_clip_rect(view);
+        let mut draw: Vec<usize> = (first..first + shown).filter(|&t| Some(t) != floating).collect();
+        draw.extend(floating.filter(|&t| t >= first && t < first + shown));
+        for t in draw {
             let x = view.left() + (t - first) as f32 * fit;
-            let rect = Rect::from_min_max(Pos2::new(x, view.top() + 6.0), Pos2::new(x + fit, view.bottom()));
-            rects.push(rect);
+            let slot = Rect::from_min_max(Pos2::new(x, view.top() + 6.0), Pos2::new(x + fit, view.bottom()));
+            rects[t] = slot;
+            let float = Some(t) == floating;
+            // Tabs slide to their new places as the dragged one passes them.
+            let key = self.order(t).first().copied().unwrap_or(0);
+            let slide = egui::Id::unique(("tab-x", key));
+            let rect = match (float, pointer_x) {
+                (true, Some(px)) => {
+                    let left = (px - self.grab_dx).clamp(view.left(), view.right() - fit);
+                    ui.ctx().animate_value_with_time(slide, left, 0.0);
+                    slot.translate(Vec2::new(left - slot.left(), 0.0))
+                }
+                _ => {
+                    let left = ui.ctx().animate_value_with_time(slide, slot.left(), 0.12);
+                    slot.translate(Vec2::new(left - slot.left(), 0.0))
+                }
+            };
+            let painter = if float { &float_painter } else { &painter };
+            if float {
+                let shadow = egui::epaint::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha(90) };
+                painter.add(shadow.as_shape(rect, egui::CornerRadius { nw: theme::R_LG, ne: theme::R_LG, sw: 0, se: 0 }));
+            }
             let id = self.tabs[t].active;
             let order_len = self.order(t).len();
             let (name, rtt) = self.name(id);
             let (glyph, down) = self.glyph(id);
             let on = t == self.current;
-            let r = ui.interact(rect, egui::Id::unique(("tab", t)), egui::Sense::click_and_drag());
+            let r = ui.interact(slot, egui::Id::unique(("tab", t)), egui::Sense::click_and_drag());
             let x_rect = Rect::from_center_size(Pos2::new(rect.right() - 16.0, rect.center().y), Vec2::splat(20.0));
             let xr = ui.interact(x_rect, egui::Id::unique(("tab-close", t)), egui::Sense::click());
-            let hot = r.hovered() || xr.hovered();
+            let hot = (r.hovered() || xr.hovered()) && self.dragging.is_none();
             if hot {
                 hovered = Some(t);
             }
@@ -877,6 +958,7 @@ impl Workspace {
             if r.drag_started() {
                 self.dragging = Some(t);
                 self.current = t;
+                self.grab_dx = r.interact_pointer_pos().map_or(fit / 2.0, |p| p.x - slot.left());
             }
             let mut tip = name;
             if let Some(ms) = rtt {
@@ -889,7 +971,7 @@ impl Workspace {
         }
         // Thin rules between tabs that are neither current nor under the pointer.
         for (t, rect) in rects.iter().enumerate().take(first + shown).skip(first + 1) {
-            let quiet = |k: usize| k != self.current && Some(k) != hovered;
+            let quiet = |k: usize| k != self.current && Some(k) != hovered && Some(k) != floating;
             if quiet(t - 1) && quiet(t) {
                 let x = rect.left();
                 let y = rect.center().y - 1.0;
@@ -897,8 +979,31 @@ impl Workspace {
             }
         }
         for (r, tip) in shapes {
-            r.on_hover_text(tip);
+            if self.dragging.is_none() {
+                r.on_hover_text(tip);
+            }
         }
+        // A tab dragged over from another window: where it would go in.
+        if let Some(at) = self.drop_hint {
+            let x = if at < first {
+                view.left()
+            } else if at < first + shown {
+                rects[at].left()
+            } else {
+                view.left() + shown as f32 * fit
+            };
+            let accent = super::ACCENT;
+            painter.rect_filled(view.with_min_y(view.top() + 6.0), theme::R_LG, accent.gamma_multiply(0.10));
+            ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("tab-drop"))).rect_filled(
+                Rect::from_center_size(Pos2::new(x.clamp(view.left() + 1.5, view.right() - 1.5), view.center().y + 3.0), Vec2::new(3.0, view.height() - 10.0)),
+                1.5,
+                accent,
+            );
+        }
+        // Where the tabs are on the screen, for drops from other windows.
+        let origin = ui.ctx().input(|i| i.viewport().inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()));
+        self.strip_screen = view.translate(origin);
+        self.tabs_screen = rects.iter().map(|r| if r.is_finite() && r.is_positive() { r.translate(origin) } else { Rect::NOTHING }).collect();
         if over {
             if ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
                 self.tab_first += 1;
@@ -942,22 +1047,32 @@ impl Workspace {
         (glyph, matches!(p.state, State::Down(_)))
     }
 
-    /// A tab being dragged: along the bar it changes places with the others; let go away from the
-    /// bar, it leaves for a window of its own (unless it is the only one).
+    /// A tab being dragged: along the bar it changes places with the others; away from the bar
+    /// the app shows where it would go, and takes it there when let go.
     fn drag_tab(&mut self, ui: &egui::Ui, rects: &[Rect]) {
         let Some(d) = self.dragging else { return };
         let (pos, released) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_released() || !i.pointer.any_down()));
         let Some(p) = pos else { return };
+        let size = ui.ctx().content_rect().size();
+        let away = p.y > super::chrome::HEIGHT + 40.0 || p.y < -20.0 || p.x < -20.0 || p.x > size.x + 20.0;
+        let origin = ui.ctx().input(|i| i.viewport().inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()));
         if released {
             self.dragging = None;
-            let away = p.y > super::chrome::HEIGHT + 40.0 || p.y < -20.0;
-            if away && self.tabs.len() > 1 && d < self.tabs.len() {
-                let w = self.take_tab(d);
-                self.torn_out.push(w);
+            self.drag_out = None;
+            if away && d < self.tabs.len() {
+                self.dropped = Some((d, p + origin));
             }
             return;
         }
-        if let Some(to) = rects.iter().position(|r| p.x >= r.left() && p.x < r.right())
+        self.drag_out = away.then_some(p + origin);
+        if away {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            return;
+        }
+        // It changes places once the middle of the floating tab passes into another's slot.
+        let width = rects.get(d).map_or(0.0, |r| r.width());
+        let middle = p.x - self.grab_dx + width / 2.0;
+        if let Some(to) = rects.iter().position(|r| middle >= r.left() && middle < r.right())
             && to != d
             && d < self.tabs.len()
         {
@@ -1481,6 +1596,38 @@ mod tests {
             h.snap.save(&h.ctx, h.size, &dir.join(format!("tabs_{n}_light_narrow.png")));
             h.w.close_all();
         }
+        // A tab dragged along the bar, one coming in from another window, and one out.
+        let mut h = Harness::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        }
+        h.frame(Vec::new());
+        let a = h.snap.find("alpha")[0].center();
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.frame(vec![press(a, true)]);
+        for k in 1..=6 {
+            h.frame(vec![Event::PointerMoved(a + Vec2::new(22.0 * k as f32, 0.0))]);
+        }
+        for _ in 0..6 {
+            h.frame(Vec::new());
+        }
+        h.snap.save(&h.ctx, h.size, &dir.join("tab_drag_float.png"));
+        h.frame(vec![press(a + Vec2::new(132.0, 0.0), false)]);
+        h.w.drop_hint = Some(2);
+        h.frame(Vec::new());
+        h.snap.save(&h.ctx, h.size, &dir.join("tab_drop_hint.png"));
+        h.w.drop_hint = None;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)), ..Default::default() };
+        let w = &mut h.w;
+        h.snap.frame(&h.ctx, input, |ui| {
+            w.ui(ui, Vec::new());
+            super::super::tab_ghost(ui.ctx(), ic::TERMINAL, "alpha", 1, Pos2::new(600.0, 400.0));
+        });
+        h.snap.save(&h.ctx, h.size, &dir.join("tab_ghost.png"));
+        h.w.close_all();
     }
 
     /// Tabs dragged along the bar change places; one dragged away from the bar leaves for a
@@ -1515,20 +1662,49 @@ mod tests {
         let (a, b) = (at(&h, "first"), at(&h, "second"));
         drag(&mut h, a, b);
         assert_eq!(names(&h.w), ["second", "first"], "dragged along the bar");
+        // Away from the bar it is out while held, and handed to the app when let go there.
         let a = at(&h, "first");
-        drag(&mut h, a, a + Vec2::new(0.0, 300.0));
-        assert_eq!(names(&h.w), ["second"], "dragged away from the bar");
-        assert_eq!(h.w.torn_out.len(), 1, "it leaves for a window of its own");
-        assert_eq!(names(&h.w.torn_out[0]), ["first"]);
-        assert_eq!(h.w.torn_out[0].panes.len(), 1, "with its pane");
-        // The last tab stays: there is nothing to leave from.
-        let a = at(&h, "second");
-        drag(&mut h, a, a + Vec2::new(0.0, 300.0));
-        assert_eq!(names(&h.w), ["second"]);
-        h.w.close_all();
-        for mut w in std::mem::take(&mut h.w.torn_out) {
-            w.close_all();
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.frame(vec![press(a, true)]);
+        for k in 1..=8 {
+            h.frame(vec![Event::PointerMoved(a + Vec2::new(0.0, 40.0 * k as f32))]);
         }
+        assert_eq!(h.w.drag_out, Some(a + Vec2::new(0.0, 320.0)), "out while held");
+        h.frame(vec![press(a + Vec2::new(0.0, 320.0), false)]);
+        assert_eq!(h.w.dropped, Some((1, a + Vec2::new(0.0, 320.0))), "let go away from the bar");
+        assert_eq!(h.w.drag_out, None);
+        assert_eq!(names(&h.w), ["second", "first"], "the app takes it from here");
+        h.w.close_all();
+    }
+
+    /// A tab from another window goes in where it was dropped, its panes numbered after these.
+    #[test]
+    fn a_tab_from_another_window_goes_in_where_dropped() {
+        let mut h = Harness::new();
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        h.w.add(shell("a"), Place::Tab, (false, false, false));
+        h.w.add(shell("b"), Place::Tab, (false, false, false));
+        let mut other = Workspace::new(h.w.opt.clone());
+        other.add(shell("c"), Place::Tab, (false, false, false));
+        other.add(shell("d"), Place::Split { below: false }, (false, false, false));
+        let moved = other.take_tab(0);
+        h.w.put_tab(moved, 1);
+        h.frame(Vec::new());
+        let names: Vec<String> = (0..h.w.tabs.len()).map(|t| h.w.name(h.w.tabs[t].active).0).collect();
+        assert_eq!(names, ["a", "d", "b"], "in between, its active pane named");
+        assert_eq!(h.w.current, 1, "and shown");
+        let mut ids: Vec<u64> = h.w.panes.iter().map(|p| p.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every pane its own number");
+        assert_eq!(h.w.order(1).len(), 2, "with both its panes");
+        h.w.close_all();
+        other.close_all();
     }
 
     /// Windows Terminal's keys: new tab, next tab, split, between panes, close pane.

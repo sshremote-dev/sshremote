@@ -662,7 +662,6 @@ impl eframe::App for App {
         let (main_keys, window_keys) = if self.grab_window.is_some() { (Vec::new(), grabbed) } else { (grabbed, Vec::new()) };
         let mut back = false;
         let mut reached = Vec::new();
-        let mut torn = Vec::new();
         let mut main_grab = false;
         if let Screen::Work(mut w) = std::mem::replace(&mut self.screen, Screen::Connect) {
             let out = w.ui(ui, main_keys);
@@ -670,17 +669,17 @@ impl eframe::App for App {
             main_grab = out.grab;
             reached = std::mem::take(&mut w.reached);
             self.open_dialog(&ctx, &mut w);
-            torn = std::mem::take(&mut w.torn_out);
             self.screen = Screen::Work(w);
         }
-        self.tear_off(&ctx, torn);
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
+        self.tab_drags(&ctx);
         // The hook catches the keys while any active pane wants them, for that window.
         self.grab_window = if main_grab { None } else { window_grab };
         #[cfg(windows)]
         crate::keygrab::set_active(main_grab || window_grab.is_some());
         self.reached(reached);
-        if back && self.quit_when_empty {
+        // `sshremote terminal` ends with its last pane, unless tabs live on in other windows.
+        if back && self.quit_when_empty && self.windows.is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         } else if back {
             self.screen = Screen::Connect;
@@ -733,15 +732,79 @@ impl App {
     }
 
     /// Tabs dragged out of a workspace: each in a window of its own, where the pointer let go.
-    fn tear_off(&mut self, ctx: &egui::Context, torn: Vec<workspace::Workspace>) {
-        let at = ctx.input(|i| {
-            let origin = i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min);
-            origin + i.pointer.latest_pos().unwrap_or(Pos2::new(100.0, 100.0)).to_vec2() - Vec2::new(60.0, 16.0)
-        });
-        for w in torn {
-            self.windows_made += 1;
-            let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
-            self.windows.push((id, Box::new(w), at));
+    /// A window of its own for a tab dragged out, its tab under the screen point `at`.
+    fn tear_off(&mut self, w: workspace::Workspace, at: Pos2) {
+        self.windows_made += 1;
+        let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
+        self.windows.push((id, Box::new(w), at - Vec2::new(90.0, 18.0)));
+    }
+
+    /// Every window's workspace, with its window (None: the main one).
+    fn workspaces(&mut self) -> Vec<(Option<egui::ViewportId>, &mut workspace::Workspace)> {
+        let mut all = Vec::new();
+        if let Screen::Work(w) = &mut self.screen {
+            all.push((None, &mut **w));
+        }
+        for (id, w, _) in &mut self.windows {
+            all.push((Some(*id), &mut **w));
+        }
+        all
+    }
+
+    /// A tab dragged out of its bar, as Windows Terminal and browsers do it: over another
+    /// window's tabs that window shows where it would go in, and takes it when let go there;
+    /// anywhere else a picture of it follows the pointer, and let go it opens in a window of its
+    /// own there (the only tab of a window stays: there is nothing to tear it from).
+    fn tab_drags(&mut self, ctx: &egui::Context) {
+        let mut ghost = None;
+        let mut tear = None;
+        let mut focus = None;
+        {
+            let mut all = self.workspaces();
+            for (_, w) in all.iter_mut() {
+                w.drop_hint = None;
+            }
+            let Some(s) = all.iter().position(|(_, w)| w.drag_out.is_some() || w.dropped.is_some()) else { return };
+            let dropped = all[s].1.dropped.take();
+            let Some(point) = dropped.map(|d| d.1).or(all[s].1.drag_out) else { return };
+            let over = all.iter().enumerate().position(|(i, (_, w))| i != s && w.strip_screen.expand2(Vec2::new(8.0, 10.0)).contains(point));
+            let at = |w: &workspace::Workspace| {
+                let shown: Vec<(usize, &Rect)> = w.tabs_screen.iter().enumerate().filter(|(_, r)| r.is_positive()).collect();
+                match shown.iter().find(|(_, r)| r.center().x > point.x) {
+                    Some((i, _)) => *i,
+                    None => shown.last().map_or(w.tabs_screen.len(), |(i, _)| i + 1),
+                }
+            };
+            match (dropped, over) {
+                (None, Some(o)) => {
+                    let hint = at(all[o].1);
+                    all[o].1.drop_hint = Some(hint);
+                }
+                (None, None) => {
+                    let t = all[s].1.dragging_tab().unwrap_or(0);
+                    ghost = Some((all[s].1.tab_label(t), point));
+                }
+                (Some((t, _)), Some(o)) => {
+                    let moved = all[s].1.take_tab(t);
+                    let hint = at(all[o].1);
+                    all[o].1.put_tab(moved, hint);
+                    focus = Some(all[o].0.unwrap_or(egui::ViewportId::ROOT));
+                }
+                (Some((t, _)), None) => {
+                    if all[s].1.tabs_len() > 1 {
+                        tear = Some((all[s].1.take_tab(t), point));
+                    }
+                }
+            }
+        }
+        if let Some((w, at)) = tear {
+            self.tear_off(w, at);
+        }
+        if let Some(id) = focus {
+            ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
+        }
+        if let Some(((glyph, name, panes), at)) = ghost {
+            tab_ghost(ctx, glyph, &name, panes, at);
         }
     }
 
@@ -761,7 +824,6 @@ impl App {
     /// `keys` are the system keys caught for the one that asked; returns the one asking now.
     fn other_windows(&mut self, ctx: &egui::Context, keys: Vec<(u32, bool)>, reached: &mut Vec<String>) -> Option<egui::ViewportId> {
         let mut windows = std::mem::take(&mut self.windows);
-        let mut torn = Vec::new();
         let mut keys = Some(keys);
         let owner = self.grab_window;
         let mut grab = None;
@@ -796,14 +858,58 @@ impl App {
                     grab = Some(*id);
                 }
                 self.open_dialog(&ctx, w);
-                torn.append(&mut w.torn_out);
             });
             keep
         });
         self.windows.append(&mut windows);
-        self.tear_off(ctx, torn);
         grab
     }
+}
+
+/// The picture of a tab being dragged where it cannot go in: a small window under the pointer,
+/// its tab on top and what it shows below, that lets the pointer through and takes no focus.
+fn tab_ghost(ctx: &egui::Context, glyph: &str, name: &str, panes: usize, at: Pos2) {
+    let size = Vec2::new(260.0, 150.0);
+    let builder = egui::ViewportBuilder::default()
+        .with_title("SSH Remote")
+        .with_decorations(false)
+        .with_inner_size(size)
+        .with_position(at - Vec2::new(40.0, 14.0))
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_mouse_passthrough(true)
+        .with_taskbar(false)
+        .with_active(false);
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("tab-ghost"), builder, |ui, class| {
+        let v = ui.visuals().clone();
+        // Embedded (where windows of their own are not possible): drawn at the pointer.
+        let rect = if class == egui::ViewportClass::EmbeddedWindow {
+            Rect::from_min_size(at - Vec2::new(40.0, 14.0), size)
+        } else {
+            ui.max_rect()
+        };
+        let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("tab-ghost")));
+        p.rect_filled(rect, theme::R_MD, chrome::bar_fill(&v));
+        p.rect_stroke(rect, theme::R_MD, v.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+        let tab = Rect::from_min_size(rect.min + Vec2::new(8.0, 6.0), Vec2::new(rect.width() - 16.0, 28.0));
+        let top = egui::CornerRadius { nw: theme::R_LG, ne: theme::R_LG, sw: 0, se: 0 };
+        p.rect_filled(tab, top, v.panel_fill);
+        p.text(tab.left_center() + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(14.0), v.weak_text_color());
+        let galley = ui.ctx().fonts_mut(|f| {
+            let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), FontId::proportional(13.0), v.strong_text_color());
+            job.wrap = egui::text::TextWrapping::truncate_at_width(tab.width() - 44.0);
+            f.layout_job(job)
+        });
+        p.galley(tab.left_center() + Vec2::new(32.0, -galley.size().y / 2.0), galley, v.strong_text_color());
+        let body = Rect::from_min_max(Pos2::new(rect.left() + 8.0, tab.bottom()), rect.max - Vec2::new(8.0, 8.0));
+        p.rect_filled(body, egui::CornerRadius { nw: 0, ne: 0, sw: theme::R_SM, se: theme::R_SM }, v.panel_fill);
+        p.text(body.center() - Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, glyph, FontId::proportional(30.0), v.weak_text_color());
+        let what = match panes {
+            0 | 1 => "A window of its own here, or onto other tabs".to_string(),
+            n => format!("{n} panes: a window of their own here, or onto other tabs"),
+        };
+        p.text(body.center() + Vec2::new(0.0, 26.0), Align2::CENTER_CENTER, what, FontId::proportional(11.5), v.weak_text_color());
+    });
 }
 
 pub(crate) fn human(n: u64) -> String {
@@ -833,7 +939,7 @@ mod tests {
             Place::Tab,
             (false, false, false),
         );
-        app.tear_off(&ctx, vec![w]);
+        app.tear_off(w, Pos2::new(200.0, 200.0));
         assert_eq!(app.windows.len(), 1);
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
@@ -850,6 +956,67 @@ mod tests {
             app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
         });
         assert!(app.windows.is_empty(), "and goes with its last tab");
+    }
+
+    /// A tab dragged over another window's tabs is shown going in there, and goes in when let
+    /// go; let go anywhere else, it opens in a window of its own.
+    #[test]
+    fn tabs_move_between_windows() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        let mut first = workspace::Workspace::new(app.options());
+        first.add(shell("one"), Place::Tab, (false, false, false));
+        first.add(shell("two"), Place::Tab, (false, false, false));
+        first.add(shell("three"), Place::Tab, (false, false, false));
+        app.screen = Screen::Work(Box::new(first));
+        let mut other = workspace::Workspace::new(app.options());
+        other.add(shell("four"), Place::Tab, (false, false, false));
+        app.tear_off(other, Pos2::new(300.0, 300.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run_ui(input(), |ui| {
+                app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
+            });
+        }
+        let strip = app.windows[0].1.strip_screen;
+        assert!(strip.is_positive(), "the other window's tabs are known");
+        main(&mut app).drag_out = Some(strip.left_center() + Vec2::new(4.0, 0.0));
+        app.tab_drags(&ctx);
+        assert_eq!(app.windows[0].1.drop_hint, Some(0), "shown going in before its tab");
+        main(&mut app).drag_out = None;
+        main(&mut app).dropped = Some((0, strip.left_center() + Vec2::new(4.0, 0.0)));
+        app.tab_drags(&ctx);
+        assert_eq!(main(&mut app).tabs_len(), 2);
+        assert_eq!(app.windows[0].1.tabs_len(), 2, "it went in");
+        assert_eq!(app.windows[0].1.tab_label(0).1, "one");
+        main(&mut app).dropped = Some((0, Pos2::new(900.0, 700.0)));
+        app.tab_drags(&ctx);
+        assert_eq!(main(&mut app).tabs_len(), 1);
+        assert_eq!(app.windows.len(), 2, "a window of its own");
+        main(&mut app).dropped = Some((0, Pos2::new(900.0, 700.0)));
+        app.tab_drags(&ctx);
+        assert_eq!(main(&mut app).tabs_len(), 1, "the last tab stays");
+        main(&mut app).close_all();
+        for (_, w, _) in &mut app.windows {
+            w.close_all();
+        }
+    }
+
+    fn main(app: &mut App) -> &mut workspace::Workspace {
+        match &mut app.screen {
+            Screen::Work(w) => w,
+            _ => unreachable!(),
+        }
     }
 
     #[test]
