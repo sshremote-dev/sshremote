@@ -267,9 +267,48 @@ pub fn show_lines(ui: &mut egui::Ui, lines: &[(bool, String)], them: &str, me: &
     show_lines_since(ui, lines, 0, them, me);
 }
 
+/// One message as a row of text, as in Slack: the first of a run under the sender's initial and
+/// name, the next ones under it; no bubble, only a faint tint on the row under the pointer.
+fn message(ui: &mut egui::Ui, theirs: bool, who: &str, text: &str, first: bool, width: f32) {
+    const AVATAR: f32 = 28.0;
+    const GAP: f32 = 10.0;
+    if first {
+        ui.add_space(10.0);
+    }
+    let behind = ui.painter().add(egui::Shape::Noop);
+    let row = ui
+        .horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 2.0);
+            if first {
+                let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(AVATAR), egui::Sense::hover());
+                let tint = crate::gui::AVATAR_COLORS[if theirs { 1 } else { 0 }]
+                    .gamma_multiply(if crate::gui::theme::dark() { 0.30 } else { 0.16 });
+                ui.painter().rect_filled(r, crate::gui::theme::R_LG, tint);
+                let initial = who.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let fg = ui.visuals().strong_text_color();
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(14.0), fg);
+            } else {
+                // Under the first message's text: the avatar's width and the gap after it.
+                ui.add_space(AVATAR + GAP);
+            }
+            ui.vertical(|ui| {
+                ui.set_max_width((width - AVATAR - GAP - 8.0).max(80.0));
+                if first {
+                    ui.label(RichText::new(who).strong());
+                }
+                ui.add(egui::Label::new(RichText::new(text).size(14.0)).wrap().selectable(true));
+            });
+        })
+        .response;
+    if ui.rect_contains_pointer(row.rect) {
+        let tint = if crate::gui::theme::dark() { Color32::from_white_alpha(8) } else { Color32::from_black_alpha(8) };
+        let r = row.rect.expand2(egui::vec2(6.0, 2.0));
+        ui.painter().set(behind, egui::Shape::rect_filled(r, crate::gui::theme::R_SM, tint));
+    }
+}
+
 /// Like `show_lines`, with the first `earlier` messages from before this session set apart.
 pub fn show_lines_since(ui: &mut egui::Ui, lines: &[(bool, String)], earlier: usize, them: &str, me: &str) {
-    let dark = ui.visuals().dark_mode;
     if lines.is_empty() {
         ui.add_space(ui.available_height() * 0.3);
         ui.vertical_centered(|ui| {
@@ -280,6 +319,8 @@ pub fn show_lines_since(ui: &mut egui::Ui, lines: &[(bool, String)], earlier: us
         return;
     }
     let width = ui.available_width();
+    // Messages of one run sit close; a new sender starts a little further down (see `message`).
+    ui.spacing_mut().item_spacing.y = 4.0;
     for (i, (theirs, text)) in lines.iter().enumerate() {
         let divider = |ui: &mut egui::Ui, text: &str| {
             ui.add_space(4.0);
@@ -293,41 +334,7 @@ pub fn show_lines_since(ui: &mut egui::Ui, lines: &[(bool, String)], earlier: us
             divider(ui, "This session");
         }
         let first = i == 0 || i == earlier || lines[i - 1].0 != *theirs;
-        let last = i + 1 == lines.len() || i + 1 == earlier || lines[i + 1].0 != *theirs;
-        if first && i > 0 {
-            ui.add_space(6.0);
-        }
-        let (fill, fg) = if *theirs {
-            (
-                if dark { Color32::from_rgb(36, 39, 46) } else { Color32::from_rgb(234, 237, 242) },
-                ui.visuals().text_color(),
-            )
-        } else {
-            // One's own messages a shade raised from the other side's, both close to the background.
-            (if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, ui.visuals().text_color())
-        };
-        // The corner nearest the sender stays sharp on the last bubble of a run.
-        let r = crate::gui::theme::R_LG;
-        let radius = match (*theirs, last) {
-            (true, true) => egui::CornerRadius { nw: r, ne: r, sw: 1, se: r },
-            (false, true) => egui::CornerRadius { nw: r, ne: r, sw: r, se: 1 },
-            _ => egui::CornerRadius::same(r),
-        };
-        let align = if *theirs { egui::Align::Min } else { egui::Align::Max };
-        ui.with_layout(egui::Layout::top_down(align), |ui| {
-            if first {
-                ui.label(RichText::new(if *theirs { them } else { me }).small().weak());
-            }
-            ui.add_space(-6.0);
-            egui::Frame::new().fill(fill).corner_radius(radius).inner_margin(egui::Margin::symmetric(12, 8)).show(
-                ui,
-                |ui| {
-                    ui.set_max_width(width * 0.75);
-                    ui.add(egui::Label::new(RichText::new(text).color(fg).size(14.0)).wrap().selectable(true));
-                },
-            );
-        });
-        ui.add_space(-6.0);
+        message(ui, *theirs, if *theirs { them } else { me }, text, first, width);
     }
 }
 

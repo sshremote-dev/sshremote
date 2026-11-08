@@ -14,11 +14,16 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
         let font = FontId::monospace(font_size);
         let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let area = ui.available_rect_before_wrap();
+        // As wide as the text beside the line numbers (up to six digits and their margin).
+        fit(t, (area.width() - 8.0 * cw - 12.0) / cw, area.height() / ch, out);
         ui.painter().rect_filled(area, CornerRadius::ZERO, scheme_bg());
         return text_editor(ui, t, &font, cw, ch, keys, out);
     }
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    // As wide as the reading column the live rows sit in (see below), as tall as the view.
+    let area = ui.available_rect_before_wrap();
+    fit(t, (area.width().min(960.0) - 40.0) / cw, area.height() / ch, out);
     let (first, last) = input_rows(t);
     let now = ui.input(|i| i.time);
     let due = t.reading.is_none() || now - t.built_at >= REBUILD_EVERY;
@@ -648,12 +653,17 @@ fn row_markdown_styled(cells: &[(char, bool, bool, bool)], plain: &str, wrapped:
         out.push(ch);
     }
     let trailing = out.len() - out.trim_end().len();
-    out.truncate(out.len() - trailing);
+    let spaces = out.split_off(out.len() - trailing);
     if italic {
         out.push('*');
     }
     if bold {
         out.push_str("**");
+    }
+    // A row that goes on in the next keeps the space it ends with: it is the gap between the word
+    // here and the word there, wherever the terminal broke the line.
+    if wrapped {
+        out.push_str(&spaces);
     }
     (out, wrapped)
 }

@@ -185,6 +185,20 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
     }
 }
 
+/// The terminal sized to what a view shows, `cols` by `rows` cells: the program is told, and the
+/// reading views made again, as the rows wrap anew at the new width.
+pub(super) fn fit(t: &mut Tab, cols: f32, rows: f32, out: &mut Vec<Cmd>) {
+    let (cols, rows) = ((cols.floor() as u16).max(2), (rows.floor() as u16).max(1));
+    if (cols, rows) != t.size {
+        t.size = (cols, rows);
+        t.term.resize(Size { cols: cols as usize, rows: rows as usize });
+        t.rev += 1;
+        if t.exited.is_none() {
+            out.push(Cmd::Send(ToAgent::TermResize { id: t.id, cols, rows }));
+        }
+    }
+}
+
 pub(super) fn screen(
     ui: &mut egui::Ui,
     t: &mut Tab,
@@ -198,15 +212,8 @@ pub(super) fn screen(
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let area = ui.available_rect_before_wrap();
-    let cols = ((area.width() / cw).floor() as u16).max(2);
-    let rows = ((area.height() / ch).floor() as u16).max(1);
-    if (cols, rows) != t.size {
-        t.size = (cols, rows);
-        t.term.resize(Size { cols: cols as usize, rows: rows as usize });
-        if t.exited.is_none() {
-            out.push(Cmd::Send(ToAgent::TermResize { id: t.id, cols, rows }));
-        }
-    }
+    fit(t, area.width() / cw, area.height() / ch, out);
+    let (cols, rows) = t.size;
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
     ask.focus = resp.clicked() || resp.drag_started() || resp.secondary_clicked() || resp.middle_clicked();
     let origin = area.min;

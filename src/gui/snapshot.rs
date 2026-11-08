@@ -266,6 +266,29 @@ mod pictures {
 
     #[test]
     #[ignore]
+    fn menus_chat() {
+        let lines: Vec<(bool, String)> = vec![
+            (true, "Hi, can you look at the build server?".into()),
+            (false, "Sure, connecting now.".into()),
+            (false, "I see the disk is almost full. Shall I clear the old logs in /var/log/app? They go back two years.".into()),
+            (true, "Yes please.".into()),
+            (true, "And restart the service after.".into()),
+        ];
+        for dark in [true, false] {
+            let mut input = String::new();
+            let mut s = Shot::new("chat", Vec2::new(380.0, 460.0), dark, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    crate::chat::show_lines_since(ui, &lines, 1, "Remote", "You");
+                    ui.add_space(8.0);
+                    crate::chat::input_row(ui, &mut input, true);
+                });
+            });
+            s.save("lines");
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn menus_home() {
         for dark in [true, false] {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();

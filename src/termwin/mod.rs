@@ -1507,6 +1507,70 @@ mod tests {
         assert_eq!(last - first, 3, "rule, prompt, rule, status");
     }
 
+    /// The reading views follow the window: the terminal takes their size, the program is told,
+    /// and the document is made again from the rows as they wrap at the new width.
+    #[test]
+    fn reading_views_follow_the_window_size() {
+        for view in [View::Text, View::Markdown] {
+            let ctx = egui::Context::default();
+            let mut w = TermWindow::new(None);
+            let mut clock = 0.0;
+            let mut at = |w: &mut TermWindow, width: f32| {
+                clock += 0.2;
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 500.0))),
+                    time: Some(clock),
+                    ..Default::default()
+                };
+                let mut cmds = Vec::new();
+                let _ = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+                cmds
+            };
+            at(&mut w, 900.0);
+            w.tabs[0].view = view;
+            let t = &mut w.tabs[0];
+            t.parser.advance(&mut t.term, "word ".repeat(60).as_bytes());
+            t.rev += 1;
+            at(&mut w, 900.0);
+            at(&mut w, 900.0);
+            let wide = w.tabs[0].size.0;
+            let cmds = at(&mut w, 500.0);
+            let narrow = w.tabs[0].size.0;
+            assert!(narrow < wide, "{view:?}: the terminal narrows with the view ({wide} to {narrow})");
+            let told = cmds.iter().any(|c| matches!(c, Cmd::Send(ToAgent::TermResize { cols, .. }) if *cols == narrow));
+            assert!(told, "{view:?}: the program is told the new size");
+            at(&mut w, 500.0);
+            // The rows wrap at the new width and the document is made from them.
+            let rows_now = w.tabs[0].term.grid().columns();
+            assert_eq!(rows_now, narrow as usize, "{view:?}");
+            let longest = match view {
+                View::Text => w.tabs[0].editor.as_ref().unwrap().1.0.lines().map(|l| l.chars().count()).max().unwrap(),
+                _ => reader::screen_markdown(&w.tabs[0], 0, 10).lines().map(|l| l.chars().count()).max().unwrap(),
+            };
+            assert!(longest <= narrow as usize + 1 || view == View::Markdown, "{view:?}: lines fit {narrow}: {longest}");
+        }
+    }
+
+    /// Rows the terminal wraps again at a new width still read as the sentence they were, with
+    /// every space between words wherever the break falls.
+    #[test]
+    fn rewrapped_rows_keep_their_spaces() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.term.resize(Size { cols: 120, rows: 20 });
+        let line = "(or `mcp --here` for this computer) lets an AI agent read the window in front as text";
+        t.parser.advance(&mut t.term, format!("{line}\r\n").as_bytes());
+        for cols in (20..=110).rev() {
+            t.term.resize(Size { cols, rows: 20 });
+            let history = (t.term.grid().total_lines() - t.term.grid().screen_lines()) as i32;
+            let md = reader::screen_markdown(t, -history, 20);
+            let words: Vec<&str> = md.split_whitespace().collect();
+            assert_eq!(words.join(" "), line, "at {cols} columns: {md:?}");
+        }
+    }
+
     /// The text view shows output that arrives after it opens, as it streams in.
     #[test]
     fn text_view_follows_new_output() {
