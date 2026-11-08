@@ -21,6 +21,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static SINK: Mutex<Option<Sender<(u32, bool)>>> = Mutex::new(None);
+/// The window to wake for a key taken: Windows never tells it of the key, so without a
+/// frame the key would wait, and Tab would reach the host after Alt was let go.
+static WAKE: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 
 fn ours_in_front() -> bool {
     let mut pid = 0;
@@ -47,6 +50,9 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
             && let Some(tx) = SINK.lock().unwrap().as_ref()
             && tx.send((sym, down)).is_ok()
         {
+            if let Some(ctx) = WAKE.lock().unwrap().as_ref() {
+                ctx.request_repaint();
+            }
             // Swallowed: Windows never sees it, the remote host does.
             return 1;
         }
@@ -56,9 +62,10 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
 
 /// Installs the hook on its own thread: Windows skips a low-level hook whose thread is
 /// busy (drawing a frame, say), so that thread does nothing but pump messages.
-pub fn install() -> Option<Receiver<(u32, bool)>> {
+pub fn install(ctx: eframe::egui::Context) -> Option<Receiver<(u32, bool)>> {
     let (tx, rx) = mpsc::channel();
     *SINK.lock().unwrap() = Some(tx);
+    *WAKE.lock().unwrap() = Some(ctx);
     let (ok_tx, ok_rx) = mpsc::channel();
     std::thread::spawn(move || unsafe {
         // A global hook needs a module handle even though a low-level hook runs in this process.

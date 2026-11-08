@@ -131,6 +131,39 @@ impl Pane {
         self.sel.iter().filter_map(|&i| self.entries.get(i))
     }
 
+    /// The line under the list: the one selected item's name, size and date, or how many are
+    /// selected and their size, or what the folder holds.
+    fn summary(&self) -> String {
+        if self.loading {
+            return "Loading...".to_string();
+        }
+        let shown = self.visible();
+        let picked: Vec<&DirEntry> = self.selected().collect();
+        match picked.as_slice() {
+            [] => {
+                let dirs = shown.iter().filter(|&&i| self.entries[i].dir).count();
+                let files = shown.len() - dirs;
+                let size: u64 = shown.iter().map(|&i| &self.entries[i]).filter(|e| !e.dir).map(|e| e.size).sum();
+                format!("{}, {} ({})", count(dirs, "folder"), count(files, "file"), human(size))
+            }
+            [e] => {
+                let what = if e.dir { "folder".to_string() } else { human(e.size) };
+                let when = crate::files::local_time(e.mtime);
+                if when.is_empty() {
+                    format!("{}  \u{b7}  {what}", e.name)
+                } else {
+                    format!("{}  \u{b7}  {what}  \u{b7}  modified {when}", e.name)
+                }
+            }
+            many => {
+                let size: u64 = many.iter().filter(|e| !e.dir).map(|e| e.size).sum();
+                let dirs = many.iter().filter(|e| e.dir).count();
+                let folders = if dirs > 0 { format!(", {}", count(dirs, "folder")) } else { String::new() };
+                format!("{} of {} selected ({}{folders})", many.len(), shown.len(), human(size))
+            }
+        }
+    }
+
     fn selected_paths(&self) -> Vec<String> {
         self.selected().map(|e| self.child(&e.name)).collect()
     }
@@ -157,6 +190,11 @@ fn sort(entries: &mut [DirEntry], by: Sort, ascending: bool) {
     });
 }
 
+/// "1 file", "3 files".
+fn count(n: usize, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
+
 pub struct FileWindow {
     /// Whether it takes keys and dropped files: a pane beside others only while it is active.
     pub active: bool,
@@ -166,6 +204,9 @@ pub struct FileWindow {
     /// The pane keyboard shortcuts act on.
     focus_remote: bool,
     status: String,
+    /// Bytes moved by the transfers when last measured, and how fast (bytes a second).
+    moved: Option<(std::time::Instant, u64)>,
+    rate: f64,
 }
 
 impl FileWindow {
@@ -178,6 +219,8 @@ impl FileWindow {
             dialog: None,
             focus_remote: true,
             status: String::new(),
+            moved: None,
+            rate: 0.0,
         };
         w.list_local(String::new());
         w
@@ -288,10 +331,42 @@ impl FileWindow {
         egui::Panel::bottom("transfers").show(ui, |ui| {
             ui.add_space(4.0);
             if transfers.is_empty() {
+                (self.moved, self.rate) = (None, 0.0);
                 let hint = "Drag files between the two sides, or drop files from the desktop on this window to upload.";
                 ui.label(RichText::new(if self.status.is_empty() { hint } else { &self.status }).weak());
             } else {
-                ui.label(RichText::new(format!("Transfers ({})", transfers.len())).strong());
+                // All of them at once: how far, how fast, how long still.
+                let done: u64 = transfers.iter().map(|t| t.done).sum();
+                let size: u64 = transfers.iter().map(|t| t.size).sum();
+                let now = std::time::Instant::now();
+                match self.moved {
+                    Some((at, before)) if now.duration_since(at).as_secs_f64() >= 0.5 => {
+                        let r = done.saturating_sub(before) as f64 / now.duration_since(at).as_secs_f64();
+                        self.rate = if self.rate == 0.0 { r } else { self.rate * 0.6 + r * 0.4 };
+                        self.moved = Some((now, done));
+                    }
+                    Some(_) => {}
+                    None => self.moved = Some((now, done)),
+                }
+                let left = size.saturating_sub(done);
+                let eta = if self.rate > 1.0 {
+                    let s = (left as f64 / self.rate).round() as u64;
+                    if s >= 60 { format!(", about {} min {} s left", s / 60, s % 60) } else { format!(", about {s} s left") }
+                } else {
+                    String::new()
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Transfers ({})", transfers.len())).strong());
+                    let frac = if size == 0 { 1.0 } else { done as f32 / size as f32 };
+                    let speed = if self.rate > 1.0 { format!("  \u{b7}  {}/s{eta}", human(self.rate as u64)) } else { String::new() };
+                    ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).text(format!(
+                        "{} of {}  ({:.0}%){speed}",
+                        human(done),
+                        human(size),
+                        frac * 100.0
+                    )));
+                });
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                 egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                     for t in transfers {
                         ui.horizontal(|ui| {
@@ -432,17 +507,8 @@ impl FileWindow {
                     self.transfer(d.remote, d.paths.clone(), out);
                 }
                 let _ = drop;
-                let p = self.pane(remote);
-                let n = p.visible().len();
-                let selected: u64 = p.selected().map(|e| if e.dir { 0 } else { e.size }).sum();
-                let text = if p.loading {
-                    "Loading...".to_string()
-                } else if p.sel.is_empty() {
-                    format!("{n} items")
-                } else {
-                    format!("{n} items, {} selected ({})", p.sel.len(), human(selected))
-                };
-                ui.label(RichText::new(text).small().weak());
+                let text = self.pane(remote).summary();
+                ui.add(egui::Label::new(RichText::new(text).small().weak()).truncate());
             });
     }
 
@@ -789,5 +855,20 @@ mod tests {
         let mut v = vec![e("b", false, 5), e("a", false, 9), e("z", true, 0)];
         sort(&mut v, Sort::Size, false);
         assert_eq!(v.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["z", "a", "b"]);
+    }
+
+    /// Under each list: what the folder holds, the one selected item's name, size and date, or
+    /// how many are selected.
+    #[test]
+    fn the_line_under_the_list_tells_the_selection() {
+        let e = |n: &str, dir, size| DirEntry { name: n.into(), dir, size, mtime: 0 };
+        let mut p = Pane::new();
+        p.set_list("/x".into(), vec![e("docs", true, 0), e("a.txt", false, 2048), e("b.bin", false, 1024)], String::new());
+        assert_eq!(p.summary(), "1 folder, 2 files (3.0 KB)");
+        let a = p.entries.iter().position(|x| x.name == "a.txt").unwrap();
+        p.sel.insert(a);
+        assert!(p.summary().starts_with("a.txt") && p.summary().contains("2.0 KB"), "{}", p.summary());
+        p.sel.extend(0..3);
+        assert_eq!(p.summary(), "3 of 3 selected (3.0 KB, 1 folder)");
     }
 }

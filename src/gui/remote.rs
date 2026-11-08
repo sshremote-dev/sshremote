@@ -199,18 +199,28 @@ impl Remote {
         let ctx = ui.ctx().clone();
         #[cfg(windows)]
         {
-            // As in RustDesk: system keys go to the remote host while the pointer is over its picture.
-            let over = ctx.pointer_hover_pos().is_some_and(|p| self.last_shown.is_some_and(|s| s.contains(p)));
-            let want = self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && over;
+            // System keys go to the remote host while its screen is the active pane of the window
+            // in front, as with RustDesk's focused window; the options menu turns this off.
+            let shown = self.last_shown.is_some();
+            let want = self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && shown;
             if self.in_pane {
                 self.grab_wanted = want && self.active && self.mode() == super::workspace::PaneMode::Screen;
             } else {
                 crate::keygrab::set_active(want);
             }
         }
-        let result = grabbed
-            .into_iter()
-            .try_for_each(|(keysym, down)| self.send(ToAgent::KeyState { keysym, down }))
+        // Alt, Ctrl or Shift pressed alone make no key event: they reach the host as they change
+        // (Alt+Tab is Alt from here, then Tab from the hook), and are let go there likewise.
+        let mods = ctx.input(|i| i.modifiers);
+        let here = !self.view_only
+            && (!self.in_pane || self.active && self.mode() == super::workspace::PaneMode::Screen)
+            && ctx.input(|i| i.focused)
+            && !ctx.memory(|m| m.focused().is_some())
+            && !ctx.any_popup_open();
+        let changed = (mods.alt, mods.ctrl, mods.shift) != (self.mods.alt, self.mods.ctrl, self.mods.shift);
+        let synced = if here && changed { self.sync_mods(mods) } else { Ok(()) };
+        let result = synced
+            .and_then(|_| grabbed.into_iter().try_for_each(|(keysym, down)| self.send(ToAgent::KeyState { keysym, down })))
             .and_then(|_| self.frame(ui));
         if result.is_err() {
             self.sess.close();
@@ -1817,7 +1827,7 @@ impl Remote {
                 ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
                 sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
                 if cfg!(windows) {
-                    let tip = "While the pointer is over the picture, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
+                    let tip = "While this screen is the active pane, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
                     ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
                 }
                 theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
@@ -2208,6 +2218,32 @@ mod actions {
             egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, what, hits)),
             _ => {}
         }
+    }
+
+    /// Alt held alone reaches the host before the Tab the hook takes, and is let go there too.
+    #[test]
+    #[ignore]
+    fn alt_tab_reaches_the_host_with_alt() {
+        let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+        let show = |h: &mut Harness, modifiers: egui::Modifiers, grabbed: Vec<(u32, bool)>| {
+            let mut grabbed = Some(grabbed);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)),
+                focused: true,
+                events: vec![Event::ModifiersChanged(modifiers)],
+                ..Default::default()
+            };
+            let r = &mut h.r;
+            let mut result = Ok(());
+            h.snap.frame(&h.ctx, input, |ui| result = r.show(ui, grabbed.take().unwrap_or_default()));
+            result.unwrap();
+        };
+        show(&mut h, egui::Modifiers::NONE, Vec::new());
+        show(&mut h, egui::Modifiers::ALT, vec![(xk::TAB, true), (xk::TAB, false)]);
+        assert!(h.r.mods.alt, "Alt is down at the host");
+        assert!(h.r.held.contains(&ALT_L), "held there");
+        show(&mut h, egui::Modifiers::NONE, Vec::new());
+        assert!(!h.r.mods.alt && !h.r.held.contains(&ALT_L), "and let go");
     }
 
     #[test]

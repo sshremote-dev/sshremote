@@ -306,7 +306,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         Box::new(move |cc| {
             style(&cc.egui_ctx);
             #[cfg(windows)]
-            let grabbed = crate::keygrab::install();
+            let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
             #[cfg(not(windows))]
             let grabbed = None;
             let mut app = App::new(form, budget, &open, grabbed);
@@ -641,7 +641,7 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
         Box::new(move |cc| {
             style(&cc.egui_ctx);
             #[cfg(windows)]
-            let grabbed = crate::keygrab::install();
+            let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
             #[cfg(not(windows))]
             let grabbed = None;
             let mut app = App::new(Form::from(&opt), opt.budget, "", grabbed);
