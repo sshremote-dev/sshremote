@@ -365,7 +365,7 @@ impl Remote {
             self.pick_at = None;
             self.send(ToAgent::Share(Share::ActiveWindow))?;
         }
-        if self.paused || self.view_only {
+        if (self.paused || self.view_only) && shown.is_some() {
             // A badge on the picture: it is a still image until resumed, or input is off.
             let text = if self.paused {
                 format!("{}  Paused   ·   {} resumes, {} fetches one frame", ic::PAUSE, ic::PLAY, ic::ARROW_CLOCKWISE)

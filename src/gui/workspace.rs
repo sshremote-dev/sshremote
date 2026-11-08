@@ -389,10 +389,20 @@ impl Workspace {
         }
         let result = r.set_mode(p.mode);
         let (panel, chat, full) = std::mem::take(&mut p.start);
-        r.open_panels(panel, chat);
+        r.open_panels(false, chat);
         self.reached.push(p.label.clone());
         p.state = State::Live(Box::new(r));
         let id = p.id;
+        // The terminal asked for beside the screen is a pane of its own below it, as every pane is.
+        if panel {
+            let launch = Launch::Agent { target: p.target.clone(), label: p.label.clone(), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Terminal };
+            let tab = self.tabs.iter().position(|t| { let mut l = Vec::new(); t.root.leaves(&mut l); l.contains(&id) });
+            if let Some(t) = tab {
+                self.current = t;
+                self.tabs[t].active = id;
+                self.add(launch, Place::Split { below: true }, (false, false, false));
+            }
+        }
         if full {
             self.set_zoom(ctx, Some(id));
         }
