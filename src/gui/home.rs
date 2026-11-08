@@ -334,7 +334,8 @@ impl App {
         if changed {
             self.reload_hosts();
         }
-        if back || ui.input(|i| i.key_pressed(Key::Escape)) && !ui.ctx().any_popup_open() {
+        let escape = !ui.ctx().any_popup_open() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+        if back || escape {
             self.keys = None;
             self.config = None;
             self.vault = None;

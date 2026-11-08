@@ -264,6 +264,8 @@ struct Tab {
 enum Confirm {
     Pane(u64),
     Tab(u64),
+    /// The whole window, with every tab in it.
+    Window,
 }
 
 /// The arrangements of a tab's panes, as tmux has them.
@@ -313,6 +315,11 @@ pub(super) struct Workspace {
     dragging: Option<usize>,
     /// Where the dragged tab was grabbed, from its left edge, so it follows the pointer from there.
     grab_dx: f32,
+    /// Where the pointer was last while dragging a tab.
+    drag_last: Option<Pos2>,
+    /// The pane and mode the controls were last measured for (they are measured again when
+    /// another pane or mode may fit where these did not).
+    measured_for: Option<(u64, PaneMode)>,
     /// The dragged tab is away from this bar: where the pointer is on the screen.
     pub(super) drag_out: Option<Pos2>,
     /// A tab let go away from this bar, and where on the screen: the app moves it into the
@@ -323,8 +330,9 @@ pub(super) struct Workspace {
     pub(super) tabs_screen: Vec<Rect>,
     /// Where a tab dragged over from another window would go in: the app sets it each frame.
     pub(super) drop_hint: Option<usize>,
-    /// The mode drop-down's width last frame.
+    /// The mode drop-down's width last frame, and whether it shows its icon only.
     mode_w: f32,
+    mode_compact: bool,
     title: String,
     /// The first tab shown when they do not all fit, the wheel not yet a whole step, and the
     /// current tab and room it was last brought into view for.
@@ -360,12 +368,15 @@ impl Workspace {
             controls_w: 260.0,
             dragging: None,
             grab_dx: 0.0,
+            drag_last: None,
+            measured_for: None,
             drag_out: None,
             dropped: None,
             strip_screen: Rect::NOTHING,
             tabs_screen: Vec::new(),
             drop_hint: None,
             mode_w: 150.0,
+            mode_compact: false,
             title: String::new(),
             tab_first: 0,
             tab_wheel: 0.0,
@@ -630,6 +641,16 @@ impl Workspace {
 
     fn set_zoom(&mut self, _ctx: &egui::Context, zoom: Option<u64>) {
         self.zoom = zoom;
+        // What fills the window is what takes the keys.
+        if let Some(z) = zoom
+            && let Some(tab) = self.tabs.iter_mut().find(|t| {
+                let mut l = Vec::new();
+                t.root.leaves(&mut l);
+                l.contains(&z)
+            })
+        {
+            tab.active = z;
+        }
         if zoom.is_some() {
             self.window_full = false;
         }
@@ -669,6 +690,11 @@ impl Workspace {
         if self.tabs.is_empty() {
             return Out { empty: true, grab: false };
         }
+        // Alt+F4 or the system's close: the window and its connections go only once confirmed.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.confirm = Some(Confirm::Window);
+        }
         let now = ctx.input(|i| i.time);
         let pointer_top = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= 6.0);
         if pointer_top {
@@ -693,7 +719,7 @@ impl Workspace {
                 None => super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action)),
             };
             if bar.close {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+                self.confirm = Some(Confirm::Window);
             }
             if self.window_full && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= super::chrome::HEIGHT + 4.0) {
                 self.reveal_until = now + 0.6;
@@ -726,6 +752,8 @@ impl Workspace {
         }
         let active = tab.active;
         let several = rects.len() > 1;
+        // While a dialog asks something, keys are the dialog's, not a pane's.
+        let asking = self.confirm.is_some() || self.picker.is_some();
         let mut grabbed = Some(grabbed);
         let mut closing = Vec::new();
         let mut lost = Vec::new();
@@ -734,7 +762,7 @@ impl Workspace {
         let mut to_shell = Vec::new();
         for (id, rect) in &rects {
             let Some(i) = self.index(*id) else { continue };
-            let is_active = *id == active;
+            let is_active = *id == active && !asking;
             let pane = &mut self.panes[i];
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(*rect).id_salt(("pane", *id)));
             child.set_clip_rect(*rect);
@@ -780,6 +808,34 @@ impl Workspace {
             }
             if several && is_active && self.zoom.is_none() {
                 ui.painter().rect_stroke(*rect, CornerRadius::ZERO, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+            }
+        }
+        // The panes of other tabs (and those behind a zoomed one) keep running unseen.
+        let drawn: Vec<u64> = rects.iter().map(|(id, _)| *id).collect();
+        for i in 0..self.panes.len() {
+            let id = self.panes[i].id;
+            if drawn.contains(&id) {
+                continue;
+            }
+            let pane = &mut self.panes[i];
+            if let Some(t) = pane.terms.as_mut() {
+                let _ = t.background(&ctx);
+            }
+            match &mut pane.state {
+                State::Shell(t) => {
+                    if t.background(&ctx).iter().any(|c| matches!(c, crate::termwin::Cmd::Close)) {
+                        closing.push(id);
+                    }
+                }
+                State::Live(r) => {
+                    r.active = false;
+                    match r.background(&ctx) {
+                        Err(e) if e == "disconnected" => closing.push(id),
+                        Err(e) => lost.push((i, e)),
+                        Ok(()) => {}
+                    }
+                }
+                State::Down(_) => {}
             }
         }
         if let Some((id, f)) = remote_action
@@ -844,7 +900,13 @@ impl Workspace {
             })
         };
         let panes = self.order(self.current).len();
-        if take(cs, Key::T) {
+        if take(Modifiers::NONE, Key::F11) {
+            self.window_full = !self.window_full;
+            self.zoom = None;
+        } else if take(cs, Key::Enter) {
+            let z = if self.zoom == Some(active) { None } else { Some(active) };
+            self.set_zoom(ctx, z);
+        } else if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
         } else if take(cs, Key::W) {
             self.confirm = Some(Confirm::Pane(active));
@@ -888,10 +950,18 @@ impl Workspace {
         const LAYOUT_W: f32 = 6.0 * 32.0 + 16.0;
         const MORE_W: f32 = 36.0;
         let mode_w = self.mode_w + 8.0;
+        let now_for = self.active_id().and_then(|id| self.index(id).map(|i| (id, self.mode_of_pane(i))));
+        if now_for != self.measured_for {
+            self.measured_for = now_for;
+            // Tried unfolded once; measured there, it folds again if it does not fit.
+            self.controls_w = 0.0;
+        }
         // The controls fold before the tabs shrink below three at their narrowest.
         let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - PLUS_W;
         let fold_controls = room < mode_w + self.controls_w + LAYOUT_W;
         let fold_layout = room < mode_w + MORE_W + LAYOUT_W;
+        // Narrower still: the mode drop-down shows its icon only (its full width is about 150).
+        self.mode_compact = room < 150.0 + MORE_W + 40.0;
         // The right-hand group first, from the right edge, so the tabs take exactly what it leaves.
         let full = ui.max_rect();
         let mut right = ui.new_child(egui::UiBuilder::new().id_salt("bar-right").max_rect(full).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -926,7 +996,7 @@ impl Workspace {
             }
         }
         let right_left = right.min_rect().left().min(full.right());
-        let width = (right_left - ui.cursor().left() - PLUS_W - 12.0).max(TAB_MIN);
+        let width = (right_left - ui.cursor().left() - PLUS_W - 12.0).max(84.0);
         let tab_rects = self.tab_strip(ui, width);
         if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
             self.picker = Some(Place::Tab);
@@ -942,8 +1012,12 @@ impl Workspace {
     fn tab_strip(&mut self, ui: &mut egui::Ui, width: f32) -> Vec<Rect> {
         let n = self.tabs.len();
         let over = n as f32 * TAB_MIN > width + 0.5;
+        // Too little room for arrows too: the current tab alone, and the list of all of them.
+        let cramped = over && width < TAB_MIN + 3.0 * 32.0;
         let mut view_w = width;
-        if over {
+        if cramped {
+            view_w = width - 34.0;
+        } else if over {
             let start = ui.cursor().left();
             if ui.add(tool_button(ic::CARET_LEFT, false)).on_hover_text("Scroll the tabs").clicked() {
                 self.tab_first = self.tab_first.saturating_sub(1);
@@ -953,7 +1027,7 @@ impl Workspace {
             view_w = width - 3.0 * step - ui.spacing().item_spacing.x;
         }
         // Whole tabs only: as many as fit at their narrowest, sharing the room.
-        let shown = if over { ((view_w / TAB_MIN).floor() as usize).max(1) } else { n };
+        let shown = if cramped { 1 } else if over { ((view_w / TAB_MIN).floor() as usize).max(1) } else { n };
         let fit = if over { view_w / shown as f32 } else { (width / n.max(1) as f32).clamp(TAB_MIN, TAB_MAX) };
         let bar = ui.max_rect();
         let (view, strip) = ui.allocate_exact_size(Vec2::new(fit * shown as f32, bar.height()), egui::Sense::hover());
@@ -1063,6 +1137,7 @@ impl Workspace {
             }
             if r.drag_started() {
                 self.dragging = Some(t);
+                self.drag_last = None;
                 self.current = t;
                 self.grab_dx = r.interact_pointer_pos().map_or(fit / 2.0, |p| p.x - slot.left());
             }
@@ -1111,7 +1186,7 @@ impl Workspace {
         self.strip_screen = view.translate(origin);
         self.tabs_screen = rects.iter().map(|r| if r.is_finite() && r.is_positive() { r.translate(origin) } else { Rect::NOTHING }).collect();
         if over {
-            if ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
+            if !cramped && ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
                 self.tab_first += 1;
             }
             let names: Vec<(String, &'static str)> = (0..n).map(|t| (self.name(self.tabs[t].active).0, self.glyph(self.tabs[t].active).0)).collect();
@@ -1158,7 +1233,17 @@ impl Workspace {
     fn drag_tab(&mut self, ui: &egui::Ui, rects: &[Rect]) {
         let Some(d) = self.dragging else { return };
         let (pos, released) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_released() || !i.pointer.any_down()));
-        let Some(p) = pos else { return };
+        // Let go outside the window, the pointer may be gone in the same frame: where it was last.
+        if let Some(p) = pos {
+            self.drag_last = Some(p);
+        }
+        let Some(p) = pos.or(self.drag_last) else {
+            if released {
+                self.dragging = None;
+                self.drag_out = None;
+            }
+            return;
+        };
         let size = ui.ctx().content_rect().size();
         let away = p.y > super::chrome::HEIGHT + 40.0 || p.y < -20.0 || p.x < -20.0 || p.x > size.x + 20.0;
         let origin = ui.ctx().input(|i| i.viewport().inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()));
@@ -1199,7 +1284,12 @@ impl Workspace {
             _ => self.panes[i].mode,
         };
         let mut chosen = None;
-        let label = RichText::new(format!("{}  {}  {}", cur.glyph(), cur.name(), ic::CARET_DOWN)).size(13.0);
+        let text = if self.mode_compact {
+            format!("{} {}", cur.glyph(), ic::CARET_DOWN)
+        } else {
+            format!("{}  {}  {}", cur.glyph(), cur.name(), ic::CARET_DOWN)
+        };
+        let label = RichText::new(text).size(13.0);
         let b = egui::Button::new(label).frame_when_inactive(false).min_size(Vec2::new(0.0, 30.0));
         let (r, _) = egui::containers::menu::MenuButton::from_button(b)
             .ui(ui, |ui| {
@@ -1246,7 +1336,7 @@ impl Workspace {
             let (glyph, tip) = if on {
                 (ic::CORNERS_IN, "Leave full screen: back to the window as it was")
             } else {
-                (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it")
+                (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it (Ctrl+Shift+Enter)")
             };
             if ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
                 let ctx = ui.ctx().clone();
@@ -1261,6 +1351,14 @@ impl Workspace {
         };
         if ui.add(tool_button(glyph, false)).on_hover_text(tip).clicked() {
             self.confirm = Some(Confirm::Pane(id));
+        }
+    }
+
+    fn mode_of_pane(&self, i: usize) -> PaneMode {
+        match &self.panes[i].state {
+            State::Live(r) => r.mode(),
+            State::Shell(_) => PaneMode::Terminal,
+            State::Down(_) => self.panes[i].mode,
         }
     }
 
@@ -1281,7 +1379,25 @@ impl Workspace {
     /// Enter says yes, Escape no.
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(what) = self.confirm else { return };
+        if what == Confirm::Window {
+            let panes = self.panes.len();
+            let tabs = self.tabs.len();
+            let body = format!(
+                "{} and {} close, and their connections and shells end.",
+                if tabs == 1 { "Its tab".to_string() } else { format!("Its {tabs} tabs") },
+                if panes == 1 { "its pane".to_string() } else { format!("{panes} panes") }
+            );
+            if let Some(yes) = ask(ctx, "Close this window?", &body, "Close window") {
+                self.confirm = None;
+                if yes {
+                    self.close_all();
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+            return;
+        }
         let (id, tab) = match what {
+            Confirm::Window => unreachable!(),
             Confirm::Pane(id) => (id, None),
             Confirm::Tab(id) => (id, self.tabs.iter().position(|t| {
                 let mut l = Vec::new();
@@ -1318,34 +1434,7 @@ impl Workspace {
                 "Close",
             ),
         };
-        let (modal, fit) = super::modal(ctx, "confirm-close", Vec2::new(420.0, 0.0));
-        let mut answer = None;
-        modal.show(ctx, |ui| {
-            ui.set_width(fit.x);
-            ui.label(RichText::new(title).size(16.0).strong());
-            ui.add_space(6.0);
-            ui.label(RichText::new(body).weak());
-            ui.add_space(14.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let danger = egui::Button::new(RichText::new(yes).strong().color(super::bad()))
-                    .stroke(Stroke::new(1.0, super::bad().gamma_multiply(0.6)))
-                    .min_size(Vec2::new(0.0, 32.0));
-                if ui.add(danger).clicked() {
-                    answer = Some(true);
-                }
-                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
-                    answer = Some(false);
-                }
-            });
-        });
-        let (enter, escape) = ctx.input_mut(|i| {
-            (i.consume_key(egui::Modifiers::NONE, egui::Key::Enter), i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        });
-        if enter {
-            answer = Some(true);
-        } else if escape {
-            answer = Some(false);
-        }
+        let answer = ask(ctx, &title, &body, yes);
         match answer {
             Some(true) => {
                 self.confirm = None;
@@ -1362,7 +1451,7 @@ impl Workspace {
     /// Full screen of the window, split beside or below, and moving the active pane.
     fn layout_buttons(&mut self, ui: &mut egui::Ui, rtl: bool) {
         let mut buttons: Vec<(&str, &str, u8)> = vec![
-            (if self.window_full { ic::ARROWS_IN } else { ic::ARROWS_OUT }, "Full screen: the window as it is, split, without its title bar", 0),
+            (if self.window_full { ic::ARROWS_IN } else { ic::ARROWS_OUT }, "Full screen: the window as it is, split, without its title bar (F11)", 0),
             (ic::SPLIT_SIDE, "Split: a new pane beside this one (Alt+Shift+=)", 1),
             (ic::SPLIT_BELOW, "Split: a new pane below this one (Alt+Shift+-)", 2),
             (ic::CARET_LEFT, "Move this pane left (Alt+arrows go between panes)", 3),
@@ -1502,6 +1591,42 @@ impl Workspace {
             self.zoom = Some(id);
         }
     }
+}
+
+/// A question before something that cannot be undone: Cancel, or the red action. Enter says
+/// yes (unless a button has the keyboard), Escape no; None while unanswered.
+fn ask(ctx: &egui::Context, title: &str, body: &str, yes: &str) -> Option<bool> {
+    let (modal, fit) = super::modal(ctx, "confirm-close", Vec2::new(420.0, 0.0));
+    let mut answer = None;
+    modal.show(ctx, |ui| {
+        ui.set_width(fit.x);
+        ui.label(RichText::new(title).size(16.0).strong());
+        ui.add_space(6.0);
+        ui.label(RichText::new(body).weak());
+        ui.add_space(14.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let danger = egui::Button::new(RichText::new(yes).strong().color(super::bad()))
+                .stroke(Stroke::new(1.0, super::bad().gamma_multiply(0.6)))
+                .min_size(Vec2::new(0.0, 32.0));
+            if ui.add(danger).clicked() {
+                answer = Some(true);
+            }
+            if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    let button_focused = ctx.memory(|m| m.focused().is_some());
+    let (enter, escape) = ctx.input_mut(|i| {
+        let enter = !button_focused && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        (enter, i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    });
+    if enter {
+        answer = Some(true);
+    } else if escape {
+        answer = Some(false);
+    }
+    answer
 }
 
 impl Down {
@@ -1852,6 +1977,20 @@ mod tests {
     #[test]
     fn tab_pictures() {
         let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        for n in [1usize, 3] {
+            let mut h = Harness::new();
+            h.size = Vec2::new(480.0, 320.0);
+            for i in 0..n {
+                let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+                profile.name = format!("server-{i}");
+                h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+            }
+            for _ in 0..8 {
+                h.frame(Vec::new());
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join(format!("tabs_min_{n}.png")));
+            h.w.close_all();
+        }
         for n in [2usize, 8, 16, 30] {
             let mut h = Harness::new();
             for i in 0..n {
@@ -2021,6 +2160,103 @@ mod tests {
         assert_eq!(h.w.confirm, Some(Confirm::Pane(order[0])), "Ctrl+Shift+W asks first");
         h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
         assert_eq!(h.w.order(1), vec![order[1]], "and closes the pane once told yes");
+        h.w.close_all();
+    }
+
+    /// A shell in a tab not shown keeps taking its output, so it does not stall.
+    #[test]
+    fn shells_in_hidden_tabs_keep_running() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = |profile: crate::termwin::Profile| Launch::Shell { label: "s".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
+        h.w.add(shell(profile.clone()), Place::Tab, (false, false, false));
+        h.w.add(shell(profile), Place::Tab, (false, false, false));
+        h.w.current = 1;
+        let hidden = h.w.tabs[0].active;
+        for _ in 0..60 {
+            h.frame(Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let i = h.w.index(hidden).unwrap();
+            if let State::Shell(t) = &h.w.panes[i].state
+                && t.output_seen() > 0
+            {
+                break;
+            }
+        }
+        let i = h.w.index(hidden).unwrap();
+        let State::Shell(t) = &h.w.panes[i].state else { panic!("a shell") };
+        assert!(t.output_seen() > 0, "the hidden shell's prompt was read");
+        h.w.close_all();
+    }
+
+    /// While a dialog asks something, the panes behind it get no keys; closing the window asks
+    /// too; F11 and Ctrl+Shift+Enter fill the screen with the window or the pane.
+    #[test]
+    fn dialogs_keep_the_keys_and_the_window_asks_before_closing() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(Launch::Shell { label: "s".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.frame(Vec::new());
+        let id = h.w.tabs[0].active;
+        let keys_on = |h: &Harness| match &h.w.panes[0].state {
+            State::Shell(t) => t.keys_on,
+            _ => false,
+        };
+        assert!(keys_on(&h));
+        h.w.confirm = Some(Confirm::Pane(id));
+        h.frame(Vec::new());
+        assert!(!keys_on(&h), "the dialog has the keys");
+        h.w.confirm = None;
+        h.frame(Vec::new());
+        assert!(keys_on(&h));
+        // The system's close (Alt+F4): asked, not done.
+        h.clock += 0.05;
+        let mut input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)),
+            time: Some(h.clock),
+            focused: true,
+            ..Default::default()
+        };
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let w = &mut h.w;
+        h.snap.frame(&h.ctx, input, |ui| {
+            w.ui(ui, Vec::new());
+        });
+        assert_eq!(h.w.confirm, Some(Confirm::Window), "closing the window asks");
+        assert_eq!(h.w.panes.len(), 1);
+        h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+        assert_eq!(h.w.confirm, None);
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
+        assert!(h.w.window_full, "F11: the window's full screen");
+        h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
+        assert!(!h.w.window_full);
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::SHIFT)]);
+        assert_eq!(h.w.zoom, Some(id), "Ctrl+Shift+Enter: the pane's");
+        h.w.close_all();
+    }
+
+    /// Let go outside the window, a tab drag ends even when the pointer is gone in that frame.
+    #[test]
+    fn a_drag_let_go_outside_ends() {
+        let mut h = Harness::new();
+        for name in ["a", "b"] {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        }
+        h.frame(Vec::new());
+        let a = h.snap.find("a").into_iter().find(|r| r.center().y < super::super::chrome::HEIGHT).unwrap().center();
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.frame(vec![press(a, true)]);
+        for k in 1..=6 {
+            h.frame(vec![Event::PointerMoved(a + Vec2::new(0.0, 60.0 * k as f32))]);
+        }
+        let out = a + Vec2::new(0.0, 360.0);
+        h.frame(vec![press(out, false), Event::PointerGone]);
+        assert_eq!(h.w.dragging_tab(), None, "the drag ended");
+        assert!(h.w.dropped.is_some(), "and the tab was let go away from the bar");
         h.w.close_all();
     }
 

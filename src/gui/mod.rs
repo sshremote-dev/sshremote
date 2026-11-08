@@ -728,6 +728,8 @@ impl App {
     /// it was asked for (a new tab, or beside the active pane).
     fn open_dialog(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
         let Some(place) = w.picker else { return };
+        // What is opened from the dialog, a tool's terminal too, opens in this workspace.
+        let before = self.queued.len();
         let (modal, fit) = modal(ctx, "open-dialog", Vec2::new(820.0, 560.0));
         let modal = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
@@ -746,13 +748,12 @@ impl App {
         });
         let shut = modal.should_close() || modal.inner.0 || ctx.input(|i| i.key_pressed(Key::Escape));
         if let Some(c) = modal.inner.1 {
-            let before = self.queued.len();
             self.choose(c, place);
-            // Opened here, not in the main window: a host typed wrong keeps the dialog with its error.
-            for (launch, place, start) in self.queued.drain(before..) {
-                w.add(launch, place, start);
-                w.picker = None;
-            }
+        }
+        // Opened here, not in the main window: a host typed wrong keeps the dialog with its error.
+        for (launch, place, start) in self.queued.drain(before.min(self.queued.len())..) {
+            w.add(launch, place, start);
+            w.picker = None;
         }
         if shut {
             w.picker = None;
@@ -824,6 +825,7 @@ impl App {
                 }
             }
         }
+        ctx.request_repaint();
         if let Some((w, at)) = tear {
             self.tear_off(w, at);
         }
@@ -867,11 +869,7 @@ impl App {
             }
             ctx.show_viewport_immediate(*id, builder, |ui, _| {
                 let ctx = ui.ctx().clone();
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    w.close_all();
-                    keep = false;
-                    return;
-                }
+                // Closing asks first (the workspace does that); once empty the window goes.
                 chrome::behaviour(&ctx);
                 let mine = if owner == Some(*id) { keys.take().unwrap_or_default() } else { Vec::new() };
                 let out = w.ui(ui, mine);

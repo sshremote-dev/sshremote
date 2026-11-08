@@ -394,8 +394,9 @@ impl FileWindow {
             ui.add_space(2.0);
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            let gap = 72.0;
-            let w = ((ui.available_width() - gap) / 2.0).max(200.0);
+            // The two sides share the room down to a narrow pane; the arrows between them too.
+            let gap = if ui.available_width() < 560.0 { 44.0 } else { 72.0 };
+            let w = ((ui.available_width() - gap) / 2.0).max(110.0);
             let h = ui.available_height();
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(Vec2::new(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -518,7 +519,8 @@ impl FileWindow {
 
     fn table(&mut self, ui: &mut egui::Ui, remote: bool, out: &mut Vec<Cmd>) {
         let row_h = 24.0;
-        let width = ui.available_width();
+        // The rows below lose what the scroll bar takes; the headings line up with them.
+        let width = ui.available_width() - ui.spacing().scroll.allocated_width();
         // The name keeps most of the room: the date goes first as the list narrows, then the size
         // (the line under the list still tells them for the selection).
         let (size_w, date_w) = if width >= 420.0 {

@@ -314,6 +314,9 @@ struct Tab {
     typed_at: f64,
     /// Where a click asked the cursor to go, while arrow keys take it there.
     seek: Option<input::Seek>,
+    /// Alt+arrows move between this window's own panes (not in a pane of the workspace, which
+    /// takes them itself when it has panes to move between, and lets the shell have them else).
+    nav_keys: bool,
 }
 
 /// The text and Markdown views' content, with the output revision and the first live row it ends above.
@@ -679,6 +682,7 @@ impl TermWindow {
             preedit: String::new(),
             typed_at: 0.0,
             seek: None,
+            nav_keys: true,
             md_heights: Default::default(),
             built_at: 0.0,
             stitched: Vec::new(),
@@ -756,6 +760,22 @@ impl TermWindow {
         self.tabs.iter().filter(|t| t.exited.is_none()).map(|t| Cmd::Send(ToAgent::TermClose { id: t.id })).collect()
     }
 
+    /// Output read and replies sent while the pane is not drawn (a tab in the background), so
+    /// a build there goes on and its shell does not stall on a full pipe.
+    pub fn background(&mut self, ctx: &egui::Context) -> Vec<Cmd> {
+        let mut out = Vec::new();
+        if self.before(ctx, &mut out) {
+            self.after(ctx, &mut out);
+        }
+        out
+    }
+
+    /// How much output the shells have taken in (for tests of panes not drawn).
+    #[cfg(test)]
+    pub(crate) fn output_seen(&self) -> u64 {
+        self.tabs.iter().map(|t| t.rev).sum()
+    }
+
     /// The terminal drawn inside another window's area, as the remote screen window does.
     pub fn embedded(&mut self, ui: &mut egui::Ui) -> Vec<Cmd> {
         self.framed = false;
@@ -808,6 +828,9 @@ impl TermWindow {
         }
         for (p, split) in std::mem::take(&mut self.pending) {
             self.start(ctx, p, split, out);
+        }
+        for t in &mut self.tabs {
+            t.nav_keys = !self.bare;
         }
         // Output of local programs.
         for t in &mut self.tabs {

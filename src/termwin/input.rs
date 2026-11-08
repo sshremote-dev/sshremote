@@ -158,6 +158,9 @@ pub(super) fn keyboard_with(
                     ui.ctx().copy_text(s);
                     t.term.selection = None;
                 }
+                // Ctrl+Insert arrives as a copy too: with nothing selected it does nothing,
+                // where Ctrl+C interrupts.
+                _ if insert_held() => {}
                 _ => send.push(0x03),
             },
             Event::Cut => send.push(0x18),
@@ -197,7 +200,7 @@ pub(super) fn keyboard_with(
                 if (cs && matches!(key, Key::T | Key::W | Key::F))
                     || (modifiers.ctrl && matches!(key, Key::Tab | Key::Equals | Key::Plus | Key::Minus))
                     || (alt_shift && matches!(key, Key::Equals | Key::Plus | Key::Minus | Key::D))
-                    || (alt && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown))
+                    || (alt && t.nav_keys && matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown))
                 {
                     continue;
                 }
@@ -220,6 +223,17 @@ pub(super) fn keyboard_with(
     } else if !t.preedit.is_empty() {
         t.typed_at = ui.input(|i| i.time);
     }
+}
+
+/// Whether Insert is held: on Windows Ctrl+Insert reaches us only as a copy, not as its key.
+fn insert_held() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT};
+        unsafe { GetAsyncKeyState(VK_INSERT as i32) < 0 }
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// Where a click asked the cursor to go (a screen line and column), reached with arrow keys a
@@ -251,6 +265,11 @@ pub(super) fn click_cursor(t: &mut Tab, line: i32, col: usize, out: &mut Vec<Cmd
     }
     let screen = mode.contains(TermMode::ALT_SCREEN);
     let cursor = grid.cursor.point.line.0;
+    // A pager (less, man, git log) keeps its cursor on the last row, at its prompt: there the
+    // arrows would scroll, not move a cursor, so a click leaves it be. Editors keep theirs in the text.
+    if screen && cursor == grid.screen_lines() as i32 - 1 {
+        return;
+    }
     // The shell's line: the cursor's row and the rows it wraps across.
     let wraps = |l: i32| grid[Line(l)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
     if !screen && !(line.min(cursor)..line.max(cursor)).all(wraps) {

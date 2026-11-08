@@ -441,6 +441,18 @@ impl Remote {
         Ok(())
     }
 
+    /// The connection kept going while its pane is not drawn: pictures, files and shells read,
+    /// transfers fed, the link watched; keys held at the host let go.
+    pub(super) fn background(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        self.pump(ctx)?;
+        self.ctl.tick(&mut self.sess).map_err(|e| e.to_string())?;
+        self.feed_uploads()?;
+        if !self.held.is_empty() || self.mods != Modifiers::NONE {
+            self.release_all()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn pump(&mut self, ctx: &egui::Context) -> Result<(), String> {
         loop {
             match self.rx.try_recv() {
