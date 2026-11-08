@@ -624,7 +624,7 @@ impl Workspace {
         use egui::{Key, Modifiers};
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
-        let mut take = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        let take = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
         } else if take(cs, Key::W) {
