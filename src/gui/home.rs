@@ -384,6 +384,7 @@ impl App {
                     }
                     let more = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false).min_size(Vec2::new(32.0, 32.0)));
                     more.ui(ui, |ui| {
+                        crate::gui::menu_look(ui);
                         ui.set_min_width(230.0);
                         if ui.button(format!("{}  Remote screen", ic::MONITOR)).clicked() {
                             go = Some((self.form.host.clone(), self.form.port.clone(), How::Screen));
@@ -423,6 +424,7 @@ impl App {
                         ui.label(RichText::new("Screen quality").weak());
                         let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
                         egui::ComboBox::from_id_salt("quality").selected_text(current).width(260.0).show_ui(ui, |ui| {
+                            crate::gui::menu_look(ui);
                             ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
                             for (i, p) in PRESETS.iter().enumerate() {
                                 ui.selectable_value(&mut self.form.preset, Some(i), preset_text(p));
@@ -515,6 +517,7 @@ impl App {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             let direct = h.starts_with("sshremote://");
                             egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(ui, |ui| {
+                                crate::gui::menu_look(ui);
                                 ui.set_min_width(210.0);
                                 if !direct && ui.button(format!("{}  Terminal", ic::TERMINAL)).clicked() {
                                     go = Some((h.clone(), p.clone(), How::Terminal));

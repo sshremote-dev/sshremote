@@ -995,6 +995,7 @@ impl TermWindow {
             .min_size(Vec2::new(22.0, 30.0));
         let profiles = self.profiles.clone();
         egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+            crate::gui::menu_look(ui);
             ui.set_min_width(240.0);
             for (k, p) in profiles.iter().enumerate() {
                 let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
@@ -1028,7 +1029,7 @@ impl TermWindow {
                     egui::containers::menu::MenuConfig::new()
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
                 )
-                .ui(ui, |ui| {
+                .ui(ui, |ui| crate::gui::menu(ui, |ui| {
                     ui.set_min_width(240.0);
                     ui.label(RichText::new("Appearance").strong());
                     changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
@@ -1073,7 +1074,7 @@ impl TermWindow {
                             ui.label(RichText::new(v).weak().size(12.0));
                         });
                     }
-                });
+                }));
             self.copy_on_select = copy_on_select;
             if changed {
                 self.save_settings();
@@ -1091,6 +1092,7 @@ impl TermWindow {
                     let glyph = views.iter().find(|v| v.0 == t.view).map_or(ic::TERMINAL, |v| v.1);
                     egui::containers::menu::MenuButton::from_button(crate::gui::tool_button(glyph, false))
                         .ui(ui, |ui| {
+                            crate::gui::menu_look(ui);
                             ui.set_min_width(160.0);
                             for &(v, glyph, name, tip) in views.iter().rev() {
                                 let b = egui::Button::selectable(t.view == v, format!("{glyph}  {name}"));

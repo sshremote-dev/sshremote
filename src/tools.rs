@@ -166,6 +166,7 @@ impl KeyTool {
             egui::Grid::new("keygen").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label("Type");
                 egui::ComboBox::from_id_salt("keytype").selected_text(KINDS[self.kind].0).show_ui(ui, |ui| {
+                    crate::gui::menu_look(ui);
                     for (i, k) in KINDS.iter().enumerate() {
                         ui.selectable_value(&mut self.kind, i, k.0);
                     }
@@ -480,6 +481,7 @@ impl ConfigTool {
             ui.label("Key");
             let shown = if self.form.identity.is_empty() { "default".to_string() } else { self.form.identity.clone() };
             egui::ComboBox::from_id_salt("hostkey").selected_text(shown).show_ui(ui, |ui| {
+                crate::gui::menu_look(ui);
                 ui.selectable_value(&mut self.form.identity, String::new(), "default");
                 for k in &keys {
                     ui.selectable_value(&mut self.form.identity, k.clone(), k);
@@ -608,6 +610,7 @@ impl VaultTool {
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(220.0));
                     egui::ComboBox::from_id_salt("vault-hosts").selected_text("").width(24.0).show_ui(ui, |ui| {
+                        crate::gui::menu_look(ui);
                         for h in known {
                             if ui.selectable_label(false, h).clicked() {
                                 self.host = h.clone();

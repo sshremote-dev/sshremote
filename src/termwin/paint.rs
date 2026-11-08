@@ -413,6 +413,7 @@ pub(super) fn screen(
     let mut find = false;
     let mut view = None;
     resp.context_menu(|ui| {
+        crate::gui::menu_look(ui);
         if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C")).clicked() {
             copy_now = true;
             ui.close();

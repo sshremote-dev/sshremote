@@ -153,7 +153,7 @@ pub fn dark() -> bool {
 }
 
 /// Dark or light for the windows now.
-fn apply_theme(ctx: &egui::Context, dark: bool) {
+pub(crate) fn apply_theme(ctx: &egui::Context, dark: bool) {
     DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
     let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
     let (text, weak_line) = if dark {
@@ -199,9 +199,11 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
     v.widgets.noninteractive.fg_stroke.color = text;
     v.widgets.inactive.fg_stroke.color = text;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, weak_line);
-    // Flat buttons: no outline until hovered.
-    v.widgets.inactive.bg_stroke = Stroke::NONE;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, weak_line);
+    // A soft outline on what keeps its frame (fields, check boxes, framed buttons), so each reads
+    // as a control on any background; frameless buttons show nothing until hovered.
+    let edge = if dark { Color32::from_white_alpha(56) } else { Color32::from_black_alpha(72) };
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, edge);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, if dark { Color32::from_white_alpha(70) } else { Color32::from_black_alpha(80) });
     // Selected text and items in VS Code's selection colours, readable in both themes.
     v.selection.bg_fill = if dark { Color32::from_rgb(38, 79, 120) } else { Color32::from_rgb(173, 214, 255) };
     v.selection.stroke = Stroke::new(1.0, text);
@@ -244,11 +246,11 @@ mod contrast {
     use super::*;
     use crate::gui::{ACCENT, bad, good, selected_fill, warn};
 
-    /// A colour over `bg`, its alpha blended in as egui paints it.
+    /// A colour over `bg` as egui paints it: `Color32` holds premultiplied alpha.
     fn over(c: Color32, bg: Color32) -> Color32 {
-        let a = c.a() as f32 / 255.0;
-        let mix = |f: u8, b: u8| (f as f32 * a + b as f32 * (1.0 - a)).round() as u8;
-        if c.a() == 255 { c } else { Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b())) }
+        let k = 1.0 - c.a() as f32 / 255.0;
+        let mix = |f: u8, b: u8| (f as f32 + b as f32 * k).round().min(255.0) as u8;
+        Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b()))
     }
 
     fn luminance(c: Color32) -> f32 {
@@ -301,6 +303,7 @@ mod contrast {
                 ("good on title bar", good(), bar, 4.5),
                 ("error text on its notice", bad(), over(bad().gamma_multiply(0.15), v.panel_fill), 4.5),
                 ("focus outline on panel", ACCENT, v.panel_fill, 3.0),
+                ("check box edge on a menu", v.widgets.inactive.bg_stroke.color, v.window_fill, 1.8),
                 ("own chat bubble", text, if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, 4.5),
             ];
             let mut pairs = pairs;

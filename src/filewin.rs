@@ -581,6 +581,7 @@ impl FileWindow {
                     }
                     let other = if remote { "Download" } else { "Upload" };
                     r.context_menu(|ui| {
+                        crate::gui::menu_look(ui);
                         let mut item = |ui: &mut egui::Ui, g: &str, label: &'static str| {
                             if ui.button(format!("{g}  {label}")).clicked() {
                                 menu_action = Some((label, i));

@@ -376,6 +376,7 @@ pub(super) fn text_editor(
                 .layouter(&mut layouter)
                 .show(ui);
             edit.response.context_menu(|ui| {
+                crate::gui::menu_look(ui);
                 if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
                     ui.ctx().copy_text(text.clone());
                     ui.close();

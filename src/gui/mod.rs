@@ -20,6 +20,8 @@ pub(crate) mod chrome;
 mod home;
 mod remote;
 pub(crate) mod theme;
+#[cfg(test)]
+mod snapshot;
 
 use remote::Remote;
 use theme::filled;
@@ -243,16 +245,23 @@ pub struct App {
     service: Option<bool>,
 }
 
+impl Form {
+    /// The connect form as the command line fills it.
+    fn from(opt: &Options) -> Form {
+        Form {
+            host: opt.host.clone().unwrap_or_default(),
+            port: String::new(),
+            password: String::new(),
+            remember: false,
+            preset: opt.preset,
+            remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
+            capture: opt.capture.clone(),
+        }
+    }
+}
+
 pub fn run(opt: &Options) -> Result<(), String> {
-    let form = Form {
-        host: opt.host.clone().unwrap_or_default(),
-        port: String::new(),
-        password: String::new(),
-        remember: false,
-        preset: opt.preset,
-        remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
-        capture: opt.capture.clone(),
-    };
+    let form = Form::from(opt);
     let auto_start = opt.host.is_some() || opt.local;
     let local = opt.local;
     let budget = opt.budget;
@@ -267,41 +276,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
             let grabbed = crate::keygrab::install();
             #[cfg(not(windows))]
             let grabbed = None;
-            let mut app = App {
-                screen: Screen::Connect,
-                form,
-                recent: crate::hosts::load_recent(),
-                ssh_hosts: crate::hosts::ssh_config_hosts(),
-                favorites: crate::hosts::favorites(),
-                pending_host: None,
-                pending_ssh: None,
-                seen: crate::hosts::last_seen(),
-                search: String::new(),
-                error: None,
-                budget,
-                grabbed,
-                terms: None,
-                torn_terms: Vec::new(),
-                keys: None,
-                config: None,
-                show_options: false,
-                save_error: None,
-                start_with: if open.split_whitespace().any(|w| w == "terminal") {
-                    Start::Terminal
-                } else if open.split_whitespace().any(|w| w == "files") {
-                    Start::Files
-                } else {
-                    Start::Screen
-                },
-                start_fullscreen: open.split_whitespace().any(|w| w == "fullscreen"),
-                start_panels: (
-                    open.split_whitespace().any(|w| w == "panel"),
-                    open.split_whitespace().any(|w| w == "chat"),
-                ),
-                vault: None,
-                backup: None,
-                service: None,
-            };
+            let mut app = App::new(form, budget, &open, grabbed);
             std::thread::spawn(crate::backup::auto);
             if auto_start {
                 app.connect(&cc.egui_ctx, local);
@@ -397,14 +372,36 @@ pub(crate) fn outline() -> Color32 {
 fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
     let config =
         egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    let (r, inner) =
-        egui::containers::menu::MenuButton::from_button(tool_button(glyph, false)).config(config).ui(ui, add);
+    let (r, inner) = egui::containers::menu::MenuButton::from_button(tool_button(glyph, false))
+        .config(config)
+        .ui(ui, |ui| menu(ui, add));
     if inner.is_some() {
         // Remembered for the next frame, so an auto-hidden toolbar stays while its menu is open.
         let pass = ui.ctx().cumulative_pass_nr();
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("sshremote-menu-open"), pass));
     }
     r
+}
+
+/// The inside of a menu: compact rows, a quiet mark on the chosen item, and scrolling when it is
+/// taller than the window, so all of it stays within reach.
+pub(crate) fn menu<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    menu_look(ui);
+    let room = (ui.ctx().content_rect().height() - 48.0).max(120.0);
+    egui::ScrollArea::vertical().max_height(room).auto_shrink([true, true]).show(ui, add).inner
+}
+
+/// The look of every menu, popup list and drop-down: rows about 28 points tall, as in Windows 11
+/// and VS Code, and the chosen item on a tint near the background instead of a colour.
+pub(crate) fn menu_look(ui: &mut egui::Ui) {
+    let dark = theme::dark();
+    let s = ui.style_mut();
+    s.spacing.item_spacing.y = 2.0;
+    s.spacing.interact_size.y = 28.0;
+    s.spacing.button_padding = Vec2::new(8.0, 4.0);
+    let text = s.visuals.widgets.inactive.fg_stroke.color;
+    s.visuals.selection.bg_fill = if dark { Color32::from_white_alpha(26) } else { Color32::from_black_alpha(18) };
+    s.visuals.selection.stroke = egui::Stroke::new(1.0, text);
 }
 
 fn menu_open(ctx: &egui::Context) -> bool {
@@ -485,6 +482,47 @@ enum Source {
     Favorite,
     Recent,
     SshConfig,
+}
+
+impl App {
+    /// The app on its home screen; `open` as `--open` gives it, `grabbed` the system keys caught.
+    fn new(form: Form, budget: f64, open: &str, grabbed: Option<mpsc::Receiver<(u32, bool)>>) -> App {
+        App {
+            screen: Screen::Connect,
+            form,
+            recent: crate::hosts::load_recent(),
+            ssh_hosts: crate::hosts::ssh_config_hosts(),
+            favorites: crate::hosts::favorites(),
+            pending_host: None,
+            pending_ssh: None,
+            seen: crate::hosts::last_seen(),
+            search: String::new(),
+            error: None,
+            budget,
+            grabbed,
+            terms: None,
+            torn_terms: Vec::new(),
+            keys: None,
+            config: None,
+            show_options: false,
+            save_error: None,
+            start_with: if open.split_whitespace().any(|w| w == "terminal") {
+                Start::Terminal
+            } else if open.split_whitespace().any(|w| w == "files") {
+                Start::Files
+            } else {
+                Start::Screen
+            },
+            start_fullscreen: open.split_whitespace().any(|w| w == "fullscreen"),
+            start_panels: (
+                open.split_whitespace().any(|w| w == "panel"),
+                open.split_whitespace().any(|w| w == "chat"),
+            ),
+            vault: None,
+            backup: None,
+            service: None,
+        }
+    }
 }
 
 impl eframe::App for App {

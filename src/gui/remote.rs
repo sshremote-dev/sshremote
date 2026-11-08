@@ -1698,6 +1698,7 @@ impl Remote {
             }));
         }
         term.context_menu(|ui| {
+            crate::gui::menu_look(ui);
             if ui.button(format!("{}  Terminal in place of the screen", ic::CORNERS_OUT)).clicked() {
                 *action = Some(Box::new(|r, _| {
                     if r.terms.is_none() {
@@ -1979,6 +1980,7 @@ mod actions {
         clock: f64,
         size: Vec2,
         shapes: Vec<egui::epaint::ClippedShape>,
+        snap: super::super::snapshot::Snap,
     }
 
     impl Harness {
@@ -1999,7 +2001,7 @@ mod actions {
             let r = Remote::new(sess, rx, ctl, "test desktop".into(), None, false);
             let ctx = egui::Context::default();
             crate::gui::style(&ctx);
-            let mut h = Harness { ctx, r, clock: 0.0, size, shapes: Vec::new() };
+            let mut h = Harness { ctx, r, clock: 0.0, size, shapes: Vec::new(), snap: Default::default() };
             // The first picture arrives.
             for _ in 0..40 {
                 h.frame(Vec::new()).unwrap();
@@ -2021,7 +2023,8 @@ mod actions {
                 ..Default::default()
             };
             let mut result = Ok(());
-            let out = self.ctx.run_ui(input, |ui| result = self.r.frame(ui));
+            let r = &mut self.r;
+            let out = self.snap.frame(&self.ctx, input, |ui| result = r.frame(ui));
             self.shapes = out.shapes;
             result
         }
@@ -2163,6 +2166,57 @@ mod actions {
         assert!(h.r.win_next, "Win with the next key");
         for _ in 0..5 {
             h.frame(Vec::new()).unwrap();
+        }
+    }
+
+    /// Pictures of the remote screen's menus in both themes, wide and narrow:
+    /// SSHREMOTE_EXE=... SSHREMOTE_SNAP_DIR=folder cargo test --release -- --ignored --test-threads=1 menus_
+    #[test]
+    #[ignore]
+    fn menus_remote() {
+        // Pictures only on request: there is nothing to check without a folder to look at.
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else {
+            eprintln!("menus_remote: set SSHREMOTE_SNAP_DIR to get the pictures");
+            return;
+        };
+        for (dark, size) in [(true, Vec2::new(1280.0, 800.0)), (false, Vec2::new(1280.0, 800.0)), (true, Vec2::new(900.0, 520.0))] {
+            let mut h = Harness::new(size);
+            crate::gui::theme::apply_theme(&h.ctx, dark);
+            h.frame(Vec::new()).unwrap();
+            let name = format!("remote_{}_{}", if dark { "dark" } else { "light" }, size.x as u32);
+            let save = |h: &mut Harness, what: &str| {
+                // Popups fade in: the picture once they are fully there.
+                for _ in 0..8 {
+                    h.frame(Vec::new()).unwrap();
+                }
+                h.snap.save(&h.ctx, h.size, &dir.join(format!("{name}_{what}.png")));
+            };
+            let escape = |h: &mut Harness| {
+                h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]).unwrap();
+                h.frame(Vec::new()).unwrap();
+            };
+            for (glyph, what) in [(ic::MONITOR, "display"), (ic::KEYBOARD, "keys"), (ic::GEAR, "options")] {
+                if h.find_in(glyph, Rect::from_min_size(Pos2::ZERO, Vec2::new(h.size.x, 40.0))).is_none() {
+                    continue;
+                }
+                h.tool(glyph).unwrap();
+                save(&mut h, what);
+                escape(&mut h);
+            }
+            // The terminal button's own menu, by a right click.
+            let at = h.find_in(ic::TERMINAL, Rect::from_min_size(Pos2::ZERO, Vec2::new(h.size.x, 40.0))).unwrap().center();
+            h.frame(vec![Event::PointerMoved(at)]).unwrap();
+            let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Default::default() };
+            h.frame(vec![press(true)]).unwrap();
+            h.frame(vec![press(false)]).unwrap();
+            h.frame(Vec::new()).unwrap();
+            save(&mut h, "terminal_menu");
+            escape(&mut h);
+            h.r.open_panels(true, true);
+            for _ in 0..4 {
+                h.frame(Vec::new()).unwrap();
+            }
+            save(&mut h, "panels");
         }
     }
 
