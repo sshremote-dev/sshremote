@@ -508,6 +508,10 @@ impl Workspace {
             }
         }
         let area = ui.available_rect_before_wrap();
+        self.shortcuts(&ctx, area);
+        if self.tabs.is_empty() {
+            return Out { empty: true };
+        }
         ui.painter().rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill);
         let Some(tab) = self.tabs.get_mut(self.current) else { return Out::default() };
         let mut rects = Vec::new();
@@ -606,6 +610,49 @@ impl Workspace {
         Out { empty: self.tabs.is_empty() }
     }
 
+    /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the
+    /// remote host; a dialog or menu keeps them too.
+    fn shortcuts(&mut self, ctx: &egui::Context, area: Rect) {
+        if self.picker.is_some() || ctx.any_popup_open() {
+            return;
+        }
+        let Some(active) = self.active_id() else { return };
+        let screen = self.index(active).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen));
+        if screen {
+            return;
+        }
+        use egui::{Key, Modifiers};
+        let cs = Modifiers::CTRL | Modifiers::SHIFT;
+        let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
+        let mut take = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        if take(cs, Key::T) {
+            self.picker = Some(Place::Tab);
+        } else if take(cs, Key::W) {
+            self.close_pane(active);
+        } else if take(cs, Key::Tab) && !self.tabs.is_empty() {
+            self.current = (self.current + self.tabs.len() - 1) % self.tabs.len();
+        } else if take(Modifiers::CTRL, Key::Tab) && !self.tabs.is_empty() {
+            self.current = (self.current + 1) % self.tabs.len();
+        } else if take(alt_shift, Key::Plus) || take(alt_shift, Key::Equals) {
+            self.picker = Some(Place::Split { below: false });
+        } else if take(alt_shift, Key::Minus) {
+            self.picker = Some(Place::Split { below: true });
+        } else if take(alt_shift, Key::D) {
+            // Along the longer side, as Windows Terminal does.
+            self.picker = Some(Place::Split { below: area.aspect_ratio() < 1.6 });
+        } else {
+            let back = take(Modifiers::ALT, Key::ArrowLeft) || take(Modifiers::ALT, Key::ArrowUp);
+            let on = take(Modifiers::ALT, Key::ArrowRight) || take(Modifiers::ALT, Key::ArrowDown);
+            if back || on {
+                let order = self.order(self.current);
+                if let Some(at) = order.iter().position(|&id| id == active) {
+                    let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
+                    self.tabs[self.current].active = order[next];
+                }
+            }
+        }
+    }
+
     /// The title bar's content: tabs and + on the left; on the right the active pane's mode and
     /// controls, then the layout buttons. What does not fit folds into one menu.
     fn bar(&mut self, ui: &mut egui::Ui, action: &mut Option<(u64, remote::Deferred)>) {
@@ -671,7 +718,7 @@ impl Workspace {
             }
             r.on_hover_text(text);
         }
-        if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files (new tab)").clicked() {
+        if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
             self.picker = Some(Place::Tab);
         }
         if let Some(t) = close_tab {
@@ -796,9 +843,9 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         let mut buttons: Vec<(&str, &str, u8)> = vec![
             (if self.window_full { ic::ARROWS_IN } else { ic::ARROWS_OUT }, "Full screen: the window as it is, split, without its title bar", 0),
-            (ic::SPLIT_SIDE, "Split: a new pane beside this one", 1),
-            (ic::SPLIT_BELOW, "Split: a new pane below this one", 2),
-            (ic::CARET_LEFT, "Move this pane left", 3),
+            (ic::SPLIT_SIDE, "Split: a new pane beside this one (Alt+Shift+=)", 1),
+            (ic::SPLIT_BELOW, "Split: a new pane below this one (Alt+Shift+-)", 2),
+            (ic::CARET_LEFT, "Move this pane left (Alt+arrows go between panes)", 3),
             (ic::CARET_RIGHT, "Move this pane right", 4),
         ];
         if rtl {
@@ -1235,6 +1282,41 @@ mod tests {
         for mut w in std::mem::take(&mut h.w.torn_out) {
             w.close_all();
         }
+    }
+
+    /// Windows Terminal's keys: new tab, next tab, split, between panes, close pane.
+    #[test]
+    fn terminal_keys_for_tabs_and_panes() {
+        let mut h = Harness::new();
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        h.w.add(shell("a"), Place::Tab, (false, false, false));
+        h.w.add(shell("b"), Place::Tab, (false, false, false));
+        h.w.add(shell("c"), Place::Split { below: false }, (false, false, false));
+        h.frame(Vec::new());
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        let alt = egui::Modifiers::ALT;
+        h.frame(vec![key(egui::Key::T, cs)]);
+        assert_eq!(h.w.picker, Some(Place::Tab), "Ctrl+Shift+T opens the dialog");
+        h.w.picker = None;
+        h.frame(vec![key(egui::Key::Tab, egui::Modifiers::CTRL)]);
+        assert_eq!(h.w.current, 0, "Ctrl+Tab: the next tab, round to the first");
+        h.frame(vec![key(egui::Key::Tab, egui::Modifiers::CTRL)]);
+        assert_eq!(h.w.current, 1);
+        let order = h.w.order(1);
+        assert_eq!(h.w.tabs[1].active, order[1]);
+        h.frame(vec![key(egui::Key::ArrowLeft, alt)]);
+        assert_eq!(h.w.tabs[1].active, order[0], "Alt+Left: the pane before");
+        h.frame(vec![key(egui::Key::Minus, egui::Modifiers::ALT | egui::Modifiers::SHIFT)]);
+        assert_eq!(h.w.picker, Some(Place::Split { below: true }), "Alt+Shift+-: split below");
+        h.w.picker = None;
+        h.frame(vec![key(egui::Key::W, cs)]);
+        assert_eq!(h.w.order(1), vec![order[1]], "Ctrl+Shift+W closes the pane");
+        h.w.close_all();
     }
 
     /// In the window's full screen the title bar hides, shows when the pointer reaches the top
