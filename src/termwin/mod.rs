@@ -1114,6 +1114,7 @@ impl TermWindow {
                 let common = [
                     ("Ctrl+Shift+F", "Find"),
                     ("Ctrl+Shift+C / V", "Copy / paste"),
+                    ("Ctrl+Insert / Shift+Insert", "Copy / paste"),
                     ("Ctrl+= / Ctrl+-", "Text size"),
                     ("Ctrl+click", "Open a link"),
                 ];
@@ -1825,6 +1826,37 @@ mod tests {
         assert!(copied, "the selection is copied");
         // Typing still reaches the shell, and the selection gives way to the caret.
         assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Text("ls".into())])), "ls");
+    }
+
+    /// Ctrl+Insert copies the selection without interrupting, and Shift+Insert pastes, as in
+    /// GNOME Terminal.
+    #[test]
+    fn insert_keys_copy_and_paste() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.parser.advance(&mut t.term, b"\x1b[2J\x1b[Hcopy me\r\n");
+        let mut sel = Selection::new(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+        sel.update(Point::new(Line(0), Column(6)), Side::Right);
+        t.term.selection = Some(sel);
+        let key = |modifiers| Event::Key { key: Key::Insert, physical_key: None, pressed: true, repeat: false, modifiers };
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let mut cmds = Vec::new();
+        let out = ctx.run_ui(input(vec![key(egui::Modifiers::CTRL)]), |ui| cmds.extend(w.embedded(ui)));
+        assert_eq!(typed(&cmds), "", "nothing typed");
+        assert!(out.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s == "copy me")));
+        cmds.clear();
+        let out = ctx.run_ui(input(vec![key(egui::Modifiers::SHIFT)]), |ui| cmds.extend(w.embedded(ui)));
+        assert_eq!(typed(&cmds), "", "nothing typed");
+        let pasting = out.viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::RequestPaste));
+        assert!(pasting, "Shift+Insert asks for the clipboard");
+        let _ = w.close_all();
     }
 
     /// In the text and Markdown views, Ctrl+C copies text selected with the mouse and sends

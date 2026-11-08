@@ -179,6 +179,16 @@ pub(super) fn keyboard_with(
             Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.ctrl && modifiers.shift => {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
+            // Ctrl+Insert copies and Shift+Insert pastes, as in GNOME Terminal and xterm (on
+            // Windows they arrive as copy and paste already).
+            Event::Key { key: Key::Insert, pressed: true, modifiers, .. } if modifiers.ctrl && !modifiers.shift => {
+                if let Some(s) = t.term.selection_to_string().filter(|s| !s.is_empty()) {
+                    ui.ctx().copy_text(s);
+                }
+            }
+            Event::Key { key: Key::Insert, pressed: true, modifiers, .. } if modifiers.shift && !modifiers.ctrl => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
             Event::Key { key, pressed: true, modifiers, .. } => {
                 // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
                 let cs = modifiers.ctrl && modifiers.shift;

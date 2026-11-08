@@ -430,11 +430,11 @@ pub(super) fn screen(
     let mut view = None;
     resp.context_menu(|ui| {
         crate::gui::menu_look(ui);
-        if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C")).clicked() {
+        if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
             copy_now = true;
             ui.close();
         }
-        if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V")).clicked() {
+        if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V, Shift+Insert")).clicked() {
             paste_now = true;
             ui.close();
         }

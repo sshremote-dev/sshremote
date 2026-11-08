@@ -47,6 +47,8 @@ pub(crate) mod ic {
     pub const ARROW_UP: &str = "\u{E08E}";
     pub const APP_WINDOW: &str = "\u{E5DA}";
     pub const SQUARES_FOUR: &str = "\u{E464}";
+    pub const LAYOUT: &str = "\u{E6D6}";
+    pub const ROWS: &str = "\u{E5A2}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const PLUS: &str = "\u{E3D4}";
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";

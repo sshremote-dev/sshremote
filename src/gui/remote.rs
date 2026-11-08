@@ -1794,7 +1794,8 @@ impl Remote {
         // Which of chat, screenshot, pause and one frame were asked for, from the bar or the menu.
         let (mut chat, mut shot, mut pause, mut frame) = (false, false, false, false);
         if !compact {
-            chat = icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
+            // Chat is with the person at the screen: shown with the screen only.
+            chat = screen && icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
             shot = screen && icon(ui, ic::CAMERA, shot_tip, false).clicked();
             // Paused: the play button shows as on, so the frozen state is plain to see.
             if screen {

@@ -140,6 +140,74 @@ impl Node {
         }
     }
 
+    /// How many panes share this part along `below`'s direction: a split the same way counts its
+    /// two sides, anything else is one.
+    fn weight(&self, below: bool) -> f32 {
+        match self {
+            Node::Split { below: b, a, b: c, .. } if *b == below => a.weight(below) + c.weight(below),
+            _ => 1.0,
+        }
+    }
+
+    /// The same arrangement with every pane in a row or column the same size: three side by
+    /// side are a third each, not a half and two quarters.
+    fn balance(&mut self) {
+        if let Node::Split { below, ratio, a, b } = self {
+            let (wa, wb) = (a.weight(*below), b.weight(*below));
+            *ratio = wa / (wa + wb);
+            a.balance();
+            b.balance();
+        }
+    }
+
+    /// Panes one after another, beside each other or one above the other, all the same size.
+    fn even(ids: &[u64], below: bool) -> Node {
+        match ids {
+            [] => Node::Leaf(0),
+            [id] => Node::Leaf(*id),
+            [first, rest @ ..] => Node::Split {
+                below,
+                ratio: 1.0 / ids.len() as f32,
+                a: Box::new(Node::Leaf(*first)),
+                b: Box::new(Node::even(rest, below)),
+            },
+        }
+    }
+
+    /// The panes in one of the standard arrangements, `main` first where one is bigger.
+    fn arranged(ids: &[u64], main: u64, layout: Layout) -> Node {
+        let mut ids = ids.to_vec();
+        if let Some(at) = ids.iter().position(|&id| id == main)
+            && matches!(layout, Layout::MainLeft | Layout::MainTop)
+        {
+            ids.remove(at);
+            ids.insert(0, main);
+        }
+        match (layout, ids.as_slice()) {
+            (_, [] | [_]) => Node::even(&ids, false),
+            (Layout::Side, _) => Node::even(&ids, false),
+            (Layout::Stacked, _) => Node::even(&ids, true),
+            (Layout::MainLeft | Layout::MainTop, [first, rest @ ..]) => {
+                let below = layout == Layout::MainTop;
+                Node::Split { below, ratio: 0.6, a: Box::new(Node::Leaf(*first)), b: Box::new(Node::even(rest, !below)) }
+            }
+            (Layout::Grid, _) => {
+                let cols = (ids.len() as f32).sqrt().ceil() as usize;
+                let rows: Vec<Node> = ids.chunks(cols).map(|r| Node::even(r, false)).collect();
+                let mut grid = rows.into_iter().rev().reduce(|below_rows, row| Node::Split {
+                    below: true,
+                    ratio: 0.5,
+                    a: Box::new(row),
+                    b: Box::new(below_rows),
+                });
+                let mut grid = grid.take().unwrap_or(Node::Leaf(0));
+                grid.balance();
+                grid
+            }
+            (Layout::Even, _) => Node::even(&ids, false),
+        }
+    }
+
     fn swap(&mut self, x: u64, y: u64) {
         match self {
             Node::Leaf(id) if *id == x => *id = y,
@@ -177,7 +245,7 @@ impl Node {
                 }
                 if r.dragged() {
                     let d = if *below { r.drag_delta().y / rect.height() } else { r.drag_delta().x / rect.width() };
-                    *ratio = (*ratio + d).clamp(0.12, 0.88);
+                    *ratio = (*ratio + d).clamp(0.05, 0.95);
                 }
                 a.layout(ui, ra, path * 2 + 1, out);
                 b.layout(ui, rb, path * 2 + 2, out);
@@ -189,6 +257,27 @@ impl Node {
 struct Tab {
     root: Node,
     active: u64,
+}
+
+/// A closing waiting for a yes: a pane (and its connection), or a whole tab, named by a pane in it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Confirm {
+    Pane(u64),
+    Tab(u64),
+}
+
+/// The arrangements of a tab's panes, as tmux has them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Layout {
+    /// The same arrangement, every pane of a row or column the same size.
+    Even,
+    Side,
+    Stacked,
+    /// The active pane big on the left, the others one above the other on the right.
+    MainLeft,
+    /// The active pane big on top, the others side by side below it.
+    MainTop,
+    Grid,
 }
 
 /// What the workspace tells the app after a frame.
@@ -241,6 +330,10 @@ pub(super) struct Workspace {
     /// current tab and room it was last brought into view for.
     tab_first: usize,
     tab_wheel: f32,
+    /// A pane or tab to close once the user says yes.
+    confirm: Option<Confirm>,
+    /// Where the panes were drawn last frame.
+    panes_area: Rect,
     scrolled_for: Option<(usize, usize)>,
 }
 
@@ -276,6 +369,8 @@ impl Workspace {
             title: String::new(),
             tab_first: 0,
             tab_wheel: 0.0,
+            confirm: None,
+            panes_area: Rect::NOTHING,
             scrolled_for: None,
         }
     }
@@ -311,6 +406,7 @@ impl Workspace {
             Place::Split { below } if !self.tabs.is_empty() => {
                 let tab = &mut self.tabs[self.current];
                 tab.root.split(tab.active, id, below);
+                tab.root.balance();
                 tab.active = id;
             }
             _ => {
@@ -582,7 +678,20 @@ impl Workspace {
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
         let show_bar = self.zoom.is_none() && (!self.window_full || now < self.reveal_until);
         if show_bar {
-            let bar = super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action));
+            // In the window's full screen the bar comes down over the panes, as the screen's
+            // toolbar does, rather than pushing them down.
+            let over = self.window_full.then(|| {
+                let r = Rect::from_min_size(ui.max_rect().min, Vec2::new(ui.max_rect().width(), super::chrome::HEIGHT));
+                ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(r)
+                        .layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("full-window-bar"))),
+                )
+            });
+            let bar = match over {
+                Some(mut child) => super::chrome::title_bar(&mut child, |ui| self.bar(ui, &mut remote_action)),
+                None => super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action)),
+            };
             if bar.close {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -591,6 +700,7 @@ impl Workspace {
             }
         }
         let area = ui.available_rect_before_wrap();
+        self.panes_area = area;
         self.shortcuts(&ctx, area);
         let full = self.zoom.is_some() || self.window_full;
         if full != self.sent_full {
@@ -698,6 +808,7 @@ impl Workspace {
         for id in closing {
             self.close_pane(id);
         }
+        self.confirm_dialog(&ctx);
         // The window's title follows the active pane.
         if let Some(id) = self.active_id() {
             let title = format!("SSH Remote - {}", self.name(id).0);
@@ -712,7 +823,7 @@ impl Workspace {
     /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the
     /// remote host; a dialog or menu keeps them too.
     fn shortcuts(&mut self, ctx: &egui::Context, area: Rect) {
-        if self.picker.is_some() || ctx.any_popup_open() {
+        if self.picker.is_some() || self.confirm.is_some() || ctx.any_popup_open() {
             return;
         }
         let Some(active) = self.active_id() else { return };
@@ -736,7 +847,7 @@ impl Workspace {
         if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
         } else if take(cs, Key::W) {
-            self.close_pane(active);
+            self.confirm = Some(Confirm::Pane(active));
         } else if take(cs, Key::Tab) && !self.tabs.is_empty() {
             self.current = (self.current + self.tabs.len() - 1) % self.tabs.len();
             self.zoom = None;
@@ -774,7 +885,7 @@ impl Workspace {
         let avail = ui.available_width();
         // Widths: the five layout buttons and their separator, the mode drop-down and the pane's
         // controls (as measured last frame), the "more" menu.
-        const LAYOUT_W: f32 = 5.0 * 32.0 + 16.0;
+        const LAYOUT_W: f32 = 6.0 * 32.0 + 16.0;
         const MORE_W: f32 = 36.0;
         let mode_w = self.mode_w + 8.0;
         // The controls fold before the tabs shrink below three at their narrowest.
@@ -816,13 +927,9 @@ impl Workspace {
         }
         let right_left = right.min_rect().left().min(full.right());
         let width = (right_left - ui.cursor().left() - PLUS_W - 12.0).max(TAB_MIN);
-        let (close_tab, tab_rects) = self.tab_strip(ui, width);
+        let tab_rects = self.tab_strip(ui, width);
         if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
             self.picker = Some(Place::Tab);
-        }
-        if let Some(t) = close_tab {
-            self.close_tab(t);
-            return;
         }
         self.drag_tab(ui, &tab_rects);
     }
@@ -830,12 +937,11 @@ impl Workspace {
     /// The tabs, as a terminal draws them: the current one in the panes' colour and joined to
     /// them, the others flat with a thin rule between. They share `width` down to `TAB_MIN`
     /// each; past that the strip scrolls (wheel, arrows, the current tab kept in view) and a
-    /// list of every tab opens from the end. Returns a tab whose close was clicked, and where
-    /// each tab is drawn (for dragging).
-    fn tab_strip(&mut self, ui: &mut egui::Ui, width: f32) -> (Option<usize>, Vec<Rect>) {
+    /// list of every tab opens from the end. Returns where each tab is drawn (for dragging); a
+    /// tab's close asks first.
+    fn tab_strip(&mut self, ui: &mut egui::Ui, width: f32) -> Vec<Rect> {
         let n = self.tabs.len();
         let over = n as f32 * TAB_MIN > width + 0.5;
-        let mut close = None;
         let mut view_w = width;
         if over {
             let start = ui.cursor().left();
@@ -950,7 +1056,7 @@ impl Workspace {
                 painter.text(x_rect.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
             }
             if xr.clicked() || r.middle_clicked() {
-                close = Some(t);
+                self.confirm = Some(Confirm::Tab(id));
             } else if r.clicked() {
                 self.current = t;
                 self.zoom = None;
@@ -1028,7 +1134,7 @@ impl Workspace {
                 self.zoom = None;
             }
         }
-        (close, rects)
+        rects
     }
 
     /// The icon of a pane's mode, and whether it is down (connecting again, or given up).
@@ -1120,6 +1226,9 @@ impl Workspace {
     /// The active pane's own controls (the screen's quality, keys, chat...).
     fn controls(&mut self, ui: &mut egui::Ui, id: u64, action: &mut Option<(u64, remote::Deferred)>) {
         let Some(i) = self.index(id) else { return };
+        // The screen has its own full-screen button among its controls; a terminal or the files
+        // get theirs here, after their controls.
+        let own_full = matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen);
         match &mut self.panes[i].state {
             State::Live(r) => {
                 let mut a = None;
@@ -1132,6 +1241,117 @@ impl Workspace {
             State::Shell(t) => t.controls(ui),
             State::Down(_) => {}
         }
+        if !own_full {
+            let on = self.zoom == Some(id);
+            let (glyph, tip) = if on {
+                (ic::CORNERS_IN, "Leave full screen: back to the window as it was")
+            } else {
+                (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it")
+            };
+            if ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
+                let ctx = ui.ctx().clone();
+                self.set_zoom(&ctx, if on { None } else { Some(id) });
+            }
+        }
+        // Disconnect last: the pane closes, and with the tab's last pane the tab.
+        let (glyph, tip) = if self.is_remote(id) {
+            (ic::LINK_BREAK, "Disconnect: end this connection and close the pane (Ctrl+Shift+W)")
+        } else {
+            (ic::X, "Close this pane (Ctrl+Shift+W)")
+        };
+        if ui.add(tool_button(glyph, false)).on_hover_text(tip).clicked() {
+            self.confirm = Some(Confirm::Pane(id));
+        }
+    }
+
+    /// Whether a pane reaches another computer (closing it disconnects).
+    fn is_remote(&self, id: u64) -> bool {
+        self.index(id).is_some_and(|i| {
+            let p = &self.panes[i];
+            p.ssh_cmd.is_some() || matches!(p.target, Target::Ssh { .. })
+        })
+    }
+
+    /// Asks before closing a pane or a tab: closing ends connections and shells for good.
+    /// Enter says yes, Escape no.
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(what) = self.confirm else { return };
+        let (id, tab) = match what {
+            Confirm::Pane(id) => (id, None),
+            Confirm::Tab(id) => (id, self.tabs.iter().position(|t| {
+                let mut l = Vec::new();
+                t.root.leaves(&mut l);
+                l.contains(&id)
+            })),
+        };
+        if self.index(id).is_none() || matches!(what, Confirm::Tab(_)) && tab.is_none() {
+            self.confirm = None;
+            return;
+        }
+        let name = self.name(id).0;
+        let (title, body, yes) = match tab {
+            Some(t) => {
+                let n = self.order(t).len();
+                let name = self.name(self.tabs[t].active).0;
+                let body = if n > 1 {
+                    format!("Its {n} panes close, and their connections and shells end.")
+                } else if self.is_remote(id) {
+                    "The connection ends and the tab closes.".to_string()
+                } else {
+                    "The shell ends and the tab closes.".to_string()
+                };
+                (format!("Close the tab {name}?"), body, "Close tab")
+            }
+            None if self.is_remote(id) => (
+                format!("Disconnect {name}?"),
+                "The connection ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
+                "Disconnect",
+            ),
+            None => (
+                format!("Close {name}?"),
+                "The shell ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
+                "Close",
+            ),
+        };
+        let (modal, fit) = super::modal(ctx, "confirm-close", Vec2::new(420.0, 0.0));
+        let mut answer = None;
+        modal.show(ctx, |ui| {
+            ui.set_width(fit.x);
+            ui.label(RichText::new(title).size(16.0).strong());
+            ui.add_space(6.0);
+            ui.label(RichText::new(body).weak());
+            ui.add_space(14.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let danger = egui::Button::new(RichText::new(yes).strong().color(super::bad()))
+                    .stroke(Stroke::new(1.0, super::bad().gamma_multiply(0.6)))
+                    .min_size(Vec2::new(0.0, 32.0));
+                if ui.add(danger).clicked() {
+                    answer = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        let (enter, escape) = ctx.input_mut(|i| {
+            (i.consume_key(egui::Modifiers::NONE, egui::Key::Enter), i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        });
+        if enter {
+            answer = Some(true);
+        } else if escape {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                self.confirm = None;
+                match tab {
+                    Some(t) => self.close_tab(t),
+                    None => self.close_pane(id),
+                }
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
     }
 
     /// Full screen of the window, split beside or below, and moving the active pane.
@@ -1143,10 +1363,16 @@ impl Workspace {
             (ic::CARET_LEFT, "Move this pane left (Alt+arrows go between panes)", 3),
             (ic::CARET_RIGHT, "Move this pane right", 4),
         ];
+        // The arrangement menu after the splits.
+        buttons.insert(3, (ic::LAYOUT, "Layout: arrange this tab's panes", 5));
         if rtl {
             buttons.reverse();
         }
         for (glyph, tip, what) in buttons {
+            if what == 5 {
+                self.layout_menu(ui, glyph, tip);
+                continue;
+            }
             let on = what == 0 && self.window_full;
             if !ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
                 continue;
@@ -1160,6 +1386,46 @@ impl Workspace {
                 _ => self.move_active(what == 3),
             }
         }
+    }
+
+    /// The tab's arrangements: the same sizes, side by side, stacked, a main pane, a grid.
+    fn layout_menu(&mut self, ui: &mut egui::Ui, glyph: &str, tip: &str) {
+        let many = self.order(self.current).len() > 1;
+        let mut chosen = None;
+        ui.add_enabled_ui(many, |ui| {
+            icon_menu(ui, glyph, |ui| {
+                for (layout, g, text) in [
+                    (Layout::Even, ic::ARROWS_OUT, "Even sizes  (keep the arrangement)"),
+                    (Layout::Side, ic::SPLIT_SIDE, "Side by side"),
+                    (Layout::Stacked, ic::SPLIT_BELOW, "Stacked"),
+                    (Layout::MainLeft, ic::LAYOUT, "Main pane left, the others stacked"),
+                    (Layout::MainTop, ic::ROWS, "Main pane on top, the others side by side"),
+                    (Layout::Grid, ic::SQUARES_FOUR, "Grid"),
+                ] {
+                    if ui.button(format!("{g}  {text}")).clicked() {
+                        chosen = Some(layout);
+                        ui.close();
+                    }
+                }
+            })
+            .on_hover_text(tip)
+            .on_disabled_hover_text("Layout: for a tab of two panes or more");
+        });
+        if let Some(layout) = chosen {
+            self.arrange(layout);
+        }
+    }
+
+    /// Arranges the current tab's panes; the active pane stays active (and is the main one).
+    fn arrange(&mut self, layout: Layout) {
+        let ids = self.order(self.current);
+        let Some(tab) = self.tabs.get_mut(self.current) else { return };
+        if layout == Layout::Even {
+            tab.root.balance();
+        } else {
+            tab.root = Node::arranged(&ids, tab.active, layout);
+        }
+        self.zoom = None;
     }
 
     fn move_active(&mut self, left: bool) {
@@ -1182,7 +1448,6 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         let order = self.order(self.current);
         let mut go = None;
-        let mut leave = false;
         let mut action = None;
         let r = egui::Area::new(egui::Id::unique("pane-dock"))
             .order(egui::Order::Foreground)
@@ -1209,11 +1474,8 @@ impl Workspace {
                         });
                         ui.separator();
                         self.mode_menu(ui, z);
+                        // Its controls end with the button that leaves full screen.
                         self.controls(ui, z, &mut action);
-                        ui.separator();
-                        if ui.add(tool_button(ic::ARROWS_IN, false)).on_hover_text("Leave full screen (Ctrl+Alt+Enter)").clicked() {
-                            leave = true;
-                        }
                     });
                 });
             });
@@ -1233,9 +1495,6 @@ impl Workspace {
                 tab.active = id;
             }
             self.zoom = Some(id);
-        }
-        if leave {
-            self.set_zoom(&ctx, None);
         }
     }
 }
@@ -1564,7 +1823,10 @@ mod tests {
         assert_eq!(h.w.current, 3, "the list goes to a tab");
         let at = in_bar(&h, "host04")[0].center();
         h.click_at(at, PointerButton::Middle);
-        assert_eq!(h.w.tabs.len(), 29, "middle click closes");
+        assert!(matches!(h.w.confirm, Some(Confirm::Tab(_))), "middle click asks to close the tab");
+        h.frame(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+        assert_eq!(h.w.tabs.len(), 29, "and closes it");
+        h.frame(Vec::new());
         assert!(in_bar(&h, "host04").is_empty());
         h.w.close_all();
     }
@@ -1738,8 +2000,122 @@ mod tests {
         assert_eq!(h.w.picker, Some(Place::Split { below: true }), "Alt+Shift+-: split below");
         h.w.picker = None;
         h.frame(vec![key(egui::Key::W, cs)]);
-        assert_eq!(h.w.order(1), vec![order[1]], "Ctrl+Shift+W closes the pane");
+        assert_eq!(h.w.confirm, Some(Confirm::Pane(order[0])), "Ctrl+Shift+W asks first");
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        assert_eq!(h.w.order(1), vec![order[1]], "and closes the pane once told yes");
         h.w.close_all();
+    }
+
+    /// Closing a tab or a pane asks first: Escape keeps it, Enter closes it.
+    #[test]
+    fn closing_asks_first() {
+        let mut h = Harness::new();
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        h.w.add(shell("one"), Place::Tab, (false, false, false));
+        h.w.add(shell("two"), Place::Tab, (false, false, false));
+        h.w.add(shell("three"), Place::Split { below: false }, (false, false, false));
+        h.frame(Vec::new());
+        let key = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        // The pane's own close, last of its controls (the tab's is on the left).
+        for _ in 0..4 {
+            h.frame(Vec::new());
+        }
+        let x = h.snap.find(ic::X).into_iter().filter(|r| r.center().y < super::super::chrome::HEIGHT).max_by(|a, b| a.left().total_cmp(&b.left())).unwrap();
+        h.click_at(x.center(), PointerButton::Primary);
+        assert!(matches!(h.w.confirm, Some(Confirm::Pane(_))), "a pane's close asks");
+        assert!(!h.snap.find("Close three?").is_empty(), "naming the pane");
+        h.frame(vec![key(egui::Key::Escape)]);
+        assert_eq!(h.w.confirm, None);
+        assert_eq!(h.w.order(1).len(), 2, "Escape keeps it");
+        // A tab's close: the whole tab, its panes too.
+        let id = h.w.tabs[1].active;
+        h.w.confirm = Some(Confirm::Tab(id));
+        h.frame(Vec::new());
+        assert!(!h.snap.find("Its 2 panes close").is_empty());
+        h.frame(vec![key(egui::Key::Enter)]);
+        assert_eq!(h.w.tabs.len(), 1, "the tab went, with both panes");
+        assert_eq!(h.w.panes.len(), 1);
+        h.w.close_all();
+    }
+
+    /// Every pane can fill the window: a terminal gets the button among its controls.
+    #[test]
+    fn a_terminal_pane_fills_the_window() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
+        h.w.add(shell, Place::Tab, (false, false, false));
+        h.frame(Vec::new());
+        for _ in 0..4 {
+            h.frame(Vec::new());
+        }
+        h.bar(ic::CORNERS_OUT);
+        assert_eq!(h.w.zoom, Some(h.w.tabs[0].active), "the pane alone");
+        h.w.set_zoom(&h.ctx.clone(), None);
+        h.frame(Vec::new());
+        h.w.close_all();
+    }
+
+    /// Splits share the room evenly; the layouts arrange a tab as tmux's do.
+    #[test]
+    fn splits_are_even_and_layouts_arrange() {
+        let rects = |node: &Node| {
+            fn walk(n: &Node, r: Rect, out: &mut Vec<(u64, Rect)>) {
+                match n {
+                    Node::Leaf(id) => out.push((*id, r)),
+                    Node::Split { below, ratio, a, b } => {
+                        let (ra, rb) = if *below {
+                            let y = r.top() + r.height() * ratio;
+                            (r.with_max_y(y), r.with_min_y(y))
+                        } else {
+                            let x = r.left() + r.width() * ratio;
+                            (r.with_max_x(x), r.with_min_x(x))
+                        };
+                        walk(a, ra, out);
+                        walk(b, rb, out);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(node, Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 600.0)), &mut out);
+            out
+        };
+        // Three side by side, the third split off the second: a third each.
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, false);
+        root.balance();
+        root.split(2, 3, false);
+        root.balance();
+        for (_, r) in rects(&root) {
+            assert!((r.width() - 400.0).abs() < 0.5, "{r:?}");
+        }
+        // Mixed: one on the left, two stacked on the right; the stack's panes share its height.
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, false);
+        root.split(2, 3, true);
+        root.balance();
+        let r = rects(&root);
+        assert!((r[0].1.width() - 600.0).abs() < 0.5 && (r[1].1.height() - 300.0).abs() < 0.5, "{r:?}");
+        let ids = [1, 2, 3, 4, 5];
+        let side = rects(&Node::arranged(&ids, 3, Layout::Side));
+        assert!(side.iter().all(|(_, r)| (r.width() - 240.0).abs() < 0.5 && r.height() == 600.0));
+        let stacked = rects(&Node::arranged(&ids, 3, Layout::Stacked));
+        assert!(stacked.iter().all(|(_, r)| (r.height() - 120.0).abs() < 0.5));
+        let main = rects(&Node::arranged(&ids, 3, Layout::MainLeft));
+        assert_eq!(main[0].0, 3, "the active pane is the main one");
+        assert!((main[0].1.width() - 720.0).abs() < 0.5 && (main[1].1.height() - 150.0).abs() < 0.5);
+        let top = rects(&Node::arranged(&ids, 3, Layout::MainTop));
+        assert_eq!(top[0].0, 3);
+        assert!((top[0].1.height() - 360.0).abs() < 0.5 && (top[1].1.width() - 300.0).abs() < 0.5);
+        let grid = rects(&Node::arranged(&[1, 2, 3, 4], 1, Layout::Grid));
+        assert!(grid.iter().all(|(_, r)| (r.width() - 600.0).abs() < 0.5 && (r.height() - 300.0).abs() < 0.5), "{grid:?}");
+        let grid = rects(&Node::arranged(&ids, 1, Layout::Grid));
+        assert_eq!(grid.len(), 5);
+        assert!((grid[0].1.height() - 300.0).abs() < 0.5, "two rows: {grid:?}");
     }
 
     /// Closing panes and tabs keeps the rest as it was: the current tab, full screen off once
@@ -1823,6 +2199,8 @@ mod tests {
         h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 1.0))]);
         h.frame(Vec::new());
         assert!(bar_shown(&h), "shown at the top edge");
+        // Over the panes, not pushing them down.
+        assert!(h.w.panes_area.top() < 1.0, "the panes start at the top: {:?}", h.w.panes_area);
         for _ in 0..40 {
             h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
         }
