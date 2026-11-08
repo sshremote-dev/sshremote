@@ -905,7 +905,7 @@ impl Workspace {
             if fold_controls {
                 // One menu for what does not fit: the pane's controls, and the layout if needed.
                 let more = icon_menu(ui, ic::DOTS, |ui| {
-                    ui.set_max_width(300.0);
+                    ui.set_max_width(440.0);
                     ui.horizontal_wrapped(|ui| self.controls(ui, active, action));
                     if fold_layout {
                         ui.separator();
@@ -1254,7 +1254,7 @@ impl Workspace {
             }
         }
         // Disconnect last: the pane closes, and with the tab's last pane the tab.
-        let (glyph, tip) = if self.is_remote(id) {
+        let (glyph, tip) = if self.is_remote(id) || !self.is_shell(id) {
             (ic::LINK_BREAK, "Disconnect: end this connection and close the pane (Ctrl+Shift+W)")
         } else {
             (ic::X, "Close this pane (Ctrl+Shift+W)")
@@ -1262,6 +1262,11 @@ impl Workspace {
         if ui.add(tool_button(glyph, false)).on_hover_text(tip).clicked() {
             self.confirm = Some(Confirm::Pane(id));
         }
+    }
+
+    /// Whether a pane is a plain shell here (closing it ends the shell, not a connection).
+    fn is_shell(&self, id: u64) -> bool {
+        self.index(id).is_some_and(|i| matches!(self.panes[i].state, State::Shell(_)))
     }
 
     /// Whether a pane reaches another computer (closing it disconnects).
@@ -1295,14 +1300,14 @@ impl Workspace {
                 let name = self.name(self.tabs[t].active).0;
                 let body = if n > 1 {
                     format!("Its {n} panes close, and their connections and shells end.")
-                } else if self.is_remote(id) {
+                } else if self.is_remote(id) || !self.is_shell(id) {
                     "The connection ends and the tab closes.".to_string()
                 } else {
                     "The shell ends and the tab closes.".to_string()
                 };
                 (format!("Close the tab {name}?"), body, "Close tab")
             }
-            None if self.is_remote(id) => (
+            None if self.is_remote(id) || !self.is_shell(id) => (
                 format!("Disconnect {name}?"),
                 "The connection ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
                 "Disconnect",
@@ -1761,6 +1766,19 @@ mod tests {
                 h.frame(Vec::new());
             }
             save(&mut h, "split");
+            let first = h.w.order(0)[0];
+            h.w.confirm = Some(Confirm::Pane(first));
+            save(&mut h, "confirm");
+            h.w.confirm = None;
+            h.w.tabs[0].active = first;
+            h.w.set_mode(first, PaneMode::Files);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.frame(Vec::new());
+            }
+            save(&mut h, "files");
+            h.w.set_mode(first, PaneMode::Screen);
+            h.w.tabs[0].active = h.w.order(0)[1];
             h.bar("Terminal");
             save(&mut h, "mode_menu");
             h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);

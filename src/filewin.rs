@@ -444,7 +444,7 @@ impl FileWindow {
                 ui.set_min_size(ui.available_size());
                 ui.horizontal(|ui| {
                     let glyph = if remote { ic::MONITOR } else { ic::HARD_DRIVE };
-                    ui.label(RichText::new(format!("{glyph}  {title}")).strong());
+                    // The buttons first, from the right; the title takes what is left, cut short.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let p = self.pane(remote);
                         let (g, tip) = if p.hidden {
@@ -462,6 +462,10 @@ impl FileWindow {
                             let path = self.pane(remote).path.clone();
                             self.go(remote, path, out);
                         }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(format!("{glyph}  {title}")).strong()).truncate())
+                                .on_hover_text(title);
+                        });
                     });
                 });
                 ui.horizontal(|ui| {
@@ -515,7 +519,15 @@ impl FileWindow {
     fn table(&mut self, ui: &mut egui::Ui, remote: bool, out: &mut Vec<Cmd>) {
         let row_h = 24.0;
         let width = ui.available_width();
-        let (size_w, date_w) = (84.0, 132.0);
+        // The name keeps most of the room: the date goes first as the list narrows, then the size
+        // (the line under the list still tells them for the selection).
+        let (size_w, date_w) = if width >= 420.0 {
+            (84.0, 132.0)
+        } else if width >= 260.0 {
+            (76.0, 0.0)
+        } else {
+            (0.0, 0.0)
+        };
         // Column headers that sort.
         let (head, _) = ui.allocate_exact_size(Vec2::new(width, row_h), Sense::hover());
         let cols = [
@@ -532,6 +544,9 @@ impl FileWindow {
         ];
         let weak = ui.visuals().weak_text_color();
         for (key, name, rect) in cols {
+            if rect.width() < 1.0 {
+                continue;
+            }
             let r = ui.interact(rect, ui.make_persistent_id(("sort", name, remote)), Sense::click());
             let p = self.pane(remote);
             let mark = if p.sort == key { if p.ascending { ic::CARET_UP } else { ic::CARET_DOWN } } else { "" };
@@ -602,7 +617,7 @@ impl FileWindow {
                     let galley = painter.layout(e.name.clone(), FontId::proportional(13.5), text, f32::INFINITY);
                     let clip = ui.painter_at(name_rect);
                     clip.galley(egui::pos2(name_rect.min.x, rect.center().y - galley.size().y / 2.0), galley, text);
-                    if !e.dir {
+                    if !e.dir && size_w > 0.0 {
                         painter.text(
                             egui::pos2(rect.max.x - date_w - 8.0, rect.center().y),
                             Align2::RIGHT_CENTER,
@@ -611,10 +626,11 @@ impl FileWindow {
                             weak,
                         );
                     }
+                    let date = if date_w > 0.0 { crate::files::local_time(e.mtime) } else { String::new() };
                     painter.text(
                         egui::pos2(rect.max.x - date_w + 8.0, rect.center().y),
                         Align2::LEFT_CENTER,
-                        crate::files::local_time(e.mtime),
+                        date,
                         FontId::proportional(12.5),
                         weak,
                     );
