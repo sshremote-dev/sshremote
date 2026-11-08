@@ -56,7 +56,7 @@ What is opened goes into the workspace:
 ```sh
 sshremote HOST                 # the screen in this terminal, auto quality under 100 KB/s
 sshremote HOST --preset 0      # 0 black and white 50% 5 fps .. 4 true colour 60 fps
-sshremote terminal HOST        # the terminal window; --split HOST adds panes
+sshremote terminal HOST        # the workspace with a terminal pane; --split HOST adds panes
 sshremote --gui HOST --open files
 ```
 

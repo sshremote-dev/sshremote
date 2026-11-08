@@ -52,9 +52,9 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote mcp [options] HOST    MCP server on stdio so an AI agent can see and operate HOST
        sshremote mcp --here            the same for this computer's own screen
        sshremote terminal [HOST [PORT]] [--split HOST] [--split-down HOST] [--view V] [-- CMD...]
-                                  the terminal window: a local shell, or ssh to HOST; --split adds
-                                  panes beside or below (HOST local: a shell here); --view text or
-                                  markdown starts in that view; -- runs CMD in the first tab
+                                  the workspace with a terminal pane: a local shell, or ssh to HOST;
+                                  --split adds panes beside or below (HOST local: a shell here);
+                                  --view text or markdown starts the first in that view; -- runs CMD
        sshremote --local [options]     view a built-in test desktop (no ssh)
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
@@ -352,12 +352,8 @@ fn run(args: &[String]) -> Result<(), String> {
 /// `terminal [HOST [PORT]] [--split HOST] [--split-down HOST] [--view V] [-- CMD...]`.
 fn terminal(args: &[String]) -> Result<(), String> {
     // "local" is a shell here.
-    let profile = |host: &str, port: &str| {
-        if host == "local" {
-            termwin::local_profiles().into_iter().next().expect("a local shell")
-        } else {
-            termwin::ssh_profile(host, port)
-        }
+    let shell = |host: &str, port: &str| {
+        if host == "local" { gui::TermStart::Local } else { gui::TermStart::Host(host.to_string(), port.to_string()) }
     };
     let mut first = None;
     let mut panes = Vec::new();
@@ -372,23 +368,19 @@ fn terminal(args: &[String]) -> Result<(), String> {
                 }
                 view = Some(v.clone());
             }
-            // Everything after -- is a command to run in the first tab.
-            "--" => {
-                let argv: Vec<String> = it.by_ref().cloned().collect();
-                let name = argv.first().cloned().unwrap_or_default();
-                first = Some(termwin::Profile { name, icon: gui::ic::TERMINAL, launch: termwin::Launch::Local(argv) });
-            }
+            // Everything after -- is a command to run in the first pane.
+            "--" => first = Some(gui::TermStart::Command(it.by_ref().cloned().collect())),
             "--split" | "--split-down" => {
                 let host = it.next().ok_or(format!("{a} needs a host (local for a shell here)"))?;
-                panes.push((profile(host, ""), a == "--split"));
+                panes.push((shell(host, ""), a == "--split"));
             }
             s if s.starts_with('-') => return Err(format!("unknown option {s}\n\n{USAGE}")),
             host if first.is_none() => {
                 let port = it.next_if(|p| p.parse::<u16>().is_ok()).map_or("", |s| s.as_str());
-                first = Some(profile(host, port));
+                first = Some(shell(host, port));
             }
             extra => return Err(format!("one host only, then --split for more panes (not {extra})")),
         }
     }
-    termwin::run_window(first.unwrap_or_else(|| profile("local", "")), panes, view)
+    gui::run_terminal(first.unwrap_or(gui::TermStart::Local), panes, view)
 }

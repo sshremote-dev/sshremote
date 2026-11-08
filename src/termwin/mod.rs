@@ -406,6 +406,8 @@ pub enum Cmd {
 }
 
 pub struct TermWindow {
+    /// The view the first tab starts in (`sshremote terminal --view`), once it is there.
+    pub start_view: Option<String>,
     /// Whether keys typed in this window go to the shell; a window that shows the terminal beside
     /// something else (the remote screen) turns it off while that has the keyboard.
     pub keys_on: bool,
@@ -472,6 +474,7 @@ impl TermWindow {
         let chosen = setting("term_colors").and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < SCHEMES.len());
         SCHEME.store(chosen.unwrap_or(AUTO), std::sync::atomic::Ordering::Relaxed);
         TermWindow {
+            start_view: None,
             keys_on: true,
             tabs: Vec::new(),
             active: 0,
@@ -1220,6 +1223,15 @@ impl TermWindow {
         let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
         // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
+        if let Some(t) = self.tabs.first_mut()
+            && let Some(v) = self.start_view.take()
+        {
+            t.view = match v.as_str() {
+                "text" => View::Text,
+                "markdown" => View::Markdown,
+                _ => View::Terminal,
+            };
+        }
         let keys = self.keys_on && self.renaming.is_none() && !ui.ctx().any_popup_open();
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -1358,50 +1370,6 @@ fn find_local_profiles() -> Vec<Profile> {
     out
 }
 
-/// The terminal as a program of its own (`sshremote terminal [HOST]`).
-/// `view` ("text" or "markdown") is how the first tab starts.
-pub fn run_window(first: Profile, panes: Vec<(Profile, bool)>, view: Option<String>) -> Result<(), String> {
-    struct Solo(TermWindow, Option<View>, Vec<TermWindow>);
-    impl eframe::App for Solo {
-        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-            let ctx = ui.ctx().clone();
-            let mut out = Vec::new();
-            if !self.0.before(&ctx, &mut out) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-            if let Some(t) = self.0.tabs.first_mut()
-                && let Some(v) = self.1.take()
-            {
-                t.view = v;
-            }
-            crate::gui::chrome::behaviour(&ctx);
-            self.0.body(ui, &mut out);
-            self.0.after(&ctx, &mut out);
-            // Windows made from torn-off tabs, each with its own viewport.
-            self.2.extend(self.0.take_torn());
-            TermWindow::show_torn(&ctx, &mut self.2);
-        }
-    }
-    let native = crate::gui::native_options("SSH Remote Terminal", [960.0, 600.0]);
-    eframe::run_native(
-        "sshremote-terminal",
-        native,
-        Box::new(move |cc| {
-            crate::gui::style(&cc.egui_ctx);
-            let mut w = TermWindow::standalone(first, Vec::new());
-            w.framed = true;
-            w.pending.extend(panes.into_iter().map(|(p, side)| (p, Some((0, side)))));
-            let view = match view.as_deref() {
-                Some("text") => Some(View::Text),
-                Some("markdown") => Some(View::Markdown),
-                _ => None,
-            };
-            Ok(Box::new(Solo(w, view, Vec::new())))
-        }),
-    )
-    .map_err(|e| e.to_string())
-}
 
 /// An ssh session in a local terminal (password and host key prompts appear in it).
 pub fn ssh_profile(host: &str, port: &str) -> Profile {

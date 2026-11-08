@@ -546,6 +546,79 @@ impl App {
     }
 }
 
+/// What `sshremote terminal` opens in a pane: a shell here, ssh to a host, or a command.
+pub enum TermStart {
+    Local,
+    Host(String, String),
+    Command(Vec<String>),
+}
+
+impl TermStart {
+    /// The pane: the shell, and the agent of the same machine for its screen and files.
+    fn launch(self) -> Launch {
+        let local = Target::Local { capture: "auto".into() };
+        match self {
+            TermStart::Local => {
+                let profile = crate::termwin::local_profiles().into_iter().next().expect("a local shell");
+                Launch::Shell { label: profile.name.clone(), profile, target: local, ssh_cmd: None }
+            }
+            TermStart::Command(argv) => {
+                let name = argv.first().cloned().unwrap_or_default();
+                let profile = crate::termwin::Profile { name: name.clone(), icon: ic::TERMINAL, launch: crate::termwin::Launch::Local(argv) };
+                Launch::Shell { label: name, profile, target: local, ssh_cmd: None }
+            }
+            TermStart::Host(host, port) => {
+                let port_n: Option<u16> = port.trim().parse().ok();
+                let target = Target::Ssh {
+                    host: host.clone(),
+                    port: port_n,
+                    args: Vec::new(),
+                    remote: REMOTE.into(),
+                    capture: "auto".into(),
+                    password: crate::vault::get(&host),
+                    unattended: true,
+                };
+                let mut cmd = vec!["ssh".to_string()];
+                if let Some(p) = port_n {
+                    cmd.extend(["-p".into(), p.to_string()]);
+                }
+                cmd.push(host.clone());
+                let profile = crate::termwin::ssh_profile(&host, &port);
+                Launch::Shell { label: host, profile, target, ssh_cmd: Some(cmd) }
+            }
+        }
+    }
+}
+
+/// `sshremote terminal`: the workspace with `first` in a tab and `panes` beside (true) or below it.
+pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Option<String>) -> Result<(), String> {
+    let opt = crate::parse_client(&["--gui".into()])?;
+    let native = native_options("SSH Remote", [960.0, 600.0]);
+    eframe::run_native(
+        "sshremote",
+        native,
+        Box::new(move |cc| {
+            style(&cc.egui_ctx);
+            #[cfg(windows)]
+            let grabbed = crate::keygrab::install();
+            #[cfg(not(windows))]
+            let grabbed = None;
+            let mut app = App::new(Form::from(&opt), opt.budget, "", grabbed);
+            let mut w = workspace::Workspace::new(app.options());
+            w.add(first.launch(), Place::Tab, (false, false, false));
+            for (p, side) in panes {
+                w.add(p.launch(), Place::Split { below: !side }, (false, false, false));
+            }
+            if let Some(v) = view {
+                w.start_view(&v);
+            }
+            app.screen = Screen::Work(Box::new(w));
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// The open window's size, about a file dialog's.
 const OPEN_SIZE: [f32; 2] = [900.0, 600.0];
 

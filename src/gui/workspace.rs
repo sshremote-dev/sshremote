@@ -273,6 +273,13 @@ impl Workspace {
         self.zoom = None;
     }
 
+    /// The first pane's shell starts in this view (terminal, text or markdown).
+    pub(super) fn start_view(&mut self, view: &str) {
+        if let Some(Pane { state: State::Shell(t), .. }) = self.panes.first_mut() {
+            t.start_view = Some(view.to_string());
+        }
+    }
+
     fn index(&self, id: u64) -> Option<usize> {
         self.panes.iter().position(|p| p.id == id)
     }
