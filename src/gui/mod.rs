@@ -257,6 +257,9 @@ pub struct App {
     start_panels: (bool, bool),
     /// The open view's place shown.
     section: home::Section,
+    /// Workspaces in windows of their own (tabs dragged out), with where they first appear.
+    windows: Vec<(egui::ViewportId, Box<workspace::Workspace>, Pos2)>,
+    windows_made: u64,
     /// What to open next frame: the open view's choices, tools, the command line.
     queued: Vec<(workspace::Launch, workspace::Place, (bool, bool, bool))>,
     vault: Option<crate::tools::VaultTool>,
@@ -541,6 +544,8 @@ impl App {
             backup: None,
             service: None,
             section: home::Section::Ssh,
+            windows: Vec::new(),
+            windows_made: 0,
             queued: Vec::new(),
         }
     }
@@ -644,46 +649,22 @@ impl eframe::App for App {
         }
         let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
         let mut back = false;
-        let mut picker = None;
         let mut reached = Vec::new();
-        if let Screen::Work(w) = &mut self.screen {
+        let mut torn = Vec::new();
+        if let Screen::Work(mut w) = std::mem::replace(&mut self.screen, Screen::Connect) {
             back = w.ui(ui, grabbed).empty;
             reached = std::mem::take(&mut w.reached);
-            picker = w.picker;
+            self.open_dialog(&ctx, &mut w);
+            torn = std::mem::take(&mut w.torn_out);
+            self.screen = Screen::Work(w);
         }
+        self.tear_off(&ctx, torn);
+        self.other_windows(&ctx);
         // Hosts reached are the recent ones; a host typed for a terminal is recorded when opened.
         for h in reached {
             if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {
                 crate::hosts::mark_seen(&h);
                 self.seen = crate::hosts::last_seen();
-            }
-        }
-        // The open dialog over the workspace: its choice goes where it was asked for.
-        if let Some(place) = picker {
-            let modal = egui::Modal::new(egui::Id::unique("open-dialog")).show(&ctx, |ui| {
-                ui.set_width(820.0_f32.min(ctx.content_rect().width() - 40.0));
-                ui.set_height(520.0_f32.min(ctx.content_rect().height() - 60.0));
-                let close = ui
-                    .horizontal(|ui| {
-                        ui.label(RichText::new("Open").size(16.0).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked()
-                        })
-                        .inner
-                    })
-                    .inner;
-                ui.separator();
-                (close, self.open_view(ui))
-            });
-            let shut = modal.should_close() || modal.inner.0 || ctx.input(|i| i.key_pressed(Key::Escape));
-            let chosen = modal.inner.1;
-            if let Some(c) = chosen {
-                self.choose(c, place);
-            }
-            if (chosen_made(&self.queued) || shut)
-                && let Screen::Work(w) = &mut self.screen
-            {
-                w.picker = None;
             }
         }
         if back {
@@ -705,9 +686,90 @@ impl eframe::App for App {
     }
 }
 
-/// Whether the open dialog's choice was taken (something is queued to open).
-fn chosen_made(queued: &[(workspace::Launch, workspace::Place, (bool, bool, bool))]) -> bool {
-    !queued.is_empty()
+impl App {
+    /// The open dialog over workspace `w`, when it asks for one: the choice opens in it, where
+    /// it was asked for (a new tab, or beside the active pane).
+    fn open_dialog(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
+        let Some(place) = w.picker else { return };
+        let modal = egui::Modal::new(egui::Id::unique("open-dialog")).show(ctx, |ui| {
+            ui.set_width(820.0_f32.min(ctx.content_rect().width() - 40.0));
+            ui.set_height(520.0_f32.min(ctx.content_rect().height() - 60.0));
+            let close = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("Open").size(16.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked()
+                    })
+                    .inner
+                })
+                .inner;
+            ui.separator();
+            (close, self.open_view(ui))
+        });
+        let shut = modal.should_close() || modal.inner.0 || ctx.input(|i| i.key_pressed(Key::Escape));
+        if let Some(c) = modal.inner.1 {
+            let before = self.queued.len();
+            self.choose(c, place);
+            // Opened here, not in the main window: a host typed wrong keeps the dialog with its error.
+            for (launch, place, start) in self.queued.drain(before..) {
+                w.add(launch, place, start);
+                w.picker = None;
+            }
+        }
+        if shut {
+            w.picker = None;
+        }
+    }
+
+    /// Tabs dragged out of a workspace: each in a window of its own, where the pointer let go.
+    fn tear_off(&mut self, ctx: &egui::Context, torn: Vec<workspace::Workspace>) {
+        let at = ctx.input(|i| {
+            let origin = i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min);
+            origin + i.pointer.latest_pos().unwrap_or(Pos2::new(100.0, 100.0)).to_vec2() - Vec2::new(60.0, 16.0)
+        });
+        for w in torn {
+            self.windows_made += 1;
+            let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
+            self.windows.push((id, Box::new(w), at));
+        }
+    }
+
+    /// The windows of torn-off tabs, each a workspace with its own title bar, tabs and panes.
+    fn other_windows(&mut self, ctx: &egui::Context) {
+        let mut windows = std::mem::take(&mut self.windows);
+        let mut torn = Vec::new();
+        windows.retain_mut(|(id, w, at)| {
+            let mut keep = true;
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title("SSH Remote")
+                .with_inner_size([1100.0, 720.0])
+                .with_min_inner_size([480.0, 320.0])
+                .with_position(*at)
+                .with_decorations(false);
+            if let Some(icon) = app_icon() {
+                builder = builder.with_icon(icon);
+            }
+            ctx.show_viewport_immediate(*id, builder, |ui, _| {
+                let ctx = ui.ctx().clone();
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    w.close_all();
+                    keep = false;
+                    return;
+                }
+                chrome::behaviour(&ctx);
+                if w.ui(ui, Vec::new()).empty {
+                    keep = false;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    return;
+                }
+                self.open_dialog(&ctx, w);
+                torn.append(&mut w.torn_out);
+            });
+            keep
+        });
+        self.windows.append(&mut windows);
+        self.tear_off(ctx, torn);
+    }
 }
 
 pub(crate) fn human(n: u64) -> String {
@@ -722,6 +784,35 @@ pub(crate) fn human(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab dragged out lives in a window of its own, which goes when its last tab closes.
+    #[test]
+    fn torn_tabs_live_in_windows_of_their_own() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let mut w = workspace::Workspace::new(app.options());
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        w.add(
+            Launch::Shell { label: "torn".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
+            Place::Tab,
+            (false, false, false),
+        );
+        app.tear_off(&ctx, vec![w]);
+        assert_eq!(app.windows.len(), 1);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run_ui(input(), |ui| app.other_windows(ui.ctx()));
+        }
+        assert_eq!(app.windows.len(), 1, "the window stays while it has a tab");
+        app.windows[0].1.close_all();
+        let _ = ctx.run_ui(input(), |ui| app.other_windows(ui.ctx()));
+        assert!(app.windows.is_empty(), "and goes with its last tab");
+    }
 
     #[test]
     fn keys_map_to_keysyms() {

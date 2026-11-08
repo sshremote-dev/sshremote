@@ -206,6 +206,10 @@ pub(super) struct Workspace {
     pub(super) reached: Vec<String>,
     /// The width the active pane's controls took last frame, to know when they must fold.
     controls_w: f32,
+    /// The tab being dragged (to a new place, or out into a window of its own).
+    dragging: Option<usize>,
+    /// Tabs dragged out of the bar: each becomes a window of its own (the app opens them).
+    pub(super) torn_out: Vec<Workspace>,
     /// The mode drop-down's width last frame, and all the right-hand group's.
     mode_w: f32,
     right_w: f32,
@@ -226,6 +230,8 @@ impl Workspace {
             reveal_until: 0.0,
             reached: Vec::new(),
             controls_w: 260.0,
+            dragging: None,
+            torn_out: Vec::new(),
             mode_w: 150.0,
             right_w: 420.0,
             title: String::new(),
@@ -340,6 +346,32 @@ impl Workspace {
             self.tabs.remove(ti);
             self.current = self.current.min(self.tabs.len().saturating_sub(1));
         }
+    }
+
+    /// Closes everything: the window holding the workspace is closing.
+    pub(super) fn close_all(&mut self) {
+        while !self.tabs.is_empty() {
+            self.close_tab(0);
+        }
+    }
+
+    /// Takes tab `t` with its panes into a workspace of its own.
+    fn take_tab(&mut self, t: usize) -> Workspace {
+        let tab = self.tabs.remove(t);
+        let mut ids = Vec::new();
+        tab.root.leaves(&mut ids);
+        let mut w = Workspace::new(self.opt.clone());
+        let (moved, kept): (Vec<Pane>, Vec<Pane>) = std::mem::take(&mut self.panes).into_iter().partition(|p| ids.contains(&p.id));
+        self.panes = kept;
+        w.panes = moved;
+        w.tabs.push(tab);
+        // Ids stay unique in each: the new one numbers its panes after these.
+        w.next_id = self.next_id;
+        if self.zoom.is_some_and(|z| ids.contains(&z)) {
+            self.zoom = None;
+        }
+        self.current = self.current.min(self.tabs.len().saturating_sub(1));
+        w
     }
 
     fn close_tab(&mut self, tab: usize) {
@@ -590,6 +622,7 @@ impl Workspace {
         // The tabs take what the right-hand group leaves, as it measured last frame.
         let tab_w = ((avail - self.right_w - 36.0 - 16.0) / self.tabs.len().max(1) as f32).clamp(72.0, 220.0);
         let mut close_tab = None;
+        let mut tab_rects: Vec<Rect> = Vec::new();
         for t in 0..self.tabs.len() {
             let order = self.order(t);
             let (name, rtt) = self.name(self.tabs[t].active);
@@ -601,7 +634,12 @@ impl Workspace {
                 text.push_str(&format!("  {} {}", ic::SQUARES_FOUR, order.len()));
             }
             let on = t == self.current;
-            let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 30.0), egui::Sense::click());
+            let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 30.0), egui::Sense::click_and_drag());
+            tab_rects.push(rect);
+            if r.drag_started() {
+                self.dragging = Some(t);
+                self.current = t;
+            }
             let p = ui.painter();
             if on {
                 p.rect_filled(rect, theme::R_SM, selected_fill());
@@ -640,6 +678,7 @@ impl Workspace {
             self.close_tab(t);
             return;
         }
+        self.drag_tab(ui, &tab_rects);
         let Some(active) = self.active_id() else { return };
         let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -672,6 +711,33 @@ impl Workspace {
             ui.min_rect().width()
         });
         self.right_w = right.inner;
+    }
+
+    /// A tab being dragged: along the bar it changes places with the others; let go away from the
+    /// bar, it leaves for a window of its own (unless it is the only one).
+    fn drag_tab(&mut self, ui: &egui::Ui, rects: &[Rect]) {
+        let Some(d) = self.dragging else { return };
+        let (pos, released) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_released() || !i.pointer.any_down()));
+        let Some(p) = pos else { return };
+        if released {
+            self.dragging = None;
+            let away = p.y > super::chrome::HEIGHT + 40.0 || p.y < -20.0;
+            if away && self.tabs.len() > 1 && d < self.tabs.len() {
+                let w = self.take_tab(d);
+                self.torn_out.push(w);
+            }
+            return;
+        }
+        if let Some(to) = rects.iter().position(|r| p.x >= r.left() && p.x < r.right())
+            && to != d
+            && d < self.tabs.len()
+        {
+            let tab = self.tabs.remove(d);
+            self.tabs.insert(to, tab);
+            self.current = to;
+            self.dragging = Some(to);
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
 
     /// The drop-down that turns the active pane into a terminal, the screen or the files.
@@ -1121,6 +1187,83 @@ mod tests {
             h.w.close_tab(0);
             h.frame(Vec::new());
         }
+    }
+
+    /// Tabs dragged along the bar change places; one dragged away from the bar leaves for a
+    /// window of its own, with its panes.
+    #[test]
+    fn tabs_drag_to_reorder_and_tear_off() {
+        let mut h = Harness::new();
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        h.w.add(shell("first"), Place::Tab, (false, false, false));
+        h.w.add(shell("second"), Place::Tab, (false, false, false));
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        let at = |h: &Harness, name: &str| {
+            h.snap.find(name).into_iter().find(|r| r.center().y < super::super::chrome::HEIGHT).unwrap().center()
+        };
+        let drag = |h: &mut Harness, from: Pos2, to: Pos2| {
+            let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            h.frame(vec![Event::PointerMoved(from)]);
+            h.frame(vec![press(from, true)]);
+            for k in 1..=8 {
+                h.frame(vec![Event::PointerMoved(from + (to - from) * (k as f32 / 8.0))]);
+            }
+            h.frame(vec![press(to, false)]);
+            h.frame(Vec::new());
+        };
+        let names = |w: &Workspace| -> Vec<String> { (0..w.tabs.len()).map(|t| w.name(w.tabs[t].active).0).collect() };
+        assert_eq!(names(&h.w), ["first", "second"]);
+        let (a, b) = (at(&h, "first"), at(&h, "second"));
+        drag(&mut h, a, b);
+        assert_eq!(names(&h.w), ["second", "first"], "dragged along the bar");
+        let a = at(&h, "first");
+        drag(&mut h, a, a + Vec2::new(0.0, 300.0));
+        assert_eq!(names(&h.w), ["second"], "dragged away from the bar");
+        assert_eq!(h.w.torn_out.len(), 1, "it leaves for a window of its own");
+        assert_eq!(names(&h.w.torn_out[0]), ["first"]);
+        assert_eq!(h.w.torn_out[0].panes.len(), 1, "with its pane");
+        // The last tab stays: there is nothing to leave from.
+        let a = at(&h, "second");
+        drag(&mut h, a, a + Vec2::new(0.0, 300.0));
+        assert_eq!(names(&h.w), ["second"]);
+        h.w.close_all();
+        for mut w in std::mem::take(&mut h.w.torn_out) {
+            w.close_all();
+        }
+    }
+
+    /// In the window's full screen the title bar hides, shows when the pointer reaches the top
+    /// edge, and hides again once it leaves.
+    #[test]
+    fn full_window_shows_its_bar_at_the_top_edge() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(
+            Launch::Shell { label: "shell".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
+            Place::Tab,
+            (false, false, false),
+        );
+        h.frame(Vec::new());
+        h.bar(ic::ARROWS_OUT);
+        assert!(h.w.window_full);
+        let bar_shown = |h: &Harness| h.snap.find(ic::PLUS).iter().any(|r| r.center().y < super::super::chrome::HEIGHT);
+        for _ in 0..40 {
+            h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
+        }
+        assert!(!bar_shown(&h), "hidden in full screen");
+        h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 1.0))]);
+        h.frame(Vec::new());
+        assert!(bar_shown(&h), "shown at the top edge");
+        for _ in 0..40 {
+            h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
+        }
+        assert!(!bar_shown(&h), "hidden again");
+        h.w.close_all();
     }
 
     /// A first connection that fails asks at once: Reconnect or Close.

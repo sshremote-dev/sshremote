@@ -11,6 +11,7 @@ use crate::color::{Mode, unpack};
 use crate::proto::{Frame, MOD_CTRL, PRESETS, Settings, ToAgent, ToClient, read_msg, write_msg};
 use crate::transport::{self, Link, Target};
 
+#[derive(Clone)]
 pub struct Options {
     pub host: Option<String>,
     pub local: bool,
