@@ -214,11 +214,21 @@ pub(super) struct Workspace {
     dragging: Option<usize>,
     /// Tabs dragged out of the bar: each becomes a window of its own (the app opens them).
     pub(super) torn_out: Vec<Workspace>,
-    /// The mode drop-down's width last frame, and all the right-hand group's.
+    /// The mode drop-down's width last frame.
     mode_w: f32,
-    right_w: f32,
     title: String,
+    /// The first tab shown when they do not all fit, the wheel not yet a whole step, and the
+    /// current tab and room it was last brought into view for.
+    tab_first: usize,
+    tab_wheel: f32,
+    scrolled_for: Option<(usize, usize)>,
 }
+
+/// A tab's width: as wide as fits, between these; past the narrowest the tabs scroll.
+const TAB_MAX: f32 = 220.0;
+const TAB_MIN: f32 = 120.0;
+/// The + after the tabs.
+const PLUS_W: f32 = 34.0;
 
 impl Workspace {
     pub(super) fn new(opt: Options) -> Workspace {
@@ -238,8 +248,10 @@ impl Workspace {
             dragging: None,
             torn_out: Vec::new(),
             mode_w: 150.0,
-            right_w: 420.0,
             title: String::new(),
+            tab_first: 0,
+            tab_wheel: 0.0,
+            scrolled_for: None,
         }
     }
 
@@ -702,76 +714,20 @@ impl Workspace {
     fn bar(&mut self, ui: &mut egui::Ui, action: &mut Option<(u64, remote::Deferred)>) {
         ui.spacing_mut().item_spacing.x = 2.0;
         let avail = ui.available_width();
-        // Widths measured last frame: the five layout buttons and their separator, the mode
-        // drop-down, the pane's controls, the "more" menu; tabs keep at least 90 each and +.
+        // Widths: the five layout buttons and their separator, the mode drop-down and the pane's
+        // controls (as measured last frame), the "more" menu.
         const LAYOUT_W: f32 = 5.0 * 32.0 + 16.0;
         const MORE_W: f32 = 36.0;
         let mode_w = self.mode_w + 8.0;
-        let room = avail - self.tabs.len() as f32 * 90.0 - 36.0;
+        // The controls fold before the tabs shrink below three at their narrowest.
+        let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - PLUS_W;
         let fold_controls = room < mode_w + self.controls_w + LAYOUT_W;
         let fold_layout = room < mode_w + MORE_W + LAYOUT_W;
-        // The tabs take what the right-hand group leaves, as it measured last frame.
-        let tab_w = ((avail - self.right_w - 36.0 - 16.0) / self.tabs.len().max(1) as f32).clamp(72.0, 220.0);
-        let mut close_tab = None;
-        let mut tab_rects: Vec<Rect> = Vec::new();
-        for t in 0..self.tabs.len() {
-            let order = self.order(t);
-            let (name, rtt) = self.name(self.tabs[t].active);
-            let mut text = name;
-            if let Some(ms) = rtt {
-                text.push_str(&format!("  ·  {:.0} ms", ms.min(999.0)));
-            }
-            if order.len() > 1 {
-                text.push_str(&format!("  {} {}", ic::SQUARES_FOUR, order.len()));
-            }
-            let on = t == self.current;
-            let (rect, r) = ui.allocate_exact_size(Vec2::new(tab_w, 30.0), egui::Sense::click_and_drag());
-            tab_rects.push(rect);
-            if r.drag_started() {
-                self.dragging = Some(t);
-                self.current = t;
-            }
-            let p = ui.painter();
-            if on {
-                p.rect_filled(rect, theme::R_SM, selected_fill());
-                p.rect_stroke(rect, theme::R_SM, Stroke::new(1.0, selected_stroke()), egui::StrokeKind::Inside);
-            } else if r.hovered() {
-                p.rect_filled(rect, theme::R_SM, ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            let fg = if on { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
-            let text_rect = rect.shrink2(Vec2::new(10.0, 0.0)).with_max_x(rect.right() - 26.0);
-            let galley = ui.fonts_mut(|f| {
-                let mut job = egui::text::LayoutJob::simple_singleline(text.clone(), FontId::proportional(13.0), fg);
-                job.wrap = egui::text::TextWrapping::truncate_at_width(text_rect.width());
-                f.layout_job(job)
-            });
-            ui.painter().galley(Pos2::new(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, fg);
-            let x = Rect::from_center_size(Pos2::new(rect.right() - 14.0, rect.center().y), Vec2::splat(20.0));
-            let xr = ui.interact(x, egui::Id::unique(("tab-close", t, order.first().copied())), egui::Sense::click());
-            if xr.hovered() {
-                ui.painter().rect_filled(x, theme::R_SM, ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            if on || r.hovered() || xr.hovered() {
-                ui.painter().text(x.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
-            }
-            if xr.clicked() {
-                close_tab = Some(t);
-            } else if r.clicked() {
-                self.current = t;
-                self.zoom = None;
-            }
-            r.on_hover_text(text);
-        }
-        if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
-            self.picker = Some(Place::Tab);
-        }
-        if let Some(t) = close_tab {
-            self.close_tab(t);
-            return;
-        }
-        self.drag_tab(ui, &tab_rects);
-        let Some(active) = self.active_id() else { return };
-        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // The right-hand group first, from the right edge, so the tabs take exactly what it leaves.
+        let full = ui.max_rect();
+        let mut right = ui.new_child(egui::UiBuilder::new().id_salt("bar-right").max_rect(full).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        if let Some(active) = self.active_id() {
+            let ui = &mut right;
             ui.spacing_mut().item_spacing.x = 2.0;
             if !fold_layout {
                 self.layout_buttons(ui, true);
@@ -799,9 +755,191 @@ impl Workspace {
                     self.controls_w = (ui.cursor().left() - start).max(0.0);
                 });
             }
-            ui.min_rect().width()
-        });
-        self.right_w = right.inner;
+        }
+        let right_left = right.min_rect().left().min(full.right());
+        let width = (right_left - ui.cursor().left() - PLUS_W - 12.0).max(TAB_MIN);
+        let (close_tab, tab_rects) = self.tab_strip(ui, width);
+        if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
+            self.picker = Some(Place::Tab);
+        }
+        if let Some(t) = close_tab {
+            self.close_tab(t);
+            return;
+        }
+        self.drag_tab(ui, &tab_rects);
+    }
+
+    /// The tabs, as a terminal draws them: the current one in the panes' colour and joined to
+    /// them, the others flat with a thin rule between. They share `width` down to `TAB_MIN`
+    /// each; past that the strip scrolls (wheel, arrows, the current tab kept in view) and a
+    /// list of every tab opens from the end. Returns a tab whose close was clicked, and where
+    /// each tab is drawn (for dragging).
+    fn tab_strip(&mut self, ui: &mut egui::Ui, width: f32) -> (Option<usize>, Vec<Rect>) {
+        let n = self.tabs.len();
+        let over = n as f32 * TAB_MIN > width + 0.5;
+        let mut close = None;
+        let mut view_w = width;
+        if over {
+            let start = ui.cursor().left();
+            if ui.add(tool_button(ic::CARET_LEFT, false)).on_hover_text("Scroll the tabs").clicked() {
+                self.tab_first = self.tab_first.saturating_sub(1);
+            }
+            // The arrow's width, with its spacing, for it, the other arrow and the list.
+            let step = ui.cursor().left() - start;
+            view_w = width - 3.0 * step - ui.spacing().item_spacing.x;
+        }
+        // Whole tabs only: as many as fit at their narrowest, sharing the room.
+        let shown = if over { ((view_w / TAB_MIN).floor() as usize).max(1) } else { n };
+        let fit = if over { view_w / shown as f32 } else { (width / n.max(1) as f32).clamp(TAB_MIN, TAB_MAX) };
+        let bar = ui.max_rect();
+        let (view, strip) = ui.allocate_exact_size(Vec2::new(fit * shown as f32, bar.height()), egui::Sense::hover());
+        let view = Rect::from_x_y_ranges(view.x_range(), bar.y_range());
+        // The wheel over the tabs steps through them; the current one comes into view when it
+        // or the room changes.
+        if over && strip.hovered() {
+            let d = ui.input(|i| i.smooth_scroll_delta);
+            self.tab_wheel -= if d.x != 0.0 { d.x } else { d.y };
+            while self.tab_wheel.abs() >= 40.0 {
+                let step = self.tab_wheel.signum();
+                self.tab_wheel -= step * 40.0;
+                self.tab_first = if step > 0.0 { self.tab_first + 1 } else { self.tab_first.saturating_sub(1) };
+            }
+        }
+        if self.scrolled_for != Some((self.current, shown)) {
+            self.scrolled_for = Some((self.current, shown));
+            self.tab_first = self.tab_first.clamp((self.current + 1).saturating_sub(shown), self.current);
+        }
+        self.tab_first = self.tab_first.min(n - shown);
+        let first = self.tab_first;
+        let painter = ui.painter().with_clip_rect(view.intersect(ui.clip_rect()));
+        let visuals = ui.visuals().clone();
+        let mut rects = Vec::with_capacity(n);
+        let mut hovered = None;
+        let mut shapes = Vec::new();
+        for t in 0..n {
+            if t < first || t >= first + shown {
+                rects.push(Rect::NOTHING);
+                continue;
+            }
+            let x = view.left() + (t - first) as f32 * fit;
+            let rect = Rect::from_min_max(Pos2::new(x, view.top() + 6.0), Pos2::new(x + fit, view.bottom()));
+            rects.push(rect);
+            let id = self.tabs[t].active;
+            let order_len = self.order(t).len();
+            let (name, rtt) = self.name(id);
+            let (glyph, down) = self.glyph(id);
+            let on = t == self.current;
+            let r = ui.interact(rect, egui::Id::unique(("tab", t)), egui::Sense::click_and_drag());
+            let x_rect = Rect::from_center_size(Pos2::new(rect.right() - 16.0, rect.center().y), Vec2::splat(20.0));
+            let xr = ui.interact(x_rect, egui::Id::unique(("tab-close", t)), egui::Sense::click());
+            let hot = r.hovered() || xr.hovered();
+            if hot {
+                hovered = Some(t);
+            }
+            let top = egui::CornerRadius { nw: theme::R_LG, ne: theme::R_LG, sw: 0, se: 0 };
+            if on {
+                painter.rect_filled(rect, top, visuals.panel_fill);
+                painter.rect_stroke(rect.expand2(Vec2::new(0.0, 2.0)).translate(Vec2::new(0.0, 2.0)), top, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+            } else if hot {
+                painter.rect_filled(rect.with_max_y(rect.bottom() - 4.0), theme::R_LG, visuals.widgets.hovered.weak_bg_fill);
+            }
+            let fg = if on { visuals.strong_text_color() } else { visuals.text_color() };
+            let weak = visuals.weak_text_color();
+            let mid = rect.center().y - 1.0;
+            let icon_color = if down { warn() } else { weak };
+            painter.text(Pos2::new(rect.left() + 12.0, mid), Align2::LEFT_CENTER, glyph, FontId::proportional(14.0), icon_color);
+            let text_left = rect.left() + 34.0;
+            let text_rect = Rect::from_min_max(Pos2::new(text_left, rect.top()), Pos2::new(rect.right() - 30.0, rect.bottom()));
+            let mut job = egui::text::LayoutJob::default();
+            let font = FontId::proportional(13.0);
+            job.append(&name, 0.0, egui::TextFormat::simple(font.clone(), fg));
+            if let Some(ms) = rtt {
+                job.append(&format!("{:.0} ms", ms.min(999.0)), 8.0, egui::TextFormat::simple(FontId::proportional(11.5), weak));
+            }
+            if order_len > 1 {
+                job.append(&format!("{} {}", ic::SQUARES_FOUR, order_len), 8.0, egui::TextFormat::simple(FontId::proportional(11.5), weak));
+            }
+            job.wrap = egui::text::TextWrapping::truncate_at_width(text_rect.width().max(8.0));
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            painter.galley(Pos2::new(text_left, mid - galley.size().y / 2.0), galley, fg);
+            if xr.hovered() {
+                painter.rect_filled(x_rect, theme::R_SM, visuals.widgets.hovered.weak_bg_fill);
+            }
+            if on || hot {
+                painter.text(x_rect.center(), Align2::CENTER_CENTER, ic::X, FontId::proportional(12.0), fg);
+            }
+            if xr.clicked() || r.middle_clicked() {
+                close = Some(t);
+            } else if r.clicked() {
+                self.current = t;
+                self.zoom = None;
+            }
+            if r.drag_started() {
+                self.dragging = Some(t);
+                self.current = t;
+            }
+            let mut tip = name;
+            if let Some(ms) = rtt {
+                tip.push_str(&format!("  ·  {:.0} ms", ms));
+            }
+            if order_len > 1 {
+                tip.push_str(&format!("  ·  {order_len} panes"));
+            }
+            shapes.push((r, tip));
+        }
+        // Thin rules between tabs that are neither current nor under the pointer.
+        for (t, rect) in rects.iter().enumerate().take(first + shown).skip(first + 1) {
+            let quiet = |k: usize| k != self.current && Some(k) != hovered;
+            if quiet(t - 1) && quiet(t) {
+                let x = rect.left();
+                let y = rect.center().y - 1.0;
+                painter.vline(x, (y - 8.0)..=(y + 8.0), Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color));
+            }
+        }
+        for (r, tip) in shapes {
+            r.on_hover_text(tip);
+        }
+        if over {
+            if ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
+                self.tab_first += 1;
+            }
+            let names: Vec<(String, &'static str)> = (0..n).map(|t| (self.name(self.tabs[t].active).0, self.glyph(self.tabs[t].active).0)).collect();
+            let current = self.current;
+            let mut pick = None;
+            // Its own id: the bar's right-hand group is laid out first, in a child of this ui.
+            ui.push_id("tab-list", |ui| {
+                let r = icon_menu(ui, ic::CARET_DOWN, |ui| {
+                    for (t, (name, glyph)) in names.iter().enumerate() {
+                        if ui.selectable_label(t == current, format!("{glyph}  {name}")).clicked() {
+                            pick = Some(t);
+                            ui.close();
+                        }
+                    }
+                });
+                r.on_hover_text(format!("All {n} tabs"));
+            });
+            if let Some(t) = pick {
+                self.current = t;
+                self.zoom = None;
+            }
+        }
+        (close, rects)
+    }
+
+    /// The icon of a pane's mode, and whether it is down (connecting again, or given up).
+    fn glyph(&self, id: u64) -> (&'static str, bool) {
+        let Some(p) = self.index(id).map(|i| &self.panes[i]) else { return (ic::TERMINAL, false) };
+        let mode = match &p.state {
+            State::Live(r) => r.mode(),
+            State::Shell(_) => PaneMode::Terminal,
+            State::Down(_) => p.mode,
+        };
+        let glyph = match mode {
+            PaneMode::Terminal => ic::TERMINAL,
+            PaneMode::Screen => ic::DESKTOP,
+            PaneMode::Files => ic::FOLDER,
+        };
+        (glyph, matches!(p.state, State::Down(_)))
     }
 
     /// A tab being dragged: along the bar it changes places with the others; let go away from the
@@ -842,7 +980,7 @@ impl Workspace {
         let mut chosen = None;
         let label = RichText::new(format!("{}  {}  {}", cur.glyph(), cur.name(), ic::CARET_DOWN)).size(13.0);
         let b = egui::Button::new(label).frame_when_inactive(false).min_size(Vec2::new(0.0, 30.0));
-        egui::containers::menu::MenuButton::from_button(b)
+        let (r, _) = egui::containers::menu::MenuButton::from_button(b)
             .ui(ui, |ui| {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(190.0);
@@ -852,9 +990,8 @@ impl Workspace {
                         ui.close();
                     }
                 }
-            })
-            .0
-            .on_hover_text("What this pane shows of its connection; switching does not connect again");
+            });
+        r.on_hover_text("What this pane shows of its connection; switching does not connect again");
         // Laid out left to right here or right to left in the bar: the width either way.
         let w = (ui.cursor().left() - start).abs();
         if w > 20.0 {
@@ -1275,6 +1412,74 @@ mod tests {
             h.snap.save(&h.ctx, h.size, &dir.join(format!("ws_{name}_reconnecting.png")));
             h.w.close_tab(0);
             h.frame(Vec::new());
+        }
+    }
+
+    /// Many tabs scroll as whole tabs, the current one always in view, with the + and the
+    /// pane's controls kept clear; the list at the end goes to any tab, middle click closes one.
+    #[test]
+    fn many_tabs_scroll_and_keep_the_bar_whole() {
+        let mut h = Harness::new();
+        for i in 0..30 {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = format!("host{i:02}");
+            h.w.add(
+                Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
+                Place::Tab,
+                (false, false, false),
+            );
+        }
+        let in_bar = |h: &Harness, what: &str| h.snap.find(what).into_iter().filter(|r| r.center().y < super::super::chrome::HEIGHT).collect::<Vec<_>>();
+        for current in [29, 0, 17] {
+            h.w.current = current;
+            h.frame(Vec::new());
+            h.frame(Vec::new());
+            assert!(!in_bar(&h, &format!("host{current:02}")).is_empty(), "tab {current} is in view");
+            let plus = in_bar(&h, ic::PLUS)[0];
+            let mode = in_bar(&h, "Terminal")[0];
+            assert!(plus.right() < mode.left(), "+ clear of the controls");
+        }
+        // The list is the caret before the + (the mode drop-down has one too).
+        h.frame(Vec::new());
+        let plus = in_bar(&h, ic::PLUS)[0];
+        let carets = in_bar(&h, ic::CARET_DOWN);
+        let list = carets.iter().find(|r| r.right() < plus.left()).unwrap_or_else(|| panic!("no list in {carets:?}, + at {plus:?}"));
+        h.click_at(list.center(), PointerButton::Primary);
+        h.item("host03");
+        assert_eq!(h.w.current, 3, "the list goes to a tab");
+        let at = in_bar(&h, "host04")[0].center();
+        h.click_at(at, PointerButton::Middle);
+        assert_eq!(h.w.tabs.len(), 29, "middle click closes");
+        assert!(in_bar(&h, "host04").is_empty());
+        h.w.close_all();
+    }
+
+    #[test]
+    fn tab_pictures() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        for n in [2usize, 8, 16, 30] {
+            let mut h = Harness::new();
+            for i in 0..n {
+                let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+                profile.name = format!("server-{i}.example.com");
+                h.w.add(
+                    Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
+                    Place::Tab,
+                    (false, false, false),
+                );
+            }
+            h.w.current = n / 2;
+            for _ in 0..8 {
+                h.frame(vec![Event::PointerMoved(Pos2::new(160.0, 20.0))]);
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join(format!("tabs_{n}.png")));
+            crate::gui::theme::apply_theme(&h.ctx, false);
+            h.size = Vec2::new(760.0, 500.0);
+            for _ in 0..8 {
+                h.frame(Vec::new());
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join(format!("tabs_{n}_light_narrow.png")));
+            h.w.close_all();
         }
     }
 
