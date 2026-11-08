@@ -160,6 +160,53 @@ impl Node {
         }
     }
 
+    /// After `id` was split off along `below`: the row (or column) it is in shares its room
+    /// evenly, and every other size set by hand stays.
+    fn even_out(&mut self, id: u64, below: bool) {
+        // The way down to the pane: each split's direction, and whether it went to the first part.
+        fn path(n: &Node, id: u64, out: &mut Vec<(bool, bool)>) -> bool {
+            match n {
+                Node::Leaf(x) => *x == id,
+                Node::Split { below, a, b, .. } => {
+                    out.push((*below, true));
+                    if path(a, id, out) {
+                        return true;
+                    }
+                    out.last_mut().expect("pushed").1 = false;
+                    if path(b, id, out) {
+                        return true;
+                    }
+                    out.pop();
+                    false
+                }
+            }
+        }
+        let mut steps = Vec::new();
+        if !path(self, id, &mut steps) {
+            return;
+        }
+        // The run of same-way splits that ends at the new one starts here.
+        let start = steps.iter().rposition(|&(b, _)| b != below).map_or(0, |i| i + 1);
+        let mut node = self;
+        for &(_, first) in &steps[..start] {
+            let Node::Split { a, b, .. } = node else { return };
+            node = if first { a } else { b };
+        }
+        node.even_run(below);
+    }
+
+    /// Even shares along `below` for a run of splits that way, leaving the parts inside alone.
+    fn even_run(&mut self, below: bool) {
+        if let Node::Split { below: b, ratio, a, b: c } = self
+            && *b == below
+        {
+            let (wa, wc) = (a.weight(below), c.weight(below));
+            *ratio = wa / (wa + wc);
+            a.even_run(below);
+            c.even_run(below);
+        }
+    }
+
     /// Panes one after another, beside each other or one above the other, all the same size.
     fn even(ids: &[u64], below: bool) -> Node {
         match ids {
@@ -417,7 +464,7 @@ impl Workspace {
             Place::Split { below } if !self.tabs.is_empty() => {
                 let tab = &mut self.tabs[self.current];
                 tab.root.split(tab.active, id, below);
-                tab.root.balance();
+                tab.root.even_out(id, below);
                 tab.active = id;
             }
             _ => {
@@ -2341,12 +2388,24 @@ mod tests {
         // Three side by side, the third split off the second: a third each.
         let mut root = Node::Leaf(1);
         root.split(1, 2, false);
-        root.balance();
+        root.even_out(2, false);
         root.split(2, 3, false);
-        root.balance();
+        root.even_out(3, false);
         for (_, r) in rects(&root) {
             assert!((r.width() - 400.0).abs() < 0.5, "{r:?}");
         }
+        // A size set by hand elsewhere stays: one wide on the left, a stack on the right split.
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, false);
+        root.split(2, 3, true);
+        if let Node::Split { ratio, .. } = &mut root {
+            *ratio = 0.7;
+        }
+        root.split(3, 4, false);
+        root.even_out(4, false);
+        let r = rects(&root);
+        assert!((r[0].1.width() - 840.0).abs() < 0.5, "the hand-set width stays: {r:?}");
+        assert!((r[2].1.width() - r[3].1.width()).abs() < 0.5, "the new pair is even: {r:?}");
         // Mixed: one on the left, two stacked on the right; the stack's panes share its height.
         let mut root = Node::Leaf(1);
         root.split(1, 2, false);
