@@ -257,6 +257,12 @@ pub struct App {
     start_panels: (bool, bool),
     /// The open view's place shown.
     section: home::Section,
+    /// `sshremote terminal`: the program ends with its last pane, as a terminal does.
+    quit_when_empty: bool,
+    /// Hosts being reached for the screen or files, with their ports: recent once reached.
+    pending_ports: std::collections::HashMap<String, String>,
+    /// The window whose active pane last asked for the system keys (None: the main one).
+    grab_window: Option<egui::ViewportId>,
     /// Workspaces in windows of their own (tabs dragged out), with where they first appear.
     windows: Vec<(egui::ViewportId, Box<workspace::Workspace>, Pos2)>,
     windows_made: u64,
@@ -546,6 +552,9 @@ impl App {
             section: home::Section::Ssh,
             windows: Vec::new(),
             windows_made: 0,
+            quit_when_empty: false,
+            pending_ports: Default::default(),
+            grab_window: None,
             queued: Vec::new(),
         }
     }
@@ -618,6 +627,7 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
                 w.start_view(&v);
             }
             app.screen = Screen::Work(Box::new(w));
+            app.quit_when_empty = true;
             Ok(Box::new(app))
         }),
     )
@@ -647,37 +657,38 @@ impl eframe::App for App {
                 w.add(launch, place, start);
             }
         }
+        // System keys caught for a host go to the window whose pane asked for them last frame.
         let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
+        let (main_keys, window_keys) = if self.grab_window.is_some() { (Vec::new(), grabbed) } else { (grabbed, Vec::new()) };
         let mut back = false;
         let mut reached = Vec::new();
         let mut torn = Vec::new();
+        let mut main_grab = false;
         if let Screen::Work(mut w) = std::mem::replace(&mut self.screen, Screen::Connect) {
-            back = w.ui(ui, grabbed).empty;
+            let out = w.ui(ui, main_keys);
+            back = out.empty;
+            main_grab = out.grab;
             reached = std::mem::take(&mut w.reached);
             self.open_dialog(&ctx, &mut w);
             torn = std::mem::take(&mut w.torn_out);
             self.screen = Screen::Work(w);
         }
         self.tear_off(&ctx, torn);
-        self.other_windows(&ctx);
-        // Hosts reached are the recent ones; a host typed for a terminal is recorded when opened.
-        for h in reached {
-            if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {
-                crate::hosts::mark_seen(&h);
-                self.seen = crate::hosts::last_seen();
-            }
-        }
-        if back {
+        let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
+        // The hook catches the keys while any active pane wants them, for that window.
+        self.grab_window = if main_grab { None } else { window_grab };
+        #[cfg(windows)]
+        crate::keygrab::set_active(main_grab || window_grab.is_some());
+        self.reached(reached);
+        if back && self.quit_when_empty {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else if back {
             self.screen = Screen::Connect;
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
             if !maximized {
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
             }
-        }
-        #[cfg(windows)]
-        if !matches!(self.screen, Screen::Work(_)) {
-            crate::keygrab::set_active(false);
         }
         if matches!(self.screen, Screen::Connect) {
             self.connect_screen(ui);
@@ -734,10 +745,26 @@ impl App {
         }
     }
 
+    /// Hosts reached: the recent list (screen and files are recorded once reached) and when.
+    fn reached(&mut self, reached: Vec<String>) {
+        for h in reached {
+            if let Some(port) = self.pending_ports.remove(&h) {
+                self.remember_host(&h, &port);
+            } else if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {
+                crate::hosts::mark_seen(&h);
+                self.seen = crate::hosts::last_seen();
+            }
+        }
+    }
+
     /// The windows of torn-off tabs, each a workspace with its own title bar, tabs and panes.
-    fn other_windows(&mut self, ctx: &egui::Context) {
+    /// `keys` are the system keys caught for the one that asked; returns the one asking now.
+    fn other_windows(&mut self, ctx: &egui::Context, keys: Vec<(u32, bool)>, reached: &mut Vec<String>) -> Option<egui::ViewportId> {
         let mut windows = std::mem::take(&mut self.windows);
         let mut torn = Vec::new();
+        let mut keys = Some(keys);
+        let owner = self.grab_window;
+        let mut grab = None;
         windows.retain_mut(|(id, w, at)| {
             let mut keep = true;
             let mut builder = egui::ViewportBuilder::default()
@@ -757,10 +784,16 @@ impl App {
                     return;
                 }
                 chrome::behaviour(&ctx);
-                if w.ui(ui, Vec::new()).empty {
+                let mine = if owner == Some(*id) { keys.take().unwrap_or_default() } else { Vec::new() };
+                let out = w.ui(ui, mine);
+                reached.append(&mut w.reached);
+                if out.empty {
                     keep = false;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                     return;
+                }
+                if out.grab {
+                    grab = Some(*id);
                 }
                 self.open_dialog(&ctx, w);
                 torn.append(&mut w.torn_out);
@@ -769,6 +802,7 @@ impl App {
         });
         self.windows.append(&mut windows);
         self.tear_off(ctx, torn);
+        grab
     }
 }
 
@@ -806,11 +840,15 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..3 {
-            let _ = ctx.run_ui(input(), |ui| app.other_windows(ui.ctx()));
+            let _ = ctx.run_ui(input(), |ui| {
+                app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
+            });
         }
         assert_eq!(app.windows.len(), 1, "the window stays while it has a tab");
         app.windows[0].1.close_all();
-        let _ = ctx.run_ui(input(), |ui| app.other_windows(ui.ctx()));
+        let _ = ctx.run_ui(input(), |ui| {
+            app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
+        });
         assert!(app.windows.is_empty(), "and goes with its last tab");
     }
 

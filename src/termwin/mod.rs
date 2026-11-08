@@ -461,6 +461,14 @@ impl TermWindow {
         w
     }
 
+    /// Keeps only the shells running on this computer (a local shell, `ssh HOST`): those of an
+    /// agent end with its connection. Whether any is left.
+    pub fn keep_local(&mut self) -> bool {
+        self.tabs.retain(|t| matches!(t.backend, Backend::Local(_)));
+        self.active = 0;
+        !self.tabs.is_empty()
+    }
+
     /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
     pub fn single(profile: Profile) -> Self {
         let mut w = Self::standalone(profile, Vec::new());
@@ -1258,6 +1266,13 @@ impl TermWindow {
         let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
         // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
+        // A pane's shell that ended well closes its pane, as Windows Terminal does by default; one
+        // that failed stays, its message there to read.
+        if self.bare
+            && let Some(i) = self.tabs.iter().position(|t| t.exited.as_deref().is_some_and(|e| e.ends_with("code 0")))
+        {
+            self.close_pane(i, out);
+        }
         if let Some(t) = self.tabs.first_mut()
             && let Some(v) = self.start_view.take()
         {

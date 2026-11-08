@@ -15,6 +15,11 @@ pub(super) struct Remote {
     pub(super) active: bool,
     pub(super) zoom_request: Option<bool>,
     pub(super) zoomed: bool,
+    /// In a pane: it wants the system keys (pointer over its picture, "Send system keys" on);
+    /// the app turns the grab on for whichever window and pane asks.
+    pub(super) grab_wanted: bool,
+    /// In a pane: its shell ended, and with it the pane.
+    pub(super) pane_closed: bool,
     sess: Session,
     rx: mpsc::Receiver<Ev>,
     ctl: Control,
@@ -129,6 +134,8 @@ impl Remote {
             active: true,
             zoom_request: None,
             zoomed: false,
+            grab_wanted: false,
+            pane_closed: false,
             terms: terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone())),
             term_inline: terminal,
             term_detached: false,
@@ -194,8 +201,11 @@ impl Remote {
         {
             // As in RustDesk: system keys go to the remote host while the pointer is over its picture.
             let over = ctx.pointer_hover_pos().is_some_and(|p| self.last_shown.is_some_and(|s| s.contains(p)));
-            if self.active {
-                crate::keygrab::set_active(self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && over);
+            let want = self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && over;
+            if self.in_pane {
+                self.grab_wanted = want && self.active && self.mode() == super::workspace::PaneMode::Screen;
+            } else {
+                crate::keygrab::set_active(want);
             }
         }
         let result = grabbed
@@ -204,6 +214,10 @@ impl Remote {
             .and_then(|_| self.frame(ui));
         if result.is_err() {
             self.sess.close();
+            self.grab_wanted = false;
+        }
+        // A pane's window belongs to the workspace: its title and full screen stay.
+        if result.is_err() && !self.in_pane {
             if self.fullscreen {
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             }
@@ -247,6 +261,9 @@ impl Remote {
         }
         }
         let transfers = self.transfers();
+        if let Some(f) = self.files.as_mut() {
+            f.active = self.active;
+        }
         let cmds = egui::CentralPanel::default()
             .show(ui, |ui| self.files.as_mut().map(|f| f.embedded(ui, &host, &transfers)).unwrap_or_default())
             .inner;
@@ -569,6 +586,10 @@ impl Remote {
 
     /// Starts uploading files dropped on the window.
     pub(super) fn take_drops(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        // Beside other panes, files dropped go to the active one only.
+        if self.in_pane && !self.active {
+            return Ok(());
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
             let path = f.path().to_path_buf();
@@ -1001,6 +1022,8 @@ impl Remote {
                 crate::termwin::Cmd::Close => {
                     self.terms = None;
                     self.term_inline = false;
+                    // A pane that was the shell goes with it, as a plain shell's pane does.
+                    self.pane_closed = self.in_pane;
                 }
             }
         }
@@ -1784,39 +1807,42 @@ impl Remote {
         let mut sound_clicked = false;
         let mut dark = ui.visuals().dark_mode;
         let mut theme_clicked = false;
-        let more = icon_menu(ui, ic::GEAR, |ui| {
-            ui.checkbox(&mut self.view_only, "View only")
-                .on_hover_text("Watch without sending keys, clicks or the wheel");
-            ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
-            sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
-            if cfg!(windows) {
-                let tip = "While the pointer is over the picture, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
-                ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
-            }
-            theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
-            ui.separator();
-            if ui.button("Repaint the whole screen").clicked() {
-                *action = Some(Box::new(|r, _| r.menu('r')));
-                ui.close();
-            }
-            if compact {
+        // The screen's options (view only, sound, system keys...): only where the screen is shown.
+        if screen {
+            let more = icon_menu(ui, ic::GEAR, |ui| {
+                ui.checkbox(&mut self.view_only, "View only")
+                    .on_hover_text("Watch without sending keys, clicks or the wheel");
+                ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
+                sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
+                if cfg!(windows) {
+                    let tip = "While the pointer is over the picture, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
+                    ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
+                }
+                theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
                 ui.separator();
-                let item = |ui: &mut egui::Ui, glyph: &str, text: &str, tip: &str| {
-                    let clicked = ui.button(format!("{glyph}  {text}")).on_hover_text(tip).clicked();
-                    if clicked {
-                        ui.close();
-                    }
-                    clicked
-                };
-                chat = item(ui, &chat_glyph, "Chat", chat_tip);
-                shot = item(ui, ic::CAMERA, "Screenshot", shot_tip);
-                pause = item(ui, pause_glyph, if self.paused { "Resume" } else { "Pause" }, pause_tip);
-                frame = self.paused && item(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", "Fetch one frame");
-            }
-        });
-        // A paused picture shows on the menu button too when its own button is folded away.
-        let more = if compact && self.paused { more.highlight() } else { more };
-        more.on_hover_text("Options");
+                if ui.button("Repaint the whole screen").clicked() {
+                    *action = Some(Box::new(|r, _| r.menu('r')));
+                    ui.close();
+                }
+                if compact {
+                    ui.separator();
+                    let item = |ui: &mut egui::Ui, glyph: &str, text: &str, tip: &str| {
+                        let clicked = ui.button(format!("{glyph}  {text}")).on_hover_text(tip).clicked();
+                        if clicked {
+                            ui.close();
+                        }
+                        clicked
+                    };
+                    chat = item(ui, &chat_glyph, "Chat", chat_tip);
+                    shot = item(ui, ic::CAMERA, "Screenshot", shot_tip);
+                    pause = item(ui, pause_glyph, if self.paused { "Resume" } else { "Pause" }, pause_tip);
+                    frame = self.paused && item(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", "Fetch one frame");
+                }
+            });
+            // A paused picture shows on the menu button too when its own button is folded away.
+            let more = if compact && self.paused { more.highlight() } else { more };
+            more.on_hover_text("Options");
+        }
         if chat {
             *action = Some(Box::new(|r, _| {
                 match r.chat.take() {

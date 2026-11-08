@@ -158,6 +158,8 @@ fn sort(entries: &mut [DirEntry], by: Sort, ascending: bool) {
 }
 
 pub struct FileWindow {
+    /// Whether it takes keys and dropped files: a pane beside others only while it is active.
+    pub active: bool,
     pub local: Pane,
     pub remote: Pane,
     dialog: Option<Dialog>,
@@ -170,6 +172,7 @@ impl FileWindow {
     /// Opens on the local home folder; the remote listing is requested by the caller.
     pub fn new() -> Self {
         let mut w = FileWindow {
+            active: true,
             local: Pane::new(),
             remote: Pane::new(),
             dialog: None,
@@ -279,7 +282,7 @@ impl FileWindow {
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && self.active {
             out.push(Cmd::Upload { paths: dropped, to: self.remote.path.clone() });
         }
         egui::Panel::bottom("transfers").show(ui, |ui| {
@@ -636,7 +639,7 @@ impl FileWindow {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Cmd>) {
-        if self.dialog.is_some() || ctx.memory(|m| m.focused().is_some()) {
+        if !self.active || self.dialog.is_some() || ctx.memory(|m| m.focused().is_some()) {
             return;
         }
         let remote = self.focus_remote;
@@ -706,7 +709,7 @@ impl FileWindow {
                 }
             });
         });
-        if done.is_none() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+        if done.is_none() && self.active && ctx.input(|i| i.key_pressed(Key::Enter)) {
             done = Some(true);
         }
         if modal.should_close() && done.is_none() {
@@ -736,6 +739,32 @@ impl FileWindow {
 
 #[cfg(test)]
 mod tests {
+    /// Keys typed into another pane do not reach a file manager that is not the active one:
+    /// Delete would otherwise ask to delete its selection, and Enter would confirm.
+    #[test]
+    fn an_inactive_file_manager_ignores_keys() {
+        for active in [false, true] {
+            let ctx = egui::Context::default();
+            let mut w = FileWindow::new();
+            w.active = active;
+            w.remote.sel.insert(0);
+            w.focus_remote = true;
+            let input = |events| egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(900.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let delete = egui::Event::Key { key: Key::Delete, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+            let _ = ctx.run_ui(input(Vec::new()), |ui| {
+                w.embedded(ui, "host", &[]);
+            });
+            let _ = ctx.run_ui(input(vec![delete]), |ui| {
+                w.embedded(ui, "host", &[]);
+            });
+            assert_eq!(w.dialog.is_some(), active, "active {active}");
+        }
+    }
+
     use super::*;
 
     #[test]

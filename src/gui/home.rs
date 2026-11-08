@@ -596,7 +596,13 @@ impl App {
             cmd.extend(["-p".into(), p.to_string()]);
         }
         cmd.push(host.clone());
-        self.remember_host(&host, port.trim());
+        // A terminal is recorded when opened (it signs in in its tab); the screen and files once
+        // the agent is reached, so mistyped hosts do not pile up.
+        if mode == PaneMode::Terminal {
+            self.remember_host(&host, port.trim());
+        } else {
+            self.pending_ports.insert(host.clone(), port.trim().to_string());
+        }
         Ok(if mode == PaneMode::Terminal {
             Launch::Shell { profile: crate::termwin::ssh_profile(&host, port), label: host, target, ssh_cmd: Some(cmd) }
         } else {

@@ -186,6 +186,8 @@ struct Tab {
 pub(super) struct Out {
     /// No pane is left: the app goes back to the open window.
     pub empty: bool,
+    /// The active pane wants the system keys (Win, Alt+Tab...) for its host.
+    pub grab: bool,
 }
 
 pub(super) struct Workspace {
@@ -198,6 +200,8 @@ pub(super) struct Workspace {
     next_id: u64,
     /// One pane fills the screen (its own full screen).
     zoom: Option<u64>,
+    /// Whether the window was last told to be full screen: it follows `zoom` and `window_full`.
+    sent_full: bool,
     /// The whole window, split as it is, fills the screen.
     window_full: bool,
     /// Until when the title bar stays shown over a full-screen window, and the zoomed pane's dock.
@@ -226,6 +230,7 @@ impl Workspace {
             opt,
             next_id: 1,
             zoom: None,
+            sent_full: false,
             window_full: false,
             reveal_until: 0.0,
             reached: Vec::new(),
@@ -344,6 +349,9 @@ impl Workspace {
         }
         if let Some(ti) = emptied {
             self.tabs.remove(ti);
+            if ti < self.current {
+                self.current -= 1;
+            }
             self.current = self.current.min(self.tabs.len().saturating_sub(1));
         }
     }
@@ -448,24 +456,29 @@ impl Workspace {
         let p = &mut self.panes[i];
         if let State::Live(r) = &mut p.state {
             p.mode = r.mode();
-            p.terms = r.take_terms();
+            p.terms = r.take_terms().filter(|_| true).and_then(|mut t| t.keep_local().then_some(t));
             r.close();
         }
         p.state = State::Down(Down::new(true, why));
     }
 
-    fn set_zoom(&mut self, ctx: &egui::Context, zoom: Option<u64>) {
+    fn set_zoom(&mut self, _ctx: &egui::Context, zoom: Option<u64>) {
         self.zoom = zoom;
         if zoom.is_some() {
             self.window_full = false;
         }
-        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(zoom.is_some() || self.window_full));
     }
 
     fn set_mode(&mut self, id: u64, mode: PaneMode) {
         let Some(i) = self.index(id) else { return };
         let p = &mut self.panes[i];
         p.mode = mode;
+        // A shell on its way to the agent (or that could not reach it) is a shell again.
+        if mode == PaneMode::Terminal && matches!(&p.state, State::Down(d) if !d.again) && p.terms.is_some() {
+            let t = p.terms.take().expect("checked");
+            p.state = State::Shell(Box::new(t));
+            return;
+        }
         match &mut p.state {
             State::Live(r) => {
                 if let Err(e) = r.set_mode(mode) {
@@ -488,7 +501,7 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
         if self.tabs.is_empty() {
-            return Out { empty: true };
+            return Out { empty: true, grab: false };
         }
         let now = ctx.input(|i| i.time);
         let pointer_top = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= 6.0);
@@ -509,8 +522,13 @@ impl Workspace {
         }
         let area = ui.available_rect_before_wrap();
         self.shortcuts(&ctx, area);
+        let full = self.zoom.is_some() || self.window_full;
+        if full != self.sent_full {
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(full));
+            self.sent_full = full;
+        }
         if self.tabs.is_empty() {
-            return Out { empty: true };
+            return Out { empty: true, grab: false };
         }
         ui.painter().rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill);
         let Some(tab) = self.tabs.get_mut(self.current) else { return Out::default() };
@@ -532,6 +550,8 @@ impl Workspace {
         let mut closing = Vec::new();
         let mut lost = Vec::new();
         let mut zoom_req = None;
+        let mut grab = false;
+        let mut to_shell = Vec::new();
         for (id, rect) in &rects {
             let Some(i) = self.index(*id) else { continue };
             let is_active = *id == active;
@@ -556,11 +576,17 @@ impl Workspace {
                             if let Some(on) = r.zoom_request.take() {
                                 zoom_req = Some(on.then_some(*id));
                             }
+                            if r.pane_closed {
+                                closing.push(*id);
+                            }
+                            grab |= is_active && r.grab_wanted;
                         }
                     }
                 }
                 State::Down(d) => match down_view(&mut child, *rect, d, &pane.label) {
                     Some(DownAct::Close) => closing.push(*id),
+                    // A shell that was reaching for the agent stays the shell it was.
+                    Some(DownAct::Cancel) if !d.again && pane.terms.is_some() => to_shell.push(*id),
                     Some(DownAct::Cancel) => {
                         d.rx = None;
                         d.given_up = true;
@@ -590,6 +616,9 @@ impl Workspace {
         for (i, e) in lost {
             self.lost(i, e);
         }
+        for id in to_shell {
+            self.set_mode(id, PaneMode::Terminal);
+        }
         if let Some(z) = zoom_req {
             self.set_zoom(&ctx, z);
         }
@@ -607,7 +636,7 @@ impl Workspace {
                 self.title = title;
             }
         }
-        Out { empty: self.tabs.is_empty() }
+        Out { empty: self.tabs.is_empty(), grab }
     }
 
     /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the
@@ -624,15 +653,26 @@ impl Workspace {
         use egui::{Key, Modifiers};
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
-        let take = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        // Exactly these modifiers: Alt+Shift+arrows and the like stay the shell's.
+        let take = |m: Modifiers, k: Key| {
+            ctx.input_mut(|i| {
+                let at = i.events.iter().position(|e| {
+                    matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. } if *key == k && modifiers.matches_exact(m))
+                });
+                at.map(|n| i.events.remove(n)).is_some()
+            })
+        };
+        let panes = self.order(self.current).len();
         if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
         } else if take(cs, Key::W) {
             self.close_pane(active);
         } else if take(cs, Key::Tab) && !self.tabs.is_empty() {
             self.current = (self.current + self.tabs.len() - 1) % self.tabs.len();
+            self.zoom = None;
         } else if take(Modifiers::CTRL, Key::Tab) && !self.tabs.is_empty() {
             self.current = (self.current + 1) % self.tabs.len();
+            self.zoom = None;
         } else if take(alt_shift, Key::Plus) || take(alt_shift, Key::Equals) {
             self.picker = Some(Place::Split { below: false });
         } else if take(alt_shift, Key::Minus) {
@@ -640,7 +680,7 @@ impl Workspace {
         } else if take(alt_shift, Key::D) {
             // Along the longer side, as Windows Terminal does.
             self.picker = Some(Place::Split { below: area.aspect_ratio() < 1.6 });
-        } else {
+        } else if panes > 1 {
             let back = take(Modifiers::ALT, Key::ArrowLeft) || take(Modifiers::ALT, Key::ArrowUp);
             let on = take(Modifiers::ALT, Key::ArrowRight) || take(Modifiers::ALT, Key::ArrowDown);
             if back || on {
@@ -648,6 +688,10 @@ impl Workspace {
                 if let Some(at) = order.iter().position(|&id| id == active) {
                     let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
                     self.tabs[self.current].active = order[next];
+                    // In a pane's full screen, the next pane takes the screen.
+                    if self.zoom.is_some() {
+                        self.zoom = Some(order[next]);
+                    }
                 }
             }
         }
@@ -840,7 +884,6 @@ impl Workspace {
 
     /// Full screen of the window, split beside or below, and moving the active pane.
     fn layout_buttons(&mut self, ui: &mut egui::Ui, rtl: bool) {
-        let ctx = ui.ctx().clone();
         let mut buttons: Vec<(&str, &str, u8)> = vec![
             (if self.window_full { ic::ARROWS_IN } else { ic::ARROWS_OUT }, "Full screen: the window as it is, split, without its title bar", 0),
             (ic::SPLIT_SIDE, "Split: a new pane beside this one (Alt+Shift+=)", 1),
@@ -860,7 +903,6 @@ impl Workspace {
                 0 => {
                     self.window_full = !self.window_full;
                     self.zoom = None;
-                    ctx.send_viewport_cmd(ViewportCommand::Fullscreen(self.window_full));
                 }
                 1 | 2 => self.picker = Some(Place::Split { below: what == 2 }),
                 _ => self.move_active(what == 3),
@@ -1316,6 +1358,65 @@ mod tests {
         h.w.picker = None;
         h.frame(vec![key(egui::Key::W, cs)]);
         assert_eq!(h.w.order(1), vec![order[1]], "Ctrl+Shift+W closes the pane");
+        h.w.close_all();
+    }
+
+    /// Closing panes and tabs keeps the rest as it was: the current tab, full screen off once
+    /// the pane that filled the screen is gone, and Alt+arrows left to a lone shell.
+    #[test]
+    fn closing_keeps_the_rest_in_order() {
+        let mut h = Harness::new();
+        let shell = |name: &str| {
+            let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            profile.name = name.into();
+            Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        for n in ["a", "b", "c"] {
+            h.w.add(shell(n), Place::Tab, (false, false, false));
+        }
+        h.w.current = 1;
+        h.frame(Vec::new());
+        h.w.close_tab(0);
+        assert_eq!(h.w.name(h.w.tabs[h.w.current].active).0, "b", "the current tab stays");
+        // A pane in full screen, then closed: the window leaves full screen.
+        h.w.add(shell("d"), Place::Split { below: false }, (false, false, false));
+        let d = h.w.tabs[h.w.current].active;
+        let ctx = h.ctx.clone();
+        h.w.set_zoom(&ctx, Some(d));
+        h.frame(Vec::new());
+        assert!(h.w.sent_full);
+        h.w.close_pane(d);
+        h.frame(Vec::new());
+        assert!(!h.w.sent_full, "full screen ends with its pane");
+        // Alt+Left in a tab of one pane is the shell's.
+        h.frame(vec![Event::Key { key: egui::Key::ArrowLeft, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT }]);
+        let kept = h.ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Key { key: egui::Key::ArrowLeft, .. })));
+        assert!(kept, "Alt+Left reaches the shell");
+        h.w.close_all();
+    }
+
+    /// A shell turned to the screen of a host without the agent, then back to Terminal, is the
+    /// same shell again.
+    #[test]
+    fn a_shell_that_cannot_reach_the_agent_stays_a_shell() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let target = Target::Ssh {
+            host: "nobody@127.0.0.1".into(),
+            port: Some(1),
+            args: vec!["-o".into(), "ConnectTimeout=2".into()],
+            remote: "sshremote --agent".into(),
+            capture: "auto".into(),
+            password: None,
+            unattended: true,
+        };
+        h.w.add(Launch::Shell { label: "s".into(), profile, target, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.frame(Vec::new());
+        let id = h.w.tabs[0].active;
+        h.w.set_mode(id, PaneMode::Screen);
+        assert!(matches!(h.w.panes[0].state, State::Down(_)));
+        h.w.set_mode(id, PaneMode::Terminal);
+        assert!(matches!(h.w.panes[0].state, State::Shell(_)), "back to the shell it was");
         h.w.close_all();
     }
 
