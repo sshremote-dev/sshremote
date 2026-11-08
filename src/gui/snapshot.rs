@@ -267,12 +267,13 @@ mod pictures {
     #[test]
     #[ignore]
     fn menus_chat() {
-        let lines: Vec<(bool, String)> = vec![
-            (true, "Hi, can you look at the build server?".into()),
-            (false, "Sure, connecting now.".into()),
-            (false, "I see the disk is almost full. Shall I clear the old logs in /var/log/app? They go back two years.".into()),
-            (true, "Yes please.".into()),
-            (true, "And restart the service after.".into()),
+        let t = crate::chat::now();
+        let lines: Vec<crate::chat::Line> = vec![
+            (true, "Hi, can you look at the build server?".into(), t - 90_000),
+            (false, "Sure, connecting now.".into(), t - 300),
+            (false, "I see the disk is almost full. Shall I clear the old logs in /var/log/app? They go back two years.".into(), t - 290),
+            (true, "Yes please.".into(), t - 120),
+            (true, "And restart the service after.".into(), t - 100),
         ];
         for dark in [true, false] {
             let mut input = String::new();

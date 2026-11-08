@@ -49,9 +49,9 @@ pub(super) struct Remote {
     next_upload: u32,
     sound: Option<crate::audio::Player>,
     /// Open chat panel: messages (from the remote side?, text) and the line being typed.
-    chat: Option<(Vec<(bool, String)>, String)>,
+    chat: Option<(Vec<crate::chat::Line>, String)>,
     /// Messages kept while the panel is closed, and how many are unread.
-    chat_lines: Vec<(bool, String)>,
+    chat_lines: Vec<crate::chat::Line>,
     unread: usize,
     /// How many of the messages are from earlier sessions with this host.
     chat_earlier: usize,
@@ -441,10 +441,10 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Chat(t))) => {
                     crate::chat::append_history(self.host(), true, &t);
                     match self.chat.as_mut() {
-                        Some((lines, _)) => lines.push((true, t)),
+                        Some((lines, _)) => lines.push((true, t, crate::chat::now())),
                         None => {
                             self.notify(&format!("Message: {t}"));
-                            self.chat_lines.push((true, t));
+                            self.chat_lines.push((true, t, crate::chat::now()));
                             self.unread += 1;
                         }
                     }
@@ -789,7 +789,7 @@ impl Remote {
         }
         if let Some(text) = sent {
             if let Some((lines, _)) = self.chat.as_mut() {
-                lines.push((false, text.clone()));
+                lines.push((false, text.clone(), crate::chat::now()));
             }
             crate::chat::append_history(&host, false, &text);
             self.send(ToAgent::Chat(text))?;
