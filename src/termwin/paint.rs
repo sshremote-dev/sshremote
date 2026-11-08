@@ -312,6 +312,15 @@ pub(super) fn screen(
         t.term.selection = Some(Selection::new(SelectionType::Semantic, pt, side));
     } else if resp.clicked() {
         t.term.selection = None;
+        if !ctrl
+            && !app_mouse
+            && focused
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let (pt, side) = cell_at(p);
+            let col = pt.column.0 + usize::from(side == Side::Right);
+            input::click_cursor(t, pt.line.0, col.min(cols as usize - 1), out);
+        }
         if ctrl && let Some(p) = resp.interact_pointer_pos() {
             let (pt, _) = cell_at(p);
             let line =

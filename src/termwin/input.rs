@@ -203,12 +203,133 @@ pub(super) fn keyboard_with(
         }
     }
     if !send.is_empty() && t.exited.is_none() {
+        t.seek = None;
         t.term.scroll_display(Scroll::Bottom);
         t.typed_at = ui.input(|i| i.time);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
     } else if !t.preedit.is_empty() {
         t.typed_at = ui.input(|i| i.time);
     }
+}
+
+/// Where a click asked the cursor to go (a screen line and column), reached with arrow keys a
+/// batch at a time as the program moves the cursor: in a full-screen program Up and Down, then
+/// Left and Right; on the shell's own line Left and Right only (Up and Down are its history).
+pub(super) struct Seek {
+    line: i32,
+    col: usize,
+    screen: bool,
+    /// Where the cursor was when the last keys went, and when.
+    last: Option<((i32, usize), std::time::Instant)>,
+    tries: u8,
+}
+
+/// A click at a screen cell: the cursor goes there, as far as the program lets it. A program that
+/// asked for the mouse gets the click itself; the shell's cursor moves only along the line it is
+/// typing; a click while scrolled back, or after the program ended, does nothing.
+pub(super) fn click_cursor(t: &mut Tab, line: i32, col: usize, out: &mut Vec<Cmd>) {
+    let grid = t.term.grid();
+    if t.exited.is_some() || grid.display_offset() != 0 || line < 0 || line >= grid.screen_lines() as i32 {
+        return;
+    }
+    let mode = *t.term.mode();
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        let mut send = mouse_report(mode, 0, col, line as usize, true);
+        send.extend(mouse_report(mode, 0, col, line as usize, false));
+        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+        return;
+    }
+    let screen = mode.contains(TermMode::ALT_SCREEN);
+    let cursor = grid.cursor.point.line.0;
+    // The shell's line: the cursor's row and the rows it wraps across.
+    let wraps = |l: i32| grid[Line(l)][Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE);
+    if !screen && !(line.min(cursor)..line.max(cursor)).all(wraps) {
+        return;
+    }
+    // Not past the end of the row's text: Right there would go on to the next line.
+    let end = row_end(t, line);
+    let col = if screen || line != cursor || col > grid.cursor.point.column.0 { col.min(end) } else { col };
+    t.seek = Some(Seek { line, col, screen, last: None, tries: 0 });
+    seek_step(t, out);
+}
+
+/// Cells up to the last one with text on a screen row.
+fn row_end(t: &Tab, line: i32) -> usize {
+    let row = &t.term.grid()[Line(line)];
+    (0..t.term.grid().columns()).rev().find(|&c| !matches!(row[Column(c)].c, ' ' | '\0')).map_or(0, |c| c + 1)
+}
+
+/// Characters (not cells: a wide one takes two) from one screen point to another, in reading order.
+fn chars_between(t: &Tab, from: (i32, usize), to: (i32, usize)) -> usize {
+    let grid = t.term.grid();
+    let cols = grid.columns();
+    let (a, b) = if from <= to { (from, to) } else { (to, from) };
+    let mut n = 0;
+    let (mut l, mut c) = a;
+    while (l, c) < b {
+        if !grid[Line(l)][Column(c)].flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            n += 1;
+        }
+        c += 1;
+        if c == cols {
+            c = 0;
+            l += 1;
+        }
+    }
+    n
+}
+
+/// Sends the next arrow keys of a click's cursor move once the cursor has answered the last;
+/// true while the move goes on. It stops on arrival, when the keys stop bringing the cursor
+/// closer (a tab, the end of the text), or when the program does not move it at all.
+pub(super) fn seek_step(t: &mut Tab, out: &mut Vec<Cmd>) -> bool {
+    let Some(s) = t.seek.as_ref() else { return false };
+    let p = t.term.grid().cursor.point;
+    let at = (p.line.0, p.column.0);
+    let target = (s.line, s.col);
+    let far = |q: (i32, usize)| {
+        if s.screen {
+            (s.line - q.0).unsigned_abs() as usize * 10_000 + q.1.abs_diff(s.col)
+        } else {
+            chars_between(t, q, target)
+        }
+    };
+    if let Some((before, when)) = s.last {
+        if before == at {
+            // Not moved yet: wait for the program a little, then leave it.
+            if when.elapsed() > std::time::Duration::from_millis(700) {
+                t.seek = None;
+            }
+            return t.seek.is_some();
+        }
+        if far(at) >= far(before) || s.tries >= 8 {
+            t.seek = None;
+            return false;
+        }
+    }
+    if at == target {
+        t.seek = None;
+        return false;
+    }
+    let app = t.term.mode().contains(TermMode::APP_CURSOR);
+    let key = |k: u8| if app { [0x1b, b'O', k] } else { [0x1b, b'[', k] };
+    let (k, n) = if s.screen && at.0 != s.line {
+        (if s.line < at.0 { b'A' } else { b'B' }, (s.line - at.0).unsigned_abs() as usize)
+    } else if s.screen {
+        (if s.col < at.1 { b'D' } else { b'C' }, chars_between(t, (at.0, at.1.min(s.col)), (at.0, at.1.max(s.col))))
+    } else {
+        (if target < at { b'D' } else { b'C' }, chars_between(t, at, target))
+    };
+    if n == 0 {
+        t.seek = None;
+        return false;
+    }
+    let send: Vec<u8> = (0..n.min(400)).flat_map(|_| key(k)).collect();
+    out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+    let s = t.seek.as_mut().expect("seeking");
+    s.last = Some((at, std::time::Instant::now()));
+    s.tries += 1;
+    true
 }
 
 /// A mouse report for a program that asked for the mouse: `button` 0 left, 1 middle, 2 right,

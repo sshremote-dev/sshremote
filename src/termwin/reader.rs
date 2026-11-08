@@ -352,6 +352,7 @@ pub(super) fn text_editor(
     let lines = text.lines().count().max(1);
     let gutter = cw * (lines.to_string().len() as f32 + 2.0);
     let mut caret_rect = None;
+    let mut clicked_at = None;
     let own_wheel = if program_scrolls(t) {
         egui::scroll_area::ScrollSource::SCROLL_BAR
     } else {
@@ -380,6 +381,13 @@ pub(super) fn text_editor(
                 .desired_rows(1)
                 .layouter(&mut layouter)
                 .show(ui);
+            if edit.response.clicked()
+                && !edit.response.double_clicked()
+                && let Some(range) = edit.cursor_range
+                && range.is_empty()
+            {
+                clicked_at = Some(range.primary.index.0);
+            }
             edit.response.context_menu(|ui| {
                 crate::gui::menu_look(ui);
                 if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
@@ -412,6 +420,32 @@ pub(super) fn text_editor(
         });
         ui.add_space(8.0);
     });
+    if keys
+        && let Some(index) = clicked_at
+    {
+        // The document is the scrollback's rows, one line each, then the screen's.
+        let before = text.chars().take(index).filter(|&c| c == '\n').count();
+        let line = before as i32 - t.rows.plain.len() as i32;
+        let in_line = text.chars().take(index).collect::<String>().rsplit('\n').next().map_or(0, |l| l.chars().count());
+        if line >= 0 {
+            let grid = t.term.grid();
+            let row = &grid[Line(line.min(grid.screen_lines() as i32 - 1))];
+            let mut seen = 0;
+            let mut col = grid.columns();
+            for c in 0..grid.columns() {
+                if row[Column(c)].flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                if seen == in_line {
+                    col = c;
+                    break;
+                }
+                seen += 1;
+            }
+            let col = if col == grid.columns() { in_line.min(grid.columns() - 1) } else { col };
+            super::input::click_cursor(t, line, col, out);
+        }
+    }
     let Some(caret) = caret_rect else { return };
     let caret = Rect::from_min_size(caret.min, Vec2::new(cw, ch));
     let selecting = egui::text_edit::TextEditState::load(ui.ctx(), id)

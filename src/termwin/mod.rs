@@ -312,6 +312,8 @@ struct Tab {
     built_at: f64,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
+    /// Where a click asked the cursor to go, while arrow keys take it there.
+    seek: Option<input::Seek>,
 }
 
 /// The text and Markdown views' content, with the output revision and the first live row it ends above.
@@ -676,6 +678,7 @@ impl TermWindow {
             search: None,
             preedit: String::new(),
             typed_at: 0.0,
+            seek: None,
             md_heights: Default::default(),
             built_at: 0.0,
             stitched: Vec::new(),
@@ -836,6 +839,9 @@ impl TermWindow {
                     TermEvent::ClipboardStore(_, s) => ctx.copy_text(s),
                     _ => {}
                 }
+            }
+            if input::seek_step(t, out) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(30));
             }
         }
         self.route_local(out);
@@ -1627,6 +1633,50 @@ mod tests {
         // What is drawn: the laid-out text, not only the document behind it.
         let shown = &w.tabs[0].editor_galley.as_ref().expect("laid out").3.text;
         assert!(shown.contains("streamed line 4"), "{shown:?}");
+    }
+
+    /// A click puts the cursor where it landed: arrow keys in a full-screen program (down first,
+    /// then across, as the program moves it, not past the text), Left and Right along the shell's
+    /// own line only, the click itself to a program that asked for the mouse.
+    #[test]
+    fn a_click_moves_the_cursor_there() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        let feed = |t: &mut Tab, s: &str| t.parser.advance(&mut t.term, s.as_bytes());
+        feed(t, "\x1b[?1049h\x1b[2J\x1b[Hline one\r\nsecond line here\r\nthird\x1b[H");
+        let mut out = Vec::new();
+        input::click_cursor(t, 1, 7, &mut out);
+        assert_eq!(typed(&out), "\x1b[B", "down first");
+        out.clear();
+        assert!(input::seek_step(t, &mut out), "waits for the program");
+        assert!(out.is_empty());
+        feed(t, "\x1b[2;1H");
+        assert!(input::seek_step(t, &mut out));
+        assert_eq!(typed(&out), "\x1b[C".repeat(7), "then across");
+        out.clear();
+        feed(t, "\x1b[2;8H");
+        assert!(!input::seek_step(t, &mut out), "there");
+        assert!(out.is_empty());
+        // Past the end of a row: to its end, not on into the next line.
+        input::click_cursor(t, 1, 40, &mut out);
+        assert_eq!(typed(&out), "\x1b[C".repeat(9));
+        out.clear();
+        // The shell: along its line only.
+        feed(t, "\x1b[?1049l\x1b[2J\x1b[Hold output\r\n$ echo hello");
+        t.seek = None;
+        input::click_cursor(t, 1, 3, &mut out);
+        assert_eq!(typed(&out), "\x1b[D".repeat(9), "left along the line");
+        out.clear();
+        t.seek = None;
+        input::click_cursor(t, 0, 3, &mut out);
+        assert!(out.is_empty() && t.seek.is_none(), "not into the output above");
+        // A program that asked for the mouse gets the click.
+        feed(t, "\x1b[?1000h\x1b[?1006h");
+        input::click_cursor(t, 1, 7, &mut out);
+        assert_eq!(typed(&out), "\x1b[<0;8;2M\x1b[<0;8;2m");
+        w.close_all();
     }
 
     fn typed(cmds: &[Cmd]) -> String {
