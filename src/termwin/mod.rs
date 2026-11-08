@@ -406,6 +406,9 @@ pub enum Cmd {
 }
 
 pub struct TermWindow {
+    /// One shell shown as a pane of another window: no tab strip, and tabs and splits are that
+    /// window's (its shortcuts here do nothing).
+    pub bare: bool,
     /// The view the first tab starts in (`sshremote terminal --view`), once it is there.
     pub start_view: Option<String>,
     /// Whether keys typed in this window go to the shell; a window that shows the terminal beside
@@ -462,6 +465,7 @@ impl TermWindow {
     pub fn single(profile: Profile) -> Self {
         let mut w = Self::standalone(profile, Vec::new());
         w.standalone = false;
+        w.bare = true;
         w
     }
 
@@ -474,6 +478,7 @@ impl TermWindow {
         let chosen = setting("term_colors").and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < SCHEMES.len());
         SCHEME.store(chosen.unwrap_or(AUTO), std::sync::atomic::Ordering::Relaxed);
         TermWindow {
+            bare: false,
             start_view: None,
             keys_on: true,
             tabs: Vec::new(),
@@ -1015,124 +1020,152 @@ impl TermWindow {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let small = |ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool| {
-                ui.add(crate::gui::tool_button(glyph, on)).on_hover_text(tip).clicked()
-            };
-            if let Some(cmd) = &self.system
-                && small(ui, ic::ARROW_SQUARE_OUT, "Open this host in the system terminal (ssh)", false)
-            {
-                let _ = spawn_system(cmd);
-            }
-            let font = &mut self.font_size;
-            let mut copy_on_select = self.copy_on_select;
-            let mut changed = false;
-            let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(weak))
-                .frame_when_inactive(false)
-                .min_size(Vec2::splat(28.0));
-            egui::containers::menu::MenuButton::from_button(gear)
-                .config(
-                    egui::containers::menu::MenuConfig::new()
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
-                )
-                .ui(ui, |ui| crate::gui::menu(ui, |ui| {
-                    ui.set_min_width(240.0);
-                    ui.label(RichText::new("Appearance").strong());
-                    changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
-                    let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
-                    let names = std::iter::once((AUTO, "Automatic (follows the app theme)"))
-                        .chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
-                    for (k, name) in names {
-                        if ui.selectable_label(k == current, name).clicked() {
-                            SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+            self.system_button(ui);
+            self.settings_menu(ui);
+            ui.add_space(6.0);
+            self.view_switch(ui, fold_views, true);
+        });
+    }
+
+    /// The controls of the active shell, left to right, for a title bar that holds this terminal
+    /// as a pane: how it is shown, its settings, the system terminal.
+    pub fn controls(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        self.view_switch(ui, false, false);
+        self.settings_menu(ui);
+        self.system_button(ui);
+    }
+
+    fn system_button(&mut self, ui: &mut egui::Ui) {
+        if let Some(cmd) = &self.system
+            && ui.add(crate::gui::tool_button(ic::ARROW_SQUARE_OUT, false)).on_hover_text("Open this host in the system terminal (ssh)").clicked()
+        {
+            let _ = spawn_system(cmd);
+        }
+    }
+
+    /// Text size, colours, copy on select, the cursor, and the shortcuts.
+    fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        let weak = ui.visuals().text_color().gamma_multiply(0.75);
+        let bare = self.bare;
+        let font = &mut self.font_size;
+        let mut copy_on_select = self.copy_on_select;
+        let mut changed = false;
+        let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(weak))
+            .frame_when_inactive(false)
+            .min_size(Vec2::splat(28.0));
+        egui::containers::menu::MenuButton::from_button(gear)
+            .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+            .ui(ui, |ui| crate::gui::menu(ui, |ui| {
+                ui.set_min_width(240.0);
+                ui.label(RichText::new("Appearance").strong());
+                changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
+                let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
+                let names = std::iter::once((AUTO, "Automatic (follows the app theme)"))
+                    .chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
+                for (k, name) in names {
+                    if ui.selectable_label(k == current, name).clicked() {
+                        SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
+                ui.horizontal(|ui| {
+                    ui.label("Cursor");
+                    let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+                    for (k, name) in CURSORS.iter().enumerate() {
+                        if ui.selectable_label(k == current, *name).clicked() {
+                            CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
                             changed = true;
                         }
                     }
-                    ui.separator();
-                    changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
-                    ui.horizontal(|ui| {
-                        ui.label("Cursor");
-                        let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
-                        for (k, name) in CURSORS.iter().enumerate() {
-                            if ui.selectable_label(k == current, *name).clicked() {
-                                CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
-                                changed = true;
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.label(RichText::new("Shortcuts").strong());
-                    for (k, v) in [
+                });
+                ui.separator();
+                ui.label(RichText::new("Shortcuts").strong());
+                // A pane of the workspace has one shell: tabs and splits are the workspace's.
+                let tabs: &[(&str, &str)] = if bare {
+                    &[]
+                } else {
+                    &[
                         ("Ctrl+Shift+T", "New tab"),
                         ("Ctrl+Shift+W", "Close pane or tab"),
                         ("Ctrl+Tab", "Next tab"),
                         ("Alt+Shift+= / -", "Split right / down"),
                         ("Alt+Shift+D", "Split along the longer side"),
                         ("Alt+arrows", "Move between panes"),
-                        ("Ctrl+Shift+F", "Find"),
-                        ("Ctrl+Shift+C / V", "Copy / paste"),
-                        ("Ctrl+= / Ctrl+-", "Text size"),
-                        ("Ctrl+click", "Open a link"),
                         ("Double-click a tab", "Rename it"),
-                    ] {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(k).monospace().size(12.0));
-                            ui.label(RichText::new(v).weak().size(12.0));
-                        });
-                    }
-                }));
-            self.copy_on_select = copy_on_select;
-            if changed {
-                self.save_settings();
-            }
-            ui.add_space(6.0);
-            // How the active tab is shown: three icon buttons, the current one filled.
-            if let Some(t) = self.tabs.get_mut(self.active) {
-                let views = [
-                    (View::Markdown, ic::ARTICLE, "Markdown", "Read the output as Markdown, with copy buttons on code (agent replies)"),
-                    (View::Text, ic::TEXT_T, "Text", "Plain text of the whole buffer, to select and copy"),
-                    (View::Terminal, ic::TERMINAL, "Terminal", "Terminal"),
+                    ]
+                };
+                let common = [
+                    ("Ctrl+Shift+F", "Find"),
+                    ("Ctrl+Shift+C / V", "Copy / paste"),
+                    ("Ctrl+= / Ctrl+-", "Text size"),
+                    ("Ctrl+click", "Open a link"),
                 ];
-                let mut pick = None;
-                if fold_views {
-                    let glyph = views.iter().find(|v| v.0 == t.view).map_or(ic::TERMINAL, |v| v.1);
-                    egui::containers::menu::MenuButton::from_button(crate::gui::tool_button(glyph, false))
-                        .ui(ui, |ui| {
-                            crate::gui::menu_look(ui);
-                            ui.set_min_width(160.0);
-                            for &(v, glyph, name, tip) in views.iter().rev() {
-                                let b = egui::Button::selectable(t.view == v, format!("{glyph}  {name}"));
-                                if ui.add(b).on_hover_text(tip).clicked() {
-                                    pick = Some(v);
-                                    ui.close();
-                                }
-                            }
-                        })
-                        .0
-                        .on_hover_text("How this tab is shown");
-                } else {
-                    egui::Frame::new().inner_margin(2).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for &(v, glyph, _, tip) in &views {
-                            if small(ui, glyph, tip, t.view == v) {
-                                pick = Some(v);
-                            }
-                        }
+                for (k, v) in tabs.iter().chain(common.iter()) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(*k).monospace().size(12.0));
+                        ui.label(RichText::new(*v).weak().size(12.0));
                     });
                 }
-                if let Some(v) = pick {
-                    t.view = v;
-                    if v == View::Terminal {
-                        t.forget_reading();
+            }));
+        self.copy_on_select = copy_on_select;
+        if changed {
+            self.save_settings();
+        }
+    }
+
+    /// How the active shell is shown: terminal, text or Markdown, three icon buttons (the current
+    /// one marked), or one button with a menu when there is no room. `rtl` when laid out from the
+    /// right.
+    fn view_switch(&mut self, ui: &mut egui::Ui, fold: bool, rtl: bool) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        let mut views = [
+            (View::Terminal, ic::TERMINAL, "Terminal", "Terminal"),
+            (View::Text, ic::TEXT_T, "Text", "Plain text of the whole buffer, to select and copy"),
+            (View::Markdown, ic::ARTICLE, "Markdown", "Read the output as Markdown, with copy buttons on code (agent replies)"),
+        ];
+        if rtl {
+            views.reverse();
+        }
+        let mut pick = None;
+        if fold {
+            let glyph = views.iter().find(|v| v.0 == t.view).map_or(ic::TERMINAL, |v| v.1);
+            egui::containers::menu::MenuButton::from_button(crate::gui::tool_button(glyph, false))
+                .ui(ui, |ui| {
+                    crate::gui::menu_look(ui);
+                    ui.set_min_width(160.0);
+                    for &(v, glyph, name, tip) in &views {
+                        let b = egui::Button::selectable(t.view == v, format!("{glyph}  {name}"));
+                        if ui.add(b).on_hover_text(tip).clicked() {
+                            pick = Some(v);
+                            ui.close();
+                        }
                     }
+                })
+                .0
+                .on_hover_text("How this shell is shown");
+        } else {
+            for &(v, glyph, _, tip) in &views {
+                if ui.add(crate::gui::tool_button(glyph, t.view == v)).on_hover_text(tip).clicked() {
+                    pick = Some(v);
                 }
             }
-        });
+        }
+        if let Some(v) = pick {
+            t.view = v;
+            if v == View::Terminal {
+                t.forget_reading();
+            }
+        }
     }
 
     fn body(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
         // A tab strip as in Windows Terminal or a browser: the active tab joins the terminal below.
         // A window of its own has it in its title bar, beside the window's buttons.
-        if self.framed {
+        if self.bare {
+        } else if self.framed {
             let bar = crate::gui::chrome::title_bar(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| self.strip(ui, out));
@@ -1152,21 +1185,23 @@ impl TermWindow {
         }
         // Keyboard shortcuts of the window itself, as in other terminals.
         let shortcuts = self.renaming.is_none();
+        // Tabs and splits of a pane are the workspace's; text size stays the pane's.
+        let tabs_keys = !self.bare;
         let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
             if !shortcuts {
                 return (false, false, false, false, false);
             }
             let cs = i.modifiers.ctrl && i.modifiers.shift;
             (
-                cs && i.key_pressed(Key::T),
-                cs && i.key_pressed(Key::W),
-                i.modifiers.ctrl && i.key_pressed(Key::Tab),
+                tabs_keys && cs && i.key_pressed(Key::T),
+                tabs_keys && cs && i.key_pressed(Key::W),
+                tabs_keys && i.modifiers.ctrl && i.key_pressed(Key::Tab),
                 i.modifiers.ctrl && !i.modifiers.alt && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
                 i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::Minus),
             )
         });
         let (split, step) = ui.ctx().input(|i| {
-            if !shortcuts {
+            if !shortcuts || !tabs_keys {
                 return (None, 0);
             }
             let alt_shift = i.modifiers.alt && i.modifiers.shift && !i.modifiers.ctrl;

@@ -701,12 +701,17 @@ impl Workspace {
     /// The active pane's own controls (the screen's quality, keys, chat...).
     fn controls(&mut self, ui: &mut egui::Ui, id: u64, action: &mut Option<(u64, remote::Deferred)>) {
         let Some(i) = self.index(id) else { return };
-        if let State::Live(r) = &mut self.panes[i].state {
-            let mut a = None;
-            r.toolbar_items(ui, &mut a);
-            if let Some(f) = a {
-                *action = Some((id, f));
+        match &mut self.panes[i].state {
+            State::Live(r) => {
+                let mut a = None;
+                r.toolbar_items(ui, &mut a);
+                if let Some(f) = a {
+                    *action = Some((id, f));
+                }
             }
+            // A plain shell: how it is shown and its settings.
+            State::Shell(t) => t.controls(ui),
+            State::Down(_) => {}
         }
     }
 

@@ -1510,6 +1510,13 @@ impl Remote {
         // menu and Disconnect becomes an icon.
         let compact = !self.in_pane && ui.available_width() < 640.0;
         let screen = self.screen_controls();
+        // A pane showing its shell: the shell's own controls first.
+        if self.in_pane && self.mode() == super::workspace::PaneMode::Terminal
+            && let Some(t) = self.terms.as_mut()
+        {
+            t.controls(ui);
+            ui.separator();
+        }
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Connection quality at a glance; details on hover.
@@ -1907,7 +1914,8 @@ impl Remote {
     }
 
     /// Shells opened before the connection, or kept from a lost one, shown in its terminal.
-    pub(super) fn adopt_terms(&mut self, t: crate::termwin::TermWindow) {
+    pub(super) fn adopt_terms(&mut self, mut t: crate::termwin::TermWindow) {
+        t.bare = self.in_pane;
         self.terms = Some(t);
     }
 
@@ -1948,7 +1956,8 @@ impl Remote {
         self.files = None;
         match mode {
             PaneMode::Terminal => {
-                self.terms.get_or_insert_with(|| crate::termwin::TermWindow::new(self.ssh_cmd.clone()));
+                let t = self.terms.get_or_insert_with(|| crate::termwin::TermWindow::new(self.ssh_cmd.clone()));
+                t.bare = self.in_pane;
                 self.term_inline = true;
             }
             PaneMode::Files => {
