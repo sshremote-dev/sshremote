@@ -293,18 +293,15 @@ mod pictures {
         for dark in [true, false] {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
             let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), 100.0, "", None);
-            let mut s = Shot::new("home", Vec2::new(1280.0, 800.0), dark, |ui| app.connect_screen(ui));
-            s.save("plain");
+            let mut s = Shot::new("open", Vec2::new(900.0, 600.0), dark, |ui| app.connect_screen(ui));
+            s.save("ssh");
             s.click(ic::DOTS, 0, PointerButton::Primary);
-            s.save("more");
-            s.escape();
-            s.click(ic::WRENCH, 0, PointerButton::Primary);
-            s.save("tools");
-            s.escape();
-            // A connection's own menu, at the bottom of the list.
-            let n = s.snap.find(ic::DOTS).len();
-            s.click(ic::DOTS, n.saturating_sub(1).min(1), PointerButton::Primary);
             s.save("row_menu");
+            s.escape();
+            for (place, what) in [("New connection", "new"), ("This computer", "local"), ("Tools", "tools")] {
+                s.click(place, 0, PointerButton::Primary);
+                s.save(what);
+            }
         }
     }
 }

@@ -456,6 +456,13 @@ impl TermWindow {
         w
     }
 
+    /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
+    pub fn single(profile: Profile) -> Self {
+        let mut w = Self::standalone(profile, Vec::new());
+        w.standalone = false;
+        w
+    }
+
     fn with_profiles(profiles: Vec<Profile>, viewport: &'static str, title: &str) -> Self {
         let c =
             crate::hosts::setting("term_cursor").and_then(|v| v.parse().ok()).unwrap_or(0usize).min(CURSORS.len() - 1);
@@ -483,11 +490,6 @@ impl TermWindow {
             standalone: false,
             framed: false,
         }
-    }
-
-    /// Opens a tab for `profile` in this window (shown from the next frame).
-    pub fn open(&mut self, profile: Profile) {
-        self.pending.push((profile, None));
     }
 
     fn open_tab(&mut self) {

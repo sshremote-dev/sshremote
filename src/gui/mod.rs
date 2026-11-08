@@ -14,11 +14,13 @@ use crate::clip::Clip;
 use crate::color::Mode;
 use crate::proto::{MOD_SUPER, PRESETS, SUPER_L, ToAgent, ToClient};
 use crate::session::{Action, Control, Ev, Framebuffer, Options, REMOTE, Session};
+use workspace::{Launch, PaneMode, Place};
 use crate::transport::Target;
 
 pub(crate) mod chrome;
 mod home;
 mod remote;
+pub(crate) mod workspace;
 pub(crate) mod theme;
 #[cfg(test)]
 mod snapshot;
@@ -32,6 +34,13 @@ pub(crate) const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
 
 /// Phosphor icon codepoints (assets/fonts, MIT licensed).
 pub(crate) mod ic {
+    pub const ARROWS_OUT: &str = "\u{E0A2}";
+    pub const ARROWS_IN: &str = "\u{E09A}";
+    pub const SPLIT_SIDE: &str = "\u{E870}";
+    pub const SPLIT_BELOW: &str = "\u{E874}";
+    pub const CARET_LEFT: &str = "\u{E138}";
+    pub const CARET_RIGHT: &str = "\u{E13A}";
+    pub const DESKTOP: &str = "\u{E560}";
     pub const ARROW_CLOCKWISE: &str = "\u{E036}";
     pub const ARROW_LEFT: &str = "\u{E058}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
@@ -180,10 +189,23 @@ struct Form {
 
 type Pending = mpsc::Receiver<Result<(Session, mpsc::Receiver<Ev>), String>>;
 
+/// Opens `target` on a thread of its own; the answer wakes the window.
+fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let r = Session::open(&target, true).map(|(s, _tx, rx)| (s, rx));
+        let _ = tx.send(r);
+        ctx.request_repaint();
+    });
+    rx
+}
+
 enum Screen {
+    /// The open window: what to connect to.
     Connect,
-    Connecting { started: Instant, rx: Pending, label: String },
-    Remote(Box<Remote>),
+    /// The workspace: tabs of panes, each a terminal, a screen or files.
+    Work(Box<workspace::Workspace>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -213,10 +235,6 @@ pub struct App {
     /// Host aliases from ~/.ssh/config; ssh applies their user, port and key itself.
     ssh_hosts: Vec<String>,
     favorites: Vec<String>,
-    /// Host and port of the connection in progress.
-    pending_host: Option<(String, String)>,
-    /// The ssh command for the connection in progress, to open the host in a system terminal.
-    pending_ssh: Option<Vec<String>>,
     seen: std::collections::HashMap<String, u64>,
     search: String,
     error: Option<String>,
@@ -229,7 +247,6 @@ pub struct App {
     torn_terms: Vec<crate::termwin::TermWindow>,
     keys: Option<crate::tools::KeyTool>,
     config: Option<crate::tools::ConfigTool>,
-    show_options: bool,
     /// What the next connection opens with: its screen, its terminal or its files.
     start_with: Start,
     /// Why the password typed for this connection was not saved, shown once it starts.
@@ -238,6 +255,10 @@ pub struct App {
     start_fullscreen: bool,
     /// The terminal panel and the chat beside the screen from the start (--open panel, chat).
     start_panels: (bool, bool),
+    /// The open view's place shown.
+    section: home::Section,
+    /// What to open next frame: the open view's choices, tools, the command line.
+    queued: Vec<(workspace::Launch, workspace::Place, (bool, bool, bool))>,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
@@ -266,7 +287,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let local = opt.local;
     let budget = opt.budget;
     let open = opt.open.clone();
-    let native = native_options("SSH Remote", [1280.0, 800.0]);
+    let size = if auto_start { [1280.0, 800.0] } else { OPEN_SIZE };
+    let native = native_options("SSH Remote", size);
     eframe::run_native(
         "sshremote",
         native,
@@ -279,7 +301,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
             let mut app = App::new(form, budget, &open, grabbed);
             std::thread::spawn(crate::backup::auto);
             if auto_start {
-                app.connect(&cc.egui_ctx, local);
+                app.connect(local);
             }
             Ok(Box::new(app))
         }),
@@ -493,8 +515,6 @@ impl App {
             recent: crate::hosts::load_recent(),
             ssh_hosts: crate::hosts::ssh_config_hosts(),
             favorites: crate::hosts::favorites(),
-            pending_host: None,
-            pending_ssh: None,
             seen: crate::hosts::last_seen(),
             search: String::new(),
             error: None,
@@ -504,7 +524,6 @@ impl App {
             torn_terms: Vec::new(),
             keys: None,
             config: None,
-            show_options: false,
             save_error: None,
             start_with: if open.split_whitespace().any(|w| w == "terminal") {
                 Start::Terminal
@@ -521,9 +540,14 @@ impl App {
             vault: None,
             backup: None,
             service: None,
+            section: home::Section::Ssh,
+            queued: Vec::new(),
         }
     }
 }
+
+/// The open window's size, about a file dialog's.
+const OPEN_SIZE: [f32; 2] = [900.0, 600.0];
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -532,106 +556,73 @@ impl eframe::App for App {
         if !fullscreen {
             chrome::behaviour(&ctx);
         }
-        let mut next = None;
-        let opt = self.options();
-        match &mut self.screen {
-            Screen::Connect => {}
-            Screen::Connecting { started, rx, label } => match rx.try_recv() {
-                Ok(Ok((sess, rx))) => {
-                    if let Some((h, p)) = self.pending_host.take() {
-                        self.recent.retain(|(r, _)| *r != h);
-                        self.recent.insert(0, (h.clone(), p));
-                        self.recent.truncate(crate::hosts::RECENT_MAX);
-                        crate::hosts::save_recent(&self.recent);
-                        crate::hosts::mark_seen(&h);
-                        self.seen = crate::hosts::last_seen();
-                    }
-                    let ctl = Control::new(&opt, Mode::True);
-                    let waker = ctx.clone();
-                    sess.on_message(move || waker.request_repaint());
-                    let desk = sess.desk;
-                    ctx.send_viewport_cmd(ViewportCommand::Title(format!("SSH Remote - {label}")));
-                    let ssh_cmd = self.pending_ssh.take();
-                    let start = std::mem::replace(&mut self.start_with, Start::Screen);
-                    let label = format!("{label}  {}x{}  {}", desk.0, desk.1, sess.backend);
-                    let mut remote = Remote::new(sess, rx, ctl, label, ssh_cmd, start == Start::Terminal);
-                    if std::mem::take(&mut self.start_fullscreen) {
-                        remote.set_fullscreen(&ctx, true);
-                    }
-                    let (panel, chat) = std::mem::take(&mut self.start_panels);
-                    remote.open_panels(panel, chat);
-                    if start == Start::Files
-                        && let Err(e) = remote.open_files_only()
-                    {
-                        self.error = Some(e);
-                    }
-                    next = Some(Screen::Remote(Box::new(remote)));
-                }
-                Ok(Err(e)) => {
-                    self.error = Some(e);
-                    next = Some(Screen::Connect);
-                    self.start_with = Start::Screen;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("connection failed".into());
-                    next = Some(Screen::Connect);
-                    self.start_with = Start::Screen;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    let secs = started.elapsed().as_secs();
-                    let label = label.clone();
-                    if chrome::title_bar(ui, |ui| {
-                        ui.label(RichText::new("SSH Remote").size(14.0).strong());
-                    })
-                    .close
-                    {
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
-                    }
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(ui.available_height() * 0.35);
-                            ui.add(egui::Spinner::new().size(36.0));
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(format!("Connecting to {label}")).size(20.0).strong());
-                            let step = match secs {
-                                0 => "Opening the connection",
-                                1..=2 => "Signing in",
-                                _ => "Starting the remote agent and the screen capture",
-                            };
-                            ui.label(RichText::new(format!("{step}...  {secs} s")).weak());
-                            if secs >= 10 {
-                                ui.label(
-                                    RichText::new(
-                                        "Still waiting. A host that needs a password gets it on the connect screen.",
-                                    )
-                                    .small()
-                                    .weak(),
-                                );
-                            }
-                            ui.add_space(12.0);
-                            if ui.button("Cancel").clicked() {
-                                next = Some(Screen::Connect);
-                                self.start_with = Start::Screen;
-                            }
-                        });
-                    });
-                    ctx.request_repaint_after(Duration::from_millis(250));
-                }
-            },
-            Screen::Remote(r) => {
-                let grabbed: Vec<(u32, bool)> =
-                    self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
-                if let Err(e) = r.show(ui, grabbed) {
-                    self.error = (e != "disconnected").then_some(e);
-                    next = Some(Screen::Connect);
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        // What was chosen opens in the workspace, which takes a working window's size.
+        for (launch, place, start) in std::mem::take(&mut self.queued) {
+            if !matches!(self.screen, Screen::Work(_)) {
+                self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
+                if !maximized && !fullscreen {
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
                 }
             }
+            if let Screen::Work(w) = &mut self.screen {
+                w.add(launch, place, start);
+            }
         }
-        if let Some(s) = next {
-            self.screen = s;
+        let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
+        let mut back = false;
+        let mut picker = None;
+        let mut reached = Vec::new();
+        if let Screen::Work(w) = &mut self.screen {
+            back = w.ui(ui, grabbed).empty;
+            reached = std::mem::take(&mut w.reached);
+            picker = w.picker;
+        }
+        // Hosts reached are the recent ones; a host typed for a terminal is recorded when opened.
+        for h in reached {
+            if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {
+                crate::hosts::mark_seen(&h);
+                self.seen = crate::hosts::last_seen();
+            }
+        }
+        // The open dialog over the workspace: its choice goes where it was asked for.
+        if let Some(place) = picker {
+            let modal = egui::Modal::new(egui::Id::unique("open-dialog")).show(&ctx, |ui| {
+                ui.set_width(820.0_f32.min(ctx.content_rect().width() - 40.0));
+                ui.set_height(520.0_f32.min(ctx.content_rect().height() - 60.0));
+                let close = ui
+                    .horizontal(|ui| {
+                        ui.label(RichText::new("Open").size(16.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked()
+                        })
+                        .inner
+                    })
+                    .inner;
+                ui.separator();
+                (close, self.open_view(ui))
+            });
+            let shut = modal.should_close() || modal.inner.0 || ctx.input(|i| i.key_pressed(Key::Escape));
+            let chosen = modal.inner.1;
+            if let Some(c) = chosen {
+                self.choose(c, place);
+            }
+            if (chosen_made(&self.queued) || shut)
+                && let Screen::Work(w) = &mut self.screen
+            {
+                w.picker = None;
+            }
+        }
+        if back {
+            self.screen = Screen::Connect;
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+            ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
+            if !maximized {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
+            }
         }
         #[cfg(windows)]
-        if !matches!(self.screen, Screen::Remote(_)) {
+        if !matches!(self.screen, Screen::Work(_)) {
             crate::keygrab::set_active(false);
         }
         if matches!(self.screen, Screen::Connect) {
@@ -639,6 +630,11 @@ impl eframe::App for App {
         }
         self.side_windows(&ctx);
     }
+}
+
+/// Whether the open dialog's choice was taken (something is queued to open).
+fn chosen_made(queued: &[(workspace::Launch, workspace::Place, (bool, bool, bool))]) -> bool {
+    !queued.is_empty()
 }
 
 pub(crate) fn human(n: u64) -> String {

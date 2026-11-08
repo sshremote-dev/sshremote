@@ -9,6 +9,12 @@ type WindowList = Result<Vec<crate::capture::WindowInfo>, String>;
 pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
 
 pub(super) struct Remote {
+    /// Shown as a pane of the workspace: no title bar of its own, input only while active, and
+    /// full screen asked of the workspace (see `zoom_request`).
+    pub(super) in_pane: bool,
+    pub(super) active: bool,
+    pub(super) zoom_request: Option<bool>,
+    pub(super) zoomed: bool,
     sess: Session,
     rx: mpsc::Receiver<Ev>,
     ctl: Control,
@@ -119,6 +125,10 @@ impl Remote {
         // The conversation with this host so far, from earlier sessions.
         let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
         Remote {
+            in_pane: false,
+            active: true,
+            zoom_request: None,
+            zoomed: false,
             terms: terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone())),
             term_inline: terminal,
             term_detached: false,
@@ -184,7 +194,9 @@ impl Remote {
         {
             // As in RustDesk: system keys go to the remote host while the pointer is over its picture.
             let over = ctx.pointer_hover_pos().is_some_and(|p| self.last_shown.is_some_and(|s| s.contains(p)));
-            crate::keygrab::set_active(self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && over);
+            if self.active {
+                crate::keygrab::set_active(self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && over);
+            }
         }
         let result = grabbed
             .into_iter()
@@ -200,23 +212,13 @@ impl Remote {
         result
     }
 
-    /// For a connection made for its files: the file window open and the screen paused, so
-    /// almost no picture is sent until it is resumed.
-    /// For a connection made for its files: the window shows the file manager alone, and the
-    /// remote screen is paused, so no picture is sent unless "Show the screen" is chosen.
-    pub(super) fn open_files_only(&mut self) -> Result<(), String> {
-        self.files = Some(crate::filewin::FileWindow::new());
-        self.send(ToAgent::ListDir { path: String::new() })?;
-        self.files_only = true;
-        self.paused = true;
-        self.send(ToAgent::Pause(true))
-    }
-
     /// The file manager filling the window, under a bar with the host, the screen and disconnect.
     fn files_view(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
         let host = self.host().to_string();
         let mut show_screen = false;
         let mut disconnect = false;
+        // A pane's bar is the workspace's title bar.
+        if !self.in_pane {
         let bar = super::chrome::title_bar(ui, |ui| {
             let dot = match self.ctl.rtt {
                 r if r < 80.0 => good(),
@@ -242,6 +244,7 @@ impl Remote {
         });
         if bar.close {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        }
         }
         let transfers = self.transfers();
         let cmds = egui::CentralPanel::default()
@@ -301,7 +304,7 @@ impl Remote {
         // it floats over the top edge as a dock.
         let docked = !self.fullscreen;
         let mut bar_action: Option<Deferred> = None;
-        if docked {
+        if docked && !self.in_pane {
             let bar = super::chrome::title_bar(ui, |ui| self.toolbar_items(ui, &mut bar_action));
             if bar.close {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -395,14 +398,16 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = toolbar_rect.into_iter().chain(chat_rect).collect();
-        if self.view_only || inline {
+        if self.view_only || inline || !self.active {
             self.release_all()?;
         } else {
             self.input(&ctx, shown, &ui_rects)?;
         }
-        let toggle = ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter));
+        let toggle =
+            self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter));
         if toggle {
-            self.set_fullscreen(&ctx, !self.fullscreen);
+            let now = if self.in_pane { self.zoomed } else { self.fullscreen };
+            self.set_fullscreen(&ctx, !now);
         }
         // Network messages wake the window themselves; this only keeps statistics and pings going.
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -986,7 +991,7 @@ impl Remote {
     /// The terminal in this window, with a bar to go back to the screen or give it its own window.
     pub(super) fn inline_terminal(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<(), String> {
         let Some(mut t) = self.terms.take() else { return Ok(()) };
-        t.keys_on = true;
+        t.keys_on = self.active;
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).id_salt("inline-terminal"));
         let cmds = t.embedded(&mut child);
         self.terms = Some(t);
@@ -1415,6 +1420,10 @@ impl Remote {
     }
 
     pub(super) fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.in_pane {
+            self.zoom_request = Some(on);
+            return;
+        }
         self.fullscreen = on;
         self.pinned = !on;
         ctx.send_viewport_cmd(ViewportCommand::Fullscreen(on));
@@ -1499,7 +1508,8 @@ impl Remote {
     pub(super) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
         // A narrow window keeps every button within reach: the least used go into the options
         // menu and Disconnect becomes an icon.
-        let compact = ui.available_width() < 640.0;
+        let compact = !self.in_pane && ui.available_width() < 640.0;
+        let screen = self.screen_controls();
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Connection quality at a glance; details on hover.
@@ -1516,8 +1526,10 @@ impl Remote {
             self.label,
             self.ctl.describe()
         );
-        // One chip: the state's colour, the host and the round trip, the details on hover.
+        // One chip: the state's colour, the host and the round trip, the details on hover. A pane's
+        // host and round trip are on its tab.
         let host = self.host().to_string();
+        if !self.in_pane {
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
         egui::Frame::new()
             .corner_radius(CornerRadius::same(crate::gui::theme::R_LG))
@@ -1533,6 +1545,8 @@ impl Remote {
             })
             .response
             .on_hover_text(&details);
+        }
+        if screen {
         if self.sharing.0 != 0 {
             let name: String = self.sharing.1.chars().take(18).collect();
             let chip = egui::Button::new(RichText::new(format!("{}  {name}  {}", ic::APP_WINDOW, ic::X)).small())
@@ -1621,12 +1635,12 @@ impl Remote {
                 r.send(ToAgent::ListWindows)
             }));
         }
-        let fs_tip =
-            if self.fullscreen { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
-        let fs_glyph = if self.fullscreen { ic::CORNERS_IN } else { ic::CORNERS_OUT };
-        if icon(ui, fs_glyph, fs_tip, self.fullscreen).clicked() {
-            *action = Some(Box::new(|r, c| {
-                r.set_fullscreen(c, !r.fullscreen);
+        let fs = if self.in_pane { self.zoomed } else { self.fullscreen };
+        let fs_tip = if fs { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
+        let fs_glyph = if fs { ic::CORNERS_IN } else { ic::CORNERS_OUT };
+        if icon(ui, fs_glyph, fs_tip, fs).clicked() {
+            *action = Some(Box::new(move |r, c| {
+                r.set_fullscreen(c, !fs);
                 Ok(())
             }));
         }
@@ -1663,6 +1677,9 @@ impl Remote {
         });
         keys.on_hover_text("Send special keys");
         ui.separator();
+        }
+        // In a pane, the mode menu before these picks files or a terminal.
+        if !self.in_pane {
 
         let files_tip = "File transfer: this computer and the SSH host side by side";
         if icon(ui, ic::FOLDER, files_tip, self.files.is_some()).clicked() {
@@ -1734,6 +1751,7 @@ impl Remote {
                 ui.close();
             }
         });
+        }
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
         let chat_tip = "Chat with the person at the SSH host's screen";
         let shot_tip = "Screenshot: save the SSH host's screen as a PNG in Pictures";
@@ -1746,11 +1764,13 @@ impl Remote {
         let (mut chat, mut shot, mut pause, mut frame) = (false, false, false, false);
         if !compact {
             chat = icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
-            shot = icon(ui, ic::CAMERA, shot_tip, false).clicked();
+            shot = screen && icon(ui, ic::CAMERA, shot_tip, false).clicked();
             // Paused: the play button shows as on, so the frozen state is plain to see.
-            let b = tool_button(pause_glyph, self.paused);
-            pause = ui.add(b).on_hover_text(pause_tip).clicked();
-            frame = self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked();
+            if screen {
+                let b = tool_button(pause_glyph, self.paused);
+                pause = ui.add(b).on_hover_text(pause_tip).clicked();
+                frame = self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked();
+            }
         }
 
         let mut sound = self.sound.is_some();
@@ -1871,9 +1891,82 @@ impl Remote {
                 .frame_when_inactive(false)
                 .min_size(Vec2::new(0.0, 28.0))
         };
-        if ui.add(end).on_hover_text("Disconnect").clicked() {
+        if !self.in_pane && ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }
+    }
+
+    /// The round trip to the host in milliseconds.
+    pub(super) fn rtt(&self) -> f32 {
+        self.ctl.rtt as f32
+    }
+
+    /// Ends the connection.
+    pub(super) fn close(&mut self) {
+        self.sess.close();
+    }
+
+    /// Shells opened before the connection, or kept from a lost one, shown in its terminal.
+    pub(super) fn adopt_terms(&mut self, t: crate::termwin::TermWindow) {
+        self.terms = Some(t);
+    }
+
+    /// The shells, kept when the connection is lost.
+    pub(super) fn take_terms(&mut self) -> Option<crate::termwin::TermWindow> {
+        self.terms.take()
+    }
+
+    /// Whether the screen's own controls (quality, keys, pause...) belong in the toolbar now.
+    fn screen_controls(&self) -> bool {
+        !self.in_pane || self.mode() == super::workspace::PaneMode::Screen
+    }
+
+    /// What a pane of this connection shows.
+    pub(super) fn mode(&self) -> super::workspace::PaneMode {
+        use super::workspace::PaneMode;
+        if self.files_only {
+            PaneMode::Files
+        } else if self.term_inline && self.terms.is_some() {
+            PaneMode::Terminal
+        } else {
+            PaneMode::Screen
+        }
+    }
+
+    /// Shows the terminal, the screen or the files of this connection, the others put away: the
+    /// picture stops (no traffic) unless it is shown, the file manager closes (transfers go on),
+    /// the shells keep running.
+    pub(super) fn set_mode(&mut self, mode: super::workspace::PaneMode) -> Result<(), String> {
+        use super::workspace::PaneMode;
+        if mode == self.mode() {
+            return Ok(());
+        }
+        let was_screen = self.mode() == PaneMode::Screen;
+        self.release_all()?;
+        self.term_inline = false;
+        self.files_only = false;
+        self.files = None;
+        match mode {
+            PaneMode::Terminal => {
+                self.terms.get_or_insert_with(|| crate::termwin::TermWindow::new(self.ssh_cmd.clone()));
+                self.term_inline = true;
+            }
+            PaneMode::Files => {
+                self.files = Some(crate::filewin::FileWindow::new());
+                self.files_only = true;
+                self.send(ToAgent::ListDir { path: String::new() })?;
+            }
+            PaneMode::Screen => {}
+        }
+        let show = mode == PaneMode::Screen;
+        if show != was_screen {
+            self.paused = !show;
+            self.send(ToAgent::Pause(!show))?;
+            if show {
+                self.send(ToAgent::Refresh)?;
+            }
+        }
+        Ok(())
     }
 
     /// Presses keys in order and releases them in reverse.

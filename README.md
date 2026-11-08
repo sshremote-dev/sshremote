@@ -20,16 +20,24 @@ anywhere on `PATH`).
 
 ## The window
 
-`sshremote` opens the home screen: a host field and the connections (favorites, recent hosts,
-`~/.ssh/config`). Each connection opens a **terminal**, the **remote screen** or the **files**.
+`sshremote` opens a small open window: a new connection, this computer (local shells, its screen
+and files, a test desktop), the SSH hosts (favorites, recent, `~/.ssh/config`) and the tools.
+What is opened goes into the workspace:
 
-- Every window draws its own title bar (tabs or toolbar beside the window buttons) and keeps the
-  system's behaviour: drag and snap, double-click, system menu (icon, right click, Alt+Space),
-  resizing edges.
-- **Remote screen**: toolbar in the title bar (in full screen, a dock that hides at the top edge):
-  quality, fit, monitors, sharing one window or application, special keys, files, terminal (in place
-  of the picture), chat, screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
-  Ctrl+Alt+Enter (or the toolbar) enters and leaves full screen.
+- **Tabs and panes** as in Windows Terminal: each tab (host and round trip) holds panes split
+  beside or below; + opens the same open dialog. The active pane is outlined and the title bar
+  follows it. On the right: the pane's **mode** (terminal, screen sharing, files; switching does not
+  connect again), its controls, then full screen, split beside, split below, move left and right.
+  A narrow window folds the controls into one menu.
+- **Full screen**: a pane's own (its dock shows at the top edge; its name switches to the other
+  panes) or the whole window as split, the title bar appearing at the top edge.
+- **Lost connections** are tried again in the same mode, the shells kept; after 30 s the pane
+  offers Reconnect or Close.
+- Every window draws its own title bar and keeps the system's behaviour: drag and snap,
+  double-click, system menu (icon, right click, Alt+Space), resizing edges.
+- **Screen sharing**: quality, fit, monitors, sharing one window or application, special keys,
+  chat, screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
+  Ctrl+Alt+Enter enters and leaves full screen.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
   windows), profiles for local shells and SSH hosts, find, schemes, mouse reporting for full-screen
   programs. Two reading views:
