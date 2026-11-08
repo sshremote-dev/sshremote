@@ -866,9 +866,10 @@ impl Remote {
         let mut click_pick = false;
         let monitors = self.monitors.clone();
         let current = self.monitor;
-        let modal = egui::Modal::new(egui::Id::unique("sshremote-share-picker")).show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.set_min_height(440.0);
+        let (modal, fit) = crate::gui::modal(ctx, "sshremote-share-picker", Vec2::new(560.0, 440.0));
+        let modal = modal.show(ctx, |ui| {
+            ui.set_width(fit.x);
+            ui.set_max_height(fit.y);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Choose what to share").size(18.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -925,7 +926,7 @@ impl Remote {
                 );
                 r.clicked()
             };
-            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(330.0).show(ui, |ui| match *tab {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((fit.y - 110.0).clamp(80.0, 330.0)).show(ui, |ui| match *tab {
                 0 => {
                     let screens: Vec<(String, String)> = if monitors.is_empty() {
                         vec![(String::new(), "The only screen".into())]

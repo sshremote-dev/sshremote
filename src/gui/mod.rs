@@ -399,6 +399,18 @@ pub(crate) fn outline() -> Color32 {
 }
 
 
+/// A dialog over the window, below its title bar so that stays in sight, centred in the room
+/// left; `fit` is the content size it would like, made smaller to fit that room whole.
+pub(crate) fn modal(ctx: &egui::Context, id: &str, want: Vec2) -> (egui::Modal, Vec2) {
+    let id = egui::Id::unique(id);
+    let room = ctx.content_rect().size() - Vec2::new(0.0, chrome::HEIGHT);
+    // The modal's frame and a gap around it.
+    let edge = Vec2::new(24.0 + 24.0, 24.0 + 24.0);
+    let fit = want.min(room - edge).max(Vec2::new(200.0, 120.0));
+    let area = egui::Modal::default_area(id).anchor(Align2::CENTER_CENTER, Vec2::new(0.0, chrome::HEIGHT / 2.0));
+    (egui::Modal::new(id).area(area), fit)
+}
+
 /// A choice among a few, as a quiet button: outlined over a faint tint when it is the chosen one.
 pub(crate) fn choice(text: impl Into<String>, on: bool) -> egui::Button<'static> {
     let b = egui::Button::new(text.into()).corner_radius(theme::R_SM).min_size(Vec2::new(0.0, 28.0)).frame_when_inactive(on);
@@ -714,9 +726,10 @@ impl App {
     /// it was asked for (a new tab, or beside the active pane).
     fn open_dialog(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
         let Some(place) = w.picker else { return };
-        let modal = egui::Modal::new(egui::Id::unique("open-dialog")).show(ctx, |ui| {
-            ui.set_width(820.0_f32.min(ctx.content_rect().width() - 40.0));
-            ui.set_height(520.0_f32.min(ctx.content_rect().height() - 60.0));
+        let (modal, fit) = modal(ctx, "open-dialog", Vec2::new(820.0, 560.0));
+        let modal = modal.show(ctx, |ui| {
+            ui.set_width(fit.x);
+            ui.set_height(fit.y);
             let close = ui
                 .horizontal(|ui| {
                     ui.label(RichText::new("Open").size(16.0).strong());
@@ -744,7 +757,6 @@ impl App {
         }
     }
 
-    /// Tabs dragged out of a workspace: each in a window of its own, where the pointer let go.
     /// A window of its own for a tab dragged out, its tab under the screen point `at`.
     fn tear_off(&mut self, w: workspace::Workspace, at: Pos2) {
         self.windows_made += 1;
@@ -1022,6 +1034,41 @@ mod tests {
         main(&mut app).close_all();
         for (_, w, _) in &mut app.windows {
             w.close_all();
+        }
+    }
+
+    /// Pictures of the open dialog over a workspace, in a large and a small window:
+    /// SSHREMOTE_SNAP_DIR=folder cargo test --release open_dialog_pictures
+    #[test]
+    fn open_dialog_pictures() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        for (w_, h_) in [(1280.0, 800.0), (760.0, 480.0)] {
+            let ctx = egui::Context::default();
+            theme::style(&ctx);
+            let opt = crate::parse_client(&["--gui".into()]).unwrap();
+            let mut app = App::new(Form::from(&opt), 100.0, "", None);
+            let mut w = workspace::Workspace::new(app.options());
+            w.picker = Some(Place::Tab);
+            let mut snap = snapshot::Snap::default();
+            let size = Vec2::new(w_, h_);
+            for (section, name) in [(home::Section::Ssh, "ssh"), (home::Section::Tools, "tools")] {
+                app.section = section;
+                if section == home::Section::Tools {
+                    app.config = Some(crate::tools::ConfigTool::new());
+                }
+                for k in 0..10 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                        time: Some(k as f64 * 0.05),
+                        ..Default::default()
+                    };
+                    snap.frame(&ctx, input, |ui| {
+                        egui::Panel::top("bar").exact_size(chrome::HEIGHT).show(ui, |_| {});
+                        app.open_dialog(ui.ctx(), &mut w);
+                    });
+                }
+                snap.save(&ctx, size, &dir.join(format!("open_dialog_{name}_{w_}.png")));
+            }
         }
     }
 
