@@ -399,8 +399,21 @@ pub(crate) fn outline() -> Color32 {
 }
 
 
+/// A choice among a few, as a quiet button: outlined over a faint tint when it is the chosen one.
+pub(crate) fn choice(text: impl Into<String>, on: bool) -> egui::Button<'static> {
+    let b = egui::Button::new(text.into()).corner_radius(theme::R_SM).min_size(Vec2::new(0.0, 28.0)).frame_when_inactive(on);
+    if on { b.fill(selected_fill()).stroke(egui::Stroke::new(1.0, selected_stroke())) } else { b }
+}
+
+/// A drop-down with the app's caret rather than egui's triangle.
+pub(crate) fn combo(id: &str, text: impl Into<egui::WidgetText>) -> egui::ComboBox<'_> {
+    egui::ComboBox::from_id_salt(id).selected_text(text).icon(|ui, rect, visuals, _open| {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, ic::CARET_DOWN, FontId::proportional(12.0), visuals.fg_stroke.color);
+    })
+}
+
 /// An icon button that opens a menu.
-fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
+pub(crate) fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
     let config =
         egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     let (r, inner) = egui::containers::menu::MenuButton::from_button(tool_button(glyph, false))

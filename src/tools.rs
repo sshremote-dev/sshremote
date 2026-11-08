@@ -6,7 +6,7 @@ use std::process::Command;
 
 use eframe::egui::{self, RichText};
 
-use crate::gui::{bad, good, ic, primary};
+use crate::gui::{bad, choice, combo, good, ic, icon, primary};
 
 use crate::sys::{quiet, ssh_dir};
 
@@ -114,17 +114,17 @@ impl KeyTool {
         self.keys = list_keys();
     }
 
-    /// The window; returns false once closed.
-    pub fn show(&mut self, ctx: &egui::Context, actions: &mut Vec<ToolAction>) -> bool {
-        let mut open = true;
-        egui::Window::new(format!("{}  SSH keys", ic::KEY)).open(&mut open).default_width(560.0).collapsible(false).show(ctx, |ui| {
+    /// The page, in the open view's tools.
+    pub fn ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
+        {
             ui.label(RichText::new("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.").weak());
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Host to install on");
-                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(220.0));
+                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W));
             });
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+            ui.add_space(4.0);
+            {
                 if self.keys.is_empty() {
                     ui.label(RichText::new("No keys yet. Create one below.").weak());
                 }
@@ -160,12 +160,11 @@ impl KeyTool {
                     });
                     ui.add_space(4.0);
                 }
-            });
-            ui.separator();
-            ui.label(RichText::new("Create a key").strong());
-            egui::Grid::new("keygen").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            }
+            section(ui, "Create a key");
+            egui::Grid::new("keygen").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("Type");
-                egui::ComboBox::from_id_salt("keytype").selected_text(KINDS[self.kind].0).show_ui(ui, |ui| {
+                combo("keytype", KINDS[self.kind].0).width(FIELD_W).show_ui(ui, |ui| {
                     crate::gui::menu_look(ui);
                     for (i, k) in KINDS.iter().enumerate() {
                         ui.selectable_value(&mut self.kind, i, k.0);
@@ -173,29 +172,29 @@ impl KeyTool {
                 });
                 ui.end_row();
                 ui.label("File name");
-                ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("id_ed25519_work"));
+                ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("id_ed25519_work").desired_width(FIELD_W));
                 ui.end_row();
                 ui.label("Comment");
-                ui.add(egui::TextEdit::singleline(&mut self.comment));
+                ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(FIELD_W));
                 ui.end_row();
                 ui.label("Passphrase");
-                ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).hint_text("optional"));
+                ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).hint_text("optional").desired_width(FIELD_W));
                 ui.end_row();
                 ui.label("Again");
-                ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true));
+                ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(FIELD_W));
                 ui.end_row();
             });
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.add(primary("Create key")).clicked() {
                     self.generate();
                 }
-                if ui.button("Open the .ssh folder").clicked() {
+                if ui.button(format!("{}  Open the .ssh folder", ic::FOLDER_OPEN)).clicked() {
                     open_path(&ssh_dir());
                 }
             });
             status(ui, &self.status);
-        });
-        open
+        }
     }
 }
 
@@ -399,32 +398,32 @@ impl ConfigTool {
         ok
     }
 
-    /// The window; returns false once closed, and whether the host list changed.
-    pub fn show(&mut self, ctx: &egui::Context, changed: &mut bool) -> bool {
-        let mut open = true;
-        let title = format!("{}  SSH hosts (~/.ssh/config)", ic::GLOBE);
-        egui::Window::new(title).open(&mut open).default_size([680.0, 520.0]).collapsible(false).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.view, ConfigView::Hosts, "Hosts");
-                let dirty = if self.text != self.saved { " *" } else { "" };
-                ui.selectable_value(&mut self.view, ConfigView::File, format!("Edit the file{dirty}"));
-            });
-            ui.separator();
-            match self.view {
-                ConfigView::Hosts => self.hosts_view(ui, changed),
-                ConfigView::File => self.file_view(ui, changed),
+    /// The page, in the open view's tools; sets `changed` when the host list changed.
+    pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        ui.horizontal(|ui| {
+            if ui.add(choice("Hosts", self.view == ConfigView::Hosts)).clicked() {
+                self.view = ConfigView::Hosts;
             }
-            status(ui, &self.status);
+            let dirty = if self.text != self.saved { " *" } else { "" };
+            if ui.add(choice(format!("Edit the file{dirty}"), self.view == ConfigView::File)).clicked() {
+                self.view = ConfigView::File;
+            }
         });
-        open
+        ui.add_space(6.0);
+        match self.view {
+            ConfigView::Hosts => self.hosts_view(ui, changed),
+            ConfigView::File => self.file_view(ui, changed),
+        }
+        status(ui, &self.status);
     }
 
     fn hosts_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.label(RichText::new("ssh, this app and other tools use these names, users, ports and keys.").weak());
         let mut edit = None;
         let mut remove = None;
-        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-            egui::Grid::new("hosts").striped(true).num_columns(6).spacing([14.0, 4.0]).show(ui, |ui| {
+        ui.add_space(4.0);
+        {
+            egui::Grid::new("hosts").striped(true).num_columns(6).spacing([14.0, 2.0]).min_row_height(30.0).show(ui, |ui| {
                 for t in ["Alias", "Host", "User", "Port", "Key", ""] {
                     ui.label(RichText::new(t).weak().small());
                 }
@@ -436,17 +435,17 @@ impl ConfigTool {
                     ui.label(if h.port.is_empty() { "22" } else { &h.port });
                     ui.label(RichText::new(&h.identity).small());
                     ui.horizontal(|ui| {
-                        if ui.small_button("Edit").clicked() {
+                        if icon(ui, ic::PENCIL, &format!("Change {}", h.alias), self.editing == h.alias).clicked() {
                             edit = Some(h.clone());
                         }
-                        if ui.small_button("Remove").clicked() {
+                        if icon(ui, ic::TRASH, &format!("Remove {} from the file (the old file is kept as config.bak)", h.alias), false).clicked() {
                             remove = Some(h.alias.clone());
                         }
                     });
                     ui.end_row();
                 }
             });
-        });
+        }
         if let Some(h) = edit {
             self.editing = h.alias.clone();
             self.form = HostEntry { port: if h.port.is_empty() { "22".into() } else { h.port.clone() }, ..h };
@@ -460,27 +459,26 @@ impl ConfigTool {
                 *changed = true;
             }
         }
-        ui.separator();
         let heading =
             if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
-        ui.label(RichText::new(heading).strong());
+        section(ui, &heading);
         let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
-        egui::Grid::new("addhost").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("addhost").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Alias");
-            ui.add(egui::TextEdit::singleline(&mut self.form.alias).hint_text("web1"));
+            ui.add(egui::TextEdit::singleline(&mut self.form.alias).hint_text("web1").desired_width(FIELD_W));
             ui.end_row();
             ui.label("Host name");
-            ui.add(egui::TextEdit::singleline(&mut self.form.hostname).hint_text("192.168.1.20 or server.example.com"));
+            ui.add(egui::TextEdit::singleline(&mut self.form.hostname).hint_text("192.168.1.20 or server.example.com").desired_width(FIELD_W));
             ui.end_row();
             ui.label("User");
-            ui.add(egui::TextEdit::singleline(&mut self.form.user));
+            ui.add(egui::TextEdit::singleline(&mut self.form.user).desired_width(FIELD_W));
             ui.end_row();
             ui.label("Port");
-            ui.add(egui::TextEdit::singleline(&mut self.form.port).desired_width(60.0));
+            ui.add(egui::TextEdit::singleline(&mut self.form.port).desired_width(80.0));
             ui.end_row();
             ui.label("Key");
             let shown = if self.form.identity.is_empty() { "default".to_string() } else { self.form.identity.clone() };
-            egui::ComboBox::from_id_salt("hostkey").selected_text(shown).show_ui(ui, |ui| {
+            combo("hostkey", shown).width(FIELD_W).show_ui(ui, |ui| {
                 crate::gui::menu_look(ui);
                 ui.selectable_value(&mut self.form.identity, String::new(), "default");
                 for k in &keys {
@@ -489,6 +487,7 @@ impl ConfigTool {
             });
             ui.end_row();
         });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             let label = if self.editing.is_empty() { "Add host" } else { "Save host" };
             if ui.add(primary(label)).clicked() && self.save_form() {
@@ -530,7 +529,7 @@ impl ConfigTool {
         });
         let th = crate::markdown::Theme::of(ui);
         egui::Frame::new().fill(th.bg).corner_radius(crate::gui::theme::R_SM).inner_margin(6.0).show(ui, |ui| {
-            egui::ScrollArea::both().max_height(ui.available_height() - 30.0).auto_shrink([false, false]).show(
+            egui::ScrollArea::both().max_height(440.0).auto_shrink([false, false]).show(
                 ui,
                 |ui| {
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
@@ -565,11 +564,9 @@ impl VaultTool {
         VaultTool { hosts: crate::vault::list(), host: host.to_string(), password: String::new(), status: None }
     }
 
-    /// The window; returns false once closed. `known` are hosts to pick from.
-    pub fn show(&mut self, ctx: &egui::Context, known: &[String]) -> bool {
-        let mut open = true;
-        let title = format!("{}  Saved passwords", ic::LOCK_KEY);
-        egui::Window::new(title).open(&mut open).default_width(480.0).collapsible(false).show(ctx, |ui| {
+    /// The page, in the open view's tools. `known` are hosts to pick from.
+    pub fn ui(&mut self, ui: &mut egui::Ui, known: &[String]) {
+        {
             let Some(store) = crate::vault::backend() else {
                 ui.label(
                     RichText::new("This system has no password store sshremote can use. On Linux, install secret-tool (libsecret-tools).")
@@ -588,10 +585,10 @@ impl VaultTool {
             if self.hosts.is_empty() {
                 ui.label(RichText::new("No saved passwords yet.").weak().italics());
             }
-            egui::Grid::new("vault").striped(true).num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
+            egui::Grid::new("vault").striped(true).num_columns(2).spacing([14.0, 2.0]).min_row_height(30.0).show(ui, |ui| {
                 for h in &self.hosts {
                     ui.label(RichText::new(h).strong());
-                    if ui.small_button("Remove").clicked() {
+                    if icon(ui, ic::TRASH, &format!("Forget the password of {h}"), false).clicked() {
                         remove = Some(h.clone());
                     }
                     ui.end_row();
@@ -604,25 +601,28 @@ impl VaultTool {
                 });
                 self.hosts = crate::vault::list();
             }
-            ui.separator();
-            egui::Grid::new("vault-add").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            section(ui, "Save a password");
+            egui::Grid::new("vault-add").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("Host");
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(220.0));
-                    egui::ComboBox::from_id_salt("vault-hosts").selected_text("").width(24.0).show_ui(ui, |ui| {
-                        crate::gui::menu_look(ui);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W - 34.0));
+                    let r = crate::gui::icon_menu(ui, ic::CARET_DOWN, |ui| {
                         for h in known {
-                            if ui.selectable_label(false, h).clicked() {
+                            if ui.button(h).clicked() {
                                 self.host = h.clone();
+                                ui.close();
                             }
                         }
                     });
+                    r.on_hover_text("A known host");
                 });
                 ui.end_row();
                 ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(220.0));
+                ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(FIELD_W));
                 ui.end_row();
             });
+            ui.add_space(6.0);
             let ready = !self.host.trim().is_empty() && !self.password.is_empty();
             let save = primary("Save password");
             if ui.add_enabled(ready, save).clicked() {
@@ -635,8 +635,7 @@ impl VaultTool {
                 self.hosts = crate::vault::list();
             }
             status(ui, &self.status);
-        });
-        open
+        }
     }
 }
 
@@ -673,21 +672,18 @@ impl BackupTool {
             .collect();
     }
 
-    /// The window; returns false once closed, and sets `changed` after a restore.
-    pub fn show(&mut self, ctx: &egui::Context, changed: &mut bool) -> bool {
-        let mut open = true;
-        let title = format!("{}  Backup and restore", ic::ARCHIVE);
-        egui::Window::new(title).open(&mut open).default_width(560.0).collapsible(false).show(ctx, |ui| {
+    /// The page, in the open view's tools; sets `changed` after a restore.
+    pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        {
             ui.label(
                 RichText::new(
                     "Recent and favorite hosts, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
                 )
                 .weak(),
             );
-            ui.add_space(4.0);
-            ui.label(RichText::new("Back up").strong());
+            section(ui, "Back up");
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(200.0))
+                ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(FIELD_W))
                     .on_hover_text(format!(
                         "With a passphrase (at least {} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored.",
                         crate::backup::MIN_PASSPHRASE
@@ -713,27 +709,30 @@ impl BackupTool {
                     open_path(&dir);
                 }
             });
-            ui.separator();
-            ui.label(RichText::new("Restore").strong());
-            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+            section(ui, "Restore");
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
                 if self.list.is_empty() {
                     ui.label(RichText::new("No backups yet.").weak().italics());
                 }
                 for (p, when, pw) in &self.list {
                     let auto = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("auto-"));
                     let label =
-                        format!("{when}{}{}", if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
-                    let r = ui.selectable_label(self.chosen.as_ref() == Some(p), label).on_hover_text(p.display().to_string());
+                        format!("{}  {when}{}{}", ic::ARCHIVE, if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
+                    let on = self.chosen.as_ref() == Some(p);
+                    let b = choice(label, on).min_size(egui::vec2(ui.available_width(), 30.0));
+                    let r = ui.add(b).on_hover_text(p.display().to_string());
                     if r.clicked() {
                         self.chosen = Some(p.clone());
                     }
                 }
             });
+            ui.add_space(4.0);
             ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
             ui.checkbox(&mut self.ssh_files, "Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)");
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords").desired_width(200.0),
+                    egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords").desired_width(FIELD_W),
                 );
                 if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD))).clicked()
                     && let Some(p) = &self.chosen
@@ -749,11 +748,21 @@ impl BackupTool {
                 }
             });
             status(ui, &self.status);
-        });
-        open
+        }
     }
 }
 
+/// The width of the tools' text fields and drop-downs.
+const FIELD_W: f32 = 300.0;
+
+/// A part of a tool's page: space above, a rule, its name.
+fn section(ui: &mut egui::Ui, name: &str) {
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(RichText::new(name).strong());
+    ui.add_space(2.0);
+}
 
 fn status(ui: &mut egui::Ui, s: &Option<(bool, String)>) {
     if let Some((ok, text)) = s {
@@ -841,13 +850,12 @@ Host *
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                let ctx = ui.ctx().clone();
                 let mut actions = Vec::new();
                 let mut changed = false;
-                assert!(keys.show(&ctx, &mut actions));
-                assert!(config.show(&ctx, &mut changed));
-                assert!(vault.show(&ctx, &["a".into(), "b".into()]));
-                assert!(backup.show(&ctx, &mut changed));
+                keys.ui(ui, &mut actions);
+                config.ui(ui, &mut changed);
+                vault.ui(ui, &["a".into(), "b".into()]);
+                backup.ui(ui, &mut changed);
                 assert!(!changed, "drawing changes nothing");
             });
         }

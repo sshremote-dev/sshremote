@@ -104,40 +104,11 @@ impl App {
             }
         }
         crate::termwin::TermWindow::show_torn(ctx, &mut self.torn_terms);
-        let mut actions = Vec::new();
-        if let Some(k) = &mut self.keys
-            && !k.show(ctx, &mut actions)
+    }
+
+    /// The host lists again, after a tool changed them.
+    fn reload_hosts(&mut self) {
         {
-            self.keys = None;
-        }
-        for a in actions {
-            match a {
-                crate::tools::ToolAction::Terminal { title, argv } => self.open_profile(crate::termwin::Profile {
-                    name: title,
-                    icon: ic::KEY,
-                    launch: crate::termwin::Launch::Local(argv),
-                }),
-            }
-        }
-        let mut changed = false;
-        if let Some(c) = &mut self.config
-            && !c.show(ctx, &mut changed)
-        {
-            self.config = None;
-        }
-        let known: Vec<String> =
-            if self.vault.is_some() { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
-        if let Some(v) = &mut self.vault
-            && !v.show(ctx, &known)
-        {
-            self.vault = None;
-        }
-        if let Some(b) = &mut self.backup
-            && !b.show(ctx, &mut changed)
-        {
-            self.backup = None;
-        }
-        if changed {
             self.ssh_hosts = crate::hosts::ssh_config_hosts();
             self.recent = crate::hosts::load_recent();
             self.favorites = crate::hosts::favorites();
@@ -275,18 +246,7 @@ impl App {
             Section::Local => {
                 ui.label(RichText::new("This computer").size(16.0).strong());
                 ui.add_space(6.0);
-                let row = |ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str| {
-                    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), egui::Sense::click());
-                    if r.hovered() {
-                        ui.painter().rect_filled(rect, theme::R_SM, ui.visuals().widgets.hovered.weak_bg_fill);
-                    }
-                    let fg = ui.visuals().strong_text_color();
-                    ui.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(18.0), fg);
-                    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 14.0), Align2::LEFT_CENTER, title, FontId::proportional(14.0), fg);
-                    let weak = ui.visuals().weak_text_color();
-                    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.5), weak);
-                    r.clicked()
-                };
+                let row = place_row;
                 for p in crate::termwin::local_profiles() {
                     if row(ui, p.icon, &p.name, "A terminal here") {
                         go = Some((String::new(), String::new(), How::Local(p.clone())));
@@ -304,29 +264,82 @@ impl App {
                 }
             }
             Section::Ssh => self.ssh_section(ui, &mut go),
-            Section::Tools => {
-                ui.label(RichText::new("Tools").size(16.0).strong());
-                ui.add_space(6.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                if ui.button(format!("{}  SSH keys", ic::KEY)).clicked() {
-                    self.keys = Some(crate::tools::KeyTool::new());
-                }
-                if ui.button(format!("{}  SSH hosts (~/.ssh/config)", ic::GLOBE)).clicked() {
-                    self.config = Some(crate::tools::ConfigTool::new());
-                }
-                if ui.button(format!("{}  Saved passwords", ic::LOCK_KEY)).clicked() {
-                    self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
-                }
-                if ui.button(format!("{}  Backup and restore", ic::ARCHIVE)).clicked() {
-                    self.backup = Some(crate::tools::BackupTool::new());
-                }
-                if cfg!(windows) {
-                    ui.separator();
-                    self.admin_items(ui);
-                }
-            }
+            Section::Tools => self.tools_section(ui),
         }
         go
+    }
+
+    /// The tools: a list of them, or the one open, as a page with a way back.
+    fn tools_section(&mut self, ui: &mut egui::Ui) {
+        let open = [self.keys.is_some(), self.config.is_some(), self.vault.is_some(), self.backup.is_some()];
+        let Some(which) = open.iter().position(|&o| o) else {
+            ui.label(RichText::new("Tools").size(16.0).strong());
+            ui.add_space(6.0);
+            if place_row(ui, ic::KEY, "SSH keys", "Your key pairs: copy one, install it on a host, or create one") {
+                self.keys = Some(crate::tools::KeyTool::new());
+            }
+            if place_row(ui, ic::GLOBE, "SSH hosts", "The hosts of ~/.ssh/config: names, users, ports and keys") {
+                self.config = Some(crate::tools::ConfigTool::new());
+            }
+            if place_row(ui, ic::LOCK_KEY, "Saved passwords", "Passwords for SSH sign-in, in the system's password store") {
+                self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
+            }
+            if place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
+                self.backup = Some(crate::tools::BackupTool::new());
+            }
+            if cfg!(windows) {
+                ui.add_space(6.0);
+                ui.separator();
+                self.admin_items(ui);
+            }
+            return;
+        };
+        let (glyph, title) = [
+            (ic::KEY, "SSH keys"),
+            (ic::GLOBE, "SSH hosts (~/.ssh/config)"),
+            (ic::LOCK_KEY, "Saved passwords"),
+            (ic::ARCHIVE, "Backup and restore"),
+        ][which];
+        let mut back = false;
+        ui.horizontal(|ui| {
+            back = icon(ui, ic::ARROW_LEFT, "Back to the tools", false).clicked();
+            ui.label(RichText::new(format!("{glyph}  {title}")).size(16.0).strong());
+        });
+        ui.add_space(4.0);
+        let known: Vec<String> = if which == 2 { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
+        let mut actions = Vec::new();
+        let mut changed = false;
+        egui::ScrollArea::vertical().id_salt("tool-page").auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width((ui.available_width() - 14.0).min(720.0));
+            if let Some(k) = &mut self.keys {
+                k.ui(ui, &mut actions);
+            } else if let Some(c) = &mut self.config {
+                c.ui(ui, &mut changed);
+            } else if let Some(v) = &mut self.vault {
+                v.ui(ui, &known);
+            } else if let Some(b) = &mut self.backup {
+                b.ui(ui, &mut changed);
+            }
+            ui.add_space(12.0);
+        });
+        for a in actions {
+            match a {
+                crate::tools::ToolAction::Terminal { title, argv } => self.open_profile(crate::termwin::Profile {
+                    name: title,
+                    icon: ic::KEY,
+                    launch: crate::termwin::Launch::Local(argv),
+                }),
+            }
+        }
+        if changed {
+            self.reload_hosts();
+        }
+        if back || ui.input(|i| i.key_pressed(Key::Escape)) && !ui.ctx().any_popup_open() {
+            self.keys = None;
+            self.config = None;
+            self.vault = None;
+            self.backup = None;
+        }
     }
 
     /// A host not in the list: its address, what to open, and the connection's options.
@@ -373,7 +386,7 @@ impl App {
             ui.end_row();
             ui.label(RichText::new("Screen quality").weak());
             let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
-            egui::ComboBox::from_id_salt("quality").selected_text(current).width(260.0).show_ui(ui, |ui| {
+            combo("quality", current).width(260.0).show_ui(ui, |ui| {
                 crate::gui::menu_look(ui);
                 ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
                 for (i, p) in PRESETS.iter().enumerate() {
@@ -644,3 +657,17 @@ pub(super) enum How {
 
 /// A host, its port, and what to open on it.
 pub(super) type Choice = (String, String, How);
+
+/// A place to open or a tool, as a row: its icon, its name and a line about it.
+fn place_row(ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str) -> bool {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), egui::Sense::click());
+    if r.hovered() {
+        ui.painter().rect_filled(rect, theme::R_SM, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let fg = ui.visuals().strong_text_color();
+    ui.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(18.0), fg);
+    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 14.0), Align2::LEFT_CENTER, title, FontId::proportional(14.0), fg);
+    let weak = ui.visuals().weak_text_color();
+    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.5), weak);
+    r.clicked()
+}

@@ -303,6 +303,12 @@ mod pictures {
                 s.click(place, 0, PointerButton::Primary);
                 s.save(what);
             }
+            // Each tool is a page of the open view, with a way back.
+            for (tool, what) in [("SSH keys", "tool_keys"), ("SSH hosts", "tool_hosts"), ("Saved passwords", "tool_vault"), ("Backup and restore", "tool_backup")] {
+                s.click(tool, 0, PointerButton::Primary);
+                s.save(what);
+                s.click(ic::ARROW_LEFT, 0, PointerButton::Primary);
+            }
         }
     }
 }
