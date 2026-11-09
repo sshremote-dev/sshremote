@@ -19,150 +19,310 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
         ui.painter().rect_filled(area, CornerRadius::ZERO, scheme_bg());
         return text_editor(ui, t, &font, cw, ch, keys, out);
     }
+    markdown_view(ui, t, font_size, keys, out);
+}
+
+/// What the Markdown view finds: the query, the blocks that hold it, and the one shown.
+#[derive(Default)]
+pub(super) struct Find {
+    query: String,
+    hits: Vec<usize>,
+    at: usize,
+    /// For the query and document the hits are for.
+    for_key: (String, u64),
+    focus: bool,
+    /// The current hit changed: the view goes to it.
+    go: bool,
+}
+
+/// The Markdown view: a record to read, search and copy, not typed into. A full-screen program's
+/// record is gathered from what settles on its screen (see `collect`), so an agent's answers, a
+/// file paged through, stay together as one document while its live status is left out; a shell's
+/// record is its scrollback and screen. The wheel scrolls the record; at either end it goes on to
+/// a program that scrolls itself, and what that brings into view is added.
+fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out: &mut Vec<Cmd>) {
     let font = FontId::monospace(font_size);
-    let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-    // As wide as the reading column the live rows sit in (see below), as tall as the view.
+    let ch = ui.ctx().fonts_mut(|f| f.row_height(&font));
     let area = ui.available_rect_before_wrap();
-    fit(t, (area.width().min(960.0) - 40.0) / cw, area.height() / ch, out);
-    let (first, last) = input_rows(t);
     let now = ui.input(|i| i.time);
+    let alt = t.term.mode().contains(TermMode::ALT_SCREEN);
+    if t.md_copy {
+        // Copy from the menu: egui copies the selection when it sees the copy event.
+        t.md_copy = false;
+        ui.ctx().input_mut(|i| i.events.push(Event::Copy));
+    }
+    // A shell's record is built again once its output settles, or now and then while it streams.
     if t.seen_rev != t.rev {
         t.seen_rev = t.rev;
         t.changed_at = now;
     }
-    // Built again once the output settles, or now and then while it streams without a pause.
+    let key = if alt { (true, t.collect.rev, 0) } else { (false, t.rev, t.md_skip) };
     let settled = now - t.changed_at >= SETTLE || now - t.built_at >= SETTLE_AT_MOST;
-    // Scrolled by the wheel, the program's new screen is shown at once, as the text view does.
-    let following = now - t.wheel_at < FOLLOW_WHEEL;
-    let due = t.reading.is_none() || following || (settled && now - t.built_at >= REBUILD_EVERY);
+    let due = alt || t.reading.is_none() || (settled && now - t.built_at >= REBUILD_EVERY);
     if !due {
         let wait = (SETTLE - (now - t.changed_at)).min(SETTLE_AT_MOST - (now - t.built_at)).max(REBUILD_EVERY);
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
-    if due && t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
+    let rebuilt = due && t.reading.as_ref().is_none_or(|r| r.0 != key);
+    if rebuilt {
         t.built_at = now;
-        let text = if t.term.mode().contains(TermMode::ALT_SCREEN) {
-            // A full-screen program keeps its own text and scrolls it itself (the wheel goes to
-            // it): its screen is read as it is, as the text view shows it.
-            let end = if status_row(t) && first == t.term.grid().screen_lines() as i32 { first - 1 } else { first };
-            screen_markdown(t, 0, end)
-        } else {
-            sync_rows(t);
-            let rows: Vec<(String, bool)> = t.rows.md.iter().cloned().chain((0..first).map(|l| row_markdown(t, l))).collect();
-            join_rows(rows)
-        };
+        let text = join_rows(record_md(t));
         let doc = crate::markdown::Doc::new(&text);
-        t.reading = Some((t.rev, first, std::rc::Rc::new((text, doc))));
+        t.reading = Some((key, std::rc::Rc::new((text, doc))));
     }
-    let read = t.reading.as_ref().expect("just built").2.clone();
+    let read = t.reading.as_ref().expect("just built").1.clone();
     let doc = &read.1;
     let th = crate::markdown::Theme::terminal(scheme_bg(), scheme_fg());
-    let area = ui.available_rect_before_wrap();
     ui.painter().rect_filled(area, CornerRadius::ZERO, th.bg);
     ui.visuals_mut().override_text_color = Some(th.fg);
-    let markdown = t.view == View::Markdown;
-    let id = egui::Id::unique(("reader-input", t.id));
-    let live_rows = (last - first + 1) as usize;
-    let mut live: Option<(Rect, egui::Response)> = None;
-    // The keys come to the live rows unless selected text has them; typing takes them back.
-    let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_) | Event::Paste(_))));
-    let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
-    let wheel = if ui.rect_contains_pointer(area) { wheel_lines(ui, ch, 10.0) } else { 0 };
-    // A program that scrolls itself gets the wheel, as in the text view; the bar still scrolls here.
-    let mut scroll =
-        egui::ScrollArea::both().id_salt(("reading", t.id, markdown)).auto_shrink([false, false]).stick_to_bottom(true);
-    if program_scrolls(t) {
-        scroll = scroll.scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR);
-    }
-    let mut heights = std::mem::take(&mut t.md_heights);
     let doc_id = egui::Id::unique(("md-doc", t.id));
-    // The document's identity: a new one is built when the output changes.
     let doc_key = std::rc::Rc::as_ptr(&read) as usize as u64;
-    // Kept at the bottom with the height of what is drawn now, not of the frame before: a new
-    // screen of a different height would otherwise show a frame out of place (the view shakes).
-    if markdown && t.md_bottom && t.md_laid != doc_key {
-        let width = area.width().min(960.0);
-        let pad = ((area.width() - width) / 2.0).max(0.0) + 20.0;
-        ui.spacing_mut().item_spacing.y = 6.0;
-        let end = crate::markdown::lay_out(ui, doc, doc_key, doc_id, &th, &mut heights, pad, width - 40.0, 14.0);
-        let content = end + live_rows as f32 * ch + 6.0;
-        scroll = scroll.vertical_scroll_offset((content - area.height()).max(0.0));
+    let width = area.width().min(960.0);
+    let pad = ((area.width() - width) / 2.0).max(0.0) + 20.0;
+    let column = width - 40.0;
+    ui.spacing_mut().item_spacing.y = 6.0;
+
+    // Ctrl+F searches; Escape closes the search.
+    if keys && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::F)) {
+        let f = t.find.get_or_insert_with(Find::default);
+        f.focus = true;
     }
-    let shown = scroll.show_viewport(ui, |ui, view| {
-        if markdown {
-            // A readable column, as in the preview; the live rows sit under it on the same edge.
-            // Only the blocks in view are laid out and drawn, so long output stays quick.
-            let full = ui.available_width();
-            let width = full.min(960.0);
-            let pad = ((full - width) / 2.0).max(0.0) + 20.0;
-            let column = width - 40.0;
-            ui.spacing_mut().item_spacing.y = 6.0;
-            let end =
-                crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
-            let origin = ui.max_rect().min;
-            let rows = Rect::from_min_size(
-                origin + Vec2::new(pad, end),
-                Vec2::new(column.max(cw * 20.0), live_rows as f32 * ch),
-            );
-            let resp = ui.interact(rows, id, Sense::click());
-            live = Some((rows, resp));
-            // The content's size, for the scroll area.
-            ui.allocate_rect(
-                Rect::from_min_max(origin, Pos2::new(origin.x + full, rows.bottom() + 6.0)),
-                Sense::hover(),
+    let bar_h = if t.find.is_some() { 36.0 } else { 0.0 };
+    let view_rect = Rect::from_min_max(area.min + Vec2::new(0.0, bar_h), area.max);
+
+    let mut heights = std::mem::take(&mut t.md_heights);
+    let end = crate::markdown::lay_out(ui, doc, doc_key, doc_id, &th, &mut heights, pad, column, 14.0);
+    let content = end + 24.0;
+    let mut scroll = egui::ScrollArea::both().id_salt(("reading", t.id)).auto_shrink([false, false]);
+    if t.md_laid != doc_key {
+        if t.md_bottom {
+            // At the bottom it stays there, with this document's height, not the last one's.
+            scroll = scroll.vertical_scroll_offset((content - view_rect.height()).max(0.0));
+        } else if t.collect.prepended > 0 {
+            // Rows added above: what is in view stays where it is.
+            scroll = scroll.vertical_scroll_offset(t.md_offset + (end - t.md_end).max(0.0));
+        }
+        t.collect.prepended = 0;
+    }
+    // Search: the blocks that hold the query, and the view goes to the current one.
+    if let Some(f) = &mut t.find {
+        let k = (f.query.to_lowercase(), doc_key);
+        if f.for_key != k {
+            f.hits = if k.0.is_empty() {
+                Vec::new()
+            } else {
+                doc.blocks.iter().enumerate().filter(|(_, b)| crate::markdown::block_text(b).to_lowercase().contains(&k.0)).map(|(n, _)| n).collect()
+            };
+            f.go = f.for_key.0 != k.0;
+            f.at = f.at.min(f.hits.len().saturating_sub(1));
+            f.for_key = k;
+        }
+        if f.go {
+            f.go = false;
+            if let Some(&(y, _)) = f.hits.get(f.at).and_then(|&n| heights.tops().get(n)) {
+                scroll = scroll.vertical_scroll_offset((y - 40.0).max(0.0));
+            }
+        }
+    }
+    let hits: Vec<(usize, bool)> = t.find.as_ref().map(|f| f.hits.iter().enumerate().map(|(i, &n)| (n, i == f.at)).collect()).unwrap_or_default();
+    let wheel = if ui.rect_contains_pointer(view_rect) { wheel_lines(ui, ch, 10.0) } else { 0 };
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(view_rect));
+    let shown = scroll.show_viewport(&mut child, |ui, view| {
+        let origin = ui.max_rect().min;
+        let hl = egui::Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 40);
+        for &(n, current) in &hits {
+            if let Some(&(y, h)) = heights.tops().get(n) {
+                let r = Rect::from_min_size(origin + Vec2::new(pad - 6.0, y - 3.0), Vec2::new(column + 12.0, h + 6.0));
+                ui.painter().rect_filled(r, CornerRadius::same(4), hl);
+                if current {
+                    ui.painter().rect_stroke(r, CornerRadius::same(4), egui::Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
+                }
+            }
+        }
+        crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
+        if doc.blocks.is_empty() {
+            let msg = if alt {
+                "Nothing gathered yet: what the program shows is added here once it settles, and \
+                 scrolling it adds more."
+            } else {
+                "Nothing to show yet."
+            };
+            ui.put(
+                Rect::from_min_size(origin + Vec2::new(pad, 14.0), Vec2::new(column, 40.0)),
+                egui::Label::new(RichText::new(msg).color(th.fg.gamma_multiply(0.6))),
             );
         }
+        ui.allocate_rect(Rect::from_min_max(origin, Pos2::new(origin.x + ui.available_width(), origin.y + content)), Sense::hover());
     });
     t.md_heights = heights;
-    // Left at the bottom (or scrolled back there with the bar): followed there.
     t.md_laid = doc_key;
-    t.md_bottom = shown.state.clamped_offset().y >= shown.content_size.y - shown.inner_rect.height() - 2.0;
-    // A program that scrolls itself takes the wheel; what it then shows is read again.
-    if program_scrolls(t) && t.exited.is_none() && wheel != 0 {
+    t.md_end = end;
+    let offset = shown.state.clamped_offset().y;
+    let room = (shown.content_size.y - shown.inner_rect.height()).max(0.0);
+    let (at_top, at_bottom) = (offset <= 1.0, offset >= room - 2.0);
+    t.md_offset = offset;
+    t.md_bottom = at_bottom;
+    // At either end of the record the wheel goes on to a program that scrolls itself.
+    if alt && program_scrolls(t) && t.exited.is_none() && ((wheel > 0 && at_top) || (wheel < 0 && at_bottom)) {
         let grid = t.term.grid();
         let send = wheel_bytes(*t.term.mode(), wheel, grid.columns() / 2, grid.screen_lines() / 2);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
-        t.wheel_at = now;
-        ui.ctx().request_repaint();
+        t.collect.up = wheel > 0;
+        t.collect.wheel_at = now;
     }
-    if following {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+    find_bar(ui, t, Rect::from_min_size(area.min, Vec2::new(area.width(), bar_h)), keys);
+    md_tools(ui, t, view_rect, &read.0);
+}
+
+/// The record as Markdown rows: a full-screen program's gathered rows, or a shell's scrollback
+/// and screen (after what was cleared by hand).
+fn record_md(t: &mut Tab) -> Vec<(String, bool)> {
+    if t.term.mode().contains(TermMode::ALT_SCREEN) {
+        let rows = t.collect.rows();
+        // Markdown source (a file open in an editor) is read as it is, not from its colours.
+        let source = rows.iter().any(|k| k.plain.trim_start().starts_with("```"))
+            || rows.iter().filter(|k| ["# ", "## ", "### "].iter().any(|h| k.plain.starts_with(h))).count() >= 2;
+        return rows.into_iter().map(|k| if source { (k.plain, false) } else { k.md }).collect();
     }
-    let Some((rect, resp)) = live else { return };
-    let rect = rect.intersect(shown.inner_rect);
-    let grab = keys && (resp.clicked() || typing || !elsewhere);
-    let c = t.term.grid().cursor.point;
-    let full = resp.rect;
-    let at = Pos2::new(full.left() + c.column.0 as f32 * cw, full.top() + (c.line.0 - first) as f32 * ch);
-    if keys {
-        // Ctrl+C copies text selected in the document (egui copies it); with nothing selected it
-        // interrupts the program, as in the terminal.
-        let selection = ui.ctx().plugin_opt::<egui::text_selection::LabelSelectionState>();
-        let copied = egui::Id::unique(("copied", t.id));
-        // Copied the frame before: the selection goes, so the next Ctrl+C interrupts, as in
-        // Windows Terminal. (Cleared any earlier, the copy itself would be lost.)
-        if ui.ctx().data_mut(|d| d.remove_temp::<bool>(copied)).is_some()
-            && let Some(p) = &selection
-        {
-            p.lock().clear_selection();
+    sync_rows(t);
+    let last = last_written(t);
+    let rows: Vec<(String, bool)> = t.rows.md.iter().cloned().chain((0..=last).map(|l| row_markdown(t, l))).collect();
+    rows.into_iter().skip(t.md_skip).collect()
+}
+
+/// The record as plain text, to copy.
+fn record_plain(t: &mut Tab) -> String {
+    if t.term.mode().contains(TermMode::ALT_SCREEN) {
+        return t.collect.rows().into_iter().map(|k| k.plain).collect::<Vec<_>>().join("\n");
+    }
+    sync_rows(t);
+    let last = last_written(t);
+    let rows: Vec<String> = t.rows.plain.iter().cloned().chain((0..=last).map(|l| row_plain(t, l))).collect();
+    rows.into_iter().skip(t.md_skip).collect::<Vec<_>>().join("\n").trim_end().to_string()
+}
+
+/// The screen's last row with text (or the cursor's, below it).
+fn last_written(t: &Tab) -> i32 {
+    let grid = t.term.grid();
+    let cursor = grid.cursor.point.line.0;
+    (0..grid.screen_lines() as i32).rev().find(|&r| !row_plain(t, r).is_empty()).unwrap_or(0).max(cursor)
+}
+
+/// Clears the Markdown view's record: what is there now is not shown again, what comes is.
+fn clear_record(t: &mut Tab) {
+    if t.term.mode().contains(TermMode::ALT_SCREEN) {
+        t.collect.clear_by_hand();
+    } else {
+        sync_rows(t);
+        t.md_skip = t.rows.plain.len() + last_written(t) as usize + 1;
+    }
+    t.md_bottom = true;
+}
+
+/// The search bar above the record: the query, how many blocks hold it, and the way between them.
+fn find_bar(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, keys: bool) {
+    let Some(f) = &mut t.find else { return };
+    let mut close = false;
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(12.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let ui = &mut child;
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, ui.visuals().faint_bg_color);
+    ui.label(RichText::new(ic::SEARCH).size(15.0));
+    let edit = ui.add(egui::TextEdit::singleline(&mut f.query).hint_text("Search the record").desired_width(260.0));
+    if f.focus {
+        edit.request_focus();
+        f.focus = false;
+    }
+    let (enter, shift, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.modifiers.shift, i.key_pressed(Key::Escape)));
+    let n = f.hits.len();
+    ui.label(if f.query.is_empty() { String::new() } else if n == 0 { "No results".into() } else { format!("{} of {n}", f.at + 1) });
+    let prev = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_UP, false)).on_hover_text("Previous (Shift+Enter)").clicked();
+    let next = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_DOWN, false)).on_hover_text("Next (Enter)").clicked();
+    if ui.add(crate::gui::tool_button(ic::X, false)).on_hover_text("Close (Escape)").clicked() {
+        close = true;
+    }
+    let typed_enter = enter && (edit.lost_focus() || edit.has_focus());
+    if n > 0 && (next || (typed_enter && !shift)) {
+        f.at = (f.at + 1) % n;
+        f.go = true;
+    } else if n > 0 && (prev || (typed_enter && shift)) {
+        f.at = (f.at + n - 1) % n;
+        f.go = true;
+    }
+    if typed_enter {
+        f.focus = true;
+    }
+    if close || (keys && esc) {
+        t.find = None;
+    }
+}
+
+/// The record's tools: search and clear at its top right, and the same with copying on a right
+/// click anywhere over it.
+fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
+    let mut act = None;
+    let tools = Rect::from_min_size(Pos2::new(rect.right() - 86.0, rect.top() + 8.0), Vec2::new(70.0, 30.0));
+    // On a backing of the view's colour, so text scrolled under them does not show through.
+    let back = scheme_bg().gamma_multiply(0.92);
+    ui.painter().rect_filled(tools.expand(3.0), CornerRadius::same(8), back);
+    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(tools).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    if bar.add(crate::gui::tool_button(ic::ERASER, false)).on_hover_text("Clear: start the record again from here").clicked() {
+        act = Some(MdAct::Clear);
+    }
+    if bar.add(crate::gui::tool_button(ic::SEARCH, t.find.is_some())).on_hover_text("Search (Ctrl+F)").clicked() {
+        act = Some(MdAct::FindToggle);
+    }
+    let menu_id = egui::Id::unique(("md-menu", t.id));
+    let (secondary, pos) = ui.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
+    if secondary && let Some(p) = pos.filter(|p| rect.contains(*p)) {
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, p));
+    }
+    if let Some(p) = ui.ctx().data(|d| d.get_temp::<Pos2>(menu_id)) {
+        let selected = ui.ctx().plugin_opt::<egui::text_selection::LabelSelectionState>().is_some_and(|s| s.lock().has_selection());
+        let shown = egui::Area::new(menu_id).fixed_pos(p).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                crate::gui::menu(ui, |ui| {
+                    for (a, text, on) in [
+                        (MdAct::Copy, format!("{}  Copy (Ctrl+C)", ic::COPY), selected),
+                        (MdAct::CopyMd, format!("{}  Copy all as Markdown", ic::ARTICLE), !markdown.is_empty()),
+                        (MdAct::CopyText, format!("{}  Copy all as text", ic::TEXT_T), !markdown.is_empty()),
+                        (MdAct::Find, format!("{}  Search  (Ctrl+F)", ic::SEARCH), true),
+                        (MdAct::Clear, format!("{}  Clear", ic::ERASER), true),
+                    ] {
+                        if a == MdAct::Clear {
+                            ui.separator();
+                        }
+                        if ui.add_enabled(on, egui::Button::new(text)).clicked() {
+                            act = Some(a);
+                        }
+                    }
+                });
+            });
+        });
+        let elsewhere = ui.input(|i| i.pointer.any_pressed()) && !secondary && !ui.ctx().pointer_hover_pos().is_some_and(|q| shown.response.rect.contains(q));
+        if act.is_some() || elsewhere || ui.input(|i| i.key_pressed(Key::Escape)) {
+            ui.ctx().data_mut(|d| d.remove_temp::<Pos2>(menu_id));
         }
-        let selected = selection.is_some_and(|p| p.lock().has_selection());
-        if selected && ui.input(|i| i.events.contains(&Event::Copy)) {
-            ui.ctx().data_mut(|d| d.insert_temp(copied, true));
-            ui.ctx().request_repaint();
-        }
-        let skip = KeySkip { select_all: false, copy: selected };
-        keyboard_with(ui, t, id, rect, Rect::from_min_size(at, Vec2::new(cw, ch)), grab, skip, out);
     }
-    let focused = ui.memory(|m| m.has_focus(id));
-    let mut clip = ui.new_child(egui::UiBuilder::new().max_rect(shown.inner_rect));
-    clip.set_clip_rect(shown.inner_rect);
-    paint(&clip, t, full, &font, cw, ch, first, focused);
-    // Only where typing goes shows a text cursor; elsewhere the pointer stays an arrow.
-    if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| shown.inner_rect.contains(*p)) {
-        let icon = if rect.contains(p) { egui::CursorIcon::Text } else { egui::CursorIcon::Default };
-        ui.ctx().set_cursor_icon(icon);
+    match act {
+        Some(MdAct::Copy) => t.md_copy = true,
+        Some(MdAct::CopyMd) => ui.ctx().copy_text(markdown.to_string()),
+        Some(MdAct::CopyText) => ui.ctx().copy_text(record_plain(t)),
+        Some(MdAct::Find) => t.find.get_or_insert_with(Find::default).focus = true,
+        Some(MdAct::FindToggle) if t.find.is_some() => t.find = None,
+        Some(MdAct::FindToggle) => t.find = Some(Find { focus: true, ..Default::default() }),
+        Some(MdAct::Clear) => clear_record(t),
+        None => {}
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MdAct {
+    Copy,
+    CopyMd,
+    CopyText,
+    Find,
+    FindToggle,
+    Clear,
 }
 
 /// Rows of the live screen shown under the text and Markdown views, so what is typed can be seen:
@@ -252,7 +412,7 @@ impl Rows {
 }
 
 /// One row as plain text without trailing spaces.
-fn row_plain(t: &Tab, line: i32) -> String {
+pub(super) fn row_plain(t: &Tab, line: i32) -> String {
     let row = &t.term.grid()[Line(line)];
     let mut text = String::new();
     for c in 0..t.term.grid().columns() {
@@ -293,6 +453,7 @@ pub(super) fn sync_rows(t: &mut Tab) {
         Some(d) => {
             t.rows.md.drain(..d);
             t.rows.plain.drain(..d);
+            t.md_skip = t.md_skip.saturating_sub(d);
             for h in cached - d..history {
                 let md = row_markdown(t, line(h));
                 let plain = row_plain(t, line(h));
@@ -527,6 +688,7 @@ pub(super) const LINE_MARKERS: [&str; 6] = ["● ", "⏺ ", "❯ ", "› ", "•
 /// back as Markdown: a whole bold line becomes a heading (level 1 when also underlined or italic,
 /// as Claude Code draws `#`), bold and italic runs become `**` and `*`. Agents draw Markdown with
 /// these attributes and drop the marks, so this gives the Markdown view its structure back.
+#[cfg(test)]
 pub(super) fn screen_markdown(t: &Tab, from: i32, to: i32) -> String {
     join_rows((from..to).map(|line| row_markdown(t, line)))
 }
@@ -560,7 +722,7 @@ pub(super) fn join_rows(rows: impl IntoIterator<Item = (String, bool)>) -> Strin
 }
 
 /// Hints full-screen programs draw over their own text (Claude Code's, when scrolled back).
-const FLOATING_HINTS: [&str; 1] = ["Jump to bottom (ctrl+End) \u{2193}"];
+pub(super) const FLOATING_HINTS: [&str; 1] = ["Jump to bottom (ctrl+End) \u{2193}"];
 
 /// Whether a line reads as code by itself: it ends or starts as code does, not as a sentence.
 fn codelike(raw: &str) -> bool {
@@ -740,7 +902,9 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
     let mut colours: Vec<Color> = Vec::new();
     // Status lines ("Thinking… (10s · ↓ 561 tokens)") are coloured but not code.
     let status = plain.chars().any(|c| matches!(c, '\u{B7}' | '\u{2026}' | '\u{2191}' | '\u{2193}'));
-    if !status && !plain.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)) {
+    // Pictures drawn with block characters (a banner) are not code either.
+    let art = plain.chars().any(|c| ('\u{2580}'..='\u{259f}').contains(&c));
+    if !art && !status && !plain.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)) {
         for c in 0..cols {
             let cell = &row[Column(c)];
             let plain_fg = matches!(cell.fg, Color::Named(NamedColor::Foreground | NamedColor::DimForeground));

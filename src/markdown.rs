@@ -1166,6 +1166,11 @@ pub struct Heights {
 }
 
 impl Heights {
+    /// Each block's top and height in the document last laid out.
+    pub fn tops(&self) -> &[(f32, f32)] {
+        self.layout.as_ref().map_or(&[], |l| l.2.as_slice())
+    }
+
     fn key(blocks: &[Block], n: usize, width: f32) -> (u64, bool, u32) {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1243,6 +1248,19 @@ pub fn lay_out(ui: &mut egui::Ui, doc: &Doc, doc_key: u64, id: egui::Id, th: &Th
         heights.layout = Some((doc_key, w, tops, y));
     }
     heights.layout.as_ref().expect("just laid out").3
+}
+
+/// A block's words, to search.
+pub fn block_text(b: &Block) -> String {
+    match b {
+        Block::Heading(_, t) | Block::Para(t) | Block::Pre(t) => t.clone(),
+        Block::Part(b) => block_text(b),
+        Block::Code { code, .. } => code.clone(),
+        Block::Table { rows, .. } => rows.iter().map(|r| r.join(" ")).collect::<Vec<_>>().join("\n"),
+        Block::Item { marker, text, .. } => format!("{marker} {text}"),
+        Block::Quote(bs) => bs.iter().map(block_text).collect::<Vec<_>>().join("\n"),
+        Block::Rule => String::new(),
+    }
 }
 
 /// Draws a whole document in the colours of `th` (the background it is drawn on).

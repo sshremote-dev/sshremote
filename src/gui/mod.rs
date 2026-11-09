@@ -52,6 +52,7 @@ pub(crate) mod ic {
     pub const FILE_TEXT: &str = "\u{E23A}";
     pub const ROWS: &str = "\u{E5A2}";
     pub const EQUALS: &str = "\u{E21C}";
+    pub const ERASER: &str = "\u{E21E}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const PLUS: &str = "\u{E3D4}";
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";

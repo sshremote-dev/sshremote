@@ -17,6 +17,7 @@ use crate::proto::ToAgent;
 
 mod input;
 mod paint;
+mod collect;
 mod reader;
 
 use input::*;
@@ -193,8 +194,6 @@ const REBUILD_EVERY: f64 = 0.1;
 const SETTLE: f64 = 0.35;
 /// ...and at least this often while output never stops, so a long run still shows progress.
 const SETTLE_AT_MOST: f64 = 1.2;
-/// How long after a wheel step the Markdown view follows the program's screen without waiting.
-const FOLLOW_WHEEL: f64 = 0.6;
 
 /// Selected cells, in VS Code's selection colour for a dark or a light background.
 fn selection() -> Color32 {
@@ -310,8 +309,17 @@ struct Tab {
     /// The output revision last seen by the Markdown view, and when it last changed: the view
     /// waits for the output to settle before it builds the document again.
     seen_rev: u64,
-    /// When the wheel last went to a program that scrolls itself: what it shows then is read at once.
-    wheel_at: f64,
+    /// The Markdown view's record of a full-screen program, gathered from its screens.
+    collect: collect::Collect,
+    /// Rows of a shell's record cleared by hand (from its oldest).
+    md_skip: usize,
+    /// Copy the selection, asked from the Markdown view's menu.
+    md_copy: bool,
+    /// The Markdown view's scroll offset and the document's height, last frame.
+    md_offset: f32,
+    md_end: f32,
+    /// The Markdown view's search.
+    find: Option<reader::Find>,
     /// Whether the Markdown view was at the bottom: it stays there as the document changes.
     md_bottom: bool,
     /// The document last drawn in the Markdown view.
@@ -326,8 +334,9 @@ struct Tab {
     nav_keys: bool,
 }
 
-/// The text and Markdown views' content, with the output revision and the first live row it ends above.
-type Reading = (u64, i32, std::rc::Rc<(String, crate::markdown::Doc)>);
+/// The Markdown view's document and what it was built from (a record's change count, or the
+/// output revision and the rows cleared by hand).
+type Reading = ((bool, u64, usize), std::rc::Rc<(String, crate::markdown::Doc)>);
 
 impl Tab {
     #[cfg(test)]
@@ -689,7 +698,12 @@ impl TermWindow {
             md_heights: Default::default(),
             built_at: 0.0,
             seen_rev: 0,
-            wheel_at: f64::NEG_INFINITY,
+            collect: Default::default(),
+            md_skip: 0,
+            md_copy: false,
+            md_offset: 0.0,
+            md_end: 0.0,
+            find: None,
             md_bottom: true,
             md_laid: 0,
             changed_at: 0.0,
@@ -748,6 +762,7 @@ impl TermWindow {
 
     pub fn output(&mut self, id: u32, data: &[u8]) {
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+            t.collect.saw(data);
             t.parser.advance(&mut t.term, data);
             t.rev += 1;
         }
@@ -841,12 +856,20 @@ impl TermWindow {
             if let Backend::Local(l) = &mut t.backend {
                 let (data, exit) = l.drain();
                 if !data.is_empty() {
+                    t.collect.saw(&data);
                     t.parser.advance(&mut t.term, &data);
                     t.rev += 1;
                 }
                 if let Some(e) = exit {
                     t.exited = Some(e);
                 }
+            }
+        }
+        // Every tab's record of a full-screen program takes in what settled on its screen.
+        let now = ctx.input(|i| i.time);
+        for t in &mut self.tabs {
+            if let Some(at) = collect::tick(t, now) {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at - now).max(0.02)));
             }
         }
         true
@@ -1591,6 +1614,214 @@ mod tests {
         assert!(md.contains("```\n\nSummary: a &self method reads the value and another one changes\nit in place."), "{md}");
     }
 
+    /// Draws `rows` as a full-screen program's screen (one per row, the rest blank).
+    fn draw(t: &mut Tab, rows: &[String]) {
+        let n = t.term.grid().screen_lines();
+        let mut out = String::new();
+        for r in 0..n {
+            out.push_str(&format!("\x1b[{};1H\x1b[2K{}", r + 1, rows.get(r).map_or("", String::as_str)));
+        }
+        t.parser.advance(&mut t.term, out.as_bytes());
+        t.rev += 1;
+    }
+
+    /// The record's rows as plain text.
+    fn record(t: &Tab) -> Vec<String> {
+        t.collect.rows().into_iter().map(|k| k.plain).collect()
+    }
+
+    /// Ticks the record at `now` and once the screen has settled.
+    fn settle(t: &mut Tab, now: &mut f64) {
+        collect::tick(t, *now);
+        *now += collect::STABLE + 0.1;
+        collect::tick(t, *now);
+        *now += 0.1;
+    }
+
+    fn alt_tab() -> (TermWindow, usize) {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.parser.advance(&mut t.term, b"\x1b[?1049h");
+        t.rev += 1;
+        let n = t.term.grid().screen_lines();
+        (w, n)
+    }
+
+    /// Screens of a program scrolled down and back up go into one record, in order, each row once;
+    /// a screen too far to place goes after it.
+    #[test]
+    fn the_record_gathers_scrolled_screens_in_order() {
+        let (mut w, n) = alt_tab();
+        let t = &mut w.tabs[0];
+        let line = |i: usize| format!("line {i:03} of the file");
+        let page = |k: usize| (k..k + n).map(line).collect::<Vec<_>>();
+        let mut now = 0.0;
+        for k in [0, 5, 9, 3, 0, 12] {
+            draw(t, &page(k));
+            settle(t, &mut now);
+        }
+        assert_eq!(record(t), (0..12 + n).map(line).collect::<Vec<_>>(), "in order, each once");
+        // Scrolled too far at once: after the record, apart.
+        draw(t, &page(200));
+        settle(t, &mut now);
+        let r = record(t);
+        assert_eq!(r[..12 + n], (0..12 + n).map(line).collect::<Vec<_>>()[..]);
+        assert_eq!(r[12 + n], "", "a gap");
+        assert_eq!(r[13 + n..], page(200)[..]);
+        // The program leaves: the record goes.
+        t.parser.advance(&mut t.term, b"\x1b[?1049l");
+        t.rev += 1;
+        settle(t, &mut now);
+        assert!(t.collect.is_empty(), "a new record when the program leaves");
+    }
+
+    /// An answer that appears at once, longer than the screen, shows only its end; scrolling up
+    /// to its start joins it with the question in one document, each row once.
+    #[test]
+    fn pieces_of_the_record_join_up_as_it_is_scrolled() {
+        let (mut w, n) = alt_tab();
+        let t = &mut w.tabs[0];
+        let mut doc: Vec<String> = vec!["Banner".into(), "version 1".into(), String::new(), "\u{276F} the question".into(), String::new()];
+        doc.extend((0..3 * n).map(|i| format!("answer row {i}")));
+        let mut now = 0.0;
+        // The question, then the whole answer at once: the screen shows its end.
+        draw(t, &doc[..4]);
+        settle(t, &mut now);
+        let len = doc.len();
+        draw(t, &doc[len - n..]);
+        settle(t, &mut now);
+        // Scrolled up a few rows at a time to the top.
+        let mut s = len - n;
+        while s > 0 {
+            s = s.saturating_sub(4);
+            // Scrolled back, the agent covers its last row with a hint.
+            let mut page = doc[s..s + n].to_vec();
+            page[n - 1] = "                Jump to bottom (ctrl+End) \u{2193}".into();
+            draw(t, &page);
+            settle(t, &mut now);
+        }
+        assert_eq!(record(t), doc, "one document, each row once");
+    }
+
+    /// A line that keeps changing (an agent's spinner) and the agent's input box stay out; a
+    /// redraw from the top with room below (as after /clear) starts the record again.
+    #[test]
+    fn the_record_leaves_out_live_lines_and_starts_again_when_cleared() {
+        let (mut w, n) = alt_tab();
+        let t = &mut w.tabs[0];
+        let cols = t.term.grid().columns();
+        let rule = "\u{2500}".repeat(cols);
+        let mut now = 0.0;
+        let screen = |answer: usize, k: usize| {
+            let mut rows: Vec<String> = vec!["Banner of the agent".into(), "version 1".into(), String::new()];
+            rows.extend((0..answer).map(|i| format!("answer line {i}")));
+            rows.push(format!("\u{273B} Thinking\u{2026} ({k}s \u{B7} {} tokens)", k * 7));
+            rows.resize(n - 4, String::new());
+            rows.extend([rule.clone(), "\u{276F} typing here".into(), rule.clone(), "  status".into()]);
+            rows
+        };
+        for k in 0..6 {
+            draw(t, &screen(k, k));
+            settle(t, &mut now);
+        }
+        let r = record(t);
+        assert_eq!(r.first().map(String::as_str), Some("Banner of the agent"));
+        assert!(r.iter().any(|l| l == "answer line 4"), "{r:?}");
+        assert!(!r.iter().any(|l| l.contains("Thinking") || l.contains("typing") || l.contains('\u{2500}')), "{r:?}");
+        // /clear: the banner and the command, nothing below.
+        let mut cleared: Vec<String> = vec!["Banner of the agent".into(), "version 1".into(), String::new(), "\u{276F} /clear".into()];
+        cleared.resize(n - 4, String::new());
+        cleared.extend([rule.clone(), "\u{276F} ".into(), rule.clone(), "  status".into()]);
+        // The command's row comes a moment after the rest: it is still taken once it settles.
+        let mut first = cleared.clone();
+        first[3] = String::new();
+        draw(t, &first);
+        collect::tick(t, now);
+        now += 0.3;
+        draw(t, &cleared);
+        collect::tick(t, now);
+        now += 0.3;
+        collect::tick(t, now);
+        settle(t, &mut now);
+        assert_eq!(record(t), vec!["Banner of the agent", "version 1", "", "\u{276F} /clear"]);
+    }
+
+    /// The Markdown view shows the record, its menu copies it, and clearing empties it.
+    #[test]
+    fn the_markdown_view_shows_copies_and_clears_the_record() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        let mut clock = 0.0;
+        let mut tick = |w: &mut TermWindow, events: Vec<Event>| {
+            clock += 0.2;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                focused: true,
+                time: Some(clock),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                w.embedded(ui);
+            })
+        };
+        tick(&mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        t.parser.advance(&mut t.term, b"\x1b[?1049h");
+        draw(t, &["# Title".into(), "Some words.".into()]);
+        w.tabs[0].view = View::Markdown;
+        for _ in 0..6 {
+            tick(&mut w, Vec::new());
+        }
+        let text = w.tabs[0].reading.as_ref().map(|r| r.1.0.clone()).unwrap_or_default();
+        assert!(text.contains("Some words."), "{text:?}");
+        // Right click: the menu; "Copy all as Markdown" copies the record.
+        let at = Pos2::new(400.0, 300.0);
+        let click = |button, pressed| Event::PointerButton { pos: at, button, pressed, modifiers: Default::default() };
+        tick(&mut w, vec![Event::PointerMoved(at), click(egui::PointerButton::Secondary, true)]);
+        tick(&mut w, vec![click(egui::PointerButton::Secondary, false)]);
+        let item = tick(&mut w, Vec::new());
+        let find = |out: &egui::FullOutput, what: &str| {
+            let mut found = None;
+            for c in &out.shapes {
+                if let egui::Shape::Text(s) = &c.shape
+                    && s.galley.job.text.contains(what)
+                {
+                    found = Some(s.galley.rect.translate(s.pos.to_vec2()).center());
+                }
+            }
+            found
+        };
+        let copy_at = find(&item, "Copy all as Markdown").expect("the menu shows");
+        let press = |pressed| Event::PointerButton { pos: copy_at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        tick(&mut w, vec![Event::PointerMoved(copy_at), press(true)]);
+        let out = tick(&mut w, vec![press(false)]);
+        let copied = out.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s.contains("Some words.")));
+        assert!(copied, "the record is copied");
+        // The clear button empties it, and what is on the screen does not come back by itself.
+        let shown = tick(&mut w, Vec::new());
+        let clear_at = find(&shown, ic::ERASER).expect("the clear button");
+        tick(&mut w, vec![Event::PointerMoved(clear_at), Event::PointerButton { pos: clear_at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }]);
+        tick(&mut w, vec![Event::PointerButton { pos: clear_at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+        for _ in 0..6 {
+            tick(&mut w, Vec::new());
+        }
+        assert!(w.tabs[0].collect.is_empty(), "cleared");
+        // Ctrl+F opens the search, which finds the words.
+        let t = &mut w.tabs[0];
+        draw(t, &["# Title".into(), "Other words here.".into()]);
+        for _ in 0..6 {
+            tick(&mut w, Vec::new());
+        }
+        tick(&mut w, vec![Event::Key { key: Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]);
+        tick(&mut w, vec![Event::Text("other".into())]);
+        tick(&mut w, Vec::new());
+        let out = tick(&mut w, Vec::new());
+        assert!(find(&out, "1 of 1").is_some(), "the search finds it");
+    }
+
     /// Python as Claude Code colours it: comments, imports with one colour and functions two
     /// blank lines apart stay one block; a bold heading and a numbered list stay text.
     #[test]
@@ -1614,7 +1845,8 @@ mod tests {
     /// and the document is made again from the rows as they wrap at the new width.
     #[test]
     fn reading_views_follow_the_window_size() {
-        for view in [View::Text, View::Markdown] {
+        // The Markdown view is read, not typed into: the terminal keeps the size the others give it.
+        for view in [View::Text] {
             let ctx = egui::Context::default();
             let mut w = TermWindow::new(None);
             let mut clock = 0.0;
@@ -1815,18 +2047,108 @@ mod tests {
                 let events = if k % 2 == 0 { vec![wheel(dir_dy)] } else { Vec::new() };
                 frame(&mut w, &mut snap, events);
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                let text = w.tabs[0].reading.as_ref().map(|r| r.2.0.clone()).unwrap_or_default();
+                let text = w.tabs[0].reading.as_ref().map(|r| r.1.0.clone()).unwrap_or_default();
                 log.push_str(&format!("===== frame {n} wheel {}\n{text}\n", if k % 2 == 0 { dir_dy } else { 0.0 }));
                 snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_{n:03}.png")));
                 n += 1;
             }
         }
         std::fs::write(dir.join("scroll_frames.txt"), log).unwrap();
+        // /clear typed in the text view: the screen is cleared.
+        w.tabs[0].view = View::Text;
+        frame(&mut w, &mut snap, vec![Event::Text("/clear".into())]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        frame(&mut w, &mut snap, vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+        for _ in 0..60 {
+            frame(&mut w, &mut snap, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        snap.save(&ctx, size, &dir.join("claude_cleared.png"));
+        w.tabs[0].view = View::Markdown;
+        for _ in 0..30 {
+            frame(&mut w, &mut snap, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        snap.save(&ctx, size, &dir.join("claude_md_cleared.png"));
+        let text = w.tabs[0].reading.as_ref().map(|r| r.1.0.clone()).unwrap_or_default();
+        let screen = reader::screen_text(&w.tabs[0], 0, w.tabs[0].term.grid().screen_lines() as i32 - 1).0;
+        std::fs::write(dir.join("cleared.md"), format!("{text}\n----\n{}\n----\n{screen}", collect::debug(&w.tabs[0]))).unwrap();
         w.tabs[0].view = View::Text;
         for _ in 0..10 {
             frame(&mut w, &mut snap, Vec::new());
         }
         snap.save(&ctx, size, &dir.join("claude_text.png"));
+        let _ = w.close_all();
+    }
+
+    /// nano on the VM in the Markdown view: scrolling through a file with the wheel gathers it, in
+    /// order and once each line; leaving nano starts the record again. Saves pictures and the
+    /// record to SSHREMOTE_SNAP_DIR; needs SSHREMOTE_NANO=1 and `ssh ubuntu` working.
+    #[test]
+    #[ignore]
+    fn markdown_view_with_nano() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        if std::env::var_os("SSHREMOTE_NANO").is_none() {
+            return;
+        }
+        let file = std::env::var("SSHREMOTE_NANO_FILE").unwrap_or_else(|_| "/home/a/sshremote-src/README.md".into());
+        let launch = vec!["ssh".into(), "-t".into(), "ubuntu".into(), "nano".into(), "-v".into(), file];
+        let profile = Profile { name: "nano".into(), icon: ic::TERMINAL, launch: Launch::Local(launch) };
+        let mut w = TermWindow::single(profile);
+        let ctx = egui::Context::default();
+        crate::gui::style(&ctx);
+        let size = Vec2::new(1100.0, 760.0);
+        let mut snap = crate::gui::snapshot::Snap::default();
+        let mut clock = 0.0;
+        let mut frame = |w: &mut TermWindow, snap: &mut crate::gui::snapshot::Snap, events: Vec<Event>| {
+            clock += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                focused: true,
+                time: Some(clock),
+                events,
+                ..Default::default()
+            };
+            snap.frame(&ctx, input, |ui| {
+                w.embedded(ui);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        for _ in 0..80 {
+            frame(&mut w, &mut snap, Vec::new());
+        }
+        snap.save(&ctx, size, &dir.join("nano_text.png"));
+        w.tabs[0].view = View::Markdown;
+        for _ in 0..30 {
+            frame(&mut w, &mut snap, Vec::new());
+        }
+        snap.save(&ctx, size, &dir.join("nano_md_start.png"));
+        let wheel = |dy: f32| Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+        frame(&mut w, &mut snap, vec![Event::PointerMoved(Pos2::new(500.0, 300.0))]);
+        // Down through the file a notch at a time, as a hand does.
+        for k in 0..240 {
+            frame(&mut w, &mut snap, if k % 2 == 0 { vec![wheel(-60.0)] } else { Vec::new() });
+            if k % 60 == 59 {
+                snap.save(&ctx, size, &dir.join(format!("nano_md_scroll_{:02}.png", k / 60)));
+            }
+        }
+        for _ in 0..20 {
+            frame(&mut w, &mut snap, Vec::new());
+        }
+        snap.save(&ctx, size, &dir.join("nano_md_end.png"));
+        let text = w.tabs[0].reading.as_ref().map(|r| r.1.0.clone()).unwrap_or_default();
+        let plain = w.tabs[0].collect.rows().into_iter().map(|k| k.plain).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("nano_record.md"), &text).unwrap();
+        std::fs::write(dir.join("nano_record.txt"), &plain).unwrap();
+        // Ctrl+X leaves nano: the record starts again.
+        if let Backend::Local(l) = &mut w.tabs[0].backend {
+            l.write(b"\x18");
+        }
+        for _ in 0..40 {
+            frame(&mut w, &mut snap, Vec::new());
+        }
+        snap.save(&ctx, size, &dir.join("nano_md_left.png"));
+        assert!(w.tabs[0].collect.is_empty(), "the record goes when nano leaves");
         let _ = w.close_all();
     }
 
@@ -1853,7 +2175,7 @@ mod tests {
         tick(&mut w);
         w.tabs[0].view = View::Markdown;
         tick(&mut w);
-        let built = |w: &TermWindow| w.tabs[0].reading.as_ref().map(|r| std::rc::Rc::as_ptr(&r.2) as usize);
+        let built = |w: &TermWindow| w.tabs[0].reading.as_ref().map(|r| std::rc::Rc::as_ptr(&r.1) as usize);
         let mut builds = std::collections::BTreeSet::new();
         // One second of output every frame.
         for k in 0..20 {
@@ -1871,7 +2193,7 @@ mod tests {
         for _ in 0..12 {
             tick(&mut w);
         }
-        let doc = &w.tabs[0].reading.as_ref().expect("built").2;
+        let doc = &w.tabs[0].reading.as_ref().expect("built").1;
         assert!(doc.0.contains("done streaming"), "{:?}", doc.0);
         assert!(!doc.1.blocks.iter().any(|b| matches!(b, crate::markdown::Block::Code { code, .. } if code.trim().is_empty())));
     }
@@ -1938,7 +2260,9 @@ mod tests {
                 &mut w,
                 vec![Event::Ime(egui::ImeEvent::Commit("\u{D55C}".into())), Event::Text("a".into())],
             );
-            assert_eq!(typed(&done), "\u{D55C}a");
+            // The Markdown view is a record to read and copy: nothing typed there goes to the shell.
+            let want = if view == View::Text { "\u{D55C}a" } else { "" };
+            assert_eq!(typed(&done), want, "{view:?}");
         }
     }
 
@@ -1967,7 +2291,7 @@ mod tests {
             t.parser.advance(&mut t.term, format!("line {n}\r\n").as_bytes());
         }
         t.rev += 1;
-        for view in [View::Text, View::Markdown] {
+        for view in [View::Text] {
             w.tabs[0].view = view;
             for _ in 0..3 {
                 ime_y(&ctx, &mut w, Vec::new());
@@ -2115,9 +2439,11 @@ mod tests {
                 })
                 .collect();
             assert!(copied.iter().any(|s| s.contains("alpha")), "{view:?}: the selection is copied: {copied:?}");
-            // Copying ends the selection, so the next Ctrl+C interrupts, as in Windows Terminal.
+            // Copying ends the selection, so the next Ctrl+C interrupts, as in Windows Terminal; the
+            // Markdown view takes no keys, so there it does nothing.
             frame(&ctx, &mut w, Vec::new());
-            assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Copy])), "\u{3}", "{view:?}: the next Ctrl+C interrupts");
+            let want = if view == View::Text { "\u{3}" } else { "" };
+            assert_eq!(typed(&frame(&ctx, &mut w, vec![Event::Copy])), want, "{view:?}: the next Ctrl+C");
         }
     }
 
