@@ -1142,12 +1142,11 @@ mod tests {
 
     #[test]
     fn font_files_tell_their_names() {
-        let dir = font_dirs().into_iter().next().unwrap();
-        let some = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "ttf")).take(20).collect::<Vec<_>>();
-        let named: Vec<_> = some.iter().filter_map(|p| font_info(p)).collect();
-        assert!(!named.is_empty(), "names read from {some:?}");
+        // The fonts as the font list finds them (in folders under the font folders too).
         let all = scan_fonts();
         assert!(all.len() >= 10 && all.iter().any(|f| f.mono), "{} fonts found", all.len());
+        let named: Vec<_> = all.iter().take(20).filter_map(|f| font_info(std::path::Path::new(&f.path))).collect();
+        assert_eq!(named.len(), all.len().min(20), "each found font tells its name again");
         if cfg!(windows) {
             let (name, mono) = font_info(std::path::Path::new(r"C:\Windows\Fonts\consola.ttf")).unwrap();
             assert!(name.starts_with("Consolas") && mono, "{name} {mono}");
