@@ -43,6 +43,14 @@ pub(crate) enum LogoPlace {
     Center,
 }
 
+/// Where the overlay goes: in the window's corner with this computer's figures, or in each
+/// terminal with the figures of the computer it runs on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HudScope {
+    Window,
+    Terminals,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Corner {
     TopLeft,
@@ -90,6 +98,9 @@ pub(crate) struct Look {
     pub hud_disk: bool,
     pub hud_clock: bool,
     pub hud_corner: Corner,
+    pub hud_scope: HudScope,
+    /// In the active terminal only.
+    pub hud_active_only: bool,
     pub hud_text: f32,
     pub hud_bg: [u8; 3],
     pub hud_bg_alpha: f32,
@@ -118,15 +129,17 @@ impl Default for Look {
             logo_place: LogoPlace::TitleBar,
             logo_size: 96.0,
             logo_opacity: 0.8,
-            hud: false,
+            hud: true,
             hud_cpu: true,
             hud_ram: true,
-            hud_disk: false,
+            hud_disk: true,
             hud_clock: true,
-            hud_corner: Corner::BottomRight,
-            hud_text: 0.6,
+            hud_corner: Corner::TopRight,
+            hud_scope: HudScope::Terminals,
+            hud_active_only: false,
+            hud_text: 0.75,
             hud_bg: [0, 0, 0],
-            hud_bg_alpha: 0.35,
+            hud_bg_alpha: 0.6,
         }
     }
 }
@@ -169,6 +182,8 @@ impl Look {
             "logo_size": self.logo_size, "logo_opacity": self.logo_opacity,
             "hud": self.hud, "hud_cpu": self.hud_cpu, "hud_ram": self.hud_ram, "hud_disk": self.hud_disk,
             "hud_clock": self.hud_clock, "hud_corner": name_of(&CORNERS, self.hud_corner),
+            "hud_scope": if self.hud_scope == HudScope::Window { "window" } else { "terminals" },
+            "hud_active_only": self.hud_active_only,
             "hud_text": self.hud_text, "hud_bg": self.hud_bg, "hud_bg_alpha": self.hud_bg_alpha,
         })
         .to_string()
@@ -213,6 +228,12 @@ impl Look {
             hud_disk: flag("hud_disk", d.hud_disk),
             hud_clock: flag("hud_clock", d.hud_clock),
             hud_corner: from_name(&CORNERS, v.get("hud_corner").and_then(|x| x.as_str()), d.hud_corner),
+            hud_scope: match v.get("hud_scope").and_then(|x| x.as_str()) {
+                Some("window") => HudScope::Window,
+                Some("terminals") => HudScope::Terminals,
+                _ => d.hud_scope,
+            },
+            hud_active_only: flag("hud_active_only", d.hud_active_only),
             hud_text: num("hud_text", d.hud_text, 0.1, 1.0),
             hud_bg: rgb("hud_bg", d.hud_bg),
             hud_bg_alpha: num("hud_bg_alpha", d.hud_bg_alpha, 0.0, 1.0),
@@ -574,7 +595,7 @@ fn hud_line(l: &Look, s: &Stats) -> String {
 
 /// The overlay in a corner of the window, over everything and taking no clicks.
 fn overlay(ctx: &egui::Context, l: &Look) {
-    if !l.hud || !(l.hud_cpu || l.hud_ram || l.hud_disk || l.hud_clock) {
+    if !l.hud || l.hud_scope != HudScope::Window || !(l.hud_cpu || l.hud_ram || l.hud_disk || l.hud_clock) {
         return;
     }
     let line = hud_line(l, &stats());
@@ -589,12 +610,7 @@ fn overlay(ctx: &egui::Context, l: &Look) {
         Corner::BottomLeft => (egui::Align2::LEFT_BOTTOM, Vec2::new(10.0, -10.0)),
         Corner::BottomRight => (egui::Align2::RIGHT_BOTTOM, Vec2::new(-10.0, -10.0)),
     };
-    let [r, g, b] = l.hud_bg;
-    let back = Color32::from_rgba_unmultiplied(r, g, b, (l.hud_bg_alpha * 255.0) as u8);
-    // Text that reads on the chosen background (on the window's own when that is clear).
-    let light_back = if l.hud_bg_alpha > 0.4 { (r as u32 * 3 + g as u32 * 6 + b as u32) / 10 > 140 } else { !super::theme::dark() };
-    let ink = if light_back { Color32::BLACK } else { Color32::WHITE };
-    let ink = ink.gamma_multiply(l.hud_text);
+    let (back, ink) = hud_colours(l);
     egui::Area::new(egui::Id::unique("look-overlay"))
         .order(egui::Order::Foreground)
         .anchor(align, off)
@@ -604,6 +620,168 @@ fn overlay(ctx: &egui::Context, l: &Look) {
                 ui.add(egui::Label::new(RichText::new(line).size(12.0).color(ink).monospace()).extend());
             });
         });
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// The load and the time of the computer a terminal runs on.
+
+/// One line of `sshremote --stats`: busy and total CPU time, memory and disk used and total, and
+/// the time of day ("-" for what could not be read).
+pub(crate) fn stats_line() -> String {
+    let (cpu, ram, disk, clock) = sys_now();
+    let pair = |p: Option<(f64, f64)>| p.map_or("- -".to_string(), |(a, b)| format!("{a:.0} {b:.0}"));
+    let cpu = cpu.map_or("- -".to_string(), |(a, b)| format!("{a} {b}"));
+    format!("S {cpu} {} {} {clock}", pair(ram), pair(disk))
+}
+
+/// `sshremote --stats`: the line above every 2 s, until whoever reads it goes.
+pub(crate) fn print_stats() -> Result<(), String> {
+    use std::io::Write;
+    loop {
+        let mut out = std::io::stdout().lock();
+        if writeln!(out, "{}", stats_line()).and_then(|_| out.flush()).is_err() {
+            return Ok(());
+        }
+        drop(out);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// The same from a host without sshremote: Linux's own counters, read by its shell.
+const SHELL_STATS: &str = "while :; do c=$(awk '/^cpu /{print $2+$3+$4+$7+$8+$9, $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat); \
+m=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{print (t-a)*1024, t*1024}' /proc/meminfo); \
+d=$(df -kP / | awk 'NR==2{print $3*1024, $2*1024}'); echo \"S $c $m $d $(date +%H:%M)\"; sleep 2; done";
+
+/// A host's figures as they come, read from its `--stats` line by line.
+struct Feed {
+    key: Vec<String>,
+    stats: Option<Stats>,
+    cpu_times: Option<(u64, u64)>,
+    used: std::time::Instant,
+}
+
+static FEEDS: Mutex<Vec<std::sync::Arc<Mutex<Feed>>>> = Mutex::new(Vec::new());
+
+/// The figures of the computer a terminal runs on: this one with no SSH command, else its host's,
+/// read over a connection of their own (one per host, shared by its panes, closed when no pane
+/// shows them for a while); None until the first arrive.
+fn host_stats(ctx: &egui::Context, ssh: Option<&[String]>) -> Option<Stats> {
+    let Some(ssh) = ssh.filter(|s| !s.is_empty()) else { return Some(stats()) };
+    let feed = {
+        let mut feeds = FEEDS.lock().ok()?;
+        match feeds.iter().find(|f| f.lock().is_ok_and(|f| f.key == ssh)) {
+            Some(f) => f.clone(),
+            None => {
+                let f = std::sync::Arc::new(Mutex::new(Feed { key: ssh.to_vec(), stats: None, cpu_times: None, used: std::time::Instant::now() }));
+                feeds.push(f.clone());
+                let (me, ctx) = (f.clone(), ctx.clone());
+                std::thread::spawn(move || follow(&me, &ctx));
+                f
+            }
+        }
+    };
+    let mut f = feed.lock().ok()?;
+    f.used = std::time::Instant::now();
+    f.stats.clone()
+}
+
+/// Reads a host's figures while a pane shows them; tries again after a while when the
+/// connection fails (the host asleep, or not yet signed in to).
+fn follow(me: &std::sync::Arc<Mutex<Feed>>, ctx: &egui::Context) {
+    use std::io::BufRead;
+    let idle = || me.lock().map_or(true, |f| f.used.elapsed() > std::time::Duration::from_secs(15));
+    while !idle() {
+        let key = me.lock().map(|f| f.key.clone()).unwrap_or_default();
+        // ssh [-p PORT] HOST, quietly, without asking for anything.
+        let mut cmd = std::process::Command::new(&key[0]);
+        cmd.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15"]);
+        cmd.args(&key[1..]);
+        // sshremote where the agent is looked for (on PATH, else ~/.local/bin), else the shell.
+        cmd.arg(format!("sshremote --stats || ~/.local/bin/sshremote --stats || {SHELL_STATS}"));
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        crate::sys::quiet(&mut cmd);
+        if let Ok(mut child) = cmd.spawn() {
+            let out = child.stdout.take();
+            for line in out.map(std::io::BufReader::new).into_iter().flat_map(|r| r.lines()).map_while(Result::ok) {
+                if let Some((times, s)) = parse_stats(&line)
+                    && let Ok(mut f) = me.lock()
+                {
+                    let cpu = match (f.cpu_times, times) {
+                        (Some((b0, t0)), Some((b1, t1))) if t1 > t0 => Some(((b1 - b0) as f32 / (t1 - t0) as f32 * 100.0).clamp(0.0, 100.0)),
+                        _ => f.stats.as_ref().and_then(|s| s.cpu),
+                    };
+                    f.cpu_times = times;
+                    f.stats = Some(Stats { cpu, ..s });
+                    ctx.request_repaint();
+                }
+                if idle() {
+                    break;
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for _ in 0..20 {
+            if idle() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    if let Ok(mut feeds) = FEEDS.lock() {
+        feeds.retain(|f| !std::sync::Arc::ptr_eq(f, me));
+    }
+}
+
+/// A `--stats` line: the CPU times, and the rest as figures to show.
+fn parse_stats(line: &str) -> Option<(Option<(u64, u64)>, Stats)> {
+    let f: Vec<&str> = line.split_whitespace().collect();
+    if f.len() != 8 || f[0] != "S" {
+        return None;
+    }
+    let n = |i: usize| f[i].parse::<f64>().ok();
+    let cpu = f[1].parse::<u64>().ok().zip(f[2].parse::<u64>().ok());
+    let pair = |i: usize| n(i).zip(n(i + 1)).filter(|p| p.1 > 0.0);
+    Some((cpu, Stats { cpu: None, ram: pair(3), disk: pair(5), clock: f[7].to_string() }))
+}
+
+/// The overlay inside a terminal pane: what its computer is doing, with its name, in the corner
+/// chosen; in every terminal, or the active one only.
+pub(crate) fn pane_overlay(ui: &egui::Ui, rect: Rect, ssh: Option<&[String]>, label: &str, active: bool) {
+    let l = get();
+    if !l.hud || l.hud_scope != HudScope::Terminals || (l.hud_active_only && !active) || !(l.hud_cpu || l.hud_ram || l.hud_disk || l.hud_clock) {
+        return;
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
+    let line = match host_stats(ui.ctx(), ssh) {
+        Some(s) => hud_line(&l, &s),
+        None => "\u{2026}".to_string(),
+    };
+    let who = if ssh.is_some() { label.to_string() } else { "this computer".to_string() };
+    let text = if line.is_empty() { who } else { format!("{who}  \u{B7}  {line}") };
+    let (back, ink) = hud_colours(&l);
+    let painter = ui.painter().with_clip_rect(rect);
+    let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.5), ink);
+    let size = galley.size() + Vec2::new(16.0, 8.0);
+    let at = match l.hud_corner {
+        Corner::TopLeft => Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
+        Corner::TopRight => Pos2::new(rect.right() - 8.0 - size.x, rect.top() + 8.0),
+        Corner::BottomLeft => Pos2::new(rect.left() + 8.0, rect.bottom() - 8.0 - size.y),
+        Corner::BottomRight => Pos2::new(rect.right() - 8.0 - size.x, rect.bottom() - 8.0 - size.y),
+    };
+    let r = Rect::from_min_size(at, size);
+    painter.rect_filled(r, CornerRadius::same(6), back);
+    painter.galley(r.min + Vec2::new(8.0, 4.0), galley, ink);
+}
+
+/// The overlay's background, and text that reads on it (on the window's own when it is clear).
+fn hud_colours(l: &Look) -> (Color32, Color32) {
+    let [r, g, b] = l.hud_bg;
+    let back = Color32::from_rgba_unmultiplied(r, g, b, (l.hud_bg_alpha * 255.0) as u8);
+    let light_back = if l.hud_bg_alpha > 0.4 { (r as u32 * 3 + g as u32 * 6 + b as u32) / 10 > 140 } else { !super::theme::dark() };
+    let ink = if light_back { Color32::BLACK } else { Color32::WHITE };
+    (back, ink.gamma_multiply(l.hud_text))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1182,8 +1360,16 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     }
 
     heading(ui, "Overlay");
-    ui.checkbox(&mut l.hud, "Show the system's load and the time in a corner");
+    ui.checkbox(&mut l.hud, "Show the load and the time");
     if l.hud {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Where");
+            ui.selectable_value(&mut l.hud_scope, HudScope::Terminals, "In each terminal, from the computer it runs on");
+            ui.selectable_value(&mut l.hud_scope, HudScope::Window, "In the window, from this computer");
+        });
+        if l.hud_scope == HudScope::Terminals {
+            ui.checkbox(&mut l.hud_active_only, "Only in the active terminal");
+        }
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut l.hud_cpu, "CPU");
             ui.checkbox(&mut l.hud_ram, "Memory");
@@ -1278,6 +1464,19 @@ mod tests {
         assert_eq!(hud_line(&l, &s), "CPU 12%  \u{B7}  RAM 8.0/32 GB  \u{B7}  Disk 60%  \u{B7}  14:05");
         let l = Look { hud_cpu: false, hud_ram: false, hud_disk: false, hud_clock: true, ..l };
         assert_eq!(hud_line(&l, &s), "14:05");
+    }
+
+    /// What `--stats` writes reads back as the figures, and a host's shell's line as well.
+    #[test]
+    fn stats_lines_read_back() {
+        let (times, s) = parse_stats(&stats_line()).expect("its own line");
+        assert!(times.is_some() && s.ram.is_some() && s.disk.is_some() && s.clock.len() == 5);
+        let (times, s) = parse_stats("S 144600854 1303199213 18519367680 65371582464 93436006400 103976787968 22:14").unwrap();
+        assert_eq!(times, Some((144600854, 1303199213)));
+        assert_eq!(s.ram, Some((18519367680.0, 65371582464.0)));
+        assert_eq!(s.clock, "22:14");
+        assert!(parse_stats("S - - - - - - 22:14").is_some_and(|(t, s)| t.is_none() && s.ram.is_none()));
+        assert!(parse_stats("bash: sshremote: command not found").is_none());
     }
 
     #[test]

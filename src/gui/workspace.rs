@@ -875,6 +875,10 @@ impl Workspace {
                     None => {}
                 },
             }
+            // In a terminal, what the computer it runs on is doing (its SSH host's, or this one's).
+            if matches!(pane.state, State::Shell(_)) || pane.mode == PaneMode::Terminal {
+                crate::gui::look::pane_overlay(ui, *rect, pane.ssh_cmd.as_deref(), &pane.label, is_active);
+            }
             if several && is_active && self.zoom.is_none() {
                 ui.painter().rect_stroke(*rect, CornerRadius::ZERO, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
             }
@@ -2030,6 +2034,43 @@ mod tests {
         }
         look::set(Look::default());
         crate::termwin::reset_look();
+        h.w.close_all();
+    }
+
+    /// Each terminal shows what its own computer is doing: an SSH terminal its host's figures (from
+    /// SSHREMOTE_SSH_HOST), a local one this computer's; then only in the active one.
+    #[test]
+    #[ignore]
+    fn workspace_host_figures() {
+        use crate::gui::look::{self, HudScope, Look};
+        let (Some(dir), Ok(host)) = (std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from), std::env::var("SSHREMOTE_SSH_HOST")) else { return };
+        let mut h = Harness::new();
+        look::set(Look { image: String::new(), anim: String::new(), ..Look::default() });
+        let ssh = Launch::Shell { label: host.clone(), profile: crate::termwin::ssh_profile(&host, ""), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: Some(vec!["ssh".into(), host.clone()]) };
+        h.w.add(ssh, Place::Tab, (false, false, false));
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Split { below: false }, (false, false, false));
+        let shown = |h: &mut Harness, what: &str| {
+            for _ in 0..160 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.frame(Vec::new());
+                if !h.snap.find(what).is_empty() {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(shown(&mut h, &format!("{host}  \u{B7}  CPU")), "the SSH terminal shows its host's figures");
+        assert!(shown(&mut h, "this computer  \u{B7}  CPU"), "the local one this computer's");
+        h.snap.save(&h.ctx, h.size, &dir.join("host_figures.png"));
+        look::set(Look { image: String::new(), anim: String::new(), hud_active_only: true, ..Look::default() });
+        for _ in 0..5 {
+            h.frame(Vec::new());
+        }
+        assert!(h.snap.find(&format!("{host}  \u{B7}")).is_empty(), "only the active terminal (the local one) shows them");
+        h.snap.save(&h.ctx, h.size, &dir.join("host_figures_active.png"));
+        assert_eq!(Look::default().hud_scope, HudScope::Terminals);
+        look::set(Look::default());
         h.w.close_all();
     }
 

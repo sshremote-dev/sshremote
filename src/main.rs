@@ -322,7 +322,7 @@ fn main() {
     // Without a console of its own (a double click under the manifest's detached policy), command-line
     // use borrows the terminal it was started from, or opens one; window modes and helpers need none.
     #[cfg(windows)]
-    if !args.iter().any(|a| ["--gui", "--service", "--chat-window", "--agent"].contains(&a.as_str()))
+    if !args.iter().any(|a| ["--gui", "--service", "--chat-window", "--agent", "--stats"].contains(&a.as_str()))
         && args[0] != "terminal"
     {
         attach_console();
@@ -364,6 +364,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
         "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
+        // The load and the time every 2 s, for a viewer to show beside this host's terminals.
+        "--stats" => gui::look::print_stats(),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
