@@ -1276,16 +1276,17 @@ impl Viewer {
                     }
                 }
             }
-            ToClient::FetchEnd { id, ok, text } => match {
+            ToClient::FetchEnd { id, ok, text } => {
                 self.transfers.retain(|t| t.upload || t.id != id);
-                self.inbox.end(id, ok, &text)
-            } {
+                let note = self.inbox.end(id, ok, &text);
+                match note {
                 Some(crate::files::Note::Done { ok, text, .. }) => {
                     let t = if ok { format!("download ok={ok} {text}") } else { format!("download failed: {text}") };
                     self.notify(&t)?
                 }
                 _ => self.notify(&format!("download failed: {text}"))?,
-            },
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1496,7 +1497,7 @@ impl Viewer {
         paint_bytes: 0,
         label: format!("{host} {}x{} {}", sess.desk.0, sess.desk.1, sess.backend),
         sess,
-        ctl: Control::new(&opt, Mode::True),
+        ctl: Control::new(opt, Mode::True),
         cols: 0,
         rows: 0,
         cw: 10,
