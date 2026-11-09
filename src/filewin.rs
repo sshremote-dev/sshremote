@@ -190,6 +190,16 @@ fn sort(entries: &mut [DirEntry], by: Sort, ascending: bool) {
     });
 }
 
+/// Files read as text (notes, logs, configuration, code), shown with lines in their icon.
+fn is_text(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "txt" | "md" | "log" | "csv" | "json" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg" | "xml" | "html" | "css"
+            | "rs" | "py" | "js" | "ts" | "go" | "c" | "h" | "cpp" | "java" | "sh" | "ps1" | "bat" | "sql"
+    ) || name.starts_with('.') && !name.contains('/')
+}
+
 /// "1 file", "3 files".
 fn count(n: usize, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
@@ -599,12 +609,13 @@ impl FileWindow {
                         ic::HARD_DRIVE
                     } else if e.dir {
                         ic::FOLDER
+                    } else if is_text(&e.name) {
+                        ic::FILE_TEXT
                     } else {
                         ic::FILE
                     };
-                    // Folders in amber, deeper on a light background so they still stand out.
-                    let folder = if ui.visuals().dark_mode { Color32::from_rgb(230, 180, 70) } else { Color32::from_rgb(196, 134, 18) };
-                    let glyph_color = if e.dir { folder } else { weak };
+                    // Folders and drives in the app's blue for the theme; files quieter.
+                    let glyph_color = if e.dir || p.path == DRIVES { crate::gui::brand() } else { weak };
                     painter.text(
                         rect.left_center() + Vec2::new(8.0, 0.0),
                         Align2::LEFT_CENTER,

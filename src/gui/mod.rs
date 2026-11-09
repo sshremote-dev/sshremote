@@ -49,6 +49,7 @@ pub(crate) mod ic {
     pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const LAYOUT: &str = "\u{E6D6}";
     pub const USER: &str = "\u{E4C2}";
+    pub const FILE_TEXT: &str = "\u{E23A}";
     pub const ROWS: &str = "\u{E5A2}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const PLUS: &str = "\u{E3D4}";
@@ -396,6 +397,11 @@ pub(crate) fn tool_button(glyph: &str, on: bool) -> egui::Button<'_> {
         .corner_radius(crate::gui::theme::R_SM)
         .frame_when_inactive(on);
     if on { b.fill(selected_fill()).stroke(egui::Stroke::new(1.0, selected_stroke())) } else { b }
+}
+
+/// The app's own blue in each theme (the icon's): folders, and what belongs to the app.
+pub(crate) fn brand() -> Color32 {
+    if theme::dark() { Color32::from_rgb(0x7C, 0xB4, 0xFF) } else { Color32::from_rgb(0x36, 0x59, 0xD9) }
 }
 
 /// The tint behind something selected: barely off the background.

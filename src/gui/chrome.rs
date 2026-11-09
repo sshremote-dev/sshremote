@@ -109,6 +109,8 @@ pub fn on_edge(ctx: &egui::Context, p: Pos2) -> bool {
 pub struct BarResponse {
     /// The close button was pressed; the window decides (it may ask first).
     pub close: bool,
+    /// In full screen the middle button leaves it; the window decides how (its own state).
+    pub leave_full: bool,
 }
 
 /// A title bar across the top of `ui`: the app's icon, then `content` (tabs, a title, a toolbar)
@@ -151,19 +153,25 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         );
         child.set_clip_rect(middle);
         content(&mut child);
-        out.close |= caption_buttons(ui, buttons);
+        let (close, leave) = caption_buttons(ui, buttons);
+        out.close |= close;
+        out.leave_full |= leave;
     });
     out
 }
 
 /// Minimize, maximize or restore, and close, drawn as Windows 11 draws them. True for close.
-fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> bool {
+fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> (bool, bool) {
     let ctx = ui.ctx().clone();
     let fg = ui.visuals().text_color();
     let max = maximized(&ctx);
+    // In full screen the middle button leaves full screen (maximizing means nothing there).
+    let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+    let mut leave = false;
     let one_size = fixed(&ctx);
     let mut close = false;
-    for (k, tip) in ["Minimize", if max { "Restore Down" } else { "Maximize" }, "Close"].into_iter().enumerate() {
+    let middle = if full { "Leave full screen (F11)" } else if max { "Restore Down" } else { "Maximize" };
+    for (k, tip) in ["Minimize", middle, "Close"].into_iter().enumerate() {
         // A window of one size has no maximize: minimize moves over beside close.
         if one_size && k == 1 {
             continue;
@@ -207,12 +215,13 @@ fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> bool {
         if resp.clicked() {
             match k {
                 0 => ctx.send_viewport_cmd(ViewportCommand::Minimized(true)),
+                1 if full => leave = true,
                 1 => ctx.send_viewport_cmd(ViewportCommand::Maximized(!max)),
                 _ => close = true,
             }
         }
     }
-    close
+    (close, leave)
 }
 
 /// The system menu (Restore, Move, Size, Minimize, Maximize, Close) at `at`, in window points.

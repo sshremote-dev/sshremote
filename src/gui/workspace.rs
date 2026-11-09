@@ -752,8 +752,7 @@ impl Workspace {
         }
         // The title bar, unless a full screen hides it until the pointer reaches the top edge.
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
-        let show_bar =
-            self.zoom.is_none() && (!self.window_full || now < self.reveal_until || ctx.any_popup_open() || menu_open(&ctx));
+        let show_bar = !self.window_full || now < self.reveal_until || ctx.any_popup_open() || menu_open(&ctx);
         if show_bar {
             // In the window's full screen the bar comes down over the panes, as the screen's
             // toolbar does, rather than pushing them down.
@@ -772,6 +771,9 @@ impl Workspace {
             if bar.close {
                 self.confirm = Some(Confirm::Window);
             }
+            if bar.leave_full {
+                self.window_full = false;
+            }
             // Kept while the pointer is on it or one of its menus is open.
             let on_bar = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= super::chrome::HEIGHT + 4.0);
             if self.window_full && (on_bar || ctx.any_popup_open() || menu_open(&ctx)) {
@@ -781,7 +783,7 @@ impl Workspace {
         let area = ui.available_rect_before_wrap();
         self.panes_area = area;
         self.shortcuts(&ctx, area);
-        let full = self.zoom.is_some() || self.window_full;
+        let full = self.window_full;
         if full != self.sent_full {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(full));
             self.sent_full = full;
@@ -828,8 +830,10 @@ impl Workspace {
                 }
                 State::Live(r) => {
                     r.active = is_active;
-                    r.zoomed = self.zoom == Some(*id);
-                    r.filling = r.zoomed || (self.window_full && !several);
+                    // The screen's own full-screen key (Ctrl+Alt+Enter) is this pane alone on the
+                    // whole monitor: zoomed and the window full screen.
+                    r.zoomed = self.zoom == Some(*id) && self.window_full;
+                    r.filling = self.window_full && (self.zoom == Some(*id) || !several);
                     let keys = if is_active { grabbed.take().unwrap_or_default() } else { Vec::new() };
                     match r.show(&mut child, keys) {
                         Err(e) if e == "disconnected" => closing.push(*id),
@@ -910,10 +914,8 @@ impl Workspace {
             self.set_mode(id, PaneMode::Terminal);
         }
         if let Some(z) = zoom_req {
+            self.window_full = z.is_some();
             self.set_zoom(&ctx, z);
-        }
-        if self.zoom.is_some() {
-            self.dock(ui, area, now);
         }
         for id in closing {
             self.close_pane(id);
@@ -956,7 +958,6 @@ impl Workspace {
         let panes = self.order(self.current).len();
         if take(Modifiers::NONE, Key::F11) {
             self.window_full = !self.window_full;
-            self.zoom = None;
         } else if take(cs, Key::Enter) {
             let z = if self.zoom == Some(active) { None } else { Some(active) };
             self.set_zoom(ctx, z);
@@ -985,7 +986,7 @@ impl Workspace {
                 if let Some(at) = order.iter().position(|&id| id == active) {
                     let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
                     self.tabs[self.current].active = order[next];
-                    // In a pane's full screen, the next pane takes the screen.
+                    // In a zoomed tab, the next pane takes its place.
                     if self.zoom.is_some() {
                         self.zoom = Some(order[next]);
                     }
@@ -1011,7 +1012,8 @@ impl Workspace {
             self.controls_w = 0.0;
         }
         // The controls fold before the tabs shrink below three at their narrowest.
-        let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - PLUS_W;
+        // The window's full-screen button and its separator stay at the right in any width.
+        let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - PLUS_W - 46.0;
         let fold_controls = room < mode_w + self.controls_w + LAYOUT_W;
         let fold_layout = room < mode_w + MORE_W + LAYOUT_W;
         // Narrower still: the mode drop-down shows its icon only (its full width is about 150).
@@ -1022,6 +1024,16 @@ impl Workspace {
         if let Some(active) = self.active_id() {
             let ui = &mut right;
             ui.spacing_mut().item_spacing.x = 2.0;
+            // The whole window on the monitor, beside the window's own buttons.
+            let (glyph, tip) = if self.window_full {
+                (ic::ARROWS_IN, "Leave full screen (F11)")
+            } else {
+                (ic::ARROWS_OUT, "Full screen: the window on the whole monitor, as it is (F11)")
+            };
+            if ui.add(tool_button(glyph, self.window_full)).on_hover_text(tip).clicked() {
+                self.window_full = !self.window_full;
+            }
+            ui.separator();
             if !fold_layout {
                 self.layout_buttons(ui, true);
                 ui.separator();
@@ -1371,7 +1383,7 @@ impl Workspace {
     /// The active pane's own controls (the screen's quality, keys, chat...).
     fn controls(&mut self, ui: &mut egui::Ui, id: u64, action: &mut Option<(u64, remote::Deferred)>) {
         let Some(i) = self.index(id) else { return };
-        // Every pane's full screen and disconnect come last, after its mode's controls.
+        // Disconnect comes last, after the mode's controls.
         match &mut self.panes[i].state {
             State::Live(r) => {
                 let mut a = None;
@@ -1383,16 +1395,6 @@ impl Workspace {
             // A plain shell: how it is shown and its settings.
             State::Shell(t) => t.controls(ui),
             State::Down(_) => {}
-        }
-        let on = self.zoom == Some(id);
-        let (glyph, tip) = if on {
-            (ic::CORNERS_IN, "Leave full screen: back to the window as it was")
-        } else {
-            (ic::CORNERS_OUT, "Full screen: this pane alone, the others wait behind it (Ctrl+Shift+Enter)")
-        };
-        if ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
-            let ctx = ui.ctx().clone();
-            self.set_zoom(&ctx, if on { None } else { Some(id) });
         }
         // Disconnect last: the pane closes, and with the tab's last pane the tab.
         let (glyph, tip) = if self.is_remote(id) || !self.is_shell(id) {
@@ -1500,10 +1502,16 @@ impl Workspace {
         }
     }
 
-    /// Full screen of the window, split beside or below, and moving the active pane.
+    /// The tab's layout: the active pane alone or the grid, split beside or below, arrange, and
+    /// move the active pane.
     fn layout_buttons(&mut self, ui: &mut egui::Ui, rtl: bool) {
+        let zoomed = self.zoom.is_some();
         let mut buttons: Vec<(&str, &str, u8)> = vec![
-            (if self.window_full { ic::ARROWS_IN } else { ic::ARROWS_OUT }, "Full screen: the window as it is, split, without its title bar (F11)", 0),
+            (
+                if zoomed { ic::CORNERS_IN } else { ic::CORNERS_OUT },
+                if zoomed { "Back to the grid: every pane of the tab (Ctrl+Shift+Enter)" } else { "This pane alone: it fills the tab, the others wait (Ctrl+Shift+Enter)" },
+                0,
+            ),
             (ic::SPLIT_SIDE, "Split: a new pane beside this one (Alt+Shift+=)", 1),
             (ic::SPLIT_BELOW, "Split: a new pane below this one (Alt+Shift+-)", 2),
             (ic::CARET_LEFT, "Move this pane left (Alt+arrows go between panes)", 3),
@@ -1511,6 +1519,10 @@ impl Workspace {
         ];
         // The arrangement menu after the splits.
         buttons.insert(3, (ic::LAYOUT, "Layout: arrange this tab's panes", 5));
+        // One pane: nothing to zoom out of.
+        if self.order(self.current).len() < 2 && !zoomed {
+            buttons.remove(0);
+        }
         if rtl {
             buttons.reverse();
         }
@@ -1519,14 +1531,15 @@ impl Workspace {
                 self.layout_menu(ui, glyph, tip);
                 continue;
             }
-            let on = what == 0 && self.window_full;
+            let on = what == 0 && zoomed;
             if !ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
                 continue;
             }
             match what {
                 0 => {
-                    self.window_full = !self.window_full;
-                    self.zoom = None;
+                    let z = if zoomed { None } else { self.active_id() };
+                    let ctx = ui.ctx().clone();
+                    self.set_zoom(&ctx, z);
                 }
                 1 | 2 => self.picker = Some(Place::Split { below: what == 2 }),
                 _ => self.move_active(what == 3),
@@ -1584,67 +1597,6 @@ impl Workspace {
         }
     }
 
-    /// Over a pane in full screen: hidden until the pointer reaches the top edge; its name is a
-    /// drop-down to go to the tab's other panes.
-    fn dock(&mut self, ui: &mut egui::Ui, area: Rect, now: f64) {
-        let Some(z) = self.zoom else { return };
-        // Kept while one of its menus is open, whatever kind.
-        if now >= self.reveal_until && !menu_open(ui.ctx()) && !ui.ctx().any_popup_open() {
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        let order = self.order(self.current);
-        let mut go = None;
-        let mut action = None;
-        let r = egui::Area::new(egui::Id::unique("pane-dock"))
-            .order(egui::Order::Foreground)
-            .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 4.0))
-            .show(&ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let (name, rtt) = self.name(z);
-                        let text = match rtt {
-                            Some(ms) => format!("{name}  ·  {:.0} ms  {}", ms.min(999.0), ic::CARET_DOWN),
-                            None => format!("{name}  {}", ic::CARET_DOWN),
-                        };
-                        let b = egui::Button::new(RichText::new(text).size(13.0)).frame_when_inactive(false);
-                        egui::containers::menu::MenuButton::from_button(b).ui(ui, |ui| {
-                            crate::gui::menu_look(ui);
-                            for &id in &order {
-                                let (n, _) = self.name(id);
-                                if ui.add(egui::Button::selectable(id == z, n)).clicked() {
-                                    go = Some(id);
-                                    ui.close();
-                                }
-                            }
-                        });
-                        ui.separator();
-                        self.mode_menu(ui, z);
-                        // Its controls end with the button that leaves full screen.
-                        self.controls(ui, z, &mut action);
-                    });
-                });
-            });
-        // Over the dock or any of its buttons (a button takes the hover from the area itself).
-        if r.response.contains_pointer() || ctx.pointer_hover_pos().is_some_and(|p| r.response.rect.expand(8.0).contains(p)) {
-            self.reveal_until = now + 0.6;
-        }
-        let _ = area;
-        if let Some((id, f)) = action
-            && let Some(i) = self.index(id)
-            && let State::Live(r) = &mut self.panes[i].state
-            && let Err(e) = f(r, &ctx)
-        {
-            self.lost(i, e);
-        }
-        if let Some(id) = go {
-            if let Some(tab) = self.tabs.get_mut(self.current) {
-                tab.active = id;
-            }
-            self.zoom = Some(id);
-        }
-    }
 }
 
 /// A point of this window as a point of the whole screen in pixels: windows on monitors of
@@ -2377,17 +2329,32 @@ mod tests {
     #[test]
     fn a_terminal_pane_fills_the_window() {
         let mut h = Harness::new();
-        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
-        let shell = Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
-        h.w.add(shell, Place::Tab, (false, false, false));
-        h.frame(Vec::new());
+        let shell = || {
+            let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+            Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
+        };
+        // One pane: nothing to zoom, so no button for it.
+        h.w.add(shell(), Place::Tab, (false, false, false));
+        for _ in 0..4 {
+            h.frame(Vec::new());
+        }
+        assert!(h.snap.find(ic::CORNERS_OUT).is_empty(), "no zoom with one pane");
+        h.w.add(shell(), Place::Split { below: false }, (false, false, false));
         for _ in 0..4 {
             h.frame(Vec::new());
         }
         h.bar(ic::CORNERS_OUT);
-        assert_eq!(h.w.zoom, Some(h.w.tabs[0].active), "the pane alone");
-        h.w.set_zoom(&h.ctx.clone(), None);
-        h.frame(Vec::new());
+        assert_eq!(h.w.zoom, Some(h.w.tabs[0].active), "the pane alone, in the tab");
+        assert!(!h.w.sent_full, "the window stays as it is");
+        for _ in 0..3 {
+            h.frame(Vec::new());
+        }
+        assert!(h.snap.find(ic::PLUS).iter().any(|r| r.center().y < super::super::chrome::HEIGHT), "the tabs stay");
+        h.bar(ic::CORNERS_IN);
+        assert_eq!(h.w.zoom, None, "back to the grid");
+        // The window's full screen is its own button, at the right, and keeps the grid.
+        h.bar(ic::ARROWS_OUT);
+        assert!(h.w.window_full && h.w.zoom.is_none());
         h.w.close_all();
     }
 
@@ -2478,16 +2445,16 @@ mod tests {
         h.frame(Vec::new());
         h.w.close_tab(0);
         assert_eq!(h.w.name(h.w.tabs[h.w.current].active).0, "b", "the current tab stays");
-        // A pane in full screen, then closed: the window leaves full screen.
+        // A zoomed pane, then closed: the tab is a grid again.
         h.w.add(shell("d"), Place::Split { below: false }, (false, false, false));
         let d = h.w.tabs[h.w.current].active;
         let ctx = h.ctx.clone();
         h.w.set_zoom(&ctx, Some(d));
         h.frame(Vec::new());
-        assert!(h.w.sent_full);
+        assert_eq!(h.w.zoom, Some(d));
         h.w.close_pane(d);
         h.frame(Vec::new());
-        assert!(!h.w.sent_full, "full screen ends with its pane");
+        assert_eq!(h.w.zoom, None, "the zoom ends with its pane");
         // Alt+Left in a tab of one pane is the shell's.
         h.frame(vec![Event::Key { key: egui::Key::ArrowLeft, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT }]);
         let kept = h.ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Key { key: egui::Key::ArrowLeft, .. })));
