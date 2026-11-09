@@ -54,7 +54,7 @@ impl Window {
 
     fn open(&mut self) -> Result<(), String> {
         let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-        cmd.arg("--chat-window").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.arg("--chat-window").arg(viewer_name()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         {
             // An agent started over ssh has no display variables; the desktop session uses the defaults.
@@ -103,8 +103,16 @@ impl Drop for Window {
     }
 }
 
-/// `sshremote --chat-window`: the small window shown on the remote desktop.
-pub fn run_window() -> Result<(), String> {
+/// Who is viewing, as the agent sees it: the address ssh came from.
+fn viewer_name() -> String {
+    std::env::var("SSH_CONNECTION")
+        .ok()
+        .and_then(|c| c.split_whitespace().next().map(|ip| format!("Viewer ({ip})")))
+        .unwrap_or_else(|| "Viewer".into())
+}
+
+/// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
+pub fn run_window(name: String) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -132,7 +140,7 @@ pub fn run_window() -> Result<(), String> {
                     ctx.request_repaint();
                 }
             });
-            Ok(Box::new(ChatApp { incoming: wake_rx, lines: Vec::new(), input: String::new(), ended: None }))
+            Ok(Box::new(ChatApp { incoming: wake_rx, lines: Vec::new(), input: String::new(), ended: None, name }))
         }),
     )
     .map_err(|e| e.to_string())
@@ -145,6 +153,8 @@ struct ChatApp {
     input: String,
     /// When the viewer went away; the window closes itself a little later.
     ended: Option<std::time::Instant>,
+    /// Who is viewing: "Viewer (address)".
+    name: String,
 }
 
 impl eframe::App for ChatApp {
@@ -176,7 +186,7 @@ impl eframe::App for ChatApp {
                 ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::gui::ic::CHAT, icon, Color32::WHITE);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(RichText::new("Viewer").strong().size(15.0));
+                    ui.label(RichText::new(&self.name).strong().size(15.0));
                     let state = if self.ended.is_some() {
                         "disconnected; this window closes shortly"
                     } else {
@@ -200,12 +210,72 @@ impl eframe::App for ChatApp {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
-                .show(ui, |ui| show_lines(ui, &self.lines, "Viewer", "You"));
+                .show(ui, |ui| show_lines(ui, &self.lines, &self.name, "You"));
         });
         if self.ended.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         ctx.request_repaint_after(Duration::from_secs(1));
+    }
+}
+
+/// Who is at the other end of `spec` (an ssh destination, an ~/.ssh/config alias, a
+/// sshremote:// address, or this computer), as "user (address)": ssh's own view of an alias
+/// gives its user and host name, and a host name is looked up.
+pub fn peer_name(spec: &str) -> String {
+    let me = || std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "user".into());
+    let s = spec.trim();
+    if s.is_empty() || ["local", "this computer", "test desktop"].contains(&s.to_lowercase().as_str()) {
+        return format!("{} (this computer)", me());
+    }
+    let s = s.trim_start_matches("sshremote://");
+    let (mut user, mut host) = match s.rsplit_once('@') {
+        Some((u, h)) => (Some(u.to_string()), h.to_string()),
+        None => (None, s.to_string()),
+    };
+    if !spec.starts_with("sshremote://") {
+        if let Ok(out) = crate::sys::quiet(std::process::Command::new("ssh").arg("-G").arg(s)).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(v) = line.strip_prefix("user ") {
+                    user.get_or_insert_with(|| v.trim().to_string());
+                } else if let Some(v) = line.strip_prefix("hostname ") {
+                    host = v.trim().to_string();
+                }
+            }
+        }
+    } else if let Some((h, _)) = host.rsplit_once(':').filter(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok()) {
+        host = h.to_string();
+    }
+    let ip = if host.parse::<std::net::IpAddr>().is_ok() {
+        host.clone()
+    } else {
+        use std::net::ToSocketAddrs;
+        (host.as_str(), 22).to_socket_addrs().ok().and_then(|mut a| a.next()).map_or(host.clone(), |a| a.ip().to_string())
+    };
+    match user {
+        Some(u) if !u.is_empty() => format!("{u} ({ip})"),
+        _ => ip,
+    }
+}
+
+/// `peer_name` worked out in the background (it may ask ssh and the name server), shown as
+/// "Remote" until then.
+#[derive(Clone)]
+pub struct Peer(std::sync::Arc<std::sync::Mutex<String>>);
+
+impl Peer {
+    pub fn new(spec: &str) -> Peer {
+        let p = Peer(std::sync::Arc::new(std::sync::Mutex::new("Remote".into())));
+        let (q, spec) = (p.clone(), spec.to_string());
+        std::thread::spawn(move || {
+            let name = peer_name(&spec);
+            *q.0.lock().unwrap() = name;
+        });
+        p
+    }
+
+    pub fn get(&self) -> String {
+        self.0.lock().unwrap().clone()
     }
 }
 
@@ -218,7 +288,7 @@ pub fn now() -> u64 {
 }
 
 /// When a message was written: the time today, the date and time before.
-fn when(at: u64) -> String {
+pub(crate) fn when(at: u64) -> String {
     let (then, today) = (crate::files::local_time(at), crate::files::local_time(now()));
     match (then.split_once(' '), today.split_once(' ')) {
         (Some((d, t)), Some((td, _))) if d == td => t.to_string(),

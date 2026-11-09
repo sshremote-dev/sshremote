@@ -749,7 +749,8 @@ impl Workspace {
         }
         // The title bar, unless a full screen hides it until the pointer reaches the top edge.
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
-        let show_bar = self.zoom.is_none() && (!self.window_full || now < self.reveal_until);
+        let show_bar =
+            self.zoom.is_none() && (!self.window_full || now < self.reveal_until || ctx.any_popup_open() || menu_open(&ctx));
         if show_bar {
             // In the window's full screen the bar comes down over the panes, as the screen's
             // toolbar does, rather than pushing them down.
@@ -768,7 +769,9 @@ impl Workspace {
             if bar.close {
                 self.confirm = Some(Confirm::Window);
             }
-            if self.window_full && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= super::chrome::HEIGHT + 4.0) {
+            // Kept while the pointer is on it or one of its menus is open.
+            let on_bar = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= super::chrome::HEIGHT + 4.0);
+            if self.window_full && (on_bar || ctx.any_popup_open() || menu_open(&ctx)) {
                 self.reveal_until = now + 0.6;
             }
         }
@@ -1579,7 +1582,8 @@ impl Workspace {
     /// drop-down to go to the tab's other panes.
     fn dock(&mut self, ui: &mut egui::Ui, area: Rect, now: f64) {
         let Some(z) = self.zoom else { return };
-        if now >= self.reveal_until && !menu_open(ui.ctx()) {
+        // Kept while one of its menus is open, whatever kind.
+        if now >= self.reveal_until && !menu_open(ui.ctx()) && !ui.ctx().any_popup_open() {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -1616,7 +1620,8 @@ impl Workspace {
                     });
                 });
             });
-        if r.response.hovered() {
+        // Over the dock or any of its buttons (a button takes the hover from the area itself).
+        if r.response.contains_pointer() || ctx.pointer_hover_pos().is_some_and(|p| r.response.rect.expand(8.0).contains(p)) {
             self.reveal_until = now + 0.6;
         }
         let _ = area;

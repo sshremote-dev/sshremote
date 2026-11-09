@@ -26,6 +26,8 @@ pub(super) struct Remote {
     fb: Framebuffer,
     tex: Option<TextureHandle>,
     label: String,
+    /// Who is at the screen, for the chat: "user (address)".
+    peer: crate::chat::Peer,
     fit: Fit,
     /// In full screen, fit to the window fills it all, stretched a little where the shapes
     /// differ (a 16:9 host on a 16:10 screen), rather than leave bars.
@@ -149,6 +151,7 @@ impl Remote {
             last_shown: None,
             pick_pressed: false,
             pick_at: None,
+            peer: crate::chat::Peer::new(label.split("  ").next().unwrap_or(&label)),
             label,
             sess,
             rx,
@@ -798,6 +801,7 @@ impl Remote {
     /// The chat docked beside the picture: earlier messages with this host, then this session's.
     pub(super) fn chat_panel(&mut self, ui: &mut egui::Ui, area: Rect) -> Result<Option<Rect>, String> {
         let host = self.host().to_string();
+        let peer = self.peer.get();
         let earlier = self.chat_earlier;
         let Some((lines, input)) = self.chat.as_mut() else { return Ok(None) };
         let mut sent = None;
@@ -826,7 +830,7 @@ impl Remote {
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .max_height(h)
-            .show(&mut panel, |ui| crate::chat::show_lines_since(ui, lines, earlier, "Remote", "You"));
+            .show(&mut panel, |ui| crate::chat::show_lines_since(ui, lines, earlier, &peer, "You"));
         panel.add_space(4.0);
         sent = crate::chat::input_row(&mut panel, input, true).or(sent);
         if clear {

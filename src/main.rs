@@ -364,7 +364,7 @@ fn run(args: &[String]) -> Result<(), String> {
             net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
         }
         "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
-        "--chat-window" => chat::run_window(),
+        "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer

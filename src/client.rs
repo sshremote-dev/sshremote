@@ -17,9 +17,81 @@ use crate::quant;
 use crate::session::{Action, Control, Ev, Framebuffer, Options, Session};
 use crate::sixel::Sixel;
 
-const MENU: &str = "q quit | 0-4 a quality | m colour | +/- scale | f fps | z zoom | s screen | x screenshot | \
-p pause | u one frame | o sound | c chat | g get file | l send file | t shell | v share window/app/screen | w Win | \
-k Ctrl+Alt+Del | r refresh";
+/// What the terminal shows of the connection, as the window's modes: switched freely, on one
+/// connection, without connecting again.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum View {
+    Screen,
+    Terminal,
+    Files,
+}
+
+/// What covers the view for a moment.
+#[derive(Clone, PartialEq, Debug)]
+enum Overlay {
+    None,
+    Menu,
+    /// The conversation with the person at the screen, and the line being typed.
+    Chat(String),
+    /// A question before something that cannot be undone: 'q' disconnect, 'x' delete.
+    Confirm(char),
+}
+
+/// The remote folder shown in the files view.
+#[derive(Default)]
+struct RemoteFiles {
+    path: String,
+    entries: Vec<crate::proto::DirEntry>,
+    error: String,
+    sel: usize,
+    top: usize,
+    loading: bool,
+    hidden: bool,
+}
+
+impl RemoteFiles {
+    fn sep(&self) -> char {
+        if self.path.contains('\\') && !self.path.contains('/') { '\\' } else { '/' }
+    }
+
+    fn child(&self, name: &str) -> String {
+        if self.path == crate::files::DRIVES {
+            return name.to_string();
+        }
+        let sep = self.sep();
+        if self.path.ends_with(sep) { format!("{}{name}", self.path) } else { format!("{}{sep}{name}", self.path) }
+    }
+
+    fn parent(&self) -> String {
+        let sep = self.sep();
+        let trimmed = self.path.trim_end_matches(sep);
+        if trimmed.len() == 2 && trimmed.ends_with(':') {
+            return crate::files::DRIVES.into();
+        }
+        match trimmed.rfind(sep) {
+            Some(0) => sep.to_string(),
+            Some(i) if trimmed[..i].ends_with(':') => format!("{}{sep}", &trimmed[..i]),
+            Some(i) => trimmed[..i].to_string(),
+            None => self.path.clone(),
+        }
+    }
+
+    /// The entries shown: hidden ones only when asked, folders first.
+    fn shown(&self) -> Vec<&crate::proto::DirEntry> {
+        let mut v: Vec<_> = self.entries.iter().filter(|e| self.hidden || !e.name.starts_with('.')).collect();
+        v.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        v
+    }
+}
+
+/// A transfer under way: id, name, bytes done and in all, and whether it goes up.
+struct Transfer {
+    id: u32,
+    name: String,
+    done: u64,
+    size: u64,
+    upload: bool,
+}
 
 struct Viewer {
     out: Box<dyn Write>,
@@ -53,7 +125,18 @@ struct Viewer {
     px: Vec<[u8; 3]>,
     qpal: Vec<[u8; 3]>,
     dirty: Vec<bool>,
-    menu: bool,
+    /// The mode shown, and what covers it.
+    view: View,
+    overlay: Overlay,
+    /// What the shell wrote while it was not shown, written out when it is again.
+    backlog: Vec<u8>,
+    files: RemoteFiles,
+    transfers: Vec<Transfer>,
+    /// Messages from the person at the screen not read yet.
+    unread: usize,
+    host: String,
+    /// Who is at the screen, for the chat: "user (address)".
+    peer: crate::chat::Peer,
     win_next: bool,
     player: Option<crate::audio::Player>,
     inbox: crate::files::Inbox,
@@ -71,7 +154,7 @@ struct Viewer {
     pointer: (u16, u16),
     quit: bool,
     paint_ms: f64,
-    /// The remote shell shown instead of the picture, while open.
+    /// The shell on the remote host, kept while other modes are shown.
     shell: Option<u32>,
     next_shell: u32,
     /// What is shared: kind as in `Share` (0 the whole screen) and a description.
@@ -115,8 +198,12 @@ impl Viewer {
     }
 
     fn apply(&mut self, f: Frame) -> io::Result<()> {
-        if self.shell.is_some() {
-            // Frames still in flight when the shell opened; the screen is redrawn after it.
+        if self.view != View::Screen || self.overlay != Overlay::None || self.prompt.is_some() {
+            // Not in view (another mode, or something over it): kept, and drawn when it is again.
+            if self.view == View::Screen {
+                self.fb.apply(&f)?;
+                self.dirty.iter_mut().for_each(|d| *d = true);
+            }
             self.ctl.frame_done(false);
             return self.sess.send(ToAgent::Ack(f.id));
         }
@@ -225,44 +312,44 @@ impl Viewer {
         }
     }
 
+    /// The last row: the modes as tabs, the connection, and what is going on; or the line
+    /// being typed.
     fn status(&mut self) -> io::Result<()> {
-        if self.shell.is_some() {
+        if self.view == View::Terminal && self.overlay == Overlay::None {
             return Ok(());
         }
         let text = if let Some((kind, buf)) = &self.prompt {
             let what = match kind {
-                'c' => "message",
                 'g' => "remote path to download",
                 'v' => "share (number, A+number, a, p, or Enter for the whole screen)",
-                _ => "local file to send",
+                'u' => "local file to send into this folder",
+                'n' => "name of the new folder",
+                'r' => "new name",
+                _ => "local file to send to Downloads",
             };
-            format!(" {what} (Enter sends, Esc cancels)> {buf}_ ")
-        } else if self.menu {
-            format!(" menu: {MENU} ")
-        } else if let Some((n, _)) = self.note.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(6)) {
-            format!(" {n} ")
-        } else if self.paused {
-            format!(
-                " PAUSED (Ctrl+] u: one frame, p: resume) | {} ",
-                self.ctl.status(&self.label, self.fb.w, self.fb.h)
-            )
-        } else if self.win_next {
-            " Win+: press a key (Space: Win alone) ".to_string()
-        } else if self.sharing.0 != 0 {
-            format!(
-                " SHARING {} (Ctrl+] v: whole screen) | {} ",
-                self.sharing.1,
-                self.ctl.status(&self.label, self.fb.w, self.fb.h)
-            )
+            format!(" {what} (Enter: go, Esc: cancel)> {buf}_ ")
         } else {
-            format!(
-                " {} | paint {:.1} ms | Ctrl+] menu ",
-                self.ctl.status(&self.label, self.fb.w, self.fb.h),
-                self.paint_ms
-            )
+            let tab = |v: View, name: &str| if self.view == v { format!("\x1b[1;4m{name}\x1b[22;24m") } else { name.to_string() };
+            let tabs = format!(" {}  {}  {} ", tab(View::Screen, "Screen"), tab(View::Terminal, "Terminal"), tab(View::Files, "Files"));
+            let what = if let Some((n, _)) = self.note.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(6)) {
+                n.clone()
+            } else if self.view == View::Files {
+                self.files_line()
+            } else if self.paused {
+                format!("PAUSED (Ctrl+] u: one frame, p: resume) | {}", self.ctl.status(&self.label, self.fb.w, self.fb.h))
+            } else if self.win_next {
+                "Win+: press a key (Space: Win alone)".to_string()
+            } else if self.sharing.0 != 0 {
+                format!("SHARING {} (Ctrl+] v: whole screen) | {}", self.sharing.1, self.ctl.status(&self.label, self.fb.w, self.fb.h))
+            } else {
+                format!("{} | paint {:.1} ms", self.ctl.status(&self.label, self.fb.w, self.fb.h), self.paint_ms)
+            };
+            let chat = if self.unread > 0 { format!(" | chat: {} new (Ctrl+] c)", self.unread) } else { String::new() };
+            format!("{tabs}| {what}{chat} | Ctrl+] menu ")
         };
-        let text: String = text.chars().take(self.cols).collect();
-        let pad = self.cols.saturating_sub(text.chars().count());
+        let shown = visible_len(&text);
+        let text = cut_visible(&text, self.cols);
+        let pad = self.cols.saturating_sub(shown.min(self.cols));
         write!(self.out, "\x1b[{};1H\x1b[0;7m{text}{}\x1b[0m", self.rows, " ".repeat(pad))?;
         self.out.flush()
     }
@@ -369,27 +456,220 @@ impl Viewer {
         self.sync_mods(0)
     }
 
-    /// Menu keys beyond the shared ones: screenshot, pause, sound, chat and files.
-    fn menu_extra(&mut self, c: char) -> io::Result<()> {
+    /// Draws rows of text from the top, each cut or padded to the width; `style` per row.
+    fn draw_rows(&mut self, rows: &[(String, &str)]) -> io::Result<()> {
+        let mut out = String::from("\x1b[?2026h\x1b[0m");
+        let height = self.rows.saturating_sub(1);
+        for i in 0..height {
+            let (text, style) = rows.get(i).map_or((String::new(), ""), |(t, s)| (t.clone(), *s));
+            let shown = visible_len(&text);
+            let text = cut_visible(&text, self.cols);
+            let pad = self.cols.saturating_sub(shown.min(self.cols));
+            out.push_str(&format!("\x1b[{};1H\x1b[0m{style}{text}{}\x1b[0m", i + 1, " ".repeat(pad)));
+        }
+        out.push_str("\x1b[?2026l");
+        self.out.write_all(out.as_bytes())?;
+        self.status()
+    }
+
+    /// The Ctrl+] menu: every action by its key, grouped as the window's toolbar and menus are.
+    fn draw_menu(&mut self) -> io::Result<()> {
+        let mark = |v: View| if self.view == v { "*" } else { " " };
+        let quality = if self.ctl.auto.is_some() { "auto".to_string() } else { self.ctl.preset_label() };
+        let chat = if self.unread > 0 { format!("  ({} new)", self.unread) } else { String::new() };
+        let head = "\x1b[48;5;236;97m";
+        let key = "\x1b[0m";
+        let rows: Vec<(String, &str)> = vec![
+            (format!(" sshremote  {}   (a key below, Esc: back)", self.label), head),
+            (String::new(), key),
+            (" Mode".into(), "\x1b[1m"),
+            (format!("   s{} Screen sharing     t{} Terminal     f{} Files", mark(View::Screen), mark(View::Terminal), mark(View::Files)), key),
+            (String::new(), key),
+            (" Talk".into(), "\x1b[1m"),
+            (format!("   c  Chat with the person at the screen{chat}"), key),
+            (String::new(), key),
+            (" Screen".into(), "\x1b[1m"),
+            (format!("   0-4 quality, a automatic (now {quality})    m colours    + - scale    F frames per second"), key),
+            ("   z  zoom to the terminal    n  next monitor    v  share a window or application".into(), key),
+            ("   p  pause or resume    u  one frame    r  repaint    x  screenshot    o  sound".into(), key),
+            ("   w  Win with the next key    k  Ctrl+Alt+Del    ]  send Ctrl+] to the host".into(), key),
+            (String::new(), key),
+            (" Files".into(), "\x1b[1m"),
+            ("   g  get a remote file by its path    l  send a local file to Downloads    (f: browse)".into(), key),
+            (String::new(), key),
+            (" Leave".into(), "\x1b[1m"),
+            ("   q  disconnect (asks first)".into(), key),
+        ];
+        self.draw_rows(&rows)
+    }
+
+    /// Covers the view with the menu, the chat or a question; in the terminal, on the alternate
+    /// screen, so the shell's own screen comes back as it was.
+    fn open_overlay(&mut self, o: Overlay) -> io::Result<()> {
+        if self.view == View::Screen && self.overlay == Overlay::None {
+            self.release_all()?;
+        }
+        if self.view == View::Terminal && self.overlay == Overlay::None && self.probe.is_none() {
+            let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide);
+        }
+        self.overlay = o;
+        self.redraw()
+    }
+
+    fn close_overlay(&mut self) -> io::Result<()> {
+        self.overlay = Overlay::None;
+        if self.view == View::Terminal {
+            if self.probe.is_none() {
+                let _ = execute!(self.out, terminal::LeaveAlternateScreen, cursor::Show);
+            }
+            return self.flush_backlog();
+        }
+        self.redraw()
+    }
+
+    /// Draws what is in view again: the overlay, the files, or the picture from the copy kept.
+    fn redraw(&mut self) -> io::Result<()> {
+        if self.probe.is_some() {
+            return Ok(());
+        }
+        match &self.overlay {
+            Overlay::Menu => return self.draw_menu(),
+            Overlay::Chat(_) => return self.draw_chat(),
+            Overlay::Confirm(c) => return self.draw_confirm(*c),
+            Overlay::None => {}
+        }
+        match self.view {
+            View::Screen => {
+                write!(self.out, "\x1b[0m\x1b[2J")?;
+                if self.fb.w == 0 {
+                    self.sess.send(ToAgent::Refresh)?;
+                } else {
+                    self.dirty = vec![true; self.cols * self.rows.saturating_sub(1)];
+                    let (dw, dh) = self.display();
+                    let mut out = Vec::new();
+                    self.paint(&mut out, dw, dh);
+                    self.out.write_all(&out)?;
+                }
+                self.status()
+            }
+            View::Files => self.draw_files(),
+            View::Terminal => self.flush_backlog(),
+        }
+    }
+
+    /// Goes to another mode on the same connection. The shell stays open behind the others and
+    /// the picture pauses while it is not seen.
+    fn set_view(&mut self, v: View) -> io::Result<()> {
+        self.overlay = Overlay::None;
+        let was = self.view;
+        if v == was {
+            return if v == View::Terminal { self.leave_to_shell() } else { self.redraw() };
+        }
+        self.view = v;
+        if was == View::Screen {
+            self.release_all()?;
+            self.sess.send(ToAgent::Pause(true))?;
+        }
+        match v {
+            View::Screen => {
+                self.enter_drawing()?;
+                self.sess.send(ToAgent::Pause(self.paused))?;
+                self.sess.send(ToAgent::Refresh)?;
+                self.redraw()
+            }
+            View::Files => {
+                self.enter_drawing()?;
+                if self.files.entries.is_empty() && !self.files.loading {
+                    self.files.loading = true;
+                    let path = self.files.path.clone();
+                    self.sess.send(ToAgent::ListDir { path })?;
+                }
+                self.redraw()
+            }
+            View::Terminal => self.leave_to_shell(),
+        }
+    }
+
+    /// The alternate screen with the mouse, for the picture, the files and the overlays.
+    fn enter_drawing(&mut self) -> io::Result<()> {
+        if self.probe.is_none() {
+            let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
+        }
+        Ok(())
+    }
+
+    /// The shell on the terminal's own screen, as typed into directly; one opens the first time.
+    fn leave_to_shell(&mut self) -> io::Result<()> {
+        if self.probe.is_some() {
+            return Ok(());
+        }
+        let _ = execute!(self.out, event::DisableMouseCapture, terminal::LeaveAlternateScreen, cursor::Show);
+        if self.shell.is_none() {
+            self.open_shell()?;
+        }
+        self.flush_backlog()
+    }
+
+    fn open_shell(&mut self) -> io::Result<()> {
+        let id = self.next_shell;
+        self.next_shell += 1;
+        write!(self.out, "\x1b[0m\r\nsshremote: a shell on {}. Ctrl+] for the menu (screen, files, chat).\r\n", self.host)?;
+        self.out.flush()?;
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        self.shell = Some(id);
+        self.sess.send(ToAgent::TermOpen { id, cols, rows })
+    }
+
+    /// What the shell wrote while away, now that it shows.
+    fn flush_backlog(&mut self) -> io::Result<()> {
+        if self.view == View::Terminal && self.overlay == Overlay::None && !self.backlog.is_empty() {
+            let b = std::mem::take(&mut self.backlog);
+            self.out.write_all(&b)?;
+            self.out.flush()?;
+        }
+        Ok(())
+    }
+
+    /// A key chosen in the menu.
+    fn menu_key(&mut self, c: char) -> io::Result<()> {
         match c {
+            's' => self.set_view(View::Screen),
+            't' => self.set_view(View::Terminal),
+            'f' => self.set_view(View::Files),
+            'c' => {
+                self.unread = 0;
+                self.overlay = Overlay::Chat(String::new());
+                self.redraw()
+            }
+            'q' => {
+                self.overlay = Overlay::Confirm('q');
+                self.redraw()
+            }
             'k' => {
+                self.close_overlay()?;
                 self.sess.send(ToAgent::SecureAttention)?;
                 self.notify("Sent Ctrl+Alt+Del")
             }
             'x' => {
+                self.close_overlay()?;
                 self.sess.send(ToAgent::Snapshot)?;
                 self.notify("Taking a screenshot...")
             }
             'p' => {
                 self.paused = !self.paused;
-                self.sess.send(ToAgent::Pause(self.paused))?;
+                self.close_overlay()?;
+                if self.view == View::Screen {
+                    self.sess.send(ToAgent::Pause(self.paused))?;
+                }
                 self.status()
             }
             'u' => {
+                self.close_overlay()?;
                 self.sess.send(ToAgent::Refresh)?;
                 self.status()
             }
             'o' => {
+                self.close_overlay()?;
                 if self.player.take().is_some() {
                     self.sess.send(ToAgent::Audio(false))?;
                     return self.notify("Sound off");
@@ -403,8 +683,8 @@ impl Viewer {
                     Err(e) => self.notify(&format!("Sound: {e}")),
                 }
             }
-            't' => self.open_shell(),
             'v' => {
+                self.set_view(View::Screen)?;
                 // Sharing part of the screen: the same key leads straight back to all of it.
                 if self.sharing.0 != 0 {
                     self.sess.send(ToAgent::Share(Share::Screen))?;
@@ -415,55 +695,290 @@ impl Viewer {
                 self.prompt = Some(('v', String::new()));
                 self.draw_share_list()
             }
-            'c' | 'g' | 'l' => {
+            'g' | 'l' => {
+                self.close_overlay()?;
+                if self.view == View::Terminal {
+                    self.set_view(View::Files)?;
+                }
                 self.prompt = Some((c, String::new()));
                 self.status()
             }
-            _ => {
+            // The screen's own keys: next monitor is n here (s is the screen mode), frames per
+            // second F (f is the files).
+            'n' => {
+                self.close_overlay()?;
+                let a = self.ctl.menu('s');
+                self.run_action(a)
+            }
+            'F' => {
+                self.close_overlay()?;
+                let a = self.ctl.menu('f');
+                self.run_action(a)
+            }
+            '0'..='4' | 'a' | 'm' | '+' | '=' | '-' | 'z' | 'r' | 'w' | ']' => {
+                if matches!(c, 'z' | 'w') && self.view != View::Screen {
+                    self.set_view(View::Screen)?;
+                } else {
+                    self.close_overlay()?;
+                }
                 let a = self.ctl.menu(c);
                 self.run_action(a)
+            }
+            _ => self.close_overlay(),
+        }
+    }
+
+    /// A question over the view: y says yes.
+    fn draw_confirm(&mut self, what: char) -> io::Result<()> {
+        let (title, body) = match what {
+            'q' => (format!("Disconnect from {}?", self.host), "The screen, the shell and transfers end.".to_string()),
+            _ => {
+                let name = self.files.shown().get(self.files.sel).map_or(String::new(), |e| e.name.clone());
+                (format!("Delete {name} on {}?", self.host), "It cannot be brought back; a folder goes with everything in it.".to_string())
+            }
+        };
+        let rows: Vec<(String, &str)> = vec![
+            (String::new(), ""),
+            (format!("   {title}"), "\x1b[1m"),
+            (format!("   {body}"), ""),
+            (String::new(), ""),
+            ("   y: yes      any other key: no".into(), "\x1b[33m"),
+        ];
+        self.draw_rows(&rows)
+    }
+
+    fn confirm_key(&mut self, what: char, k: &event::KeyEvent) -> io::Result<()> {
+        let yes = matches!(k.code, event::KeyCode::Char('y' | 'Y'));
+        self.overlay = Overlay::None;
+        match (what, yes) {
+            ('q', true) => {
+                self.quit = true;
+                Ok(())
+            }
+            ('x', true) => {
+                let Some(name) = self.files.shown().get(self.files.sel).map(|e| e.name.clone()) else { return self.redraw() };
+                let path = self.files.child(&name);
+                self.sess.send(ToAgent::FileOp { op: crate::proto::FileOp::Delete, path, arg: String::new() })?;
+                self.redraw()
+            }
+            _ => {
+                if self.view == View::Terminal {
+                    return self.close_overlay();
+                }
+                self.redraw()
             }
         }
     }
 
-    /// Leaves the picture for a shell on the remote host; this terminal emulates it directly.
-    fn open_shell(&mut self) -> io::Result<()> {
-        if self.probe.is_some() {
-            return Ok(());
+    /// The conversation, newest at the bottom, as Slack shows it: who and when, then the text.
+    fn draw_chat(&mut self) -> io::Result<()> {
+        let Overlay::Chat(buf) = &self.overlay else { return Ok(()) };
+        let buf = buf.clone();
+        let height = self.rows.saturating_sub(1);
+        let width = self.cols.saturating_sub(4).max(10);
+        let mut body: Vec<(String, &str)> = Vec::new();
+        for (theirs, text, at) in crate::chat::load_history(&self.host) {
+            let peer = self.peer.get();
+            let who = if theirs { peer.as_str() } else { "You" };
+            let when = if at == 0 { String::new() } else { format!("  {}", crate::chat::when(at)) };
+            body.push((format!("  {who}\x1b[22;2m{when}"), "\x1b[1m"));
+            for line in wrap(&text, width) {
+                body.push((format!("  {line}"), ""));
+            }
+            body.push((String::new(), ""));
         }
-        let id = self.next_shell;
-        self.next_shell += 1;
-        self.sess.send(ToAgent::Pause(true))?;
-        let _ = execute!(self.out, event::DisableMouseCapture, terminal::LeaveAlternateScreen, cursor::Show);
-        write!(
-            self.out,
-            "\x1b[0m\r\nsshremote: shell on the SSH host. Type exit, or press Ctrl+] to return to the screen.\r\n"
-        )?;
-        self.out.flush()?;
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        self.shell = Some(id);
-        self.sess.send(ToAgent::TermOpen { id, cols, rows })
+        let room = height.saturating_sub(3);
+        let start = body.len().saturating_sub(room);
+        let mut rows: Vec<(String, &str)> =
+            vec![(format!(" Chat with the person at {}'s screen   (Enter: send, Esc: back)", self.host), "\x1b[48;5;236;97m")];
+        rows.extend(body.drain(start..));
+        while rows.len() < height - 1 {
+            rows.push((String::new(), ""));
+        }
+        rows.push((format!(" > {buf}_"), "\x1b[48;5;238;97m"));
+        self.draw_rows(&rows)
     }
 
-    /// Back from the shell to the picture.
-    fn close_shell(&mut self, why: &str) -> io::Result<()> {
-        let Some(id) = self.shell.take() else { return Ok(()) };
-        self.sess.send(ToAgent::TermClose { id })?;
-        let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
-        self.dirty.clear();
-        self.full_redraw()?;
-        self.sess.send(ToAgent::Pause(self.paused))?;
-        self.sess.send(ToAgent::Refresh)?;
-        self.notify(why)
+    fn chat_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
+        use event::KeyCode;
+        let Overlay::Chat(buf) = &mut self.overlay else { return Ok(()) };
+        match k.code {
+            KeyCode::Esc => return self.close_overlay(),
+            KeyCode::Enter => {
+                let text = buf.trim().to_string();
+                buf.clear();
+                if !text.is_empty() {
+                    self.sess.send(ToAgent::Chat(text.clone()))?;
+                    crate::chat::append_history(&self.host, false, &text);
+                }
+            }
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) if !k.modifiers.contains(event::KeyModifiers::CONTROL) => buf.push(c),
+            _ => return Ok(()),
+        }
+        self.draw_chat()
+    }
+
+    /// The remote folder: a header, the entries with the selection, keys at the foot.
+    fn draw_files(&mut self) -> io::Result<()> {
+        let height = self.rows.saturating_sub(1);
+        let list_h = height.saturating_sub(4).max(1);
+        let shown: Vec<(String, bool, u64, u64)> =
+            self.files.shown().iter().map(|e| (e.name.clone(), e.dir, e.size, e.mtime)).collect();
+        if self.files.sel >= shown.len() {
+            self.files.sel = shown.len().saturating_sub(1);
+        }
+        if self.files.sel < self.files.top {
+            self.files.top = self.files.sel;
+        } else if self.files.sel >= self.files.top + list_h {
+            self.files.top = self.files.sel + 1 - list_h;
+        }
+        let place = if self.files.path == crate::files::DRIVES { "Drives".to_string() } else { self.files.path.clone() };
+        let mut rows: Vec<(String, &str)> = vec![(format!(" Files on {}:  {place}", self.host), "\x1b[48;5;236;97m")];
+        let date_w = 17;
+        let size_w = 10;
+        let name_w = self.cols.saturating_sub(date_w + size_w + 6).max(10);
+        rows.push((format!("   {:<name_w$} {:>size_w$}  {}", "Name", "Size", "Modified"), "\x1b[2m"));
+        if self.files.loading {
+            rows.push(("   Loading...".into(), "\x1b[2m"));
+        } else if !self.files.error.is_empty() {
+            rows.push((format!("   {}", self.files.error), "\x1b[31m"));
+        } else if shown.is_empty() {
+            rows.push(("   (empty)".into(), "\x1b[2m"));
+        }
+        for (i, (name, dir, size, mtime)) in shown.iter().enumerate().skip(self.files.top).take(list_h) {
+            let mark = if *dir { "/" } else { " " };
+            let name: String = format!("{name}{mark}");
+            let name = cut_visible(&name, name_w);
+            let pad = name_w.saturating_sub(visible_len(&name));
+            let size = if *dir { String::new() } else { crate::gui::human(*size) };
+            let when = crate::files::local_time(*mtime);
+            let style = if i == self.files.sel { "\x1b[7m" } else if *dir { "\x1b[34;1m" } else { "" };
+            rows.push((format!("   {name}{} {size:>size_w$}  {when}", " ".repeat(pad)), style));
+        }
+        while rows.len() < height - 1 {
+            rows.push((String::new(), ""));
+        }
+        rows.push((
+            " Enter open/get  Backspace up  ~ home  u send here  n new folder  F2 rename  Del delete  . hidden  F5 reload".into(),
+            "\x1b[2m",
+        ));
+        self.draw_rows(&rows)
+    }
+
+    /// The status line in the files view: the selection, and the transfers going on.
+    fn files_line(&self) -> String {
+        let sel = self.files.shown().get(self.files.sel).map(|e| {
+            let what = if e.dir { "folder".to_string() } else { crate::gui::human(e.size) };
+            let when = crate::files::local_time(e.mtime);
+            if when.is_empty() { format!("{}  {what}", e.name) } else { format!("{}  {what}  {when}", e.name) }
+        });
+        let moving = if self.transfers.is_empty() {
+            String::new()
+        } else {
+            let done: u64 = self.transfers.iter().map(|t| t.done).sum();
+            let size: u64 = self.transfers.iter().map(|t| t.size).sum::<u64>().max(1);
+            let pct = (done * 100 / size).min(100) as usize;
+            let bar = format!("[{}{}]", "#".repeat(pct / 10), ".".repeat(10 - pct / 10));
+            let first = &self.transfers[0];
+            let arrow = if first.upload { "up" } else { "down" };
+            format!(" | {arrow} {} {bar} {pct}% ({} files)", first.name, self.transfers.len())
+        };
+        format!("{}{moving}", sel.unwrap_or_else(|| format!("{} items", self.files.shown().len())))
+    }
+
+    fn files_go(&mut self, path: String) -> io::Result<()> {
+        self.files.loading = true;
+        self.files.error.clear();
+        self.sess.send(ToAgent::ListDir { path })?;
+        self.draw_files()
+    }
+
+    fn files_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
+        use event::KeyCode;
+        let n = self.files.shown().len();
+        let page = self.rows.saturating_sub(6).max(1);
+        let picked = self.files.shown().get(self.files.sel).map(|e| (e.name.clone(), e.dir));
+        match k.code {
+            KeyCode::Up => self.files.sel = self.files.sel.saturating_sub(1),
+            KeyCode::Down => self.files.sel = (self.files.sel + 1).min(n.saturating_sub(1)),
+            KeyCode::PageUp => self.files.sel = self.files.sel.saturating_sub(page),
+            KeyCode::PageDown => self.files.sel = (self.files.sel + page).min(n.saturating_sub(1)),
+            KeyCode::Home => self.files.sel = 0,
+            KeyCode::End => self.files.sel = n.saturating_sub(1),
+            KeyCode::Enter | KeyCode::Right => match picked {
+                Some((name, true)) => {
+                    let path = self.files.child(&name);
+                    self.files.sel = 0;
+                    return self.files_go(path);
+                }
+                Some((name, false)) if k.code == KeyCode::Enter => {
+                    let path = self.files.child(&name);
+                    self.sess.send(ToAgent::Fetch { tag: 0, path })?;
+                    return self.notify(&format!("Downloading {name} to {}", crate::files::downloads().display()));
+                }
+                _ => {}
+            },
+            KeyCode::Backspace | KeyCode::Left => {
+                let path = self.files.parent();
+                self.files.sel = 0;
+                return self.files_go(path);
+            }
+            KeyCode::Char('~') => {
+                self.files.sel = 0;
+                return self.files_go(String::new());
+            }
+            KeyCode::Char('d') => {
+                if let Some((name, _)) = picked {
+                    let path = self.files.child(&name);
+                    self.sess.send(ToAgent::Fetch { tag: 0, path })?;
+                    return self.notify(&format!("Downloading {name} to {}", crate::files::downloads().display()));
+                }
+            }
+            KeyCode::Char('.') => self.files.hidden = !self.files.hidden,
+            KeyCode::F(5) => {
+                let path = self.files.path.clone();
+                return self.files_go(path);
+            }
+            KeyCode::Char('u') => {
+                self.prompt = Some(('u', String::new()));
+                return self.status();
+            }
+            KeyCode::Char('n') => {
+                self.prompt = Some(('n', String::new()));
+                return self.status();
+            }
+            KeyCode::F(2) | KeyCode::Char('r') => {
+                if let Some((name, _)) = picked {
+                    self.prompt = Some(('r', name));
+                    return self.status();
+                }
+            }
+            KeyCode::Delete => {
+                if picked.is_some() {
+                    self.overlay = Overlay::Confirm('x');
+                    return self.redraw();
+                }
+            }
+            _ => return Ok(()),
+        }
+        self.draw_files()
     }
 
     /// Keys typed while the shell is shown, as the bytes a terminal sends.
     fn shell_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
         use event::{KeyCode, KeyModifiers};
-        let Some(id) = self.shell else { return Ok(()) };
         if keys::is_menu(k) {
-            return self.close_shell("Shell closed");
+            return self.open_overlay(Overlay::Menu);
         }
+        let Some(id) = self.shell else {
+            if k.code == KeyCode::Enter {
+                return self.open_shell();
+            }
+            return Ok(());
+        };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let mut b: Vec<u8> = match k.code {
@@ -511,7 +1026,8 @@ impl Viewer {
                     self.prompt = None;
                     return self.close_share_list().and_then(|_| self.status());
                 }
-                self.prompt = None
+                self.prompt = None;
+                return self.redraw();
             }
             KeyCode::Enter => {
                 let (kind, text) = (*kind, buf.trim().to_string());
@@ -591,9 +1107,20 @@ impl Viewer {
                 self.close_share_list()?;
                 self.sess.send(ToAgent::Share(share))
             }
-            'c' => {
-                self.sess.send(ToAgent::Chat(text.clone()))?;
-                self.notify(&format!("You: {text}"))
+            'u' => {
+                let dir = self.files.path.clone();
+                self.upload_to(&text, &dir)
+            }
+            'n' => {
+                let path = self.files.child(&text);
+                self.sess.send(ToAgent::FileOp { op: crate::proto::FileOp::Mkdir, path, arg: String::new() })?;
+                self.redraw()
+            }
+            'r' => {
+                let Some(old) = self.files.shown().get(self.files.sel).map(|e| e.name.clone()) else { return self.redraw() };
+                let path = self.files.child(&old);
+                self.sess.send(ToAgent::FileOp { op: crate::proto::FileOp::Rename, path, arg: text })?;
+                self.redraw()
             }
             'g' => {
                 self.sess.send(ToAgent::Fetch { tag: 0, path: text.clone() })?;
@@ -605,6 +1132,11 @@ impl Viewer {
 
     /// Sends a local file to the remote Downloads folder; the link paces the writes.
     fn upload(&mut self, path: &str) -> io::Result<()> {
+        self.upload_to(path, "")
+    }
+
+    /// Sends a local file into the remote folder `dir` (empty: Downloads).
+    fn upload_to(&mut self, path: &str, dir: &str) -> io::Result<()> {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => return self.notify(&format!("{path}: {e}")),
@@ -612,11 +1144,14 @@ impl Viewer {
         let name = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
         let id = self.next_upload;
         self.next_upload += 1;
-        self.sess.send(ToAgent::FileStart { id, size: data.len() as u64, dir: String::new(), name: name.clone() })?;
+        let size = data.len() as u64;
+        self.sess.send(ToAgent::FileStart { id, size, dir: dir.to_string(), name: name.clone() })?;
         for chunk in data.chunks(64 << 10) {
             self.sess.send(ToAgent::FileData { id, data: chunk.to_vec() })?;
         }
         self.sess.send(ToAgent::FileEnd { id })?;
+        // Sent to the link at once; it is done when the host says so.
+        self.transfers.push(Transfer { id, name: name.clone(), done: size, size, upload: true });
         self.notify(&format!("Sending {name}..."))
     }
 
@@ -632,11 +1167,19 @@ impl Viewer {
             }
             ToClient::Notice(t) => self.notify(&t)?,
             ToClient::Chat(t) => {
-                // A bell, so a message is noticed while looking elsewhere.
-                if self.probe.is_none() {
-                    self.out.write_all(b"\x07")?;
+                crate::chat::append_history(&self.host, true, &t);
+                if matches!(self.overlay, Overlay::Chat(_)) {
+                    self.draw_chat()?;
+                } else {
+                    // A bell, so a message is noticed while looking elsewhere.
+                    self.unread += 1;
+                    if self.probe.is_none() {
+                        self.out.write_all(b"\x07")?;
+                    }
+                    if self.view != View::Terminal || self.overlay != Overlay::None {
+                        self.notify(&format!("{}: {t}  (Ctrl+] c to answer)", self.peer.get()))?;
+                    }
                 }
-                self.notify(&format!("Remote: {t}"))?
             }
             ToClient::Snapshot(png) => {
                 let path = crate::shot::save_path();
@@ -663,32 +1206,80 @@ impl Viewer {
                 }
             }
             ToClient::TermOutput { id, data } if self.shell == Some(id) => {
-                self.out.write_all(&data)?;
-                self.out.flush()?;
+                if self.view == View::Terminal && self.overlay == Overlay::None {
+                    self.out.write_all(&data)?;
+                    self.out.flush()?;
+                } else {
+                    // Kept for when the shell is shown again; the newest few megabytes.
+                    self.backlog.extend_from_slice(&data);
+                    if self.backlog.len() > 4 << 20 {
+                        let cut = self.backlog.len() - (2 << 20);
+                        self.backlog.drain(..cut);
+                    }
+                }
             }
             ToClient::TermExit { id, text } if self.shell == Some(id) => {
-                self.close_shell(&format!("Shell: {text}"))?;
+                self.shell = None;
+                let line = format!("\r\n\x1b[0msshremote: the shell ended ({text}). Enter: a new one, Ctrl+]: the menu.\r\n");
+                if self.view == View::Terminal && self.overlay == Overlay::None {
+                    self.out.write_all(line.as_bytes())?;
+                    self.out.flush()?;
+                } else {
+                    self.backlog.extend_from_slice(line.as_bytes());
+                }
+            }
+            ToClient::DirList { path, entries, error } => {
+                self.files.loading = false;
+                self.files.path = path;
+                self.files.entries = entries;
+                self.files.error = error;
+                if self.view == View::Files && self.overlay == Overlay::None && self.prompt.is_none() {
+                    self.draw_files()?;
+                }
+            }
+            ToClient::OpDone { ok, text } => {
+                self.notify(&if ok { text } else { format!("Failed: {text}") })?;
+                if self.view == View::Files {
+                    let path = self.files.path.clone();
+                    self.files_go(path)?;
+                }
             }
             ToClient::Clipboard(text) if self.probe.is_none() && text.len() < 100_000 => {
                 // OSC 52 puts it on this computer's clipboard, also through ssh and tmux.
                 write!(self.out, "\x1b]52;c;{}\x07", crate::shot::base64(text.as_bytes()))?;
                 self.out.flush()?;
             }
-            ToClient::FileDone { ok, text, .. } => {
+            ToClient::FileDone { id, ok, text } => {
+                self.transfers.retain(|t| !(t.upload && t.id == id));
                 let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
-                self.notify(&t)?
+                self.notify(&t)?;
+                if ok && self.view == View::Files {
+                    let path = self.files.path.clone();
+                    self.files_go(path)?;
+                }
             }
             ToClient::FetchStart { id, size, name, .. } => {
                 if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
                     self.notify(&format!("download {name}: {text}"))?;
+                } else {
+                    self.transfers.push(Transfer { id, name, done: 0, size, upload: false });
                 }
             }
             ToClient::FetchData { id, data } => {
                 if let Some(crate::files::Note::Progress { id, received }) = self.inbox.data(id, &data) {
+                    if let Some(t) = self.transfers.iter_mut().find(|t| !t.upload && t.id == id) {
+                        t.done = received;
+                    }
                     self.sess.send(ToAgent::FetchAck { id, received })?;
+                    if self.view == View::Files {
+                        self.status()?;
+                    }
                 }
             }
-            ToClient::FetchEnd { id, ok, text } => match self.inbox.end(id, ok, &text) {
+            ToClient::FetchEnd { id, ok, text } => match {
+                self.transfers.retain(|t| t.upload || t.id != id);
+                self.inbox.end(id, ok, &text)
+            } {
                 Some(crate::files::Note::Done { ok, text, .. }) => {
                     let t = if ok { format!("download ok={ok} {text}") } else { format!("download failed: {text}") };
                     self.notify(&t)?
@@ -701,54 +1292,66 @@ impl Viewer {
     }
 
     fn on_term(&mut self, e: Event) -> io::Result<()> {
+        let screen_input = self.view == View::Screen && self.overlay == Overlay::None && self.prompt.is_none();
         match e {
-            Event::Key(k) if k.kind != KeyEventKind::Release && self.shell.is_some() => self.shell_key(&k)?,
-            Event::Paste(text) if self.shell.is_some() => {
-                if let Some(id) = self.shell {
-                    self.sess.send(ToAgent::TermInput { id, data: text.into_bytes() })?;
+            Event::Key(k) if k.kind == KeyEventKind::Release && !(screen_input && self.key_states) => {}
+            Event::Key(k) if self.overlay != Overlay::None => match self.overlay.clone() {
+                Overlay::Confirm(c) => self.confirm_key(c, &k)?,
+                Overlay::Chat(_) => self.chat_key(&k)?,
+                _ => {
+                    // The menu: a key, or Esc (or Ctrl+] again) back.
+                    let c = match k.code {
+                        event::KeyCode::Char(c) if !keys::is_menu(&k) => c,
+                        _ => '\0',
+                    };
+                    self.menu_key(c)?
+                }
+            },
+            Event::Key(k) if self.prompt.is_some() => self.prompt_key(&k)?,
+            Event::Key(k) if keys::is_menu(&k) => self.open_overlay(Overlay::Menu)?,
+            Event::Key(k) if self.view == View::Terminal => self.shell_key(&k)?,
+            Event::Key(k) if self.view == View::Files => self.files_key(&k)?,
+            Event::Paste(text) => {
+                if let Some((_, buf)) = self.prompt.as_mut() {
+                    buf.push_str(text.trim());
+                    self.status()?;
+                } else if let Overlay::Chat(buf) = &mut self.overlay {
+                    buf.push_str(&text);
+                    self.draw_chat()?;
+                } else if self.view == View::Terminal {
+                    if let Some(id) = self.shell {
+                        self.sess.send(ToAgent::TermInput { id, data: text.into_bytes() })?;
+                    }
+                } else if self.view == View::Screen {
+                    // As in RustDesk: the text goes to the host's clipboard and is pasted there.
+                    self.sess.send(ToAgent::Clipboard(text))?;
+                    self.sess.send(ToAgent::Key { keysym: 'v' as u32, mods: crate::proto::MOD_CTRL })?;
+                    self.notify("Pasted into the host")?;
                 }
             }
-            Event::Resize(cols, rows) if self.shell.is_some() => {
+            Event::Resize(cols, rows) => {
+                self.measure();
                 if let Some(id) = self.shell {
                     self.sess.send(ToAgent::TermResize { id, cols, rows })?;
                 }
-                self.measure();
-            }
-            Event::Mouse(_) if self.shell.is_some() => {}
-            Event::Paste(text) => {
-                // As in RustDesk: the text goes to the host's clipboard and is pasted there.
-                self.sess.send(ToAgent::Clipboard(text))?;
-                self.sess.send(ToAgent::Key { keysym: 'v' as u32, mods: crate::proto::MOD_CTRL })?;
-                self.notify("Pasted into the host")?;
+                if self.view == View::Screen {
+                    self.dirty.clear();
+                    self.full_redraw()?;
+                    self.push_settings()?;
+                    self.sess.send(ToAgent::Refresh)?;
+                } else if self.view != View::Terminal || self.overlay != Overlay::None {
+                    self.redraw()?;
+                }
             }
             Event::Key(k)
                 if self.key_states
-                    && self.shell.is_none()
-                    && self.prompt.is_none()
-                    && !self.menu
                     && !self.win_next
                     && !keys::is_menu(&k)
                     && !matches!(k.code, event::KeyCode::Modifier(_)) =>
             {
                 self.key_state(&k)?;
             }
-            Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if self.prompt.is_some() {
-                    return self.prompt_key(&k);
-                }
-                if self.menu {
-                    self.menu = false;
-                    let c = match k.code {
-                        event::KeyCode::Char(c) => c,
-                        _ => '\0',
-                    };
-                    return self.menu_extra(c);
-                }
-                if keys::is_menu(&k) {
-                    self.release_all()?;
-                    self.menu = true;
-                    return self.status();
-                }
+            Event::Key(k) => {
                 if matches!(k.code, event::KeyCode::Modifier(_)) {
                     return Ok(());
                 }
@@ -765,7 +1368,7 @@ impl Viewer {
                     self.sess.send(ToAgent::Key { keysym, mods: m })?;
                 }
             }
-            Event::Mouse(m) => {
+            Event::Mouse(m) if screen_input => {
                 if self.key_states {
                     // Shift+click and Ctrl+drag: the modifiers held here are held on the host too.
                     self.sync_mods(keys::mod_bits(m.modifiers))?;
@@ -794,12 +1397,14 @@ impl Viewer {
                     _ => {}
                 }
             }
-            Event::Resize(..) => {
-                self.measure();
-                self.dirty.clear();
-                self.full_redraw()?;
-                self.push_settings()?;
-                self.sess.send(ToAgent::Refresh)?;
+            Event::Mouse(m) if self.view == View::Files && self.overlay == Overlay::None => {
+                // The wheel moves through the list.
+                let k = match m.kind {
+                    MouseEventKind::ScrollDown => event::KeyCode::Down,
+                    MouseEventKind::ScrollUp => event::KeyCode::Up,
+                    _ => return Ok(()),
+                };
+                self.files_key(&event::KeyEvent::new(k, event::KeyModifiers::NONE))?;
             }
             _ => {}
         }
@@ -807,18 +1412,86 @@ impl Viewer {
     }
 }
 
-pub fn run(opt: Options) -> Result<(), String> {
-    if opt.gui {
-        return crate::gui::run(&opt);
+/// Text length on screen, without the escape sequences that style it.
+fn visible_len(s: &str) -> usize {
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        if esc {
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+        } else if c == '\x1b' {
+            esc = true;
+        } else {
+            n += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        }
     }
-    let (sess, tx, rx) = Session::connect(&opt)?;
+    n
+}
+
+/// `s` cut to `width` columns on screen, its escape sequences kept.
+fn cut_visible(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut n = 0;
+    let mut esc = false;
+    for c in s.chars() {
+        if esc {
+            out.push(c);
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            esc = true;
+            out.push(c);
+            continue;
+        }
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if n + w > width {
+            break;
+        }
+        n += w;
+        out.push(c);
+    }
+    out
+}
+
+/// A message broken into lines of at most `width` columns, at spaces where it can be.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let extra = if line.is_empty() { 0 } else { 1 };
+            if !line.is_empty() && visible_len(&line) + extra + visible_len(word) > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+            while visible_len(&line) > width {
+                let head = cut_visible(&line, width);
+                line = line[head.len()..].to_string();
+                lines.push(head);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+impl Viewer {
+    fn new(opt: &Options, sess: Session, out: Box<dyn Write>) -> Viewer {
     let host = opt.host.clone().unwrap_or_else(|| "local".into());
-    let mut v = Viewer {
+    Viewer {
         tmux: None,
         key_states: false,
         held: Default::default(),
         held_mods: 0,
-        out: if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) },
+        out,
         probe: opt.probe.as_ref().map(|p| p.1),
         paint_bytes: 0,
         label: format!("{host} {}x{} {}", sess.desk.0, sess.desk.1, sess.backend),
@@ -839,7 +1512,14 @@ pub fn run(opt: Options) -> Result<(), String> {
         px: Vec::new(),
         qpal: Vec::new(),
         dirty: Vec::new(),
-        menu: false,
+        view: View::Screen,
+        overlay: Overlay::None,
+        backlog: Vec::new(),
+        files: RemoteFiles::default(),
+        transfers: Vec::new(),
+        unread: 0,
+        peer: crate::chat::Peer::new(&host),
+        host: host.clone(),
         win_next: false,
         player: None,
         inbox: crate::files::Inbox::default(),
@@ -858,8 +1538,16 @@ pub fn run(opt: Options) -> Result<(), String> {
         next_shell: 1,
         sharing: (0, String::new()),
         share_list: None,
-    };
+    }
+    }
+}
 
+pub fn run(opt: Options) -> Result<(), String> {
+    if opt.gui {
+        return crate::gui::run(&opt);
+    }
+    let (sess, tx, rx) = Session::connect(&opt)?;
+    let mut v = Viewer::new(&opt, sess, if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) });
     let interactive = opt.probe.is_none();
     let deadline = opt.probe.as_ref().map(|p| Instant::now() + Duration::from_secs_f64(p.0));
     if interactive {
@@ -1135,6 +1823,112 @@ mod tests {
         let mut out = Vec::new();
         super::tmux_wrap(&mut out, b"\x1b[1;1H\x1bPq#0\x1b\\");
         assert_eq!(out, b"\x1bPtmux;\x1b\x1b[1;1H\x1b\x1bPq#0\x1b\x1b\\\x1b\\".to_vec());
+    }
+
+    /// What the viewer writes, kept for the test to read.
+    #[derive(Clone, Default)]
+    struct Screen(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Screen {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Screen {
+        fn take(&self) -> String {
+            String::from_utf8_lossy(&std::mem::take(&mut *self.0.lock().unwrap())).into_owned()
+        }
+    }
+
+    /// The terminal viewer goes between the screen, a shell kept open, the files and the chat on
+    /// one connection, as the window does, and asks before disconnecting.
+    #[test]
+    #[ignore]
+    fn the_terminal_viewer_switches_modes_on_one_connection() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use super::*;
+        static SCRATCH: std::sync::Once = std::sync::Once::new();
+        SCRATCH.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("sshremote-cli-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for var in ["APPDATA", "XDG_CONFIG_HOME"] {
+                unsafe { std::env::set_var(var, &dir) };
+            }
+        });
+        let opt = crate::parse_client(&["--local".into()]).unwrap();
+        let (sess, _tx, rx) = Session::connect(&opt).expect("a local agent (SSHREMOTE_EXE)");
+        let screen = Screen::default();
+        let mut v = Viewer::new(&opt, sess, Box::new(screen.clone()));
+        (v.cols, v.rows) = (100, 30);
+        let key = |c: KeyCode| Event::Key(KeyEvent::new(c, KeyModifiers::NONE));
+        let menu = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        let pump = |v: &mut Viewer, until: &dyn Fn(&Viewer) -> bool| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < end && !until(v) {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f).unwrap(),
+                    Ok(Ev::Net(m)) => v.on_message(m).unwrap(),
+                    _ => {}
+                }
+            }
+            assert!(until(v), "waited too long");
+        };
+        v.push_settings().unwrap();
+        pump(&mut v, &|v| v.fb.w > 0);
+        // The menu lists the modes; f goes to the files, listed from the host.
+        v.on_term(menu.clone()).unwrap();
+        assert_eq!(v.overlay, Overlay::Menu);
+        assert!(screen.take().contains("Screen sharing"));
+        v.on_term(key(KeyCode::Char('f'))).unwrap();
+        assert_eq!(v.view, View::Files);
+        pump(&mut v, &|v| !v.files.loading && !v.files.entries.is_empty());
+        v.draw_files().unwrap();
+        assert!(screen.take().contains("Files on"), "the folder is drawn");
+        // The terminal: a shell opens and writes its prompt.
+        v.on_term(menu.clone()).unwrap();
+        v.on_term(key(KeyCode::Char('t'))).unwrap();
+        assert_eq!(v.view, View::Terminal);
+        let shell = v.shell.expect("a shell");
+        pump(&mut v, &|_| !screen.0.lock().unwrap().is_empty());
+        // Back to the screen: the shell stays, and what it writes waits for its return.
+        v.on_term(menu.clone()).unwrap();
+        v.on_term(key(KeyCode::Char('s'))).unwrap();
+        assert_eq!(v.view, View::Screen);
+        assert_eq!(v.shell, Some(shell), "the shell is kept");
+        v.sess.send(ToAgent::TermInput { id: shell, data: b"echo kept-while-away\r".to_vec() }).unwrap();
+        pump(&mut v, &|v| String::from_utf8_lossy(&v.backlog).contains("kept-while-away"));
+        screen.take();
+        v.on_term(menu.clone()).unwrap();
+        v.on_term(key(KeyCode::Char('t'))).unwrap();
+        assert!(screen.take().contains("kept-while-away"), "written out on return");
+        assert!(v.backlog.is_empty());
+        // The chat, with its history.
+        v.on_term(menu.clone()).unwrap();
+        v.on_term(key(KeyCode::Char('c'))).unwrap();
+        for c in "hello".chars() {
+            v.on_term(key(KeyCode::Char(c))).unwrap();
+        }
+        v.on_term(key(KeyCode::Enter)).unwrap();
+        assert!(crate::chat::load_history(&v.host).iter().any(|l| !l.0 && l.1 == "hello"), "kept in the history");
+        assert!(screen.take().contains("hello"), "and shown");
+        v.on_term(key(KeyCode::Esc)).unwrap();
+        assert_eq!(v.overlay, Overlay::None);
+        // Disconnecting asks; no keeps the connection, y ends it.
+        v.on_term(menu.clone()).unwrap();
+        v.on_term(key(KeyCode::Char('q'))).unwrap();
+        assert_eq!(v.overlay, Overlay::Confirm('q'));
+        v.on_term(key(KeyCode::Char('n'))).unwrap();
+        assert!(!v.quit);
+        v.on_term(menu).unwrap();
+        v.on_term(key(KeyCode::Char('q'))).unwrap();
+        v.on_term(key(KeyCode::Char('y'))).unwrap();
+        assert!(v.quit, "y disconnects");
+        v.sess.close();
     }
 
     #[test]
