@@ -343,10 +343,18 @@ impl App {
                 || self.vault.as_ref().is_some_and(|t| t.sub_page())
                 || self.backup.as_ref().is_some_and(|t| t.sub_page());
             if form {
-                self.keys.as_mut().map(|t| t.back());
-                self.config.as_mut().map(|t| t.back());
-                self.vault.as_mut().map(|t| t.back());
-                self.backup.as_mut().map(|t| t.back());
+                if let Some(t) = self.keys.as_mut() {
+                    t.back();
+                }
+                if let Some(t) = self.config.as_mut() {
+                    t.back();
+                }
+                if let Some(t) = self.vault.as_mut() {
+                    t.back();
+                }
+                if let Some(t) = self.backup.as_mut() {
+                    t.back();
+                }
             } else {
                 self.keys = None;
                 self.config = None;
