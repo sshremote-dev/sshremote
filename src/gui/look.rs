@@ -1149,6 +1149,27 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
 
     heading(ui, "Background layers");
     ui.label(RichText::new("Behind the terminal panes, the top of the list in front. Add built-in ones or your own pictures and animations (PNG, JPEG, WebP, GIF, Lottie); drop a file on this window to add it.").weak().size(12.0));
+    // Added layers go to the top of the list, right under these.
+    ui.horizontal(|ui| {
+        ui.menu_button(format!("{}  Add built-in", ic::PLUS), |ui| {
+            for b in super::lottie::BUILT_INS {
+                let kind = if b.still { "picture" } else { "animation" };
+                if ui.button(format!("{}  ({kind})", b.label)).clicked() {
+                    let fit = if b.id == "builtin:brand" { Fit::Whole } else { Fit::Fill };
+                    l.layers.insert(0, BgLayer { src: b.id.to_string(), on: true, strength: 0.5, fit, scope: Scope::Window });
+                    ui.close();
+                }
+            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut ed.new_file).hint_text("Your file's path").desired_width(220.0));
+        if ui.add_enabled(!ed.new_file.trim().is_empty(), egui::Button::new("Add")).clicked() {
+            l.layers.insert(0, BgLayer { src: ed.new_file.trim().to_string(), on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
+            ed.new_file.clear();
+        }
+        if ui.button("Defaults").on_hover_text("The default layers again").clicked() {
+            l.layers = Look::default().layers;
+        }
+    });
     let mut act: Option<(usize, i8)> = None;
     for (i, ly) in l.layers.iter_mut().enumerate() {
         egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
@@ -1196,26 +1217,6 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         Some((i, 1)) if i + 1 < l.layers.len() => l.layers.swap(i, i + 1),
         _ => {}
     }
-    ui.horizontal(|ui| {
-        ui.menu_button(format!("{}  Add built-in", ic::PLUS), |ui| {
-            for b in super::lottie::BUILT_INS {
-                let kind = if b.still { "picture" } else { "animation" };
-                if ui.button(format!("{}  ({kind})", b.label)).clicked() {
-                    let fit = if b.id == "builtin:brand" { Fit::Whole } else { Fit::Fill };
-                    l.layers.insert(0, BgLayer { src: b.id.to_string(), on: true, strength: 0.5, fit, scope: Scope::Window });
-                    ui.close();
-                }
-            }
-        });
-        ui.add(egui::TextEdit::singleline(&mut ed.new_file).hint_text("Your file's path").desired_width(220.0));
-        if ui.add_enabled(!ed.new_file.trim().is_empty(), egui::Button::new("Add")).clicked() {
-            l.layers.insert(0, BgLayer { src: ed.new_file.trim().to_string(), on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
-            ed.new_file.clear();
-        }
-        if ui.button("Defaults").on_hover_text("The default layers again").clicked() {
-            l.layers = Look::default().layers;
-        }
-    });
 
     heading(ui, "Overlay");
     ui.checkbox(&mut l.hud, "Show the load and the time");
