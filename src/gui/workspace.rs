@@ -151,6 +151,17 @@ impl Node {
 
     /// The same arrangement with every pane in a row or column the same size: three side by
     /// side are a third each, not a half and two quarters.
+    /// Whether every pane in each row and column is already the same size.
+    fn is_even(&self) -> bool {
+        match self {
+            Node::Leaf(_) => true,
+            Node::Split { below, ratio, a, b } => {
+                let (wa, wb) = (a.weight(*below), b.weight(*below));
+                (*ratio - wa / (wa + wb)).abs() < 0.005 && a.is_even() && b.is_even()
+            }
+        }
+    }
+
     fn balance(&mut self) {
         if let Node::Split { below, ratio, a, b } = self {
             let (wa, wb) = (a.weight(*below), b.weight(*below));
@@ -914,8 +925,9 @@ impl Workspace {
             self.set_mode(id, PaneMode::Terminal);
         }
         if let Some(z) = zoom_req {
-            self.window_full = z.is_some();
+            // After the zoom, which leaves the window's full screen: this one fills the monitor.
             self.set_zoom(&ctx, z);
+            self.window_full = z.is_some();
         }
         for id in closing {
             self.close_pane(id);
@@ -1025,10 +1037,16 @@ impl Workspace {
             let ui = &mut right;
             ui.spacing_mut().item_spacing.x = 2.0;
             // The whole window on the monitor, beside the window's own buttons.
-            let (glyph, tip) = if self.window_full {
-                (ic::ARROWS_IN, "Leave full screen (F11)")
-            } else {
-                (ic::ARROWS_OUT, "Full screen: the window on the whole monitor, as it is (F11)")
+            // A shared screen keeps F11 for the remote computer: its key is Ctrl+Alt+Enter.
+            let screen = self.index(active).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen));
+            let (glyph, tip) = match (self.window_full, screen) {
+                (true, false) => (ic::ARROWS_IN, "Leave full screen (F11)"),
+                (true, true) => (ic::ARROWS_IN, "Leave full screen (Ctrl+Alt+Enter; F11 goes to the remote computer)"),
+                (false, false) => (ic::ARROWS_OUT, "Full screen: the window on the whole monitor, as it is (F11)"),
+                (false, true) => (
+                    ic::ARROWS_OUT,
+                    "Full screen: the window on the whole monitor, as it is (F11 goes to the remote computer; Ctrl+Alt+Enter fills the screen with this one)",
+                ),
             };
             if ui.add(tool_button(glyph, self.window_full)).on_hover_text(tip).clicked() {
                 self.window_full = !self.window_full;
@@ -1519,10 +1537,8 @@ impl Workspace {
         ];
         // The arrangement menu after the splits.
         buttons.insert(3, (ic::LAYOUT, "Layout: arrange this tab's panes", 5));
-        // One pane: nothing to zoom out of.
-        if self.order(self.current).len() < 2 && !zoomed {
-            buttons.remove(0);
-        }
+        // One pane: nothing to zoom, as nothing to arrange; both show, greyed.
+        let many = self.order(self.current).len() > 1;
         if rtl {
             buttons.reverse();
         }
@@ -1532,7 +1548,11 @@ impl Workspace {
                 continue;
             }
             let on = what == 0 && zoomed;
-            if !ui.add(tool_button(glyph, on)).on_hover_text(tip).clicked() {
+            // Zoom and moving need another pane; splitting is how one gets there.
+            let enabled = matches!(what, 1 | 2) || many || (what == 0 && zoomed);
+            let button = ui.add_enabled(enabled, tool_button(glyph, on)).on_hover_text(tip);
+            let button = button.on_disabled_hover_text(format!("{tip}: for a tab of two panes or more"));
+            if !button.clicked() {
                 continue;
             }
             match what {
@@ -1550,18 +1570,21 @@ impl Workspace {
     /// The tab's arrangements: the same sizes, side by side, stacked, a main pane, a grid.
     fn layout_menu(&mut self, ui: &mut egui::Ui, glyph: &str, tip: &str) {
         let many = self.order(self.current).len() > 1;
+        let even = self.tabs.get(self.current).is_none_or(|t| t.root.is_even());
         let mut chosen = None;
         ui.add_enabled_ui(many, |ui| {
             icon_menu(ui, glyph, |ui| {
                 for (layout, g, text) in [
-                    (Layout::Even, ic::ARROWS_OUT, "Even sizes  (keep the arrangement)"),
+                    (Layout::Even, ic::EQUALS, "Even sizes  (keep the arrangement)"),
                     (Layout::Side, ic::SPLIT_SIDE, "Side by side"),
                     (Layout::Stacked, ic::SPLIT_BELOW, "Stacked"),
                     (Layout::MainLeft, ic::LAYOUT, "Main pane left, the others stacked"),
                     (Layout::MainTop, ic::ROWS, "Main pane on top, the others side by side"),
                     (Layout::Grid, ic::SQUARES_FOUR, "Grid"),
                 ] {
-                    if ui.button(format!("{g}  {text}")).clicked() {
+                    // Sizes already even: nothing it would change.
+                    let item = ui.add_enabled(layout != Layout::Even || !even, egui::Button::new(format!("{g}  {text}")));
+                    if item.on_disabled_hover_text("The panes are already the same size").clicked() {
                         chosen = Some(layout);
                         ui.close();
                     }
@@ -1814,6 +1837,32 @@ mod tests {
         }
     }
 
+    /// In a shared screen F11 is the remote computer's; Ctrl+Alt+Enter is the full-screen key
+    /// there, and it leaves a full screen the window's button started.
+    #[test]
+    #[ignore]
+    fn workspace_full_screen_keys_in_a_shared_screen() {
+        let mut h = Harness::new();
+        h.w.add(test_desktop(), Place::Tab, (false, false, false));
+        h.until("the test desktop connects", |w| live(w, 0));
+        let cae = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
+        assert!(!h.w.window_full, "F11 goes to the remote computer");
+        h.bar(ic::ARROWS_OUT);
+        assert!(h.w.window_full, "the button fills the monitor");
+        h.frame(vec![key(egui::Key::Enter, cae)]);
+        h.frame(Vec::new());
+        assert!(!h.w.window_full, "Ctrl+Alt+Enter leaves it");
+        h.frame(vec![key(egui::Key::Enter, cae)]);
+        h.frame(Vec::new());
+        assert!(h.w.window_full, "and fills the monitor with the screen again");
+        h.frame(vec![key(egui::Key::Enter, cae)]);
+        h.frame(Vec::new());
+        assert!(!h.w.window_full && h.w.zoom.is_none(), "and leaves");
+        h.w.close_all();
+    }
+
     #[test]
     #[ignore]
     fn workspace_modes_splits_and_reconnect() {
@@ -1896,6 +1945,8 @@ mod tests {
             };
             h.w.add(test_desktop(), Place::Tab, (false, false, false));
             h.until("connected", |w| live(w, 0));
+            // One pane: zoom and layout show, greyed.
+            save(&mut h, "one_pane");
             let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
             h.w.add(
                 Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
@@ -1907,6 +1958,9 @@ mod tests {
                 h.frame(Vec::new());
             }
             save(&mut h, "split");
+            h.bar(ic::LAYOUT);
+            save(&mut h, "layout_menu");
+            h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
             let first = h.w.order(0)[0];
             h.w.confirm = Some(Confirm::Pane(first));
             save(&mut h, "confirm");
@@ -2333,12 +2387,14 @@ mod tests {
             let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
             Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
-        // One pane: nothing to zoom, so no button for it.
+        // One pane: nothing to zoom; the button shows, greyed, as the layout menu does.
         h.w.add(shell(), Place::Tab, (false, false, false));
         for _ in 0..4 {
             h.frame(Vec::new());
         }
-        assert!(h.snap.find(ic::CORNERS_OUT).is_empty(), "no zoom with one pane");
+        assert!(!h.snap.find(ic::CORNERS_OUT).is_empty(), "the zoom button shows with one pane");
+        h.bar(ic::CORNERS_OUT);
+        assert_eq!(h.w.zoom, None, "and does nothing");
         h.w.add(shell(), Place::Split { below: false }, (false, false, false));
         for _ in 0..4 {
             h.frame(Vec::new());

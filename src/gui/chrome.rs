@@ -170,7 +170,7 @@ fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> (bool, bool) {
     let mut leave = false;
     let one_size = fixed(&ctx);
     let mut close = false;
-    let middle = if full { "Leave full screen (F11)" } else if max { "Restore Down" } else { "Maximize" };
+    let middle = if full { "Leave full screen (F11; Ctrl+Alt+Enter in a shared screen)" } else if max { "Restore Down" } else { "Maximize" };
     for (k, tip) in ["Minimize", middle, "Close"].into_iter().enumerate() {
         // A window of one size has no maximize: minimize moves over beside close.
         if one_size && k == 1 {

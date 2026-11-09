@@ -444,7 +444,8 @@ impl Remote {
         let toggle =
             self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter));
         if toggle {
-            let now = if self.in_pane { self.zoomed } else { self.fullscreen };
+            // In a pane: out of any full screen this screen fills (F11 is the host's here).
+            let now = if self.in_pane { self.zoomed || self.filling } else { self.fullscreen };
             self.set_fullscreen(&ctx, !now);
         }
         // Network messages wake the window themselves; this only keeps statistics and pings going.
@@ -1711,7 +1712,7 @@ impl Remote {
                 r.send(ToAgent::ListWindows)
             }));
         }
-        let fs = if self.in_pane { self.zoomed } else { self.fullscreen };
+        let fs = if self.in_pane { self.zoomed || self.filling } else { self.fullscreen };
         let fs_tip = if fs { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
         let fs_glyph = if fs { ic::CORNERS_IN } else { ic::CORNERS_OUT };
         // In a pane the workspace puts this button last, beside Disconnect, as for every pane.
