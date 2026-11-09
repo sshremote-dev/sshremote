@@ -13,6 +13,17 @@ const BUTTON: f32 = 46.0;
 /// Width of the edge that resizes the window.
 const EDGE: f32 = 6.0;
 
+/// A window of one size (the open window): no resizing edges, no maximize, no full screen.
+pub fn set_fixed(ctx: &egui::Context, fixed: bool) {
+    let key = egui::Id::unique(("chrome-fixed", ctx.viewport_id()));
+    ctx.data_mut(|d| d.insert_temp(key, fixed));
+}
+
+fn fixed(ctx: &egui::Context) -> bool {
+    let key = egui::Id::unique(("chrome-fixed", ctx.viewport_id()));
+    ctx.data(|d| d.get_temp::<bool>(key)).unwrap_or(false)
+}
+
 fn maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false))
 }
@@ -44,7 +55,7 @@ pub fn behaviour(ctx: &egui::Context) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
-    if maximized(ctx) {
+    if maximized(ctx) || fixed(ctx) {
         return;
     }
     let screen = ctx.content_rect();
@@ -80,6 +91,7 @@ pub fn behaviour(ctx: &egui::Context) {
 pub fn on_edge(ctx: &egui::Context, p: Pos2) -> bool {
     let r = ctx.content_rect();
     !maximized(ctx)
+        && !fixed(ctx)
         && (p.x - r.left() < EDGE || r.right() - p.x < EDGE || p.y - r.top() < EDGE || r.bottom() - p.y < EDGE)
 }
 
@@ -104,7 +116,7 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         if back.drag_started_by(egui::PointerButton::Primary) {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
-        if back.double_clicked() {
+        if back.double_clicked() && !fixed(&ctx) {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized(&ctx)));
         }
         if back.secondary_clicked()
@@ -140,9 +152,15 @@ fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> bool {
     let ctx = ui.ctx().clone();
     let fg = ui.visuals().text_color();
     let max = maximized(&ctx);
+    let one_size = fixed(&ctx);
     let mut close = false;
     for (k, tip) in ["Minimize", if max { "Restore Down" } else { "Maximize" }, "Close"].into_iter().enumerate() {
-        let r = Rect::from_min_size(Pos2::new(rect.left() + k as f32 * BUTTON, rect.top()), Vec2::new(BUTTON, HEIGHT));
+        // A window of one size has no maximize: minimize moves over beside close.
+        if one_size && k == 1 {
+            continue;
+        }
+        let slot = if one_size && k == 0 { 1 } else { k };
+        let r = Rect::from_min_size(Pos2::new(rect.left() + slot as f32 * BUTTON, rect.top()), Vec2::new(BUTTON, HEIGHT));
         let resp = ui.interact(r, ui.scope_id().with(("caption", k)), Sense::click()).on_hover_text(tip);
         let hot = resp.hovered();
         let (bg, color) = match (k, hot, resp.is_pointer_button_down_on()) {

@@ -244,7 +244,36 @@ fn saved_login(host: &str, argv: &[String]) -> i32 {
     }
 }
 
+/// A crash leaves its reason in the settings folder: a window started without a console has
+/// nowhere else to say it.
+fn note_crashes() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = hosts::config_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+            let text = format!(
+                "sshremote {} crashed at {} (unix time {when}), thread {thread}:
+{info}
+{}
+
+",
+                env!("CARGO_PKG_VERSION"),
+                files::local_time(when),
+                std::backtrace::Backtrace::force_capture()
+            );
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.txt")) {
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    note_crashes();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ssh runs this program as its askpass helper with the prompt as the only argument.
     if let Ok(secret) = std::env::var(transport::ASKPASS_SECRET)
@@ -281,6 +310,11 @@ fn main() {
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");
         if let Err(e) = client::run(opt) {
+            // No console here: the reason goes beside the settings too.
+            if let Some(dir) = hosts::config_dir() {
+                let _ = std::fs::write(dir.join("crash.txt"), format!("sshremote stopped: {e}
+"));
+            }
             eprintln!("sshremote: {e}");
             std::process::exit(1);
         }

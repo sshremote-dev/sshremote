@@ -2517,6 +2517,26 @@ mod tests {
         h.w.close_all();
     }
 
+    /// "This computer": its terminal turned to the screen goes on to the local agent's picture.
+    #[test]
+    #[ignore]
+    fn a_local_terminal_turns_to_this_computers_screen() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(Launch::Shell { label: "PowerShell".into(), profile, target: Target::Local { capture: "auto".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.frame(Vec::new());
+        let id = h.w.tabs[0].active;
+        h.w.set_mode(id, PaneMode::Screen);
+        h.until("this computer's screen", |w| live(w, 0));
+        for _ in 0..20 {
+            h.frame(Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(live(&h.w, 0), "still there");
+        assert_eq!(mode_of(&h.w, 0), Some(PaneMode::Screen));
+        h.w.close_all();
+    }
+
     /// A first connection that fails asks at once: Reconnect or Close.
     #[test]
     #[ignore]

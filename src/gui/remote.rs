@@ -27,6 +27,9 @@ pub(super) struct Remote {
     tex: Option<TextureHandle>,
     label: String,
     fit: Fit,
+    /// In full screen, fit to the window fills it all, stretched a little where the shapes
+    /// differ (a 16:9 host on a 16:10 screen), rather than leave bars.
+    fill_full: bool,
     /// How far a fixed-size picture is scrolled, in points.
     pan: Vec2,
     fullscreen: bool,
@@ -153,6 +156,7 @@ impl Remote {
             fb: Framebuffer::default(),
             tex: None,
             fit: Fit::Window,
+            fill_full: true,
             pan: Vec2::ZERO,
             fullscreen: false,
             pinned: true,
@@ -1235,6 +1239,7 @@ impl Remote {
         let tex = self.tex.as_ref()?;
         let size = Vec2::new(self.fb.w as f32, self.fb.h as f32) / ppp;
         let rect = match self.fit {
+            Fit::Window if self.fill_full && (self.fullscreen || self.zoomed) => area,
             Fit::Window => {
                 let k = (area.width() / size.x).min(area.height() / size.y);
                 Rect::from_center_size(area.center(), size * k)
@@ -1660,6 +1665,8 @@ impl Remote {
             };
             pick(ui, Fit::Window, "Fit to window");
             pick(ui, Fit::Stretch, "Stretch to fill");
+            ui.checkbox(&mut self.fill_full, "Fill the whole screen in full screen")
+                .on_hover_text("No bars when this screen's shape differs from the host's: the picture stretches a little");
             ui.horizontal_wrapped(|ui| {
                 for p in [50, 75, 100, 125, 150, 200] {
                     pick(ui, Fit::Fixed(p), &format!("{p}%"));

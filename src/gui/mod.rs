@@ -265,6 +265,8 @@ pub struct App {
     pending_ports: std::collections::HashMap<String, String>,
     /// The window whose active pane last asked for the system keys (None: the main one).
     grab_window: Option<egui::ViewportId>,
+    /// Whether the window was last sized as the open window (true) or a working one.
+    sized_for: Option<bool>,
     /// Workspaces in windows of their own (tabs dragged out), with where they first appear.
     windows: Vec<(egui::ViewportId, Box<workspace::Workspace>, Pos2)>,
     windows_made: u64,
@@ -582,6 +584,7 @@ impl App {
             quit_when_empty: false,
             pending_ports: Default::default(),
             grab_window: None,
+            sized_for: None,
             queued: Vec::new(),
         }
     }
@@ -663,6 +666,8 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
 
 /// The open window's size, about a file dialog's.
 const OPEN_SIZE: [f32; 2] = [900.0, 600.0];
+/// The smallest working window that still shows its bar, a split and the files readably.
+pub(crate) const MIN_WORK: [f32; 2] = [760.0, 480.0];
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -677,6 +682,7 @@ impl eframe::App for App {
             if !matches!(self.screen, Screen::Work(_)) {
                 self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
                 if !maximized && !fullscreen {
+                    ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
                     ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
                 }
             }
@@ -710,13 +716,28 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         } else if back {
             self.screen = Screen::Connect;
-            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
-            if !maximized {
+        }
+        // The open window has one size, whatever the working window was; the working window
+        // resizes, down to where it still reads.
+        let open = matches!(self.screen, Screen::Connect);
+        if self.sized_for != Some(open) {
+            self.sized_for = Some(open);
+            chrome::set_fixed(&ctx, open);
+            if open {
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(OPEN_SIZE)));
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
+                ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+                ctx.send_viewport_cmd(ViewportCommand::EnableButtons { close: true, minimized: true, maximize: false });
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+                ctx.send_viewport_cmd(ViewportCommand::EnableButtons { close: true, minimized: true, maximize: true });
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_WORK)));
             }
         }
-        if matches!(self.screen, Screen::Connect) {
+        if open {
             self.connect_screen(ui);
         }
         self.side_windows(&ctx);
@@ -861,7 +882,7 @@ impl App {
             let mut builder = egui::ViewportBuilder::default()
                 .with_title("SSH Remote")
                 .with_inner_size([1100.0, 720.0])
-                .with_min_inner_size([480.0, 320.0])
+                .with_min_inner_size(MIN_WORK)
                 .with_position(*at)
                 .with_decorations(false);
             if let Some(icon) = app_icon() {
