@@ -104,13 +104,13 @@ impl Default for Look {
             custom_colors: false,
             fg: [215, 218, 224],
             bg: [22, 23, 28],
-            image: String::new(),
+            image: super::lottie::NIGHT_STILL.to_string(),
             scope: Scope::Window,
             fit: Fit::Fill,
-            image_strength: 0.25,
-            anim: super::lottie::BUILT_IN.to_string(),
+            image_strength: 0.6,
+            anim: super::lottie::NIGHT_MOTION.to_string(),
             anim_fit: Fit::Fill,
-            anim_strength: 0.55,
+            anim_strength: 0.6,
             badge: true,
             badge_opacity: 0.6,
             logo_motion: false,
@@ -193,7 +193,7 @@ impl Look {
             custom_colors: flag("custom_colors", d.custom_colors),
             fg: rgb("fg", d.fg),
             bg: rgb("bg", d.bg),
-            image: text("image", ""),
+            image: text("image", &d.image),
             scope: from_name(&SCOPES, v.get("scope").and_then(|x| x.as_str()), d.scope),
             fit: from_name(&FITS, v.get("fit").and_then(|x| x.as_str()), d.fit),
             image_strength: num("image_strength", d.image_strength, 0.0, 1.0),
@@ -1036,9 +1036,16 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     heading(ui, "Background picture");
     ui.label(RichText::new("Behind the terminal panes. Drop a picture on this window, or give its path.").weak().size(12.0));
     ui.horizontal(|ui| {
-        let edit = ui.add(egui::TextEdit::singleline(&mut l.image).hint_text("Picture or animation (PNG, JPEG, WebP, GIF, Lottie)").desired_width(300.0));
-        if edit.changed() {
-            ed.image_error = None;
+        if l.image == super::lottie::NIGHT_STILL {
+            ui.label(RichText::new("The built-in night sky").strong());
+        } else {
+            let edit = ui.add(egui::TextEdit::singleline(&mut l.image).hint_text("Picture or animation (PNG, JPEG, WebP, GIF, Lottie)").desired_width(300.0));
+            if edit.changed() {
+                ed.image_error = None;
+            }
+            if ui.button("Built-in").clicked() {
+                l.image = super::lottie::NIGHT_STILL.to_string();
+            }
         }
         if !l.image.is_empty() && ui.button("None").clicked() {
             l.image.clear();
@@ -1074,12 +1081,12 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     ui.label(RichText::new("Animation over the picture").strong());
     ui.label(RichText::new("Plays over the picture, behind the text, in the same place (each pane or the whole window). Drop it on this row, or give its path.").weak().size(12.0));
     let row = ui.horizontal(|ui| {
-        if l.anim == super::lottie::BUILT_IN {
-            ui.label(RichText::new("The built-in space with waves").strong());
+        if l.anim == super::lottie::NIGHT_MOTION {
+            ui.label(RichText::new("The built-in shooting stars").strong());
         } else {
             ui.add(egui::TextEdit::singleline(&mut l.anim).hint_text("Lottie .json or .lottie, GIF, WebP, PNG").desired_width(300.0));
             if ui.button("Built-in").clicked() {
-                l.anim = super::lottie::BUILT_IN.to_string();
+                l.anim = super::lottie::NIGHT_MOTION.to_string();
             }
         }
         if !l.anim.is_empty() && ui.button("None").clicked() {

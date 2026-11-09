@@ -11,17 +11,19 @@ use eframe::egui;
 /// Whether a file is a Lottie animation, by its name.
 pub(crate) fn is_lottie(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.ends_with(".json") || p.ends_with(".lottie") || p == BUILT_IN
+    p.ends_with(".json") || p.ends_with(".lottie") || p == NIGHT_STILL || p == NIGHT_MOTION
 }
 
-/// The built-in background: a deep blue sky with stars and waves spreading like radio signals
-/// (assets/make_space.py writes it).
-pub(crate) const BUILT_IN: &str = "builtin:space";
+/// The built-in background, a deep night (assets/make_night.py writes it) in two parts: what
+/// stays (the blue starry sky, the Milky Way, mountains and pines), drawn once, and what moves
+/// over it (shooting stars and twinkling stars, over clear), drawn every frame and cheap to draw.
+pub(crate) const NIGHT_STILL: &str = "builtin:night-still";
+pub(crate) const NIGHT_MOTION: &str = "builtin:night-motion";
 
-/// The built-in background, a whole window behind the text, is drawn at most this large and this
-/// often: soft and slow, it looks the same scaled up, at a fraction of the work.
-const BUILT_IN_SIDE: f32 = 960.0;
-const BUILT_IN_FPS: f32 = 12.0;
+/// What moves of the built-in night is drawn at most this large and this often: small bright
+/// shapes, they look the same scaled up.
+const MOTION_SIDE: f32 = 1280.0;
+const MOTION_FPS: f32 = 24.0;
 
 struct Player {
     key: String,
@@ -39,7 +41,9 @@ static PLAYERS: Mutex<Vec<Arc<Mutex<Player>>>> = Mutex::new(Vec::new());
 /// The animation's frame for now, as a texture `px` pixels on its longer side (rounded up, so a
 /// size that changes a little keeps its player).
 pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Result<Option<egui::TextureHandle>, String> {
-    let px = if path == BUILT_IN { px.min(BUILT_IN_SIDE) } else { px };
+    let px = if path == NIGHT_MOTION { px.min(MOTION_SIDE) } else { px };
+    // What stays of the night is drawn once.
+    let play = play && path != NIGHT_STILL;
     let side = ((px / 64.0).ceil() * 64.0).clamp(64.0, 2048.0) as u32;
     let key = format!("{path}@{side}");
     let player = {
@@ -96,8 +100,10 @@ fn renderer() -> rasterlottie::Renderer {
 }
 
 fn load(path: &str) -> Result<rasterlottie::Animation, String> {
-    let bytes = if path == BUILT_IN {
-        include_bytes!("../../assets/space_waves.json").to_vec()
+    let bytes = if path == NIGHT_STILL {
+        include_bytes!("../../assets/night_still.json").to_vec()
+    } else if path == NIGHT_MOTION {
+        include_bytes!("../../assets/night_motion.json").to_vec()
     } else {
         std::fs::read(path).map_err(|e| e.to_string())?
     };
@@ -213,7 +219,7 @@ fn run(path: &str, side: u32, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
     let longer = anim.width.max(anim.height).max(1) as f32;
     let config = rasterlottie::RenderConfig::new(rasterlottie::Rgba8::TRANSPARENT, side as f32 / longer);
     let (rate, length) = (anim.frame_rate.max(1.0), anim.duration_frames().max(1.0));
-    let step = Duration::from_secs_f32(1.0 / rate.min(if path == BUILT_IN { BUILT_IN_FPS } else { 30.0 }));
+    let step = Duration::from_secs_f32(1.0 / rate.min(if path == NIGHT_MOTION { MOTION_FPS } else { 30.0 }));
     let start = Instant::now();
     let mut drawn_still = false;
     loop {
