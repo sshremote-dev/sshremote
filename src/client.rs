@@ -984,11 +984,12 @@ impl Viewer {
             let style = if i == self.files.sel { "\x1b[7m" } else if *dir { "\x1b[34;1m" } else { "" };
             rows.push((format!("   {name}{} {size:>size_w$}  {when}", " ".repeat(pad)), style));
         }
-        while rows.len() < height - 1 {
+        while rows.len() < height - 2 {
             rows.push((String::new(), ""));
         }
+        rows.push((format!(" Downloads go to {}   (o: open that folder)", crate::files::downloads().display()), "\x1b[36m"));
         rows.push((
-            " Enter open/get  Backspace up  ~ home  u send here  n new folder  F2 rename  Del delete  . hidden  F5 reload".into(),
+            " Enter open folder / get file  d get file or folder  Backspace up  ~ home  u send here  n new folder  F2 rename  Del delete  . hidden  F5 reload".into(),
             "\x1b[2m",
         ));
         self.draw_rows(&rows)
@@ -1067,6 +1068,12 @@ impl Viewer {
                 }
             }
             KeyCode::Char('.') => self.files.hidden = !self.files.hidden,
+            KeyCode::Char('o') => {
+                let dir = crate::files::downloads();
+                let _ = std::fs::create_dir_all(&dir);
+                crate::tools::open_path(&dir);
+                return self.notify(&format!("Opened {}", dir.display()));
+            }
             KeyCode::F(5) => {
                 let path = self.files.path.clone();
                 return self.files_go(path);
@@ -1422,7 +1429,7 @@ impl Viewer {
             }
             ToClient::FetchStart { id, size, name, .. } => {
                 if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
-                    self.notify(&format!("download {name}: {text}"))?;
+                    self.notify(&format!("Download of {name} failed: {text}"))?;
                 } else {
                     self.transfers.push(Transfer { id, name, done: 0, size, upload: false });
                 }
@@ -1443,10 +1450,10 @@ impl Viewer {
                 let note = self.inbox.end(id, ok, &text);
                 match note {
                 Some(crate::files::Note::Done { ok, text, .. }) => {
-                    let t = if ok { format!("download ok={ok} {text}") } else { format!("download failed: {text}") };
+                    let t = if ok { format!("Saved {text}") } else { format!("Download failed: {text}") };
                     self.notify(&t)?
                 }
-                _ => self.notify(&format!("download failed: {text}"))?,
+                _ => self.notify(&format!("Download failed: {text}"))?,
                 }
             }
             _ => {}
