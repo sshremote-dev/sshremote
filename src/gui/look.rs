@@ -67,6 +67,11 @@ pub(crate) struct Look {
     pub scope: Scope,
     pub fit: Fit,
     pub image_strength: f32,
+    /// An animation (or picture) over the picture, behind the text too: how it is placed and how
+    /// strongly it shows.
+    pub anim: String,
+    pub anim_fit: Fit,
+    pub anim_strength: f32,
     /// The logo moves: the built-in one breathes, a picture of one's own plays its animation.
     pub logo_motion: bool,
     /// A logo of one's own (a picture or an animation, transparency kept; "" for the built-in),
@@ -100,6 +105,9 @@ impl Default for Look {
             scope: Scope::Pane,
             fit: Fit::Fill,
             image_strength: 0.25,
+            anim: String::new(),
+            anim_fit: Fit::Whole,
+            anim_strength: 0.8,
             logo_motion: false,
             logo_file: String::new(),
             logo_place: LogoPlace::TitleBar,
@@ -150,6 +158,7 @@ impl Look {
             "custom_colors": self.custom_colors, "fg": self.fg, "bg": self.bg,
             "image": self.image, "scope": name_of(&SCOPES, self.scope), "fit": name_of(&FITS, self.fit),
             "image_strength": self.image_strength, "logo_motion": self.logo_motion,
+            "anim": self.anim, "anim_fit": name_of(&FITS, self.anim_fit), "anim_strength": self.anim_strength,
             "logo_file": self.logo_file, "logo_place": name_of(&LOGO_PLACES, self.logo_place),
             "logo_size": self.logo_size, "logo_opacity": self.logo_opacity,
             "hud": self.hud, "hud_cpu": self.hud_cpu, "hud_ram": self.hud_ram, "hud_disk": self.hud_disk,
@@ -182,6 +191,9 @@ impl Look {
             scope: from_name(&SCOPES, v.get("scope").and_then(|x| x.as_str()), d.scope),
             fit: from_name(&FITS, v.get("fit").and_then(|x| x.as_str()), d.fit),
             image_strength: num("image_strength", d.image_strength, 0.0, 1.0),
+            anim: text("anim", ""),
+            anim_fit: from_name(&FITS, v.get("anim_fit").and_then(|x| x.as_str()), d.anim_fit),
+            anim_strength: num("anim_strength", d.anim_strength, 0.0, 1.0),
             logo_motion: flag("logo_motion", d.logo_motion),
             logo_file: text("logo_file", ""),
             logo_place: from_name(&LOGO_PLACES, v.get("logo_place").and_then(|x| x.as_str()), d.logo_place),
@@ -233,7 +245,7 @@ fn mirror(l: &Look) {
     let rgb = |c: [u8; 3]| (c[0] as u64) << 16 | (c[1] as u64) << 8 | c[2] as u64;
     CUSTOM.store(if l.custom_colors { 1 << 48 | rgb(l.fg) << 24 | rgb(l.bg) } else { 0 }, Ordering::Relaxed);
     MOTION.store(l.logo_motion, Ordering::Relaxed);
-    PICTURE.store(!l.image.is_empty() && l.image_strength > 0.0, Ordering::Relaxed);
+    PICTURE.store(!l.image.is_empty() && l.image_strength > 0.0 || !l.anim.is_empty() && l.anim_strength > 0.0, Ordering::Relaxed);
 }
 
 /// The terminal's own text and background colours, when chosen.
@@ -369,39 +381,45 @@ fn read_frames(path: &str) -> Result<Vec<(egui::ColorImage, f64)>, String> {
 /// as chosen. Returns the colour to fill with from then on: clear over a picture, else `base`.
 pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32) -> Color32 {
     let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::ZERO, base);
     if !PICTURE.load(Ordering::Relaxed) {
-        painter.rect_filled(rect, CornerRadius::ZERO, base);
         return base;
     }
     let l = get();
-    let side = match l.scope {
-        Scope::Pane => rect.width().max(rect.height()),
-        Scope::Window => ui.ctx().content_rect().width().max(ui.ctx().content_rect().height()),
-    };
-    let Ok(Some((tex, next))) = picture(ui.ctx(), &l.image, true, side) else {
-        painter.rect_filled(rect, CornerRadius::ZERO, base);
-        return base;
-    };
-    if let Some(next) = next {
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next));
-    }
-    painter.rect_filled(rect, CornerRadius::ZERO, base);
     let place = match l.scope {
         Scope::Pane => rect,
         Scope::Window => ui.ctx().content_rect(),
     };
+    // The picture, then the animation over it: both behind the text.
+    let mut shown = false;
+    if !l.image.is_empty() && l.image_strength > 0.0 {
+        shown |= layer(ui, rect, place, &l.image, l.fit, l.image_strength);
+    }
+    if !l.anim.is_empty() && l.anim_strength > 0.0 {
+        shown |= layer(ui, rect, place, &l.anim, l.anim_fit, l.anim_strength);
+    }
+    if shown { Color32::TRANSPARENT } else { base }
+}
+
+/// One picture or animation of the background over `rect`, placed in `place` as `fit` says and
+/// as strongly as `strength`; whether it could be drawn.
+fn layer(ui: &egui::Ui, rect: Rect, place: Rect, path: &str, fit: Fit, strength: f32) -> bool {
+    let painter = ui.painter();
+    let Ok(Some((tex, next))) = picture(ui.ctx(), path, true, place.width().max(place.height())) else { return false };
+    if let Some(next) = next {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next));
+    }
     let size = tex.size_vec2() / ui.ctx().pixels_per_point();
     let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    let (at, uv) = match l.fit {
-        Fit::Stretch => (place, full),
-        Fit::Fill => (Rect::from_center_size(place.center(), size * (place.width() / size.x).max(place.height() / size.y)), full),
-        Fit::Whole => (Rect::from_center_size(place.center(), size * (place.width() / size.x).min(place.height() / size.y)), full),
-        Fit::Center => (Rect::from_center_size(place.center(), size), full),
-        Fit::Tile => (place, full),
+    let at = match fit {
+        Fit::Stretch | Fit::Tile => place,
+        Fit::Fill => Rect::from_center_size(place.center(), size * (place.width() / size.x).max(place.height() / size.y)),
+        Fit::Whole => Rect::from_center_size(place.center(), size * (place.width() / size.x).min(place.height() / size.y)),
+        Fit::Center => Rect::from_center_size(place.center(), size),
     };
-    let tint = Color32::from_white_alpha((l.image_strength * 255.0) as u8);
+    let tint = Color32::from_white_alpha((strength * 255.0) as u8);
     let clip = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    if l.fit == Fit::Tile {
+    if fit == Fit::Tile {
         // One copy at its own size after another, from the place's corner, over what shows.
         let show = rect.intersect(place);
         let (x0, y0) = (((show.left() - place.left()) / size.x).floor(), ((show.top() - place.top()) / size.y).floor());
@@ -415,9 +433,9 @@ pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32) -> Color32 {
             }
         }
     } else {
-        clip.image(tex.id(), at, uv, tint);
+        clip.image(tex.id(), at, full, tint);
     }
-    Color32::TRANSPARENT
+    true
 }
 
 /// The colour a terminal pane fills with after `backdrop`: clear when a picture shows.
@@ -806,8 +824,10 @@ struct Editor {
     ui_filter: String,
     mono_filter: String,
     image_error: Option<String>,
-    /// Where the logo's row was: a picture dropped there is the logo, elsewhere the background.
+    /// Where the logo's and the animation's rows were: a file dropped there goes to that one,
+    /// elsewhere to the background picture.
     logo_row: Option<Rect>,
+    anim_row: Option<Rect>,
 }
 
 /// Opens the Appearance settings in this window.
@@ -816,6 +836,14 @@ pub(crate) fn open(ctx: &egui::Context) {
         *g = Some((ctx.viewport_id(), Editor::default()));
     }
     ctx.request_repaint();
+}
+
+/// Closes the Appearance settings.
+#[cfg(test)]
+pub(crate) fn close() {
+    if let Ok(mut g) = EDITOR.lock() {
+        *g = None;
+    }
 }
 
 fn editor_window(ctx: &egui::Context) {
@@ -841,10 +869,12 @@ fn editor_window(ctx: &egui::Context) {
         });
     // A picture dropped on the logo's row is the logo; anywhere else, the background.
     if let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())) {
-        let on_logo = ctx.pointer_hover_pos().zip(ed.logo_row).is_some_and(|(at, r)| r.contains(at));
+        let over = |r: Option<Rect>| ctx.pointer_hover_pos().zip(r).is_some_and(|(at, r)| r.contains(at));
         let path = p.to_string_lossy().into_owned();
-        if on_logo {
+        if over(ed.logo_row) {
             l.logo_file = path;
+        } else if over(ed.anim_row) {
+            l.anim = path;
         } else {
             l.image = path;
             ed.image_error = None;
@@ -970,11 +1000,6 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
                 ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(w, w * s.y / s.x)).corner_radius(4));
             }
         }
-        ui.horizontal(|ui| {
-            ui.label("For");
-            ui.selectable_value(&mut l.scope, Scope::Pane, "Each pane");
-            ui.selectable_value(&mut l.scope, Scope::Window, "The whole window");
-        });
         ui.horizontal_wrapped(|ui| {
             ui.label("Placed");
             for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
@@ -985,6 +1010,49 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How much it shows")).changed() {
             l.image_strength = pct / 100.0;
         }
+    }
+
+    ui.add_space(4.0);
+    ui.label(RichText::new("Animation over the picture").strong());
+    ui.label(RichText::new("Plays over the picture, behind the text, in the same place (each pane or the whole window). Drop it on this row, or give its path.").weak().size(12.0));
+    let row = ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut l.anim).hint_text("Lottie .json or .lottie, GIF, WebP, PNG").desired_width(300.0));
+        if !l.anim.is_empty() && ui.button("None").clicked() {
+            l.anim.clear();
+        }
+    });
+    ed.anim_row = Some(row.response.rect.expand2(Vec2::new(0.0, 20.0)));
+    if !l.anim.is_empty() {
+        match picture(ui.ctx(), &l.anim, true, 160.0) {
+            Err(e) => {
+                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
+            }
+            Ok(None) => {
+                ui.label(RichText::new("Reading it\u{2026}").weak());
+            }
+            Ok(Some((t, _))) => {
+                let s = t.size_vec2();
+                ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(96.0, 96.0 * s.y / s.x.max(1.0))));
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Placed");
+            for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
+                ui.selectable_value(&mut l.anim_fit, f, name);
+            }
+        });
+        let mut pct = (l.anim_strength * 100.0).round();
+        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How much it shows")).changed() {
+            l.anim_strength = pct / 100.0;
+        }
+    }
+    // Where both go: behind each pane on its own, or once across the window.
+    if !l.image.is_empty() || !l.anim.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label("Both for");
+            ui.selectable_value(&mut l.scope, Scope::Pane, "Each pane");
+            ui.selectable_value(&mut l.scope, Scope::Window, "The whole window");
+        });
     }
 
     heading(ui, "Logo");

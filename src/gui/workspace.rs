@@ -1984,6 +1984,36 @@ mod tests {
             }
             h.snap.save(&h.ctx, h.size, &dir.join("look_lottie_b.png"));
             shot(&mut h, &Look { logo_place: look::LogoPlace::TitleBar, ..lottie.clone() }, "lottie_title");
+            // A photo across the whole window with an animation playing over it, both behind
+            // the text; two moments.
+            let photo = src.join("earth.jpg");
+            if photo.is_file() {
+                let both = Look {
+                    image: photo.to_string_lossy().into_owned(),
+                    scope: Scope::Window,
+                    fit: Fit::Fill,
+                    image_strength: 0.75,
+                    anim: src.join("confetti2.json").to_string_lossy().into_owned(),
+                    anim_fit: Fit::Fill,
+                    anim_strength: 1.0,
+                    logo_file: String::new(),
+                    hud_corner: Corner::TopRight,
+                    ..base.clone()
+                };
+                look::close();
+                look::set(both.clone());
+                for p in &mut h.w.panes {
+                    if let State::Shell(t) = &mut p.state {
+                        t.start_view = Some("terminal".into());
+                    }
+                }
+                shot(&mut h, &both, "photo_anim_a");
+                for _ in 0..12 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.frame(Vec::new());
+                }
+                h.snap.save(&h.ctx, h.size, &dir.join("look_photo_anim_b.png"));
+            }
         }
         // Other fonts and a larger interface, taken at once.
         if cfg!(windows) {
