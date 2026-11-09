@@ -49,11 +49,20 @@ fn system_fonts() -> (FontFiles, FontFiles) {
     }
 }
 
-fn install_fonts(ctx: &egui::Context) {
+pub(crate) fn install_fonts(ctx: &egui::Context) {
     crate::markdown::install_bold(ctx);
     // The system's UI font first (one Latin face, then its Korean, Japanese and Chinese fallback),
     // egui's own fonts after it for what they lack. Missing files are skipped.
-    let (ui_fonts, mono_fonts) = system_fonts();
+    let (mut ui_fonts, mut mono_fonts) = system_fonts();
+    // The fonts chosen in Appearance come first; the system's stay behind them for what they lack.
+    let (ui_pick, mono_pick) = super::look::chosen_fonts();
+    let leak = |p: String| -> &'static str { Box::leak(p.into_boxed_str()) };
+    if let Some(p) = ui_pick {
+        ui_fonts.insert(0, (leak(p), 0));
+    }
+    if let Some(p) = mono_pick {
+        mono_fonts.insert(0, (leak(p), 0));
+    }
     for (family, list) in [(FontFamily::Proportional, ui_fonts), (FontFamily::Monospace, mono_fonts)] {
         let mut latin_done = false;
         // Inserted in reverse at the front, so the list's order is kept.

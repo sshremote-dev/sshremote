@@ -64,6 +64,7 @@ pub fn behaviour(ctx: &egui::Context) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
+    super::look::frame(ctx);
     if maximized(ctx) || fixed(ctx) {
         return;
     }
@@ -139,8 +140,22 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         // The icon opens the system menu, as the system's own title bar does.
         let icon_rect = Rect::from_min_size(bar.min, Vec2::new(40.0, HEIGHT));
         let icon = ui.interact(icon_rect, ui.scope_id().with("chrome-icon"), Sense::click());
-        if let Some(tex) = super::logo_texture(&ctx) {
-            let r = Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0));
+        if let Some((tex, opacity)) = super::look::title_logo(&ctx) {
+            // A logo of one's own: fitted to the logo's place, as clear as chosen.
+            let s = tex.size_vec2();
+            let k = 22.0 / s.x.max(s.y).max(1.0);
+            let r = Rect::from_center_size(icon_rect.center(), s * k);
+            let tint = Color32::from_white_alpha((opacity * 255.0) as u8);
+            ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+        } else if let Some(tex) = super::logo_texture(&ctx) {
+            // Still, or breathing with a soft glow when the look asks for it.
+            let (scale, glow) = super::look::logo_pulse(&ctx);
+            if glow > 0.0 {
+                let c = super::ACCENT.gamma_multiply(glow);
+                ui.painter().circle_filled(icon_rect.center(), 13.0 * scale, c.gamma_multiply(0.35));
+                ui.painter().circle_stroke(icon_rect.center(), 11.0 * scale, egui::Stroke::new(1.5, c));
+            }
+            let r = Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0 * scale));
             ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
         if icon.clicked() {

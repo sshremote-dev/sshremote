@@ -288,6 +288,9 @@ impl App {
             if place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
                 self.backup = Some(crate::tools::BackupTool::new());
             }
+            if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, a background picture, the logo and an overlay of the load and time") {
+                super::look::open(ui.ctx());
+            }
             if cfg!(windows) {
                 ui.add_space(6.0);
                 ui.separator();

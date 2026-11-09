@@ -22,6 +22,8 @@ mod home;
 mod remote;
 pub(crate) mod workspace;
 pub(crate) mod theme;
+pub(crate) mod look;
+mod lottie;
 #[cfg(test)]
 pub(crate) mod snapshot;
 
@@ -87,7 +89,6 @@ pub(crate) mod ic {
     pub const CORNERS_OUT: &str = "\u{E1D0}";
     pub const FILE: &str = "\u{E230}";
     pub const FOLDER: &str = "\u{E24A}";
-    pub const LINK_BREAK: &str = "\u{E2E4}";
     pub const ARCHIVE: &str = "\u{E00C}";
     pub const LOCK_KEY: &str = "\u{E2FE}";
     pub const SHIELD: &str = "\u{E40A}";
@@ -678,6 +679,8 @@ impl eframe::App for App {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if !fullscreen {
             chrome::behaviour(&ctx);
+        } else {
+            look::frame(&ctx);
         }
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         // What was chosen opens in the workspace, which takes a working window's size.

@@ -1401,7 +1401,7 @@ impl Workspace {
     /// The active pane's own controls (the screen's quality, keys, chat...).
     fn controls(&mut self, ui: &mut egui::Ui, id: u64, action: &mut Option<(u64, remote::Deferred)>) {
         let Some(i) = self.index(id) else { return };
-        // Disconnect comes last, after the mode's controls.
+        // Close comes last, after the mode's controls.
         match &mut self.panes[i].state {
             State::Live(r) => {
                 let mut a = None;
@@ -1414,9 +1414,9 @@ impl Workspace {
             State::Shell(t) => t.controls(ui),
             State::Down(_) => {}
         }
-        // Disconnect last: the pane closes, and with the tab's last pane the tab.
+        // Close last: the pane closes (and its connection ends), and with the tab's last pane the tab.
         let (glyph, tip) = if self.is_remote(id) || !self.is_shell(id) {
-            (ic::LINK_BREAK, "Disconnect: end this connection and close the pane (Ctrl+Shift+W)")
+            (ic::X, "Close: end this connection and close the pane (Ctrl+Shift+W)")
         } else {
             (ic::X, "Close this pane (Ctrl+Shift+W)")
         };
@@ -1496,9 +1496,9 @@ impl Workspace {
                 (format!("Close the tab {name}?"), body, "Close tab")
             }
             None if self.is_remote(id) || !self.is_shell(id) => (
-                format!("Disconnect {name}?"),
+                format!("Close {name}?"),
                 "The connection ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
-                "Disconnect",
+                "Close",
             ),
             None => (
                 format!("Close {name}?"),
@@ -1772,6 +1772,7 @@ mod tests {
             };
             let w = &mut self.w;
             self.snap.frame(&self.ctx, input, |ui| {
+                crate::gui::look::frame(ui.ctx());
                 w.ui(ui, Vec::new());
             });
         }
@@ -1860,6 +1861,138 @@ mod tests {
         h.frame(vec![key(egui::Key::Enter, cae)]);
         h.frame(Vec::new());
         assert!(!h.w.window_full && h.w.zoom.is_none(), "and leaves");
+        h.w.close_all();
+    }
+
+    /// The look of Appearance on a workspace of two terminals: a picture across the window, then
+    /// one in each pane and tiled, own colours, the overlay, and the Appearance window itself.
+    #[test]
+    #[ignore]
+    fn workspace_look_pictures() {
+        use crate::gui::look::{self, Corner, Fit, Look, Scope};
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        // A picture with something to see: soft colours and rings, as a JPEG.
+        let pic = dir.join("look_picture.jpg");
+        let img = image::RgbImage::from_fn(640, 400, |x, y| {
+            let (fx, fy) = (x as f32 / 640.0, y as f32 / 400.0);
+            let ring = (((fx - 0.6).powi(2) + (fy - 0.4).powi(2)).sqrt() * 40.0).sin() * 0.5 + 0.5;
+            image::Rgb([(60.0 + 160.0 * fx) as u8, (40.0 + 120.0 * ring) as u8, (120.0 + 120.0 * fy) as u8])
+        });
+        img.save(&pic).unwrap();
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = || Launch::Shell { label: profile.name.clone(), profile: profile.clone(), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
+        h.w.add(shell(), Place::Tab, (false, false, false));
+        h.w.add(shell(), Place::Split { below: false }, (false, false, false));
+        let base = Look {
+            custom_colors: true,
+            fg: [235, 235, 245],
+            bg: [16, 18, 30],
+            image: pic.to_string_lossy().into_owned(),
+            scope: Scope::Window,
+            fit: Fit::Fill,
+            image_strength: 0.45,
+            logo_motion: true,
+            hud: true,
+            hud_disk: true,
+            hud_corner: Corner::BottomRight,
+            ..Look::default()
+        };
+        let shot = |h: &mut Harness, l: &Look, name: &str| {
+            look::set(l.clone());
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.frame(Vec::new());
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join(format!("look_{name}.png")));
+        };
+        shot(&mut h, &base, "window");
+        shot(&mut h, &Look { scope: Scope::Pane, ..base.clone() }, "pane");
+        shot(&mut h, &Look { fit: Fit::Tile, image_strength: 0.3, hud_corner: Corner::TopLeft, hud_bg: [40, 80, 200], hud_bg_alpha: 0.8, hud_text: 1.0, ..base.clone() }, "tile");
+        // The text and Markdown views over the picture.
+        for name in ["text", "markdown", "terminal"] {
+            for p in &mut h.w.panes {
+                if let State::Shell(t) = &mut p.state {
+                    t.start_view = Some(name.into());
+                }
+            }
+            shot(&mut h, &base, name);
+        }
+        look::open(&h.ctx);
+        shot(&mut h, &base, "editor");
+        // Its lower half: the picture, the logo and the overlay.
+        let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -400.0), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+        h.frame(vec![Event::PointerMoved(Pos2::new(640.0, 450.0))]);
+        for _ in 0..4 {
+            h.frame(vec![wheel.clone()]);
+        }
+        shot(&mut h, &base, "editor_lower");
+        // A picture with holes (its background colour shows through them), and a logo of one's
+        // own that moves, clear around its shape: in a corner of the window, then in the title bar.
+        let holes = dir.join("look_holes.png");
+        image::RgbaImage::from_fn(320, 200, |x, y| {
+            let d = ((x as f32 - 160.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
+            if ((d / 18.0) as u32).is_multiple_of(2) { image::Rgba([250, 180, 40, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+        })
+        .save(&holes)
+        .unwrap();
+        let logo = dir.join("look_logo.gif");
+        {
+            let frame = |k: u32| {
+                let img = image::RgbaImage::from_fn(96, 96, |x, y| {
+                    let (dx, dy) = (x as f32 - 48.0, y as f32 - 48.0);
+                    let (r, a) = ((dx * dx + dy * dy).sqrt(), dy.atan2(dx) + k as f32 * 0.8);
+                    if (30.0..44.0).contains(&r) && a.sin() > -0.3 { image::Rgba([60, 140, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+                });
+                image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1))
+            };
+            let mut enc = image::codecs::gif::GifEncoder::new(std::fs::File::create(&logo).unwrap());
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            enc.encode_frames((0..8).map(frame)).unwrap();
+        }
+        let own = Look {
+            image: holes.to_string_lossy().into_owned(),
+            fit: Fit::Tile,
+            image_strength: 0.6,
+            logo_file: logo.to_string_lossy().into_owned(),
+            logo_place: look::LogoPlace::BottomLeft,
+            logo_size: 140.0,
+            logo_opacity: 0.9,
+            logo_motion: true,
+            ..base.clone()
+        };
+        shot(&mut h, &own, "logo_corner");
+        shot(&mut h, &Look { logo_place: look::LogoPlace::TitleBar, ..own.clone() }, "logo_title");
+        // Lottie animations (from SSHREMOTE_LOTTIE_DIR): a logo in a corner and confetti across
+        // the window, playing; two moments half a second apart.
+        if let Some(src) = std::env::var_os("SSHREMOTE_LOTTIE_DIR").map(std::path::PathBuf::from) {
+            let lottie = Look {
+                image: src.join("confetti2.json").to_string_lossy().into_owned(),
+                fit: Fit::Fill,
+                image_strength: 0.9,
+                logo_file: src.join("dancing_star.json").to_string_lossy().into_owned(),
+                logo_place: look::LogoPlace::BottomLeft,
+                logo_size: 180.0,
+                logo_opacity: 1.0,
+                logo_motion: true,
+                ..base.clone()
+            };
+            shot(&mut h, &lottie, "lottie_a");
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.frame(Vec::new());
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join("look_lottie_b.png"));
+            shot(&mut h, &Look { logo_place: look::LogoPlace::TitleBar, ..lottie.clone() }, "lottie_title");
+        }
+        // Other fonts and a larger interface, taken at once.
+        if cfg!(windows) {
+            look::set(Look::default());
+            let fonts = Look { ui_font: r"C:\Windows\Fonts\georgia.ttf".into(), mono_font: r"C:\Windows\Fonts\cour.ttf".into(), ui_scale: 1.2, ..base.clone() };
+            shot(&mut h, &fonts, "fonts");
+        }
+        look::set(Look::default());
+        crate::termwin::reset_look();
         h.w.close_all();
     }
 

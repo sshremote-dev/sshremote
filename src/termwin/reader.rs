@@ -16,7 +16,7 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
         let area = ui.available_rect_before_wrap();
         // As wide as the text beside the line numbers (up to six digits and their margin).
         fit(t, (area.width() - 8.0 * cw - 12.0) / cw, area.height() / ch, out);
-        ui.painter().rect_filled(area, CornerRadius::ZERO, scheme_bg());
+        ui.painter().rect_filled(area, CornerRadius::ZERO, crate::gui::look::fill(scheme_bg()));
         return text_editor(ui, t, &font, cw, ch, keys, out);
     }
     markdown_view(ui, t, font_size, keys, out);
@@ -73,7 +73,7 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
     let read = t.reading.as_ref().expect("just built").1.clone();
     let doc = &read.1;
     let th = crate::markdown::Theme::terminal(scheme_bg(), scheme_fg());
-    ui.painter().rect_filled(area, CornerRadius::ZERO, th.bg);
+    ui.painter().rect_filled(area, CornerRadius::ZERO, crate::gui::look::fill(th.bg));
     ui.visuals_mut().override_text_color = Some(th.fg);
     let doc_id = egui::Id::unique(("md-doc", t.id));
     let doc_key = std::rc::Rc::as_ptr(&read) as usize as u64;

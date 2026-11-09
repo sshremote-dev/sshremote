@@ -173,8 +173,14 @@ const SCHEMES: [Scheme; 6] = [
 static SCHEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(AUTO);
 const AUTO: usize = usize::MAX;
 
-/// The scheme shown: the one chosen, or One Half Dark or Light after the app's theme.
+/// The scheme shown: the one chosen, or One Half Dark or Light after the app's theme (or after
+/// the background of the colours chosen in Appearance, for the other colours).
 fn scheme() -> &'static Scheme {
+    if let Some((_, bg)) = crate::gui::look::custom_colors() {
+        let [r, g, b, _] = bg.to_array();
+        let light = r as u32 * 299 + g as u32 * 587 + b as u32 * 114 > 128_000;
+        return if light { &SCHEMES[SCHEMES.len() - 1] } else { &SCHEMES[0] };
+    }
     match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
         AUTO if crate::gui::theme::DARK.load(std::sync::atomic::Ordering::Relaxed) => &SCHEMES[0],
         AUTO => &SCHEMES[SCHEMES.len() - 1],
@@ -207,11 +213,53 @@ fn rgb(c: [u8; 3]) -> Color32 {
 }
 
 fn scheme_bg() -> Color32 {
-    rgb(scheme().1)
+    crate::gui::look::custom_colors().map_or_else(|| rgb(scheme().1), |c| c.1)
 }
 
 fn scheme_fg() -> Color32 {
-    rgb(scheme().2)
+    crate::gui::look::custom_colors().map_or_else(|| rgb(scheme().2), |c| c.0)
+}
+
+/// The terminal's text size set in Appearance, and a count of its changes: every terminal takes
+/// it when it changes.
+static TERM_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static TERM_SIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn set_term_size(size: f32) {
+    TERM_SIZE.store(size.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    TERM_SIZE_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::hosts::set_setting("term_font", &format!("{size}"));
+}
+
+/// The terminal's text size, for Appearance.
+pub(crate) fn size_picker(ui: &mut egui::Ui) {
+    let now = f32::from_bits(TERM_SIZE.load(std::sync::atomic::Ordering::Relaxed));
+    let mut size = if now > 0.0 { now } else { crate::hosts::setting("term_font").and_then(|v| v.parse().ok()).unwrap_or(14.0) };
+    if ui.add(egui::Slider::new(&mut size, 8.0..=32.0).step_by(1.0).text("Text size")).changed() {
+        set_term_size(size);
+    }
+}
+
+/// The terminal's colour scheme, for Appearance.
+pub(crate) fn scheme_picker(ui: &mut egui::Ui) {
+    let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Scheme");
+        let names = std::iter::once((AUTO, "Automatic")).chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
+        for (k, name) in names {
+            if ui.selectable_label(k == current, name).clicked() {
+                SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+                crate::hosts::set_setting("term_colors", &if k == AUTO { "auto".to_string() } else { k.to_string() });
+            }
+        }
+    });
+}
+
+/// Appearance back to its defaults: the automatic scheme and the usual text size.
+pub(crate) fn reset_look() {
+    SCHEME.store(AUTO, std::sync::atomic::Ordering::Relaxed);
+    crate::hosts::set_setting("term_colors", "auto");
+    set_term_size(14.0);
 }
 
 fn pal(i: usize) -> Color32 {
@@ -435,6 +483,8 @@ pub struct TermWindow {
     active: usize,
     next_id: u32,
     font_size: f32,
+    /// The Appearance text size this window last took.
+    size_gen: u64,
     /// A command that opens the same host in the system's own terminal, if there is one.
     system: Option<Vec<String>>,
     profiles: Vec<Profile>,
@@ -510,6 +560,7 @@ impl TermWindow {
             active: 0,
             next_id: 1,
             font_size: setting("term_font").and_then(|v| v.parse().ok()).unwrap_or(14.0),
+            size_gen: TERM_SIZE_GEN.load(std::sync::atomic::Ordering::Relaxed),
             system: None,
             profiles,
             viewport: egui::ViewportId::from_hash_of(viewport),
@@ -1145,6 +1196,10 @@ impl TermWindow {
                         }
                     }
                 });
+                if ui.button(format!("{}  More: fonts, picture, overlay\u{2026}", ic::EYE)).clicked() {
+                    crate::gui::look::open(ui.ctx());
+                    ui.close();
+                }
                 ui.separator();
                 ui.label(RichText::new("Shortcuts").strong());
                 // A pane of the workspace has one shell: tabs and splits are the workspace's.
@@ -1320,7 +1375,13 @@ impl TermWindow {
         if smaller {
             self.font_size = (self.font_size - 1.0).max(8.0);
         }
-        let frame = egui::Frame::new().fill(scheme_bg()).inner_margin(6.0);
+        // A size set in Appearance comes to every terminal.
+        let size_now = TERM_SIZE_GEN.load(std::sync::atomic::Ordering::Relaxed);
+        if size_now != self.size_gen {
+            self.size_gen = size_now;
+            self.font_size = f32::from_bits(TERM_SIZE.load(std::sync::atomic::Ordering::Relaxed)).clamp(8.0, 32.0);
+        }
+        let frame = egui::Frame::new().fill(crate::gui::look::fill(scheme_bg())).inner_margin(6.0);
         let copy_on_select = self.copy_on_select;
         // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
         // A pane's shell that ended well closes its pane, as Windows Terminal does by default; one
@@ -1342,6 +1403,8 @@ impl TermWindow {
         let keys = self.keys_on && self.renaming.is_none() && !ui.ctx().any_popup_open();
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            // The background, with the picture chosen in Appearance behind the text.
+            crate::gui::look::backdrop(ui, ui.max_rect().expand(6.0), scheme_bg());
             let font_size = self.font_size;
             let Some(group) = self.tabs.get(self.active).map(|t| t.group) else { return };
             let panes = self.panes(group);
@@ -1846,7 +1909,8 @@ mod tests {
     #[test]
     fn reading_views_follow_the_window_size() {
         // The Markdown view is read, not typed into: the terminal keeps the size the others give it.
-        for view in [View::Text] {
+        {
+            let view = View::Text;
             let ctx = egui::Context::default();
             let mut w = TermWindow::new(None);
             let mut clock = 0.0;
@@ -2291,7 +2355,8 @@ mod tests {
             t.parser.advance(&mut t.term, format!("line {n}\r\n").as_bytes());
         }
         t.rev += 1;
-        for view in [View::Text] {
+        {
+            let view = View::Text;
             w.tabs[0].view = view;
             for _ in 0..3 {
                 ime_y(&ctx, &mut w, Vec::new());
