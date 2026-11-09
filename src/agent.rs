@@ -66,7 +66,36 @@ pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
         Some(_) => return Err("--pipe is only used on Windows".into()),
         None => (Box::new(io::stdin()), Box::new(io::stdout())),
     };
-    run_on(backend, input, output)
+    run_on(backend, Box::new(EndsWithViewer { inner: input, ended: false }), output)
+}
+
+/// How long an agent whose viewer has gone may take to let go of the screen before it ends anyway.
+const LAST_WORDS: Duration = Duration::from_secs(5);
+
+/// The viewer's stream for an agent process of its own: once it ends, the process ends within
+/// `LAST_WORDS`, even if letting go of the screen hangs; else it would hold the screen cast (and
+/// keep the next viewer from the screen) for as long as the machine runs.
+struct EndsWithViewer {
+    inner: Box<dyn Read + Send>,
+    ended: bool,
+}
+
+impl Read for EndsWithViewer {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let got = self.inner.read(buf);
+        let gone = match &got {
+            Ok(n) => *n == 0,
+            Err(e) => e.kind() != io::ErrorKind::Interrupted,
+        };
+        if !self.ended && gone && !buf.is_empty() {
+            self.ended = true;
+            thread::spawn(|| {
+                thread::sleep(LAST_WORDS);
+                std::process::exit(0);
+            });
+        }
+        got
+    }
 }
 
 /// Serves one viewer over any pair of streams (stdio, relay pipes, a sealed network link).
