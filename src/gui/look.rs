@@ -943,6 +943,9 @@ pub(crate) fn chosen_fonts() -> (Option<String>, Option<String>) {
 
 /// The look applied to a window: its fonts and size, the overlay, and the Appearance window when
 /// it was opened here.
+/// The open window keeps its own plain look: no overlay drawn over it.
+pub(crate) static PLAIN: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn frame(ctx: &egui::Context) {
     let l = get();
     let fonts_key = egui::Id::unique("look-fonts-applied");
@@ -962,7 +965,9 @@ pub(crate) fn frame(ctx: &egui::Context) {
     if (ctx.zoom_factor() - l.ui_scale).abs() > 0.001 {
         ctx.set_zoom_factor(l.ui_scale);
     }
-    overlay(ctx, &l);
+    if !(PLAIN.load(Ordering::Relaxed) && ctx.viewport_id() == egui::ViewportId::ROOT) {
+        overlay(ctx, &l);
+    }
     if l.logo_motion && l.logo_file.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_millis(40));
     }

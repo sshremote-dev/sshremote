@@ -677,6 +677,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        // The open window is not dressed in the look: that is for the working windows.
+        look::PLAIN.store(matches!(self.screen, Screen::Connect), std::sync::atomic::Ordering::Relaxed);
         if !fullscreen {
             chrome::behaviour(&ctx);
         } else {
