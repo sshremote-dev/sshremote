@@ -234,7 +234,7 @@ pub fn peer_name(spec: &str) -> String {
         None => (None, s.to_string()),
     };
     if !spec.starts_with("sshremote://") {
-        if let Ok(out) = crate::sys::quiet(std::process::Command::new("ssh").arg("-G").arg(s)).output() {
+        if let Ok(out) = crate::sys::quiet(std::process::Command::new("ssh").arg("-G").arg("--").arg(s)).output() {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if let Some(v) = line.strip_prefix("user ") {
                     user.get_or_insert_with(|| v.trim().to_string());
