@@ -84,6 +84,60 @@ impl RemoteFiles {
     }
 }
 
+/// The private modes the remote shell's program set (vim's own screen, a hidden cursor, mouse
+/// reporting...), followed in its output so they can be given back after the menu or another
+/// view used the terminal.
+#[derive(Default)]
+struct ShellModes {
+    /// Its own (alternate) screen, as full-screen programs use.
+    alt: bool,
+    cursor_hidden: bool,
+    /// Every other mode it turned on, by number (mouse 1000-1006, bracketed paste 2004...).
+    on: std::collections::BTreeSet<u16>,
+}
+
+impl ShellModes {
+    /// Follows `CSI ? n h` and `CSI ? n l` in what the shell wrote.
+    fn follow(&mut self, data: &[u8]) {
+        let mut i = 0;
+        while i + 3 < data.len() {
+            if data[i] == 0x1b && data[i + 1] == b'[' && data[i + 2] == b'?' {
+                let mut j = i + 3;
+                while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
+                    j += 1;
+                }
+                if j < data.len() && (data[j] == b'h' || data[j] == b'l') {
+                    let on = data[j] == b'h';
+                    for n in String::from_utf8_lossy(&data[i + 3..j]).split(';').filter_map(|n| n.parse::<u16>().ok()) {
+                        match n {
+                            47 | 1047 | 1049 => self.alt = on,
+                            25 => self.cursor_hidden = !on,
+                            _ if on => {
+                                self.on.insert(n);
+                            }
+                            _ => {
+                                self.on.remove(&n);
+                            }
+                        }
+                    }
+                    i = j;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// The sequences that set the modes again.
+    fn restore(&self) -> String {
+        let mut out = String::new();
+        for n in &self.on {
+            out.push_str(&format!("\x1b[?{n}h"));
+        }
+        out.push_str(if self.cursor_hidden { "\x1b[?25l" } else { "\x1b[?25h" });
+        out
+    }
+}
+
 /// A transfer under way: id, name, bytes done and in all, and whether it goes up.
 struct Transfer {
     id: u32,
@@ -130,6 +184,11 @@ struct Viewer {
     overlay: Overlay,
     /// What the shell wrote while it was not shown, written out when it is again.
     backlog: Vec<u8>,
+    shell_modes: ShellModes,
+    /// Uploads being sent a piece at a time: id, the file, its size and what went.
+    uploads: Vec<(u32, std::fs::File, u64, u64)>,
+    /// The full remote path a delete or rename was asked for (not looked up again later).
+    target: Option<String>,
     files: RemoteFiles,
     transfers: Vec<Transfer>,
     /// Messages from the person at the screen not read yet.
@@ -404,6 +463,7 @@ impl Viewer {
 
     /// Shows a message in the status line (on stderr in a headless probe).
     fn notify(&mut self, text: &str) -> io::Result<()> {
+        let text = &clean(text);
         if self.probe.is_some() {
             eprintln!("probe: {text}");
             return Ok(());
@@ -443,6 +503,26 @@ impl Viewer {
             if want != (self.held_mods & bit != 0) {
                 self.sess.send(ToAgent::KeyState { keysym, down: want })?;
                 self.held_mods ^= bit;
+            }
+        }
+        Ok(())
+    }
+
+    /// Modifiers still held at the host that are no longer down here: the Windows console reports
+    /// no event for Shift, Ctrl or Alt alone, so their release is looked up.
+    fn check_mods(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.held_mods != 0 && self.probe.is_none() {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT};
+            let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) } < 0;
+            let mut now = 0;
+            for (bit, vk) in [(crate::proto::MOD_SHIFT, VK_SHIFT), (crate::proto::MOD_CTRL, VK_CONTROL), (crate::proto::MOD_ALT, VK_MENU), (MOD_SUPER, VK_LWIN)] {
+                if down(vk) {
+                    now |= bit;
+                }
+            }
+            if now & self.held_mods != self.held_mods {
+                self.sync_mods(now & self.held_mods)?;
             }
         }
         Ok(())
@@ -510,7 +590,12 @@ impl Viewer {
             self.release_all()?;
         }
         if self.view == View::Terminal && self.overlay == Overlay::None && self.probe.is_none() {
-            let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide);
+            // A program on its own screen keeps it: the menu is drawn over, and it repaints after.
+            if self.shell_modes.alt {
+                let _ = execute!(self.out, cursor::Hide);
+            } else {
+                let _ = execute!(self.out, terminal::EnterAlternateScreen, cursor::Hide);
+            }
         }
         self.overlay = o;
         self.redraw()
@@ -519,12 +604,40 @@ impl Viewer {
     fn close_overlay(&mut self) -> io::Result<()> {
         self.overlay = Overlay::None;
         if self.view == View::Terminal {
-            if self.probe.is_none() {
-                let _ = execute!(self.out, terminal::LeaveAlternateScreen, cursor::Show);
-            }
-            return self.flush_backlog();
+            return self.show_shell();
         }
         self.redraw()
+    }
+
+    /// The shell's screen back as its program left it: the main screen (kept by the terminal) or,
+    /// for a full-screen program, its own screen redrawn by it; its modes set again.
+    fn show_shell(&mut self) -> io::Result<()> {
+        if self.probe.is_some() {
+            return Ok(());
+        }
+        if self.shell_modes.alt {
+            write!(self.out, "\x1b[?1049h\x1b[0m\x1b[2J\x1b[H")?;
+        } else {
+            let _ = execute!(self.out, terminal::LeaveAlternateScreen);
+        }
+        let modes = self.shell_modes.restore();
+        self.out.write_all(modes.as_bytes())?;
+        self.out.flush()?;
+        self.flush_backlog()?;
+        if self.shell_modes.alt {
+            self.nudge_shell()?;
+        }
+        Ok(())
+    }
+
+    /// A size change and back, so a full-screen program in the shell draws itself again.
+    fn nudge_shell(&mut self) -> io::Result<()> {
+        if let Some(id) = self.shell {
+            let (cols, rows) = terminal::size().unwrap_or((80, 24));
+            self.sess.send(ToAgent::TermResize { id, cols, rows: rows.saturating_sub(1).max(1) })?;
+            self.sess.send(ToAgent::TermResize { id, cols, rows })?;
+        }
+        Ok(())
     }
 
     /// Draws what is in view again: the overlay, the files, or the picture from the copy kept.
@@ -603,11 +716,13 @@ impl Viewer {
         if self.probe.is_some() {
             return Ok(());
         }
-        let _ = execute!(self.out, event::DisableMouseCapture, terminal::LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(self.out, event::DisableMouseCapture);
+        self.show_shell()?;
+        // What came before, then a new shell if the last one ended.
         if self.shell.is_none() {
             self.open_shell()?;
         }
-        self.flush_backlog()
+        Ok(())
     }
 
     fn open_shell(&mut self) -> io::Result<()> {
@@ -715,6 +830,18 @@ impl Viewer {
                 let a = self.ctl.menu('f');
                 self.run_action(a)
             }
+            // In the terminal: Ctrl+] for the shell, and a repaint of its program.
+            ']' if self.view == View::Terminal => {
+                self.close_overlay()?;
+                match self.shell {
+                    Some(id) => self.sess.send(ToAgent::TermInput { id, data: vec![0x1d] }),
+                    None => Ok(()),
+                }
+            }
+            'r' if self.view == View::Terminal => {
+                self.close_overlay()?;
+                self.nudge_shell()
+            }
             '0'..='4' | 'a' | 'm' | '+' | '=' | '-' | 'z' | 'r' | 'w' | ']' => {
                 if matches!(c, 'z' | 'w') && self.view != View::Screen {
                     self.set_view(View::Screen)?;
@@ -733,7 +860,7 @@ impl Viewer {
         let (title, body) = match what {
             'q' => (format!("Disconnect from {}?", self.host), "The screen, the shell and transfers end.".to_string()),
             _ => {
-                let name = self.files.shown().get(self.files.sel).map_or(String::new(), |e| e.name.clone());
+                let name = clean(self.target.as_deref().unwrap_or(""));
                 (format!("Delete {name} on {}?", self.host), "It cannot be brought back; a folder goes with everything in it.".to_string())
             }
         };
@@ -756,8 +883,7 @@ impl Viewer {
                 Ok(())
             }
             ('x', true) => {
-                let Some(name) = self.files.shown().get(self.files.sel).map(|e| e.name.clone()) else { return self.redraw() };
-                let path = self.files.child(&name);
+                let Some(path) = self.target.take() else { return self.redraw() };
                 self.sess.send(ToAgent::FileOp { op: crate::proto::FileOp::Delete, path, arg: String::new() })?;
                 self.redraw()
             }
@@ -778,11 +904,11 @@ impl Viewer {
         let width = self.cols.saturating_sub(4).max(10);
         let mut body: Vec<(String, &str)> = Vec::new();
         for (theirs, text, at) in crate::chat::load_history(&self.host) {
-            let peer = self.peer.get();
+            let peer = clean(&self.peer.get());
             let who = if theirs { peer.as_str() } else { "You" };
             let when = if at == 0 { String::new() } else { format!("  {}", crate::chat::when(at)) };
             body.push((format!("  {who}\x1b[22;2m{when}"), "\x1b[1m"));
-            for line in wrap(&text, width) {
+            for line in wrap(&clean(&text), width) {
                 body.push((format!("  {line}"), ""));
             }
             body.push((String::new(), ""));
@@ -826,7 +952,7 @@ impl Viewer {
         let height = self.rows.saturating_sub(1);
         let list_h = height.saturating_sub(4).max(1);
         let shown: Vec<(String, bool, u64, u64)> =
-            self.files.shown().iter().map(|e| (e.name.clone(), e.dir, e.size, e.mtime)).collect();
+            self.files.shown().iter().map(|e| (clean(&e.name), e.dir, e.size, e.mtime)).collect();
         if self.files.sel >= shown.len() {
             self.files.sel = shown.len().saturating_sub(1);
         }
@@ -835,7 +961,7 @@ impl Viewer {
         } else if self.files.sel >= self.files.top + list_h {
             self.files.top = self.files.sel + 1 - list_h;
         }
-        let place = if self.files.path == crate::files::DRIVES { "Drives".to_string() } else { self.files.path.clone() };
+        let place = if self.files.path == crate::files::DRIVES { "Drives".to_string() } else { clean(&self.files.path) };
         let mut rows: Vec<(String, &str)> = vec![(format!(" Files on {}:  {place}", self.host), "\x1b[48;5;236;97m")];
         let date_w = 17;
         let size_w = 10;
@@ -844,7 +970,7 @@ impl Viewer {
         if self.files.loading {
             rows.push(("   Loading...".into(), "\x1b[2m"));
         } else if !self.files.error.is_empty() {
-            rows.push((format!("   {}", self.files.error), "\x1b[31m"));
+            rows.push((format!("   {}", clean(&self.files.error)), "\x1b[31m"));
         } else if shown.is_empty() {
             rows.push(("   (empty)".into(), "\x1b[2m"));
         }
@@ -893,7 +1019,10 @@ impl Viewer {
         self.files.loading = true;
         self.files.error.clear();
         self.sess.send(ToAgent::ListDir { path })?;
-        self.draw_files()
+        if self.overlay == Overlay::None && self.prompt.is_none() {
+            self.draw_files()?;
+        }
+        Ok(())
     }
 
     fn files_key(&mut self, k: &event::KeyEvent) -> io::Result<()> {
@@ -946,18 +1075,20 @@ impl Viewer {
                 self.prompt = Some(('u', String::new()));
                 return self.status();
             }
-            KeyCode::Char('n') => {
+            KeyCode::Char('n') if self.files.path != crate::files::DRIVES => {
                 self.prompt = Some(('n', String::new()));
                 return self.status();
             }
-            KeyCode::F(2) | KeyCode::Char('r') => {
+            KeyCode::F(2) | KeyCode::Char('r') if self.files.path != crate::files::DRIVES => {
                 if let Some((name, _)) = picked {
+                    self.target = Some(self.files.child(&name));
                     self.prompt = Some(('r', name));
                     return self.status();
                 }
             }
-            KeyCode::Delete => {
-                if picked.is_some() {
+            KeyCode::Delete if self.files.path != crate::files::DRIVES => {
+                if let Some((name, _)) = picked {
+                    self.target = Some(self.files.child(&name));
                     self.overlay = Overlay::Confirm('x');
                     return self.redraw();
                 }
@@ -1032,9 +1163,10 @@ impl Viewer {
             KeyCode::Enter => {
                 let (kind, text) = (*kind, buf.trim().to_string());
                 self.prompt = None;
-                if !text.is_empty() {
+                if !text.is_empty() || kind == 'v' {
                     return self.run_prompt(kind, text);
                 }
+                return self.redraw();
             }
             _ => {}
         }
@@ -1054,7 +1186,7 @@ impl Viewer {
             Some(Err(e)) => lines.push(format!("   ({e})")),
             Some(Ok(list)) => {
                 for (i, w) in list.iter().enumerate() {
-                    lines.push(format!("   {:<6} {}: {}  {}x{}", i + 1, w.app, w.title, w.w, w.h));
+                    lines.push(format!("   {:<6} {}: {}  {}x{}", i + 1, clean(&w.app), clean(&w.title), w.w, w.h));
                 }
                 if !list.is_empty() {
                     lines.push(
@@ -1117,8 +1249,7 @@ impl Viewer {
                 self.redraw()
             }
             'r' => {
-                let Some(old) = self.files.shown().get(self.files.sel).map(|e| e.name.clone()) else { return self.redraw() };
-                let path = self.files.child(&old);
+                let Some(path) = self.target.take() else { return self.redraw() };
                 self.sess.send(ToAgent::FileOp { op: crate::proto::FileOp::Rename, path, arg: text })?;
                 self.redraw()
             }
@@ -1135,24 +1266,52 @@ impl Viewer {
         self.upload_to(path, "")
     }
 
-    /// Sends a local file into the remote folder `dir` (empty: Downloads).
+    /// Sends a local file into the remote folder `dir` (empty: Downloads), a piece at a time as
+    /// the loop comes round, so the view stays live and the progress true.
     fn upload_to(&mut self, path: &str, dir: &str) -> io::Result<()> {
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
             Err(e) => return self.notify(&format!("{path}: {e}")),
         };
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let name = std::path::Path::new(path).file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned());
         let id = self.next_upload;
         self.next_upload += 1;
-        let size = data.len() as u64;
         self.sess.send(ToAgent::FileStart { id, size, dir: dir.to_string(), name: name.clone() })?;
-        for chunk in data.chunks(64 << 10) {
-            self.sess.send(ToAgent::FileData { id, data: chunk.to_vec() })?;
-        }
-        self.sess.send(ToAgent::FileEnd { id })?;
-        // Sent to the link at once; it is done when the host says so.
-        self.transfers.push(Transfer { id, name: name.clone(), done: size, size, upload: true });
+        self.uploads.push((id, file, size, 0));
+        self.transfers.push(Transfer { id, name: name.clone(), done: 0, size, upload: true });
         self.notify(&format!("Sending {name}..."))
+    }
+
+    /// The next pieces of the uploads under way; true while some remain.
+    fn pump_uploads(&mut self) -> io::Result<bool> {
+        use std::io::Read;
+        let mut budget: usize = 1 << 20;
+        let mut finished = Vec::new();
+        for (id, file, _, sent) in &mut self.uploads {
+            let mut buf = vec![0u8; 64 << 10];
+            while budget > 0 {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    finished.push(*id);
+                    break;
+                }
+                self.sess.send(ToAgent::FileData { id: *id, data: buf[..n].to_vec() })?;
+                *sent += n as u64;
+                budget = budget.saturating_sub(n);
+            }
+            if let Some(t) = self.transfers.iter_mut().find(|t| t.upload && t.id == *id) {
+                t.done = *sent;
+            }
+        }
+        for id in finished {
+            self.sess.send(ToAgent::FileEnd { id })?;
+            self.uploads.retain(|u| u.0 != id);
+        }
+        if self.view == View::Files && self.overlay == Overlay::None && self.prompt.is_none() {
+            self.status()?;
+        }
+        Ok(!self.uploads.is_empty())
     }
 
     /// Messages other than frames.
@@ -1206,14 +1365,17 @@ impl Viewer {
                 }
             }
             ToClient::TermOutput { id, data } if self.shell == Some(id) => {
+                self.shell_modes.follow(&data);
                 if self.view == View::Terminal && self.overlay == Overlay::None {
                     self.out.write_all(&data)?;
                     self.out.flush()?;
                 } else {
-                    // Kept for when the shell is shown again; the newest few megabytes.
+                    // Kept for when the shell is shown again; the newest few megabytes, cut at
+                    // a line so no sequence or character is split.
                     self.backlog.extend_from_slice(&data);
                     if self.backlog.len() > 4 << 20 {
-                        let cut = self.backlog.len() - (2 << 20);
+                        let from = self.backlog.len() - (2 << 20);
+                        let cut = self.backlog[from..].iter().position(|&b| b == b'\n').map_or(from, |i| from + i + 1);
                         self.backlog.drain(..cut);
                     }
                 }
@@ -1296,6 +1458,8 @@ impl Viewer {
         let screen_input = self.view == View::Screen && self.overlay == Overlay::None && self.prompt.is_none();
         match e {
             Event::Key(k) if k.kind == KeyEventKind::Release && !(screen_input && self.key_states) => {}
+            // Shift, Ctrl or Alt alone only matter for keys held at the host.
+            Event::Key(k) if matches!(k.code, event::KeyCode::Modifier(_)) && !(screen_input && self.key_states) => {}
             Event::Key(k) if self.overlay != Overlay::None => match self.overlay.clone() {
                 Overlay::Confirm(c) => self.confirm_key(c, &k)?,
                 Overlay::Chat(_) => self.chat_key(&k)?,
@@ -1337,9 +1501,12 @@ impl Viewer {
                 }
                 if self.view == View::Screen {
                     self.dirty.clear();
-                    self.full_redraw()?;
+                    self.fb = Framebuffer::default();
                     self.push_settings()?;
                     self.sess.send(ToAgent::Refresh)?;
+                }
+                if self.prompt.is_some() && matches!(self.prompt, Some(('v', _))) {
+                    self.draw_share_list()?;
                 } else if self.view != View::Terminal || self.overlay != Overlay::None {
                     self.redraw()?;
                 }
@@ -1352,7 +1519,7 @@ impl Viewer {
             {
                 self.key_state(&k)?;
             }
-            Event::Key(k) => {
+            Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if matches!(k.code, event::KeyCode::Modifier(_)) {
                     return Ok(());
                 }
@@ -1409,6 +1576,12 @@ impl Viewer {
         }
         Ok(())
     }
+}
+
+/// Text from the other side (names, messages, errors) made safe to print: control characters,
+/// escape sequences above all, become visible marks instead of commands to this terminal.
+fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() && c != '\t' { '\u{fffd}' } else { c }).collect()
 }
 
 /// Text length on screen, without the escape sequences that style it.
@@ -1514,6 +1687,9 @@ impl Viewer {
         view: View::Screen,
         overlay: Overlay::None,
         backlog: Vec::new(),
+        shell_modes: ShellModes::default(),
+        uploads: Vec::new(),
+        target: None,
         files: RemoteFiles::default(),
         transfers: Vec::new(),
         unread: 0,
@@ -1578,7 +1754,10 @@ pub fn run(opt: Options) -> Result<(), String> {
         #[cfg(unix)]
         if terminal::supports_keyboard_enhancement().unwrap_or(false) {
             use event::KeyboardEnhancementFlags as F;
-            let flags = F::DISAMBIGUATE_ESCAPE_CODES | F::REPORT_EVENT_TYPES | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+            let flags = F::DISAMBIGUATE_ESCAPE_CODES
+                | F::REPORT_EVENT_TYPES
+                | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | F::REPORT_ALTERNATE_KEYS;
             v.key_states = execute!(v.out, event::PushKeyboardEnhancementFlags(flags)).is_ok();
         }
         #[cfg(windows)]
@@ -1633,7 +1812,9 @@ pub fn run(opt: Options) -> Result<(), String> {
             v.sess.send(ToAgent::FileEnd { id: 1 })?;
         }
         while !v.quit && deadline.is_none_or(|d| Instant::now() < d) {
-            match rx.recv_timeout(Duration::from_millis(250)) {
+            // Quick turns while files are being sent, so they go at the link's pace.
+            let wait = if v.uploads.is_empty() { 250 } else { 2 };
+            match rx.recv_timeout(Duration::from_millis(wait)) {
                 Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     failure = Some(e);
@@ -1651,6 +1832,10 @@ pub fn run(opt: Options) -> Result<(), String> {
                 v.sess.send(typing.pop().unwrap())?;
                 next_key = Instant::now() + Duration::from_millis(500);
             }
+            if !v.uploads.is_empty() {
+                v.pump_uploads()?;
+            }
+            v.check_mods()?;
             if v.ctl.tick(&mut v.sess)? {
                 v.status()?;
             }
@@ -1928,6 +2113,27 @@ mod tests {
         v.on_term(key(KeyCode::Char('y'))).unwrap();
         assert!(v.quit, "y disconnects");
         v.sess.close();
+    }
+
+    /// The shell's program's modes are followed, so they can be set again after the menu.
+    #[test]
+    fn shell_modes_are_followed() {
+        let mut m = super::ShellModes::default();
+        m.follow(b"[?1049h[?25l[?1000;1006h text");
+        assert!(m.alt && m.cursor_hidden);
+        assert_eq!(m.restore(), "[?1000h[?1006h[?25l");
+        m.follow(b"[?1000l[?1049l[?25h");
+        assert!(!m.alt);
+        assert_eq!(m.restore(), "[?1006h[?25h");
+    }
+
+    /// Names and messages from the other side cannot drive this terminal.
+    #[test]
+    fn text_from_the_host_is_made_harmless() {
+        let evil = "file]52;c;aGk=.txt";
+        let shown = super::clean(evil);
+        assert!(!shown.contains('') && !shown.contains(''), "{shown:?}");
+        assert_eq!(super::visible_len(&shown), shown.chars().count());
     }
 
     #[test]

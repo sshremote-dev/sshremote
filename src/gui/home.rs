@@ -355,7 +355,7 @@ impl App {
                 if let Some(t) = self.backup.as_mut() {
                     t.back();
                 }
-            } else {
+            } else if !self.config.as_mut().is_some_and(|c| c.keep_open()) {
                 self.keys = None;
                 self.config = None;
                 self.vault = None;

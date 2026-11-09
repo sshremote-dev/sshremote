@@ -172,6 +172,11 @@ impl KeyTool {
 
     pub fn back(&mut self) {
         (self.creating, self.installing) = (false, None);
+        self.pass.clear();
+        self.pass2.clear();
+        if self.status.as_ref().is_some_and(|s| !s.0) {
+            self.status = None;
+        }
     }
 
     fn forms(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
@@ -206,9 +211,11 @@ impl KeyTool {
                     self.generate();
                     if self.status.as_ref().is_some_and(|s| s.0) {
                         self.creating = false;
+                        // The next key needs a name of its own.
+                        self.name.clear();
                     }
                 }
-                Some(false) => self.creating = false,
+                Some(false) => self.back(),
                 None => {}
             }
         }
@@ -233,7 +240,7 @@ impl KeyTool {
                     }
                     self.installing = None;
                 }
-                Some(false) => self.installing = None,
+                Some(false) => self.back(),
                 None => {}
             }
         }
@@ -252,16 +259,33 @@ pub struct HostEntry {
 
 fn parse_config(text: &str) -> Vec<HostEntry> {
     let mut out: Vec<HostEntry> = Vec::new();
+    // The block the lines belong to: a Host block, or none under a Match.
+    let mut current: Option<usize> = None;
     for line in text.lines() {
         let l = line.trim();
         let Some((k, v)) = l.split_once(|c: char| c.is_whitespace() || c == '=') else { continue };
         let v = v.trim().trim_start_matches('=').trim().to_string();
-        match k.to_lowercase().as_str() {
-            "host" => out.push(HostEntry { alias: v, ..Default::default() }),
-            "hostname" => out.last_mut().into_iter().for_each(|h| h.hostname = v.clone()),
-            "user" => out.last_mut().into_iter().for_each(|h| h.user = v.clone()),
-            "port" => out.last_mut().into_iter().for_each(|h| h.port = v.clone()),
-            "identityfile" => out.last_mut().into_iter().for_each(|h| h.identity = v.clone()),
+        let key = k.to_lowercase();
+        match key.as_str() {
+            "host" => {
+                // Several names on one line stay together, as the line has them.
+                out.push(HostEntry { alias: v.split_whitespace().collect::<Vec<_>>().join(" "), ..Default::default() });
+                current = Some(out.len() - 1);
+                continue;
+            }
+            "match" => {
+                current = None;
+                continue;
+            }
+            _ => {}
+        }
+        let Some(h) = current.map(|i| &mut out[i]) else { continue };
+        match key.as_str() {
+            "hostname" => h.hostname = v,
+            "user" => h.user = v,
+            "port" => h.port = v,
+            // ssh tries them in order; the form shows the first.
+            "identityfile" if h.identity.is_empty() => h.identity = v,
             _ => {}
         }
     }
@@ -279,8 +303,9 @@ fn key_of(line: &str) -> String {
 /// The lines of the `Host` block named exactly `alias`: from its Host line to before the next
 /// Host or Match line.
 fn block(lines: &[&str], alias: &str) -> Option<(usize, usize)> {
+    let want: Vec<&str> = alias.split_whitespace().collect();
     let start = lines.iter().position(|l| {
-        key_of(l) == "host" && l.trim()[4..].trim().trim_start_matches('=').split_whitespace().eq([alias])
+        key_of(l) == "host" && l.trim()[4..].trim().trim_start_matches('=').split_whitespace().eq(want.iter().copied())
     })?;
     let end = (start + 1..lines.len())
         .find(|&i| matches!(key_of(lines[i]).as_str(), "host" | "match"))
@@ -319,6 +344,8 @@ pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
                 body.push(format!("{indent}{} {}", names[i], values[i]));
                 done[i] = true;
             }
+            // Further keys ssh also tries stay as they were.
+            Some(3) if done[3] => body.push(l.to_string()),
             Some(_) => {}
             None => body.push(l.to_string()),
         }
@@ -522,6 +549,16 @@ impl ConfigTool {
         self.form_open
     }
 
+    /// Edits of the file not saved yet: leaving would lose them, so it asks for a save first.
+    pub fn keep_open(&mut self) -> bool {
+        let unsaved = self.text != self.saved;
+        if unsaved {
+            self.view = ConfigView::File;
+            self.status = Some((false, "The file has unsaved edits: save them (Ctrl+S) or revert them first.".into()));
+        }
+        unsaved
+    }
+
     pub fn back(&mut self) {
         self.form_open = false;
         self.editing.clear();
@@ -698,6 +735,9 @@ impl VaultTool {
     pub fn back(&mut self) {
         self.adding = false;
         self.password.clear();
+        if self.status.as_ref().is_some_and(|s| !s.0) {
+            self.status = None;
+        }
     }
 
     /// The form saving a password, in place of the list.
@@ -740,10 +780,7 @@ impl VaultTool {
                         self.adding = false;
                     }
                 }
-                Some(false) => {
-                    self.adding = false;
-                    self.password.clear();
-                }
+                Some(false) => self.back(),
                 None => {}
             }
         }
@@ -843,6 +880,9 @@ impl BackupTool {
         self.dialog = None;
         self.passphrase.clear();
         self.restore_pass.clear();
+        if self.status.as_ref().is_some_and(|s| !s.0) {
+            self.status = None;
+        }
     }
 
     /// Backing up or restoring, in place of the list.
@@ -873,10 +913,7 @@ impl BackupTool {
                             self.dialog = None;
                         }
                     }
-                    Some(false) => {
-                        self.passphrase.clear();
-                        self.dialog = None;
-                    }
+                    Some(false) => self.back(),
                     None => {}
                 }
             }
@@ -904,10 +941,7 @@ impl BackupTool {
                             self.dialog = None;
                         }
                     }
-                    Some(false) => {
-                        self.restore_pass.clear();
-                        self.dialog = None;
-                    }
+                    Some(false) => self.back(),
                     None => {}
                 }
             }
@@ -945,7 +979,10 @@ fn form_page(
             answer = Some(false);
         }
     });
-    if ready && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+    // Enter in a text field submits; on a focused button or check box it presses that instead.
+    let focus = ui.memory(|m| m.focused());
+    let in_text = focus.is_none_or(|id| egui::text_edit::TextEditState::load(ui.ctx(), id).is_some());
+    if ready && in_text && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
         answer = Some(true);
     }
     answer
@@ -1016,6 +1053,31 @@ Host *
         );
         assert_eq!(remove_host(text, "web1"), "# mine\n\nHost *\n  ServerAliveInterval 30\n");
         assert_eq!(remove_host(text, "nothere"), text);
+    }
+
+    /// A Host line with several names is one entry, changed and removed whole; lines under a
+    /// Match belong to no host; a second IdentityFile stays when the host is saved.
+    #[test]
+    fn several_names_match_blocks_and_keys_are_kept() {
+        use super::{parse_config, remove_host, upsert_host};
+        let text = "Host a b
+  HostName 10.0.0.1
+  IdentityFile ~/.ssh/one
+  IdentityFile ~/.ssh/two
+Match host x
+  User other
+Host c
+  User me
+";
+        let hosts = parse_config(text);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!((hosts[0].alias.as_str(), hosts[0].user.as_str(), hosts[0].identity.as_str()), ("a b", "", "~/.ssh/one"));
+        assert_eq!(hosts[1].user, "me", "the Match's User is not c's or a's");
+        let saved = upsert_host(text, "a b", &hosts[0]);
+        assert!(saved.contains("Host a b
+") && saved.contains("IdentityFile ~/.ssh/two"), "{saved}");
+        assert_eq!(saved.matches("Host a b").count(), 1, "changed in place, not added again");
+        assert!(!remove_host(text, "a b").contains("10.0.0.1"));
     }
 
     /// Every tool window draws for a few frames, in both views of the hosts window, without
