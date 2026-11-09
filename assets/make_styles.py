@@ -478,14 +478,18 @@ def brand():
     # The light passing over the face: a bright band seen only through the letters.
     band = group([rect(140, 700, (0, 0)), gradient(1, (-70, 0), (70, 0), [(0, (1, 1, 1)), (1, (1, 1, 1))], [(0, 0), (0.5, 0.85), (1, 0)])], r=20)
     sweep = keys([(0, [tx - 400, H / 2, 0]), (60, [tx - 400, H / 2, 0]), (110, [tx + width + 300, H / 2, 0]), (loop, [tx + width + 300, H / 2, 0])], ease=(0.4, 0, 0.6, 1))
-    matte = layer("face for the light", word(fill((1, 1, 1))) + [group(sub + [fill((1, 1, 1))])], loop)
+    # "(thinkbigx)" rides the same wave, a little behind the title.
+    def under(paint):
+        return [group(l + [paint], p=bob(k * 0.6 + 3)) for k, l in enumerate(sub_letters)]
+
+    matte = layer("face for the light", word(fill((1, 1, 1))) + under(fill((1, 1, 1))), loop)
     matte["td"] = 1
     lit = layer("light", [band], loop, transform(sweep))
     lit["tt"] = 1
     layers_ += [matte, lit]
     # The face: white to light blue, with a fine bright edge.
     face_paint = gradient(1, (0, ty - size * 0.75), (0, ty), [(0, (1, 1, 1)), (1, hexc("#9fc2ff"))])
-    face = word(face_paint) + [group(sub + [fill(hexc("#c9d8f5"), 90)])]
+    face = word(face_paint) + under(fill(hexc("#c9d8f5"), 90))
     layers_.append(layer("face", face, loop))
     # The depth: copies behind the face, darker as they go back.
     for i in range(depth_n, 0, -1):
@@ -499,7 +503,9 @@ def brand():
     coin = [group([portal, stroke(hexc("#3c6cf0"), w)]), group([chevron, stroke(hexc("#7fb2ff"), w)]),
             group([plate, gradient(1, (0, -logo / 2), (0, logo / 2), [(0, hexc("#1b2b55")), (1, hexc("#0c1633"))])])]
     edge = [group([plate, fill(colour)], p=(i * 1.6, i * 1.6)) for i, colour in [(4, deep), (3, hexc("#0e1f48")), (2, hexc("#14295c")), (1, hexc("#1b3470"))]]
-    layers_.append(layer("logo", [group(coin, s=spin), group(edge, s=spin)], loop, transform((lx, ly))))
+    # The logo leads the wave, and turns like a coin now and then.
+    ride = keys([(t, [lx, ly + v, 0]) for t, v in wave(loop, 96, 12, 0.1, steps=12)])
+    layers_.append(layer("logo", [group(coin, s=spin), group(edge, s=spin)], loop, transform(ride)))
     layers_.append(layer("halo", [glow((W / 2, H / 2), 700, hexc("#3a64d8"), 0.30, stretch=(150, 60))], loop))
     moving += layers_
     return moving, []
