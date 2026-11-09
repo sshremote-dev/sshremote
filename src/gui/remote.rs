@@ -1422,10 +1422,14 @@ impl Remote {
                         self.send(ToAgent::Pointer { x: p.0, y: p.1 })?;
                     }
                 }
-                Event::PointerButton { pos, button, pressed, .. } => {
+                Event::PointerButton { pos, button, pressed, modifiers } => {
                     if pressed && (over_toolbar(pos) || local || (!self.fullscreen && super::chrome::on_edge(ctx, pos)))
                     {
                         continue;
+                    }
+                    // Shift+click, Ctrl+click: the modifiers held here are held there for the click.
+                    if !local {
+                        self.sync_mods(modifiers)?;
                     }
                     let Some(p) = shown.and_then(|r| self.remote_point(r, pos)) else { continue };
                     if p != self.pointer {
@@ -1450,10 +1454,14 @@ impl Remote {
                         self.pick_at = Some(Instant::now() + Duration::from_millis(400));
                     }
                 }
-                Event::MouseWheel { unit, delta, .. } => {
+                Event::MouseWheel { unit, delta, modifiers, .. } => {
                     let Some(pos) = ctx.pointer_hover_pos() else { continue };
                     if over_toolbar(pos) || !shown.is_some_and(|r| r.contains(pos)) {
                         continue;
+                    }
+                    // Ctrl+wheel zooms there, Shift+wheel scrolls sideways there.
+                    if !local {
+                        self.sync_mods(modifiers)?;
                     }
                     let lines = match unit {
                         egui::MouseWheelUnit::Point => delta / 40.0,
@@ -2242,6 +2250,21 @@ mod actions {
             egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, what, hits)),
             _ => {}
         }
+    }
+
+    /// A click with Shift held is a Shift+click at the host.
+    #[test]
+    #[ignore]
+    fn modifiers_go_with_clicks() {
+        let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+        h.frame(Vec::new()).unwrap();
+        let at = h.r.last_shown.expect("the picture").center();
+        let press = |pressed, modifiers| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers };
+        h.frame(vec![Event::PointerMoved(at)]).unwrap();
+        h.frame(vec![press(true, egui::Modifiers::SHIFT)]).unwrap();
+        assert!(h.r.mods.shift && h.r.held.contains(&SHIFT_L), "Shift is down at the host for the click");
+        h.frame(vec![press(false, egui::Modifiers::NONE)]).unwrap();
+        assert!(!h.r.mods.shift, "and let go with it");
     }
 
     /// Alt held alone reaches the host before the Tab the hook takes, and is let go there too.

@@ -1370,10 +1370,8 @@ impl Viewer {
                 }
             }
             Event::Mouse(m) if screen_input => {
-                if self.key_states {
-                    // Shift+click and Ctrl+drag: the modifiers held here are held on the host too.
-                    self.sync_mods(keys::mod_bits(m.modifiers))?;
-                }
+                // Shift+click and Ctrl+drag: the modifiers held here are held on the host too.
+                self.sync_mods(keys::mod_bits(m.modifiers))?;
                 let (dw, dh) = self.display();
                 let dx = m.column as usize * self.cw + self.cw / 2;
                 let dy = m.row as usize * self.ch + self.ch / 2;

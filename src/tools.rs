@@ -50,6 +50,9 @@ pub struct KeyTool {
     status: Option<(bool, String)>,
     keys: Vec<KeyPair>,
     host: String,
+    /// The dialog open: creating a key, or installing the key at this index on a host.
+    creating: bool,
+    installing: Option<usize>,
 }
 
 const KINDS: [(&str, &[&str]); 3] = [
@@ -73,6 +76,8 @@ impl KeyTool {
             status: None,
             keys,
             host: String::new(),
+            creating: false,
+            installing: None,
         }
     }
 
@@ -114,86 +119,123 @@ impl KeyTool {
         self.keys = list_keys();
     }
 
-    /// The page, in the open view's tools.
+    /// The page, in the open view's tools: the keys, or the form creating one or installing one
+    /// on a host.
     pub fn ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
-        {
-            ui.label(RichText::new("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.").weak());
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Host to install on");
-                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W));
+        if self.creating || self.installing.is_some() {
+            return self.forms(ui, actions);
+        }
+        ui.label(RichText::new("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.").weak());
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(primary(format!("{}  Create a key", ic::PLUS))).clicked() {
+                self.creating = true;
+                self.status = None;
+            }
+            if ui.button(format!("{}  Open the .ssh folder", ic::FOLDER_OPEN)).clicked() {
+                open_path(&ssh_dir());
+            }
+        });
+        ui.add_space(8.0);
+        if self.keys.is_empty() {
+            ui.label(RichText::new("No keys yet.").weak());
+        }
+        for (i, k) in self.keys.iter().enumerate() {
+            egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(crate::gui::theme::R_MD).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{}  {}", ic::KEY, k.name)).strong());
+                    let kind = k.public.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
+                    ui.label(RichText::new(kind).weak().small());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon(ui, ic::UPLOAD, "Install on a host: adds the public key to its ~/.ssh/authorized_keys", false).clicked() {
+                            self.installing = Some(i);
+                        }
+                        if icon(ui, ic::COPY, "Copy the public key", false).clicked() {
+                            ui.ctx().copy_text(k.public.clone());
+                            self.status = Some((true, format!("Copied the public key of {}", k.name)));
+                        }
+                    });
+                });
+                let comment = k.public.split_whitespace().nth(2).unwrap_or("");
+                ui.label(RichText::new(comment).weak().small());
             });
             ui.add_space(4.0);
-            {
-                if self.keys.is_empty() {
-                    ui.label(RichText::new("No keys yet. Create one below.").weak());
-                }
-                for k in &self.keys {
-                    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(crate::gui::theme::R_MD).inner_margin(8.0).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}  {}", ic::KEY, k.name)).strong());
-                            let kind = k.public.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
-                            ui.label(RichText::new(kind).weak().small());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let host = self.host.trim().to_string();
-                                let b = ui.add_enabled(!host.is_empty(), egui::Button::new("Install on host"));
-                                if b.on_hover_text("Adds the public key to the host's ~/.ssh/authorized_keys; you sign in once with the password").clicked() {
-                                    let key = k.public.replace('\'', "");
-                                    let script = format!(
-                                        "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys) && echo 'Key {} installed on' $(hostname)",
-                                        k.name
-                                    );
-                                    actions.push(ToolAction::Terminal {
-                                        title: format!("Install key on {host}"),
-                                        argv: vec!["ssh".into(), host, script],
-                                    });
-                                }
-                                if ui.button(format!("{}  Copy public key", ic::COPY)).clicked() {
-                                    ui.ctx().copy_text(k.public.clone());
-                                    self.status = Some((true, format!("Copied the public key of {}", k.name)));
-                                }
-                            });
-                        });
-                        let comment = k.public.split_whitespace().nth(2).unwrap_or("");
-                        ui.label(RichText::new(comment).weak().small());
+        }
+        status(ui, &self.status);
+    }
+
+    /// What the back arrow leads back from, if a form is open.
+    pub fn sub_page(&self) -> bool {
+        self.creating || self.installing.is_some()
+    }
+
+    pub fn back(&mut self) {
+        (self.creating, self.installing) = (false, None);
+    }
+
+    fn forms(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
+        if self.creating {
+            let ready = !self.name.trim().is_empty();
+            let answer = form_page(ui, "Create a key", "Create key", ready, &self.status, |ui| {
+                egui::Grid::new("keygen").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Type");
+                    combo("keytype", KINDS[self.kind].0).width(FIELD_W).show_ui(ui, |ui| {
+                        crate::gui::menu_look(ui);
+                        for (i, k) in KINDS.iter().enumerate() {
+                            ui.selectable_value(&mut self.kind, i, k.0);
+                        }
                     });
-                    ui.add_space(4.0);
-                }
-            }
-            section(ui, "Create a key");
-            egui::Grid::new("keygen").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Type");
-                combo("keytype", KINDS[self.kind].0).width(FIELD_W).show_ui(ui, |ui| {
-                    crate::gui::menu_look(ui);
-                    for (i, k) in KINDS.iter().enumerate() {
-                        ui.selectable_value(&mut self.kind, i, k.0);
-                    }
+                    ui.end_row();
+                    ui.label("File name");
+                    ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("id_ed25519_work").desired_width(FIELD_W));
+                    ui.end_row();
+                    ui.label("Comment");
+                    ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(FIELD_W));
+                    ui.end_row();
+                    ui.label("Passphrase");
+                    ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).hint_text("optional").desired_width(FIELD_W));
+                    ui.end_row();
+                    ui.label("Again");
+                    ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(FIELD_W));
+                    ui.end_row();
                 });
-                ui.end_row();
-                ui.label("File name");
-                ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("id_ed25519_work").desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("Comment");
-                ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("Passphrase");
-                ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).hint_text("optional").desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("Again");
-                ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(FIELD_W));
-                ui.end_row();
             });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.add(primary("Create key")).clicked() {
+            match answer {
+                Some(true) => {
                     self.generate();
+                    if self.status.as_ref().is_some_and(|s| s.0) {
+                        self.creating = false;
+                    }
                 }
-                if ui.button(format!("{}  Open the .ssh folder", ic::FOLDER_OPEN)).clicked() {
-                    open_path(&ssh_dir());
-                }
+                Some(false) => self.creating = false,
+                None => {}
+            }
+        }
+        if let Some(i) = self.installing {
+            let name = self.keys.get(i).map_or(String::new(), |k| k.name.clone());
+            let ready = !self.host.trim().is_empty();
+            let answer = form_page(ui, &format!("Install {name} on a host"), "Install", ready, &None, |ui| {
+                ui.label(RichText::new("A terminal opens to sign in once with the password; after that ssh uses the key.").weak());
+                ui.add_space(6.0);
+                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W + 80.0));
             });
-            status(ui, &self.status);
+            match answer {
+                Some(true) => {
+                    if let Some(k) = self.keys.get(i) {
+                        let host = self.host.trim().to_string();
+                        let key = k.public.replace('\'', "");
+                        let script = format!(
+                            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys) && echo 'Key {} installed on' $(hostname)",
+                            k.name
+                        );
+                        actions.push(ToolAction::Terminal { title: format!("Install key on {host}"), argv: vec!["ssh".into(), host, script] });
+                    }
+                    self.installing = None;
+                }
+                Some(false) => self.installing = None,
+                None => {}
+            }
         }
     }
 }
@@ -328,6 +370,8 @@ pub struct ConfigTool {
     form: HostEntry,
     /// The alias of the host being changed; empty while adding one.
     editing: String,
+    /// The dialog adding or changing a host is open.
+    form_open: bool,
     text: String,
     saved: String,
     status: Option<(bool, String)>,
@@ -345,6 +389,7 @@ impl ConfigTool {
             hosts: parse_config(&text),
             form: HostEntry { port: "22".into(), ..Default::default() },
             editing: String::new(),
+            form_open: false,
             saved: text.clone(),
             text,
             status: None,
@@ -400,6 +445,9 @@ impl ConfigTool {
 
     /// The page, in the open view's tools; sets `changed` when the host list changed.
     pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        if self.form_open {
+            return self.host_form(ui, changed);
+        }
         ui.horizontal(|ui| {
             if ui.add(choice("Hosts", self.view == ConfigView::Hosts)).clicked() {
                 self.view = ConfigView::Hosts;
@@ -419,6 +467,13 @@ impl ConfigTool {
 
     fn hosts_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.label(RichText::new("ssh, this app and other tools use these names, users, ports and keys.").weak());
+        ui.add_space(8.0);
+        if ui.add(primary(format!("{}  Add a host", ic::PLUS))).clicked() {
+            self.editing.clear();
+            self.form = HostEntry { port: "22".into(), ..Default::default() };
+            self.form_open = true;
+            self.status = None;
+        }
         let mut edit = None;
         let mut remove = None;
         ui.add_space(4.0);
@@ -449,6 +504,8 @@ impl ConfigTool {
         if let Some(h) = edit {
             self.editing = h.alias.clone();
             self.form = HostEntry { port: if h.port.is_empty() { "22".into() } else { h.port.clone() }, ..h };
+            self.form_open = true;
+            self.status = None;
         }
         if let Some(alias) = remove {
             if self.text != self.saved {
@@ -459,45 +516,65 @@ impl ConfigTool {
                 *changed = true;
             }
         }
-        let heading =
-            if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
-        section(ui, &heading);
+    }
+
+    pub fn sub_page(&self) -> bool {
+        self.form_open
+    }
+
+    pub fn back(&mut self) {
+        self.form_open = false;
+        self.editing.clear();
+        self.status = None;
+    }
+
+    /// The form adding or changing a host, in place of the list.
+    fn host_form(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        let title = if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
+        let ok = if self.editing.is_empty() { "Add host" } else { "Save" };
+        let ready = !self.form.alias.trim().is_empty() && !self.form.hostname.trim().is_empty();
         let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
-        egui::Grid::new("addhost").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Alias");
-            ui.add(egui::TextEdit::singleline(&mut self.form.alias).hint_text("web1").desired_width(FIELD_W));
-            ui.end_row();
-            ui.label("Host name");
-            ui.add(egui::TextEdit::singleline(&mut self.form.hostname).hint_text("192.168.1.20 or server.example.com").desired_width(FIELD_W));
-            ui.end_row();
-            ui.label("User");
-            ui.add(egui::TextEdit::singleline(&mut self.form.user).desired_width(FIELD_W));
-            ui.end_row();
-            ui.label("Port");
-            ui.add(egui::TextEdit::singleline(&mut self.form.port).desired_width(80.0));
-            ui.end_row();
-            ui.label("Key");
-            let shown = if self.form.identity.is_empty() { "default".to_string() } else { self.form.identity.clone() };
-            combo("hostkey", shown).width(FIELD_W).show_ui(ui, |ui| {
-                crate::gui::menu_look(ui);
-                ui.selectable_value(&mut self.form.identity, String::new(), "default");
-                for k in &keys {
-                    ui.selectable_value(&mut self.form.identity, k.clone(), k);
-                }
+        let status = self.status.clone();
+        let answer = form_page(ui, &title, ok, ready, &status, |ui| {
+            egui::Grid::new("addhost").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Alias");
+                ui.add(egui::TextEdit::singleline(&mut self.form.alias).hint_text("web1").desired_width(FIELD_W));
+                ui.end_row();
+                ui.label("Host name");
+                ui.add(egui::TextEdit::singleline(&mut self.form.hostname).hint_text("192.168.1.20 or server.example.com").desired_width(FIELD_W));
+                ui.end_row();
+                ui.label("User");
+                ui.add(egui::TextEdit::singleline(&mut self.form.user).desired_width(FIELD_W));
+                ui.end_row();
+                ui.label("Port");
+                ui.add(egui::TextEdit::singleline(&mut self.form.port).desired_width(80.0));
+                ui.end_row();
+                ui.label("Key");
+                let shown = if self.form.identity.is_empty() { "default".to_string() } else { self.form.identity.clone() };
+                combo("hostkey", shown).width(FIELD_W).show_ui(ui, |ui| {
+                    crate::gui::menu_look(ui);
+                    ui.selectable_value(&mut self.form.identity, String::new(), "default");
+                    for k in &keys {
+                        ui.selectable_value(&mut self.form.identity, k.clone(), k);
+                    }
+                });
+                ui.end_row();
             });
-            ui.end_row();
         });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let label = if self.editing.is_empty() { "Add host" } else { "Save host" };
-            if ui.add(primary(label)).clicked() && self.save_form() {
-                *changed = true;
+        match answer {
+            Some(true) => {
+                if self.save_form() {
+                    *changed = true;
+                    self.form_open = false;
+                }
             }
-            if !self.editing.is_empty() && ui.button("Cancel").clicked() {
+            Some(false) => {
+                self.form_open = false;
                 self.editing.clear();
-                self.form = HostEntry { port: "22".into(), ..Default::default() };
+                self.status = None;
             }
-        });
+            None => {}
+        }
     }
 
     fn file_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
@@ -557,15 +634,19 @@ pub struct VaultTool {
     host: String,
     password: String,
     status: Option<(bool, String)>,
+    adding: bool,
 }
 
 impl VaultTool {
     pub fn new(host: &str) -> Self {
-        VaultTool { hosts: crate::vault::list(), host: host.to_string(), password: String::new(), status: None }
+        VaultTool { hosts: crate::vault::list(), host: host.to_string(), password: String::new(), status: None, adding: false }
     }
 
     /// The page, in the open view's tools. `known` are hosts to pick from.
     pub fn ui(&mut self, ui: &mut egui::Ui, known: &[String]) {
+        if self.adding {
+            return self.form(ui, known);
+        }
         {
             let Some(store) = crate::vault::backend() else {
                 ui.label(
@@ -580,6 +661,11 @@ impl VaultTool {
                 ))
                 .weak(),
             );
+            ui.add_space(8.0);
+            if ui.add(primary(format!("{}  Save a password", ic::PLUS))).clicked() {
+                self.adding = true;
+                self.status = None;
+            }
             ui.add_space(4.0);
             let mut remove = None;
             if self.hosts.is_empty() {
@@ -601,40 +687,65 @@ impl VaultTool {
                 });
                 self.hosts = crate::vault::list();
             }
-            section(ui, "Save a password");
-            egui::Grid::new("vault-add").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Host");
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W - 34.0));
-                    let r = crate::gui::icon_menu(ui, ic::CARET_DOWN, |ui| {
-                        for h in known {
-                            if ui.button(h).clicked() {
-                                self.host = h.clone();
-                                ui.close();
-                            }
-                        }
-                    });
-                    r.on_hover_text("A known host");
-                });
-                ui.end_row();
-                ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(FIELD_W));
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            let ready = !self.host.trim().is_empty() && !self.password.is_empty();
-            let save = primary("Save password");
-            if ui.add_enabled(ready, save).clicked() {
-                let host = self.host.trim().to_string();
-                self.status = Some(match crate::vault::set(&host, &self.password) {
-                    Ok(()) => (true, format!("Saved the password of {host}")),
-                    Err(e) => (false, e),
-                });
-                self.password.clear();
-                self.hosts = crate::vault::list();
-            }
             status(ui, &self.status);
+        }
+    }
+
+    pub fn sub_page(&self) -> bool {
+        self.adding
+    }
+
+    pub fn back(&mut self) {
+        self.adding = false;
+        self.password.clear();
+    }
+
+    /// The form saving a password, in place of the list.
+    fn form(&mut self, ui: &mut egui::Ui, known: &[String]) {
+        {
+            let ready = !self.host.trim().is_empty() && !self.password.is_empty();
+            let status = self.status.clone();
+            let answer = form_page(ui, "Save a password", "Save", ready, &status, |ui| {
+                egui::Grid::new("vault-add").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Host");
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W - 34.0));
+                        let r = crate::gui::icon_menu(ui, ic::CARET_DOWN, |ui| {
+                            for h in known {
+                                if ui.button(h).clicked() {
+                                    self.host = h.clone();
+                                    ui.close();
+                                }
+                            }
+                        });
+                        r.on_hover_text("A known host");
+                    });
+                    ui.end_row();
+                    ui.label("Password");
+                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(FIELD_W));
+                    ui.end_row();
+                });
+            });
+            match answer {
+                Some(true) => {
+                    let host = self.host.trim().to_string();
+                    self.status = Some(match crate::vault::set(&host, &self.password) {
+                        Ok(()) => (true, format!("Saved the password of {host}")),
+                        Err(e) => (false, e),
+                    });
+                    self.password.clear();
+                    self.hosts = crate::vault::list();
+                    if self.status.as_ref().is_some_and(|s| s.0) {
+                        self.adding = false;
+                    }
+                }
+                Some(false) => {
+                    self.adding = false;
+                    self.password.clear();
+                }
+                None => {}
+            }
         }
     }
 }
@@ -648,6 +759,8 @@ pub struct BackupTool {
     chosen: Option<PathBuf>,
     list: Vec<(PathBuf, String, bool)>,
     status: Option<(bool, String)>,
+    /// The dialog open: backing up (false) or restoring the chosen backup (true).
+    dialog: Option<bool>,
 }
 
 impl BackupTool {
@@ -660,6 +773,7 @@ impl BackupTool {
             chosen: None,
             list: Vec::new(),
             status: None,
+            dialog: None,
         };
         t.refresh();
         t
@@ -672,97 +786,173 @@ impl BackupTool {
             .collect();
     }
 
-    /// The page, in the open view's tools; sets `changed` after a restore.
+    /// The page, in the open view's tools: the backups; backing up and restoring ask what they
+    /// need in dialogs. Sets `changed` after a restore.
     pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
-        {
-            ui.label(
-                RichText::new(
-                    "Recent and favorite hosts, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
-                )
-                .weak(),
-            );
-            section(ui, "Back up");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(FIELD_W))
-                    .on_hover_text(format!(
-                        "With a passphrase (at least {} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored.",
-                        crate::backup::MIN_PASSPHRASE
-                    ));
-                let now = primary(format!("{}  Back up now", ic::DOWNLOAD));
-                if ui.add(now).clicked() {
-                    let min = crate::backup::MIN_PASSPHRASE;
-                    if !self.passphrase.is_empty() && self.passphrase.chars().count() < min {
-                        self.status = Some((false, format!("Use a passphrase of at least {min} characters, or none.")));
-                    } else {
-                        let pass = Some(self.passphrase.as_str()).filter(|p| !p.is_empty());
-                        self.status = Some(match crate::backup::save(pass) {
-                            Ok(p) => (true, format!("Saved {}", p.display())),
-                            Err(e) => (false, e),
-                        });
-                        self.passphrase.clear();
-                        self.refresh();
-                    }
-                }
-                if ui.button(format!("{}  Folder", ic::FOLDER)).clicked() {
-                    let dir = crate::backup::folder();
-                    let _ = std::fs::create_dir_all(&dir);
-                    open_path(&dir);
-                }
-            });
-            section(ui, "Restore");
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                if self.list.is_empty() {
-                    ui.label(RichText::new("No backups yet.").weak().italics());
-                }
-                for (p, when, pw) in &self.list {
-                    let auto = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("auto-"));
-                    let label =
-                        format!("{}  {when}{}{}", ic::ARCHIVE, if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
-                    let on = self.chosen.as_ref() == Some(p);
-                    let b = choice(label, on).min_size(egui::vec2(ui.available_width(), 30.0));
-                    let r = ui.add(b).on_hover_text(p.display().to_string());
-                    if r.clicked() {
-                        self.chosen = Some(p.clone());
-                    }
-                }
-            });
-            ui.add_space(4.0);
-            ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
-            ui.checkbox(&mut self.ssh_files, "Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords").desired_width(FIELD_W),
-                );
-                if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD))).clicked()
-                    && let Some(p) = &self.chosen
-                {
-                    let pass = Some(self.restore_pass.as_str()).filter(|p| !p.is_empty());
-                    self.status = Some(match crate::backup::restore(p, pass, self.ssh_config, self.ssh_files) {
-                        Ok(s) => {
-                            *changed = true;
-                            (true, s)
+        if self.dialog.is_some() {
+            return self.forms(ui, changed);
+        }
+        ui.label(
+            RichText::new(
+                "Recent and favorite hosts, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(primary(format!("{}  Back up now", ic::DOWNLOAD))).clicked() {
+                self.dialog = Some(false);
+                self.status = None;
+            }
+            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD)).min_size(egui::vec2(0.0, 32.0)))
+                .on_disabled_hover_text("Choose a backup below first")
+                .clicked()
+            {
+                self.dialog = Some(true);
+                self.status = None;
+            }
+            if ui.button(format!("{}  Folder", ic::FOLDER)).clicked() {
+                let dir = crate::backup::folder();
+                let _ = std::fs::create_dir_all(&dir);
+                open_path(&dir);
+            }
+        });
+        ui.add_space(8.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        if self.list.is_empty() {
+            ui.label(RichText::new("No backups yet.").weak().italics());
+        }
+        for (p, when, pw) in &self.list {
+            let auto = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("auto-"));
+            let label = format!("{}  {when}{}{}", ic::ARCHIVE, if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
+            let on = self.chosen.as_ref() == Some(p);
+            let b = choice(label, on).min_size(egui::vec2(ui.available_width(), 30.0));
+            if ui.add(b).on_hover_text(p.display().to_string()).clicked() {
+                self.chosen = Some(p.clone());
+            }
+        }
+        ui.add_space(6.0);
+        status(ui, &self.status);
+    }
+
+    pub fn sub_page(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    pub fn back(&mut self) {
+        self.dialog = None;
+        self.passphrase.clear();
+        self.restore_pass.clear();
+    }
+
+    /// Backing up or restoring, in place of the list.
+    fn forms(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        let status = self.status.clone();
+        match self.dialog {
+            Some(false) => {
+                let min = crate::backup::MIN_PASSPHRASE;
+                let answer = form_page(ui, "Back up now", "Back up", true, &status, |ui| {
+                    ui.label(RichText::new(format!(
+                        "With a passphrase (at least {min} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored."
+                    )).weak());
+                    ui.add_space(6.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(FIELD_W + 80.0));
+                });
+                match answer {
+                    Some(true) => {
+                        if !self.passphrase.is_empty() && self.passphrase.chars().count() < min {
+                            self.status = Some((false, format!("Use a passphrase of at least {min} characters, or none.")));
+                        } else {
+                            let pass = Some(self.passphrase.as_str()).filter(|p| !p.is_empty());
+                            self.status = Some(match crate::backup::save(pass) {
+                                Ok(p) => (true, format!("Saved {}", p.display())),
+                                Err(e) => (false, e),
+                            });
+                            self.passphrase.clear();
+                            self.refresh();
+                            self.dialog = None;
                         }
-                        Err(e) => (false, e),
-                    });
+                    }
+                    Some(false) => {
+                        self.passphrase.clear();
+                        self.dialog = None;
+                    }
+                    None => {}
                 }
-            });
-            status(ui, &self.status);
+            }
+            Some(true) => {
+                let answer = form_page(ui, "Restore this backup", "Restore", self.chosen.is_some(), &status, |ui| {
+                    ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
+                    ui.checkbox(&mut self.ssh_files, "Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)");
+                    ui.add_space(6.0);
+                    ui.add(egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords and keys").desired_width(FIELD_W + 80.0));
+                });
+                match answer {
+                    Some(true) => {
+                        if let Some(p) = &self.chosen {
+                            let pass = Some(self.restore_pass.as_str()).filter(|p| !p.is_empty());
+                            self.status = Some(match crate::backup::restore(p, pass, self.ssh_config, self.ssh_files) {
+                                Ok(s) => {
+                                    *changed = true;
+                                    (true, s)
+                                }
+                                Err(e) => (false, e),
+                            });
+                        }
+                        if self.status.as_ref().is_some_and(|s| s.0) {
+                            self.restore_pass.clear();
+                            self.dialog = None;
+                        }
+                    }
+                    Some(false) => {
+                        self.restore_pass.clear();
+                        self.dialog = None;
+                    }
+                    None => {}
+                }
+            }
+            None => {}
         }
     }
 }
 
+/// A form shown in place of the tool's list, as a web page opens an "add" page: its title,
+/// the fields, a status line, then the main button and Cancel. Some(true) for the main button
+/// (or Enter once `ready`), Some(false) for Cancel, None while it is being filled in; the tool
+/// page's back arrow and Escape lead back to the list too.
+fn form_page(
+    ui: &mut egui::Ui,
+    title: &str,
+    ok: &str,
+    ready: bool,
+    status_line: &Option<(bool, String)>,
+    fields: impl FnOnce(&mut egui::Ui),
+) -> Option<bool> {
+    let mut answer = None;
+    ui.label(RichText::new(title).size(15.0).strong());
+    ui.add_space(10.0);
+    fields(ui);
+    if let Some((ok, text)) = status_line.as_ref().filter(|s| !s.0) {
+        ui.add_space(6.0);
+        ui.label(RichText::new(text).color(if *ok { good() } else { bad() }));
+    }
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        if ui.add_enabled(ready, primary(ok)).clicked() {
+            answer = Some(true);
+        }
+        if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(0.0, 32.0))).clicked() {
+            answer = Some(false);
+        }
+    });
+    if ready && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        answer = Some(true);
+    }
+    answer
+}
+
 /// The width of the tools' text fields and drop-downs.
 const FIELD_W: f32 = 300.0;
-
-/// A part of a tool's page: space above, a rule, its name.
-fn section(ui: &mut egui::Ui, name: &str) {
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(4.0);
-    ui.label(RichText::new(name).strong());
-    ui.add_space(2.0);
-}
 
 fn status(ui: &mut egui::Ui, s: &Option<(bool, String)>) {
     if let Some((ok, text)) = s {

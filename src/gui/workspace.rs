@@ -389,6 +389,8 @@ pub(super) struct Workspace {
     confirm: Option<Confirm>,
     /// Where the panes were drawn last frame.
     panes_area: Rect,
+    /// The window is closing for good (told yes): nothing else is shown in it meanwhile.
+    pub(super) closing_window: bool,
     scrolled_for: Option<(usize, usize)>,
 }
 
@@ -429,6 +431,7 @@ impl Workspace {
             tab_wheel: 0.0,
             confirm: None,
             panes_area: Rect::NOTHING,
+            closing_window: false,
             scrolled_for: None,
         }
     }
@@ -1437,6 +1440,7 @@ impl Workspace {
                 self.confirm = None;
                 if yes {
                     self.close_all();
+                    self.closing_window = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
             }

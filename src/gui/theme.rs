@@ -306,11 +306,6 @@ mod contrast {
                 ("check box edge on a menu", v.widgets.inactive.bg_stroke.color, v.window_fill, 1.8),
                 ("own chat bubble", text, if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, 4.5),
             ];
-            let mut pairs = pairs;
-            for c in crate::gui::AVATAR_COLORS {
-                let square = over(c.gamma_multiply(if dark { 0.30 } else { 0.16 }), v.panel_fill);
-                pairs.push(("initial on its square", v.strong_text_color(), square, 4.5));
-            }
             for (name, fg, bg, need) in pairs {
                 let r = ratio(fg, bg);
                 eprintln!("{} {name:28} {r:5.2} (needs {need})", if dark { "dark " } else { "light" });

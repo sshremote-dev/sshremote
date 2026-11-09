@@ -21,7 +21,7 @@ anywhere on `PATH`).
 ## The window
 
 `sshremote` opens a small open window: a new connection, this computer (local shells, its screen
-and files, a test desktop), the SSH hosts (favorites, recent, `~/.ssh/config`) and the tools.
+and files), the SSH hosts (favorites, recent, `~/.ssh/config`) and the tools.
 What is opened goes into the workspace:
 
 - **Tabs and panes** as in Windows Terminal: each tab (host and round trip) holds panes split

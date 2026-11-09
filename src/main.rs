@@ -55,7 +55,6 @@ usage: sshremote                       open the window: connect screen, recent h
                                   the workspace with a terminal pane: a local shell, or ssh to HOST;
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
-       sshremote --local [options]     view a built-in test desktop (no ssh)
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
                                   wait for viewers without ssh (prints a one-time password)

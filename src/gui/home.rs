@@ -259,7 +259,8 @@ impl App {
                 if row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
                     go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
                 }
-                if row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
+                // A synthetic screen for trying the viewer, in development builds only.
+                if cfg!(feature = "test-desktop") && row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
                     go = Some((String::new(), String::new(), How::TestDesktop));
                 }
             }
@@ -336,10 +337,22 @@ impl App {
         }
         let escape = !ui.ctx().any_popup_open() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
         if back || escape {
-            self.keys = None;
-            self.config = None;
-            self.vault = None;
-            self.backup = None;
+            // From a form back to its tool's list; from the list back to the tools.
+            let form = self.keys.as_ref().is_some_and(|t| t.sub_page())
+                || self.config.as_ref().is_some_and(|t| t.sub_page())
+                || self.vault.as_ref().is_some_and(|t| t.sub_page())
+                || self.backup.as_ref().is_some_and(|t| t.sub_page());
+            if form {
+                self.keys.as_mut().map(|t| t.back());
+                self.config.as_mut().map(|t| t.back());
+                self.vault.as_mut().map(|t| t.back());
+                self.backup.as_mut().map(|t| t.back());
+            } else {
+                self.keys = None;
+                self.config = None;
+                self.vault = None;
+                self.backup = None;
+            }
         }
     }
 

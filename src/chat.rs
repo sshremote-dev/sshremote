@@ -181,9 +181,9 @@ impl eframe::App for ChatApp {
         egui::Panel::top("chat-header").frame(header).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(34.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, crate::gui::theme::R_LG, crate::gui::ACCENT);
-                let icon = egui::FontId::proportional(17.0);
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::gui::ic::CHAT, icon, Color32::WHITE);
+                let icon = egui::FontId::proportional(22.0);
+                let fg = ui.visuals().strong_text_color();
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::gui::ic::CHAT, icon, fg);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.label(RichText::new(&self.name).strong().size(15.0));
@@ -372,13 +372,11 @@ fn message(ui: &mut egui::Ui, theirs: bool, who: &str, text: &str, at: u64, firs
         .horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(GAP, 2.0);
             if first {
+                // Who wrote it, as a plain line icon: the person there, or this side.
                 let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(AVATAR), egui::Sense::hover());
-                let tint = crate::gui::AVATAR_COLORS[if theirs { 1 } else { 0 }]
-                    .gamma_multiply(if crate::gui::theme::dark() { 0.30 } else { 0.16 });
-                ui.painter().rect_filled(r, crate::gui::theme::R_LG, tint);
-                let initial = who.chars().next().unwrap_or('?').to_uppercase().to_string();
-                let fg = ui.visuals().strong_text_color();
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(14.0), fg);
+                let glyph = if theirs { crate::gui::ic::USER } else { crate::gui::ic::DESKTOP };
+                let fg = ui.visuals().weak_text_color();
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(18.0), fg);
             } else {
                 // Under the first message's text: the avatar's width and the gap after it.
                 ui.add_space(AVATAR + GAP);

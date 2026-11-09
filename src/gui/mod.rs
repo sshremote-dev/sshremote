@@ -48,6 +48,7 @@ pub(crate) mod ic {
     pub const APP_WINDOW: &str = "\u{E5DA}";
     pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const LAYOUT: &str = "\u{E6D6}";
+    pub const USER: &str = "\u{E4C2}";
     pub const ROWS: &str = "\u{E5A2}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const PLUS: &str = "\u{E3D4}";
@@ -474,29 +475,13 @@ fn preset_text(p: &crate::proto::Preset) -> String {
     format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps)
 }
 
-/// The colours of the hosts' initials, deep enough for their white letter.
-pub(crate) const AVATAR_COLORS: [Color32; 6] = [
-    Color32::from_rgb(37, 99, 235),
-    Color32::from_rgb(21, 128, 90),
-    Color32::from_rgb(124, 72, 200),
-    Color32::from_rgb(194, 85, 20),
-    Color32::from_rgb(190, 50, 100),
-    Color32::from_rgb(20, 113, 150),
-];
-
-/// A square with the host's initial, coloured by its name.
+/// A host's mark in a list: a plain line icon, as the toolbar's are (a direct sshremote://
+/// address a link, a host over ssh a server).
 fn badge(ui: &mut egui::Ui, name: &str) {
-    let bare = name.trim_start_matches("sshremote://");
-    let bare = bare.rsplit('@').next().unwrap_or(bare);
-    let hash = bare.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-    // A quiet square tinted by the host's colour, so hosts stay apart without loud colour.
-    let tint = AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()].gamma_multiply(if theme::dark() { 0.30 } else { 0.16 });
-    ui.painter().rect_filled(rect, theme::R_LG, tint);
-    ui.painter().rect_stroke(rect.shrink(0.5), theme::R_LG, egui::Stroke::new(1.0, outline()), egui::StrokeKind::Inside);
-    let initial = bare.chars().next().unwrap_or('?').to_uppercase().to_string();
-    let fg = ui.visuals().strong_text_color();
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, initial, FontId::proportional(17.0), fg);
+    let glyph = if name.starts_with("sshremote://") { ic::GLOBE } else { ic::HARD_DRIVES };
+    let fg = ui.visuals().text_color();
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(20.0), fg);
 }
 
 /// The cause of a failed connection in plain words, with what to try.
@@ -696,9 +681,11 @@ impl eframe::App for App {
         let mut back = false;
         let mut reached = Vec::new();
         let mut main_grab = false;
+        let mut closing = false;
         if let Screen::Work(mut w) = std::mem::replace(&mut self.screen, Screen::Connect) {
             let out = w.ui(ui, main_keys);
             back = out.empty;
+            closing = w.closing_window;
             main_grab = out.grab;
             reached = std::mem::take(&mut w.reached);
             self.open_dialog(&ctx, &mut w);
@@ -712,7 +699,9 @@ impl eframe::App for App {
         crate::keygrab::set_active(main_grab || window_grab.is_some());
         self.reached(reached);
         // `sshremote terminal` ends with its last pane, unless tabs live on in other windows.
-        if back && self.quit_when_empty && self.windows.is_empty() {
+        if closing {
+            // Closing after a yes: the open window is not shown on the way out.
+        } else if back && self.quit_when_empty && self.windows.is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         } else if back {
             self.screen = Screen::Connect;

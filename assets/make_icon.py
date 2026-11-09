@@ -9,9 +9,8 @@ import zlib
 from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 256)
-NAVY = (18, 29, 43)
-TEAL = (48, 218, 188)
-WHITE = (244, 250, 252)
+BLUE_TOP = (96, 165, 250)
+BLUE_BOTTOM = (37, 99, 235)
 
 
 def rounded_box(x, y, left, top, right, bottom, radius):
@@ -39,35 +38,22 @@ def polygon(x, y, points):
 
 
 def sample(x, y, small):
-    # Transparent outer corners; all foreground elements stay inside the tile.
-    if rounded_box(x, y, 8, 8, 248, 248, 53) > 0:
-        return (0, 0, 0, 0)
-    t = (y - 8) / 240
-    color = tuple(round(c + (1 - t) * 5) for c in NAVY)
-    # Optical sizing: ~1 px outline at 16 px, with a more open aperture.
-    thickness = 16 if small else 12
-    outer = rounded_box(x, y, 42, 53, 214, 179, 20)
-    inner = rounded_box(x, y, 42 + thickness, 53 + thickness,
-                        214 - thickness, 179 - thickness, 20 - thickness / 2)
-    stand = min(capsule(x, y, 113, 180, 113, 202, 7),
-                capsule(x, y, 83, 204, 143, 204, 7))
-    if max(outer, -inner) <= 0 or stand <= 0:
-        color = TEAL
-    # Familiar SSH prompt, deliberately no text/font dependency.
-    radius = 8 if small else 7
-    chevron = min(capsule(x, y, 78, 91, 102, 112, radius),
-                  capsule(x, y, 102, 112, 78, 133, radius))
-    underscore = capsule(x, y, 119, 138, 139, 138, 6)
-    if chevron <= 0 or (not small and underscore <= 0):
-        color = WHITE
-    # A real pointer silhouette crossing the screen edge: remote interaction.
-    points = ((156, 124), (207, 161), (184, 166), (173, 190))
-    pointer = polygon(x, y, points)
-    if pointer <= (7 if small else 6):
-        color = NAVY  # negative-space moat keeps cursor and bezel separate
-    if pointer <= 0:
-        color = WHITE
-    return (*color, 255)
+    """A flat line icon on no tile, as current system and app icons are drawn: a screen with a
+    shell prompt, in one blue that deepens downwards."""
+    t = min(max((y - 40) / 180, 0), 1)
+    color = tuple(round(a + (b - a) * t) for a, b in zip(BLUE_TOP, BLUE_BOTTOM))
+    # Optical sizing: heavier strokes where the icon is a few pixels across.
+    stroke = 24 if small else 17
+    outer = rounded_box(x, y, 18, 38, 238, 190, 30)
+    inner = rounded_box(x, y, 18 + stroke, 38 + stroke, 238 - stroke, 190 - stroke, 30 - stroke / 2)
+    stand = min(capsule(x, y, 128, 192, 128, 214, stroke / 2),
+                capsule(x, y, 86, 220, 170, 220, stroke / 2))
+    r = 12 if small else 9
+    chevron = min(capsule(x, y, 72, 86, 104, 114, r), capsule(x, y, 104, 114, 72, 142, r))
+    underscore = capsule(x, y, 122, 142, 158, 142, r)
+    if max(outer, -inner) <= 0 or stand <= 0 or chevron <= 0 or underscore <= 0:
+        return (*color, 255)
+    return (0, 0, 0, 0)
 
 
 def render(size):

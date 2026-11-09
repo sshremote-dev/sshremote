@@ -307,6 +307,13 @@ mod pictures {
             for (tool, what) in [("SSH keys", "tool_keys"), ("SSH hosts", "tool_hosts"), ("Saved passwords", "tool_vault"), ("Backup and restore", "tool_backup")] {
                 s.click(tool, 0, PointerButton::Primary);
                 s.save(what);
+                // Adding opens a page of its own; back returns to the list, then to the tools.
+                if what == "tool_hosts" {
+                    s.click("Add a host", 0, PointerButton::Primary);
+                    s.save("tool_hosts_add");
+                    s.click(ic::ARROW_LEFT, 0, PointerButton::Primary);
+                    s.save("tool_hosts_back");
+                }
                 s.click(ic::ARROW_LEFT, 0, PointerButton::Primary);
             }
         }
