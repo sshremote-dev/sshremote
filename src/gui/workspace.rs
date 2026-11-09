@@ -1234,10 +1234,11 @@ impl Workspace {
                 accent,
             );
         }
-        // Where the tabs are on the screen, for drops from other windows.
-        let origin = ui.ctx().input(|i| i.viewport().inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()));
-        self.strip_screen = view.translate(origin);
-        self.tabs_screen = rects.iter().map(|r| if r.is_finite() && r.is_positive() { r.translate(origin) } else { Rect::NOTHING }).collect();
+        // Where the tabs are on the screen, in pixels, for drops from windows on other monitors.
+        let ctx = ui.ctx().clone();
+        let on_screen = |r: Rect| Rect::from_min_max(screen_point(&ctx, r.min), screen_point(&ctx, r.max));
+        self.strip_screen = on_screen(view);
+        self.tabs_screen = rects.iter().map(|r| if r.is_finite() && r.is_positive() { on_screen(*r) } else { Rect::NOTHING }).collect();
         if over {
             if !cramped && ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
                 self.tab_first += 1;
@@ -1299,16 +1300,16 @@ impl Workspace {
         };
         let size = ui.ctx().content_rect().size();
         let away = p.y > super::chrome::HEIGHT + 40.0 || p.y < -20.0 || p.x < -20.0 || p.x > size.x + 20.0;
-        let origin = ui.ctx().input(|i| i.viewport().inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()));
+        let at = screen_point(ui.ctx(), p);
         if released {
             self.dragging = None;
             self.drag_out = None;
             if away && d < self.tabs.len() {
-                self.dropped = Some((d, p + origin));
+                self.dropped = Some((d, at));
             }
             return;
         }
-        self.drag_out = away.then_some(p + origin);
+        self.drag_out = away.then_some(at);
         if away {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             return;
@@ -1643,6 +1644,16 @@ impl Workspace {
             self.zoom = Some(id);
         }
     }
+}
+
+/// A point of this window as a point of the whole screen in pixels: windows on monitors of
+/// different scales compare there.
+pub(super) fn screen_point(ctx: &egui::Context, p: Pos2) -> Pos2 {
+    let (origin, scale) = ctx.input(|i| {
+        let v = i.viewport();
+        (v.inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()), v.native_pixels_per_point.unwrap_or(1.0))
+    });
+    (p + origin) * scale
 }
 
 /// A question before something that cannot be undone: Cancel, or the red action. Enter says
@@ -2286,6 +2297,19 @@ mod tests {
         h.frame(vec![key(egui::Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::SHIFT)]);
         assert_eq!(h.w.zoom, Some(id), "Ctrl+Shift+Enter: the pane's");
         h.w.close_all();
+    }
+
+    /// Points of windows on monitors of different scales meet in screen pixels.
+    #[test]
+    fn screen_points_are_pixels() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.inner_rect = Some(Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 600.0)));
+        info.native_pixels_per_point = Some(1.5);
+        let mut got = Pos2::ZERO;
+        let _ = ctx.run_ui(input, |ui| got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0)));
+        assert_eq!(got, Pos2::new(165.0, 105.0));
     }
 
     /// Let go outside the window, a tab drag ends even when the pointer is gone in that frame.

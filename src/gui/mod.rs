@@ -836,14 +836,17 @@ impl App {
             }
         }
         ctx.request_repaint();
+        // Back from screen pixels to this window's points, for placing windows.
+        let scale = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.0));
+        let points = |p: Pos2| Pos2::new(p.x / scale, p.y / scale);
         if let Some((w, at)) = tear {
-            self.tear_off(w, at);
+            self.tear_off(w, points(at));
         }
         if let Some(id) = focus {
             ctx.send_viewport_cmd_to(id, ViewportCommand::Focus);
         }
         if let Some(((glyph, name, panes), at)) = ghost {
-            tab_ghost(ctx, glyph, &name, panes, at);
+            tab_ghost(ctx, glyph, &name, panes, points(at));
         }
     }
 
