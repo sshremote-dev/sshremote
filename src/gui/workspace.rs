@@ -1906,6 +1906,13 @@ mod tests {
             }
             h.snap.save(&h.ctx, h.size, &dir.join(format!("look_{name}.png")));
         };
+        // The look out of the box: the built-in space with waves and the badge.
+        shot(&mut h, &Look::default(), "default");
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.frame(Vec::new());
+        }
+        h.snap.save(&h.ctx, h.size, &dir.join("look_default_later.png"));
         shot(&mut h, &base, "window");
         shot(&mut h, &Look { scope: Scope::Pane, ..base.clone() }, "pane");
         shot(&mut h, &Look { fit: Fit::Tile, image_strength: 0.3, hud_corner: Corner::TopLeft, hud_bg: [40, 80, 200], hud_bg_alpha: 0.8, hud_text: 1.0, ..base.clone() }, "tile");

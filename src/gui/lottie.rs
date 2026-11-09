@@ -11,8 +11,17 @@ use eframe::egui;
 /// Whether a file is a Lottie animation, by its name.
 pub(crate) fn is_lottie(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.ends_with(".json") || p.ends_with(".lottie")
+    p.ends_with(".json") || p.ends_with(".lottie") || p == BUILT_IN
 }
+
+/// The built-in background: a deep blue sky with stars and waves spreading like radio signals
+/// (assets/make_space.py writes it).
+pub(crate) const BUILT_IN: &str = "builtin:space";
+
+/// The built-in background, a whole window behind the text, is drawn at most this large and this
+/// often: soft and slow, it looks the same scaled up, at a fraction of the work.
+const BUILT_IN_SIDE: f32 = 960.0;
+const BUILT_IN_FPS: f32 = 12.0;
 
 struct Player {
     key: String,
@@ -30,6 +39,7 @@ static PLAYERS: Mutex<Vec<Arc<Mutex<Player>>>> = Mutex::new(Vec::new());
 /// The animation's frame for now, as a texture `px` pixels on its longer side (rounded up, so a
 /// size that changes a little keeps its player).
 pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Result<Option<egui::TextureHandle>, String> {
+    let px = if path == BUILT_IN { px.min(BUILT_IN_SIDE) } else { px };
     let side = ((px / 64.0).ceil() * 64.0).clamp(64.0, 2048.0) as u32;
     let key = format!("{path}@{side}");
     let player = {
@@ -86,7 +96,11 @@ fn renderer() -> rasterlottie::Renderer {
 }
 
 fn load(path: &str) -> Result<rasterlottie::Animation, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = if path == BUILT_IN {
+        include_bytes!("../../assets/space_waves.json").to_vec()
+    } else {
+        std::fs::read(path).map_err(|e| e.to_string())?
+    };
     // A `.lottie` is a zip package with the animation (and its pictures) inside.
     let text = if bytes.starts_with(b"PK") { unpack(&bytes)? } else { String::from_utf8_lossy(&bytes).into_owned() };
     let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -199,7 +213,7 @@ fn run(path: &str, side: u32, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
     let longer = anim.width.max(anim.height).max(1) as f32;
     let config = rasterlottie::RenderConfig::new(rasterlottie::Rgba8::TRANSPARENT, side as f32 / longer);
     let (rate, length) = (anim.frame_rate.max(1.0), anim.duration_frames().max(1.0));
-    let step = Duration::from_secs_f32(1.0 / rate.min(30.0));
+    let step = Duration::from_secs_f32(1.0 / rate.min(if path == BUILT_IN { BUILT_IN_FPS } else { 30.0 }));
     let start = Instant::now();
     let mut drawn_still = false;
     loop {
@@ -254,8 +268,10 @@ mod tests {
             let started = Instant::now();
             let got = load(&path).and_then(|a| {
                 let p = renderer().prepare(&a).map_err(|e| e.to_string())?;
-                let scale = 200.0 / a.width.max(a.height).max(1) as f32;
-                let mid = a.in_point + a.duration_frames() / 2.0;
+                let side: f32 = std::env::var("SSHREMOTE_LOTTIE_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(200.0);
+                let at: f32 = std::env::var("SSHREMOTE_LOTTIE_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+                let scale = side / a.width.max(a.height).max(1) as f32;
+                let mid = a.in_point + a.duration_frames() * at;
                 p.render_frame(mid, rasterlottie::RenderConfig::new(rasterlottie::Rgba8::TRANSPARENT, scale)).map_err(|e| e.to_string())
             });
             match got {

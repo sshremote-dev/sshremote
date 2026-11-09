@@ -72,6 +72,9 @@ pub(crate) struct Look {
     pub anim: String,
     pub anim_fit: Fit,
     pub anim_strength: f32,
+    /// The "SSH REMOTE (thinkbigx)" badge in the window's bottom left corner, and how clearly.
+    pub badge: bool,
+    pub badge_opacity: f32,
     /// The logo moves: the built-in one breathes, a picture of one's own plays its animation.
     pub logo_motion: bool,
     /// A logo of one's own (a picture or an animation, transparency kept; "" for the built-in),
@@ -102,12 +105,14 @@ impl Default for Look {
             fg: [215, 218, 224],
             bg: [22, 23, 28],
             image: String::new(),
-            scope: Scope::Pane,
+            scope: Scope::Window,
             fit: Fit::Fill,
             image_strength: 0.25,
-            anim: String::new(),
-            anim_fit: Fit::Whole,
-            anim_strength: 0.8,
+            anim: super::lottie::BUILT_IN.to_string(),
+            anim_fit: Fit::Fill,
+            anim_strength: 0.55,
+            badge: true,
+            badge_opacity: 0.6,
             logo_motion: false,
             logo_file: String::new(),
             logo_place: LogoPlace::TitleBar,
@@ -158,6 +163,7 @@ impl Look {
             "custom_colors": self.custom_colors, "fg": self.fg, "bg": self.bg,
             "image": self.image, "scope": name_of(&SCOPES, self.scope), "fit": name_of(&FITS, self.fit),
             "image_strength": self.image_strength, "logo_motion": self.logo_motion,
+            "badge": self.badge, "badge_opacity": self.badge_opacity,
             "anim": self.anim, "anim_fit": name_of(&FITS, self.anim_fit), "anim_strength": self.anim_strength,
             "logo_file": self.logo_file, "logo_place": name_of(&LOGO_PLACES, self.logo_place),
             "logo_size": self.logo_size, "logo_opacity": self.logo_opacity,
@@ -191,7 +197,9 @@ impl Look {
             scope: from_name(&SCOPES, v.get("scope").and_then(|x| x.as_str()), d.scope),
             fit: from_name(&FITS, v.get("fit").and_then(|x| x.as_str()), d.fit),
             image_strength: num("image_strength", d.image_strength, 0.0, 1.0),
-            anim: text("anim", ""),
+            anim: text("anim", &d.anim),
+            badge: flag("badge", d.badge),
+            badge_opacity: num("badge_opacity", d.badge_opacity, 0.1, 1.0),
             anim_fit: from_name(&FITS, v.get("anim_fit").and_then(|x| x.as_str()), d.anim_fit),
             anim_strength: num("anim_strength", d.anim_strength, 0.0, 1.0),
             logo_motion: flag("logo_motion", d.logo_motion),
@@ -757,6 +765,7 @@ pub(crate) fn frame(ctx: &egui::Context) {
     }
     overlay(ctx, &l);
     window_logo(ctx, &l);
+    badge(ctx, &l);
     if l.logo_motion && l.logo_file.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_millis(40));
     }
@@ -801,6 +810,55 @@ fn window_logo(ctx: &egui::Context, l: &Look) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-logo")));
     let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     painter.image(tex.id(), Rect::from_min_size(at, size), full, Color32::from_white_alpha((l.logo_opacity * 255.0) as u8));
+}
+
+/// The badge in the window's bottom left corner: the logo and "SSH REMOTE (thinkbigx)", a light
+/// passing over the name now and then and the logo breathing with it; over the panes, taking no
+/// clicks.
+fn badge(ctx: &egui::Context, l: &Look) {
+    if !l.badge {
+        return;
+    }
+    let area = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-badge")));
+    let a = l.badge_opacity;
+    let t = ctx.input(|i| i.time) as f32;
+    // Every 7 s a light passes over it in 1.6 s.
+    let cycle = t % 7.0;
+    let sweep = (cycle < 1.6).then_some(cycle / 1.6);
+    let glow = sweep.map_or(0.0, |s| (s * std::f32::consts::PI).sin());
+    let dark = super::theme::dark();
+    let ink = if dark { Color32::from_rgb(225, 232, 245) } else { Color32::from_rgb(30, 40, 60) };
+    let at = Pos2::new(area.left() + 14.0, area.bottom() - 14.0);
+    // The logo, a little larger at the light's height.
+    let icon = 20.0 * (1.0 + 0.08 * glow);
+    if let Some(tex) = super::logo_texture(ctx) {
+        let r = Rect::from_center_size(Pos2::new(at.x + 10.0, at.y - 10.0), Vec2::splat(icon));
+        if glow > 0.0 {
+            painter.circle_filled(r.center(), 15.0, super::ACCENT.gamma_multiply(0.25 * glow * a));
+        }
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_white_alpha((a * 255.0) as u8));
+    }
+    let name = painter.layout_no_wrap("SSH REMOTE".into(), egui::FontId::proportional(13.0), ink.gamma_multiply(a));
+    let who = painter.layout_no_wrap("(thinkbigx)".into(), egui::FontId::proportional(11.5), ink.gamma_multiply(a * 0.7));
+    let x = at.x + 28.0;
+    let name_at = Pos2::new(x, at.y - 10.0 - name.size().y / 2.0);
+    let who_at = Pos2::new(x + name.size().x + 6.0, at.y - 10.0 - who.size().y / 2.0 + 1.0);
+    let span = Rect::from_min_max(Pos2::new(x, name_at.y), Pos2::new(who_at.x + who.size().x, at.y));
+    painter.galley(name_at, name.clone(), ink);
+    painter.galley(who_at, who.clone(), ink);
+    if let Some(s) = sweep {
+        // The light: the text again, bright, in a band moving across it.
+        let band_x = span.left() - 30.0 + (span.width() + 60.0) * s;
+        let band = Rect::from_min_max(Pos2::new(band_x - 18.0, span.top() - 4.0), Pos2::new(band_x + 18.0, span.bottom() + 4.0));
+        let lit = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-badge-lit"))).with_clip_rect(band);
+        let bright = super::ACCENT.lerp_to_gamma(Color32::WHITE, 0.55).gamma_multiply(a.max(0.5));
+        lit.galley_with_override_text_color(name_at, name, bright);
+        lit.galley_with_override_text_color(who_at, who, bright);
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32(7.0 - cycle));
+    }
 }
 
 /// The built-in logo's breathing now: its scale and the strength of the glow around it.
@@ -1016,7 +1074,14 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     ui.label(RichText::new("Animation over the picture").strong());
     ui.label(RichText::new("Plays over the picture, behind the text, in the same place (each pane or the whole window). Drop it on this row, or give its path.").weak().size(12.0));
     let row = ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut l.anim).hint_text("Lottie .json or .lottie, GIF, WebP, PNG").desired_width(300.0));
+        if l.anim == super::lottie::BUILT_IN {
+            ui.label(RichText::new("The built-in space with waves").strong());
+        } else {
+            ui.add(egui::TextEdit::singleline(&mut l.anim).hint_text("Lottie .json or .lottie, GIF, WebP, PNG").desired_width(300.0));
+            if ui.button("Built-in").clicked() {
+                l.anim = super::lottie::BUILT_IN.to_string();
+            }
+        }
         if !l.anim.is_empty() && ui.button("None").clicked() {
             l.anim.clear();
         }
@@ -1053,6 +1118,15 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
             ui.selectable_value(&mut l.scope, Scope::Pane, "Each pane");
             ui.selectable_value(&mut l.scope, Scope::Window, "The whole window");
         });
+    }
+
+    heading(ui, "Badge");
+    ui.checkbox(&mut l.badge, "SSH REMOTE (thinkbigx) in the bottom left corner");
+    if l.badge {
+        let mut pct = (l.badge_opacity * 100.0).round();
+        if ui.add(egui::Slider::new(&mut pct, 10.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How clearly it shows")).changed() {
+            l.badge_opacity = pct / 100.0;
+        }
     }
 
     heading(ui, "Logo");
