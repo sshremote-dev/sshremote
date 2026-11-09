@@ -40,16 +40,11 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     if due && t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
         t.built_at = now;
         let text = if t.term.mode().contains(TermMode::ALT_SCREEN) {
-            // A full-screen program shows a window on a longer text: its screens are stitched
-            // together, so a reply or a table cut off by scrolling keeps its shape.
+            // A full-screen program keeps its own text and scrolls it itself (the wheel goes to
+            // it): its screen is read as it is, as the text view shows it.
             let end = if status_row(t) && first == t.term.grid().screen_lines() as i32 { first - 1 } else { first };
-            stitch_screen(t, screen_markdown(t, 0, end).lines().map(str::to_string).collect());
-            t.stitched.join("\n")
+            screen_markdown(t, 0, end)
         } else {
-            t.stitched.clear();
-            t.last_screen.clear();
-            t.overlays.clear();
-            t.stitch_at = None;
             sync_rows(t);
             let rows: Vec<(String, bool)> = t.rows.md.iter().cloned().chain((0..first).map(|l| row_markdown(t, l))).collect();
             join_rows(rows)
@@ -71,8 +66,12 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     let typing = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Text(_) | Event::Ime(_) | Event::Paste(_))));
     let elsewhere = ui.memory(|m| m.focused().is_some_and(|f| f != id));
     let wheel = if ui.rect_contains_pointer(area) { wheel_lines(ui, ch, 10.0) } else { 0 };
-    let scroll =
+    // A program that scrolls itself gets the wheel, as in the text view; the bar still scrolls here.
+    let mut scroll =
         egui::ScrollArea::both().id_salt(("reading", t.id, markdown)).auto_shrink([false, false]).stick_to_bottom(true);
+    if program_scrolls(t) {
+        scroll = scroll.scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR);
+    }
     let mut heights = std::mem::take(&mut t.md_heights);
     let doc_id = egui::Id::unique(("md-doc", t.id));
     // The document's identity: a new one is built when the output changes.
@@ -103,11 +102,8 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
         }
     });
     t.md_heights = heights;
-    // At the top of the document the wheel asks the program to scroll back, and what it shows is
-    // stitched on above; at the bottom it scrolls the program forward.
-    let at_top = shown.state.clamped_offset().y <= 1.0;
-    let at_bottom = shown.state.clamped_offset().y + shown.inner_rect.height() >= shown.content_size.y - 1.0;
-    if program_scrolls(t) && t.exited.is_none() && ((wheel > 0 && at_top) || (wheel < 0 && at_bottom)) {
+    // A program that scrolls itself takes the wheel; what it then shows is read again.
+    if program_scrolls(t) && t.exited.is_none() && wheel != 0 {
         let grid = t.term.grid();
         let send = wheel_bytes(*t.term.mode(), wheel, grid.columns() / 2, grid.screen_lines() / 2);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
@@ -494,6 +490,16 @@ pub(super) fn text_editor(
     }
 }
 
+/// Whether the screen's last row is a status line such as tmux draws: one background colour, not
+/// the terminal's own, across the whole width.
+pub(super) fn status_row(t: &Tab) -> bool {
+    let grid = t.term.grid();
+    let row = &grid[Line(grid.screen_lines() as i32 - 1)];
+    let first = row[Column(0)].bg;
+    let default = matches!(first, Color::Named(alacritty_terminal::vte::ansi::NamedColor::Background));
+    !default && (0..grid.columns()).all(|c| row[Column(c)].bg == first)
+}
+
 /// Markers an agent puts before a line, kept as they are ahead of the line's own formatting.
 pub(super) const LINE_MARKERS: [&str; 6] = ["● ", "⏺ ", "❯ ", "› ", "• ", "▎ "];
 
@@ -511,15 +517,36 @@ pub(super) fn join_rows(rows: impl IntoIterator<Item = (String, bool)>) -> Strin
     let mut join = false;
     for (text, wraps) in rows {
         match lines.last_mut() {
-            Some(last) if join => last.push_str(match text.split_once(SPLIT) {
-                Some((_, md)) => md,
-                None => text.trim_start_matches(CODE),
-            }),
+            Some(last) if join => {
+                let more = match text.split_once(SPLIT) {
+                    Some((_, md)) => md,
+                    None => text.trim_start_matches(CODE),
+                };
+                // A program that fills its rows and indents the next (a framed prompt) leaves a
+                // run of spaces at the break: one is the gap between the words.
+                if last.ends_with("  ") && more.starts_with(' ') {
+                    last.truncate(last.trim_end().len());
+                    last.push(' ');
+                    last.push_str(more.trim_start());
+                } else {
+                    last.push_str(more);
+                }
+            }
             _ => lines.push(text),
         }
         join = wraps;
     }
     fence_code(lines).join("\n").trim_end().to_string()
+}
+
+/// Hints full-screen programs draw over their own text (Claude Code's, when scrolled back).
+const FLOATING_HINTS: [&str; 1] = ["Jump to bottom (ctrl+End) \u{2193}"];
+
+/// Whether a line reads as code by itself: it ends or starts as code does, not as a sentence.
+fn codelike(raw: &str) -> bool {
+    let t = raw.trim();
+    !t.is_empty()
+        && (t.ends_with([';', '{', '}', ')', ']', ',', '(', '[']) || t.starts_with(['#', '}', ')', ']', '.']) || t.starts_with("//"))
 }
 
 /// Mark a row read as code (see `row_markdown`), and one with a single colour that may be code
@@ -531,15 +558,72 @@ const SPLIT: char = '\u{E002}';
 /// Runs of code rows become fenced blocks with their indentation kept: blank rows inside a run
 /// and lines of only closing brackets after one belong to it.
 fn fence_code(mut lines: Vec<String>) -> Vec<String> {
-    // A single-coloured row right next to code is code too ("else:", "}" in a keyword colour).
+    // Rows next to code join it: one with a single colour ("else:", "}" in a keyword colour, a
+    // comment), or a plain one that is not a sentence ("Empty,", "Ok(x)", "id"). Across up to
+    // two blank lines (between functions) when the row reads as code.
     let mut grew = true;
     while grew {
         grew = false;
         for i in 0..lines.len() {
-            let near = |j: Option<usize>| j.and_then(|j| lines.get(j)).is_some_and(|l| l.starts_with(CODE));
-            if lines[i].starts_with(TINT) && (near(i.checked_sub(1)) || near(Some(i + 1))) {
-                let raw = lines[i][TINT.len_utf8()..].split(SPLIT).next().unwrap_or("").to_string();
-                lines[i] = format!("{CODE}{raw}");
+            let l = &lines[i];
+            if l.starts_with(CODE) || l.trim().is_empty() {
+                continue;
+            }
+            let tint = l.starts_with(TINT);
+            let (raw, md) = match l.strip_prefix(TINT) {
+                Some(rest) => rest.split_once(SPLIT).unwrap_or((rest, rest)),
+                None => (l.as_str(), l.as_str()),
+            };
+            let (r, m) = (raw.trim(), md.trim_start());
+            let comment = r.starts_with('#') || r.starts_with("//") || r.starts_with("--");
+            // A heading the program drew in bold, a list item, a status line, an agent's marker,
+            // a table: never code.
+            let numbered = m.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            let prose = (m.starts_with('#') && (!tint || !r.starts_with('#')))
+                || m.starts_with("- ")
+                || m.starts_with("* ")
+                || m.starts_with('|')
+                || numbered
+                || m.contains(['\u{B7}', '\u{2026}'])
+                || r.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c))
+                || LINE_MARKERS.iter().any(|mk| m.starts_with(mk));
+            if prose {
+                continue;
+            }
+            // Prose: a sentence, bold words, or a row of mostly plain words (a wrapped paragraph).
+            let words: Vec<&str> = r.split_whitespace().collect();
+            let plain = words
+                .iter()
+                .filter(|w| w.trim_end_matches([',', '.', ':', ';', '!', '?']).chars().all(|c| c.is_alphabetic() || c == '\''))
+                .count();
+            let sentence = !comment
+                && ((r.ends_with(['.', '!', '?', ':']) && words.len() >= 4 && r.chars().next().is_some_and(char::is_uppercase))
+                    || m.contains("**")
+                    || (words.len() >= 8 && plain * 10 >= words.len() * 7));
+            let code_at = |j: Option<usize>| j.and_then(|j| lines.get(j)).is_some_and(|l| l.starts_with(CODE));
+            let next = code_at(i.checked_sub(1)) || code_at(Some(i + 1));
+            let reach = |up: bool| {
+                let mut j = i;
+                for _ in 0..3 {
+                    j = match if up { j.checked_sub(1) } else { Some(j + 1) } {
+                        Some(j) if j < lines.len() => j,
+                        _ => return false,
+                    };
+                    if lines[j].starts_with(CODE) {
+                        return true;
+                    }
+                    if !lines[j].trim().is_empty() {
+                        return false;
+                    }
+                }
+                false
+            };
+            let apart = !sentence && (reach(true) || reach(false)) && (tint || codelike(raw) || comment);
+            // Alone (the rest of its block off the screen) when it can only be code ("use x;").
+            let alone = tint && r.ends_with([';', '{']) || r.starts_with("#[");
+            if (next && (tint || !sentence)) || apart || alone {
+                let code = format!("{CODE}{raw}");
+                lines[i] = code;
                 grew = true;
             }
         }
@@ -557,6 +641,12 @@ fn fence_code(mut lines: Vec<String>) -> Vec<String> {
     while i < lines.len() {
         if !is_code(&lines[i]) {
             out.push(lines[i].clone());
+            // A status line ("Thinking… (3s · 9 tokens)") stays a line of its own.
+            let l = lines[i].trim_start();
+            let next = lines.get(i + 1).is_some_and(|n| !n.trim().is_empty() && !is_code(n));
+            if next && !l.starts_with('|') && l.contains(['\u{B7}', '\u{2026}']) {
+                out.push(String::new());
+            }
             i += 1;
             continue;
         }
@@ -588,6 +678,7 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
     let row = &grid[Line(line)];
     let wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
     let mut cells: Vec<(char, bool, bool, bool)> = Vec::new();
+    let mut at: Vec<usize> = Vec::new();
     for c in 0..cols {
         let cell = &row[Column(c)];
         if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
@@ -596,6 +687,27 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
         let ch = if cell.c == '\0' { ' ' } else { cell.c };
         let f = cell.flags;
         cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
+        at.push(c);
+    }
+    // Hints a program floats over its text are not part of it.
+    let mut hidden = vec![false; cols];
+    let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
+    for hint in FLOATING_HINTS {
+        let h: Vec<char> = hint.chars().collect();
+        if let Some(i) = chars.windows(h.len()).position(|w| w == h.as_slice()) {
+            for k in i..i + h.len() {
+                cells[k].0 = ' ';
+                hidden[at[k]] = true;
+            }
+        }
+    }
+    // An agent's marker has a colour of its own: it says nothing about code.
+    let lead = chars.iter().take_while(|c| **c == ' ').count();
+    let rest: String = chars[lead..].iter().collect();
+    if let Some(m) = LINE_MARKERS.iter().find(|m| rest.starts_with(**m)) {
+        for k in lead..(lead + m.chars().count()).min(at.len()) {
+            hidden[at[k]] = true;
+        }
     }
     // A row that goes on in the next keeps its last spaces: they separate the words there.
     while !wrapped && cells.last().is_some_and(|c| c.0 == ' ') {
@@ -606,11 +718,13 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
     // taking turns on one row. It is kept as it is, to be fenced with its neighbours; a row with
     // one colour is marked too, and joins code right next to it.
     let mut colours: Vec<Color> = Vec::new();
-    if !plain.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)) {
+    // Status lines ("Thinking… (10s · ↓ 561 tokens)") are coloured but not code.
+    let status = plain.chars().any(|c| matches!(c, '\u{B7}' | '\u{2026}' | '\u{2191}' | '\u{2193}'));
+    if !status && !plain.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)) {
         for c in 0..cols {
             let cell = &row[Column(c)];
             let plain_fg = matches!(cell.fg, Color::Named(NamedColor::Foreground | NamedColor::DimForeground));
-            if !matches!(cell.c, ' ' | '\0') && !plain_fg && !colours.contains(&cell.fg) {
+            if !hidden[c] && !matches!(cell.c, ' ' | '\0') && !plain_fg && !colours.contains(&cell.fg) {
                 colours.push(cell.fg);
             }
         }

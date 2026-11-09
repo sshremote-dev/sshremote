@@ -23,7 +23,7 @@ mod remote;
 pub(crate) mod workspace;
 pub(crate) mod theme;
 #[cfg(test)]
-mod snapshot;
+pub(crate) mod snapshot;
 
 use remote::Remote;
 use theme::filled;

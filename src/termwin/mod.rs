@@ -18,13 +18,11 @@ use crate::proto::ToAgent;
 mod input;
 mod paint;
 mod reader;
-mod stitch;
 
 use input::*;
 pub(crate) use paint::open_url;
 use paint::*;
 use reader::*;
-use stitch::*;
 
 /// A colour scheme: name, background, foreground, the sixteen ANSI colours.
 struct Scheme(&'static str, [u8; 3], [u8; 3], [[u8; 3]; 16]);
@@ -303,14 +301,6 @@ struct Tab {
     editor: Option<(EditorKey, std::rc::Rc<(String, usize)>)>,
     /// The mouse button a program that asked for the mouse holds down, for its drag reports.
     mouse_held: Option<u8>,
-    /// A full-screen program's screens stitched into one document, as Markdown lines.
-    stitched: Vec<String>,
-    /// The full-screen program's last screen, to tell its fixed rows from those that move.
-    last_screen: Vec<String>,
-    /// Where the last screen went into the stitched document, to look there first.
-    stitch_at: Option<i64>,
-    /// Hints a full-screen program floats over its text, found by comparing screens.
-    overlays: Vec<String>,
     /// Heights of the Markdown view's blocks, measured once each.
     md_heights: crate::markdown::Heights,
     /// When the text or Markdown view was last rebuilt from the scrollback, in egui's time.
@@ -349,10 +339,6 @@ impl Tab {
         self.rows = Default::default();
         self.editor_galley = None;
         self.md_heights = Default::default();
-        self.stitched = Vec::new();
-        self.last_screen = Vec::new();
-        self.overlays = Vec::new();
-        self.stitch_at = None;
     }
 }
 
@@ -696,10 +682,6 @@ impl TermWindow {
             built_at: 0.0,
             seen_rev: 0,
             changed_at: 0.0,
-            stitched: Vec::new(),
-            last_screen: Vec::new(),
-            overlays: Vec::new(),
-            stitch_at: None,
             mouse_held: None,
             editor: None,
             editor_galley: None,
@@ -1568,6 +1550,55 @@ mod tests {
         assert_eq!(last - first, 3, "rule, prompt, rule, status");
     }
 
+    /// Code as Claude Code colours it stays one block: rows left in the plain colour ("Empty,",
+    /// "Ok(x)", "}") join it, the hint it floats over its text is dropped, and a coloured prompt
+    /// marker or a heading does not make code.
+    #[test]
+    fn claude_code_blocks_stay_whole() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        let kw = "\x1b[38;5;170m";
+        let ty = "\x1b[38;5;75m";
+        let mk = "\x1b[38;5;244m";
+        let r = "\x1b[0m";
+        let out = format!(
+            "\x1b[2J\x1b[H{mk}\u{276F}{r} {ty}explain errors{r}\r\n\r\n\x1b[1mError Handling{r}\r\n\r\n  {kw}use{r} std::fmt;\r\n\r\n  {kw}enum{r} {ty}E{r} {{\r\n      Empty,\r\n      {ty}Bad{r}({ty}String{r}),\r\n  }}\r\n\r\n  {kw}fn{r} {ty}f{r}() -> {ty}R{r} {{\r\n      {kw}let{r} x = {ty}1{r};\r\n      x\r\n      Ok(x)\r\n  }}                Jump to bottom (ctrl+End) \u{2193}\r\n\r\nSummary: a {ty}&self{r} method reads the value and another one changes\r\nit in place.\r\n\r\n{kw}\u{273B}{r} {ty}Thinking\u{2026}{r} (3s \u{B7} {mk}9 tokens{r})\r\ntmux off\r\n\r\n  {kw}use{r} std::io;\r\n"
+        );
+        t.parser.advance(&mut t.term, out.as_bytes());
+        let md = reader::screen_markdown(t, 0, 24);
+        assert!(md.contains("\n\u{273B} Thinking\u{2026} (3s \u{B7} 9 tokens)\n\ntmux off"), "a status line is text: {md}");
+        assert!(md.contains("      let x = 1;\n      x\n      Ok(x)"), "{md}");
+        assert!(md.ends_with("```\n  use std::io;\n  ```"), "a lone first row of code: {md}");
+        assert!(!md.contains("Jump to bottom"), "{md}");
+        assert_eq!(md.matches("```").count(), 4, "one block, and the lone row: {md}");
+        assert!(md.contains("```\n  use std::fmt;\n\n  enum E {\n      Empty,"), "{md}");
+        assert!(md.contains("      Ok(x)\n  }\n  ```"), "{md}");
+        assert!(md.starts_with("\u{276F} explain errors"), "{md}");
+        assert!(md.contains("# Error Handling"), "{md}");
+        assert!(md.contains("```\n\nSummary: a &self method reads the value and another one changes\nit in place."), "{md}");
+    }
+
+    /// Python as Claude Code colours it: comments, imports with one colour and functions two
+    /// blank lines apart stay one block; a bold heading and a numbered list stay text.
+    #[test]
+    fn python_blocks_stay_whole() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let t = &mut w.tabs[0];
+        let (kw, st, cm, r) = ("\x1b[38;5;170m", "\x1b[38;5;114m", "\x1b[38;5;244m", "\x1b[0m");
+        let out = format!(
+            "\x1b[2J\x1b[H\x1b[1mWord Count{r}\r\n\r\n  1. {kw}Read{r} the file.\r\n\r\n  {st}\"\"\"Count words.\"\"\"{r}\r\n\r\n  {kw}import{r} sys\r\n  {kw}from{r} pathlib {kw}import{r} Path\r\n\r\n  {cm}# Words shorter than this are skipped.{r}\r\n  MIN = {st}3{r}\r\n\r\n\r\n  {kw}def{r} {st}read{r}(path):\r\n      {cm}# Lowercase it.{r}\r\n      {kw}return{r} path\r\n\r\nThat is all.\r\n"
+        );
+        t.parser.advance(&mut t.term, out.as_bytes());
+        let md = reader::screen_markdown(t, 0, 20);
+        assert_eq!(md.matches("```").count(), 2, "one block: {md}");
+        assert!(md.starts_with("## Word Count\n\n  1. Read the file.\n\n  ```\n  \"\"\"Count words.\"\"\""), "{md}");
+        assert!(md.contains("  # Words shorter than this are skipped.\n  MIN = 3\n\n\n  def read(path):\n      # Lowercase it.\n      return path\n  ```\n\nThat is all."), "{md}");
+    }
+
     /// The reading views follow the window: the terminal takes their size, the program is told,
     /// and the document is made again from the rows as they wrap at the new width.
     #[test]
@@ -1712,6 +1743,76 @@ mod tests {
         input::click_cursor(t, 1, 7, &mut out);
         assert_eq!(typed(&out), "\x1b[<0;8;2M\x1b[<0;8;2m");
         w.close_all();
+    }
+
+    /// Claude Code run in a pane here, shown in the Markdown view while it answers and while
+    /// the answer is scrolled, as pictures to look at (it costs a request):
+    /// SSHREMOTE_SNAP_DIR=folder SSHREMOTE_CLAUDE=1 cargo test --release markdown_view_with_claude -- --ignored
+    #[test]
+    #[ignore]
+    fn markdown_view_with_claude_code() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        if std::env::var_os("SSHREMOTE_CLAUDE").is_none() {
+            return;
+        }
+        let prompt = std::env::var("SSHREMOTE_CLAUDE_PROMPT").unwrap_or_else(|_| {
+            "Without using any tools, answer in Markdown: a heading, two paragraphs, a bulleted list of five items,              a table of four rows, and a 40-line Rust example in a code block, then a short summary."
+                .into()
+        });
+        // Claude Code starts in D:\Projects (the child keeps this directory), the prompt one argument.
+        let _ = std::env::set_current_dir("D:\\Projects");
+        let profile = Profile { name: "claude".into(), icon: ic::TERMINAL, launch: Launch::Local(vec!["cmd".into(), "/c".into(), "cd".into(), "/d".into(), "D:\\Projects".into(), "&".into(), "claude".into(), prompt]) };
+        let mut w = TermWindow::single(profile);
+        let ctx = egui::Context::default();
+        crate::gui::style(&ctx);
+        let size = Vec2::new(1100.0, 760.0);
+        let mut snap = crate::gui::snapshot::Snap::default();
+        let mut clock = 0.0;
+        let mut frame = |w: &mut TermWindow, snap: &mut crate::gui::snapshot::Snap, events: Vec<Event>| {
+            clock += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                focused: true,
+                time: Some(clock),
+                events,
+                ..Default::default()
+            };
+            snap.frame(&ctx, input, |ui| {
+                w.embedded(ui);
+            });
+        };
+        let secs: usize = std::env::var("SSHREMOTE_CLAUDE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90);
+        for k in 0..secs * 20 {
+            if k == 60 {
+                w.tabs[0].view = View::Markdown;
+            }
+            frame(&mut w, &mut snap, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if k % 40 == 39 {
+                snap.save(&ctx, size, &dir.join(format!("claude_md_{:03}.png", k / 20 + 1)));
+            }
+        }
+        // Scrolled up a little at a time, as a wheel does, then back down.
+        let wheel = |dy: f32| Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+        frame(&mut w, &mut snap, vec![Event::PointerMoved(Pos2::new(500.0, 300.0))]);
+        for step in 0..12 {
+            for _ in 0..4 {
+                frame(&mut w, &mut snap, vec![wheel(60.0)]);
+            }
+            snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_up_{step:02}.png")));
+        }
+        for step in 0..6 {
+            for _ in 0..4 {
+                frame(&mut w, &mut snap, vec![wheel(-120.0)]);
+            }
+            snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_down_{step:02}.png")));
+        }
+        w.tabs[0].view = View::Text;
+        for _ in 0..10 {
+            frame(&mut w, &mut snap, Vec::new());
+        }
+        snap.save(&ctx, size, &dir.join("claude_text.png"));
+        let _ = w.close_all();
     }
 
     /// Output that never pauses (a spinner, a reply streaming in) does not rebuild the Markdown
@@ -2016,57 +2117,6 @@ mod tests {
         t.parser.advance(&mut t.term, screen.as_bytes());
         let md = screen_markdown(t, 0, 6);
         assert_eq!(md, "\u{25CF} # The Log\n\n  *A short story*\n\n  ## Chapter 1\n  plain **bold** word");
-    }
-
-    #[test]
-    fn screens_of_a_full_screen_program_stitch_into_one_document() {
-        let lines = |r: std::ops::Range<usize>| r.map(|i| format!("line {i}")).collect::<Vec<_>>();
-        let mut doc = Vec::new();
-        stitch(&mut doc, &lines(20..30));
-        // Scrolled back by five lines: the earlier ones go on top.
-        stitch(&mut doc, &lines(15..25));
-        assert_eq!(doc, lines(15..30));
-        // New output at the end, with the last line still being written.
-        let mut screen = lines(22..32);
-        screen[9] = "line 31 (partial".into();
-        stitch(&mut doc, &screen);
-        assert_eq!(doc.len(), 17);
-        assert_eq!(doc[16], "line 31 (partial");
-        // Something else entirely starts a new document.
-        stitch(&mut doc, &["menu".to_string(), "item".to_string()]);
-        assert_eq!(doc, ["menu", "item"]);
-    }
-
-    /// Screens captured from a real full-screen agent (tmux capture-pane -e, s0.txt at the bottom,
-    /// then one page up each), from the folder in SSHREMOTE_CAPS: cargo test -- --ignored captured
-    #[test]
-    #[ignore]
-    fn captured_agent_screens_read_as_one_session() {
-        let dir = std::env::var("SSHREMOTE_CAPS").expect("SSHREMOTE_CAPS");
-        let ctx = egui::Context::default();
-        let mut w = TermWindow::new(None);
-        frame(&ctx, &mut w, Vec::new());
-        let t = &mut w.tabs[0];
-        t.term.resize(Size { cols: 120, rows: 30 });
-        t.parser.advance(&mut t.term, b"\x1b[?1049h");
-        for k in 0..6 {
-            let Ok(raw) = std::fs::read_to_string(format!("{dir}/s{k}.txt")) else { break };
-            let screen = format!("\x1b[H\x1b[2J{}", raw.trim_end_matches('\n').replace('\n', "\r\n"));
-            t.parser.advance(&mut t.term, screen.as_bytes());
-            // The rows above the input line, as the view takes them.
-            let lines: Vec<String> = screen_markdown(t, 0, 25).lines().map(str::to_string).collect();
-            stitch_screen(t, lines);
-        }
-        let doc = t.stitched.clone();
-        let text = doc.join("\n");
-        eprintln!("{text}");
-        let parsed = crate::markdown::Doc::new(&text);
-        let blocks: Vec<&crate::markdown::Block> = parsed.blocks.iter().collect();
-        use crate::markdown::Block;
-        assert!(blocks.iter().any(|b| matches!(b, Block::Table { rows, .. } if rows.len() >= 4)), "the whole table");
-        assert!(blocks.iter().any(|b| matches!(b, Block::Heading(2, h) if h.contains("Chapter 5"))), "headings");
-        assert!(!blocks.iter().any(|b| matches!(b, Block::Pre(_))), "prose is not read as columns");
-        assert!(!text.contains("bypass permissions"), "the fixed status line is left out");
     }
 
     #[test]
