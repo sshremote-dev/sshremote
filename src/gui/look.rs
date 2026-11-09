@@ -1220,14 +1220,9 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     heading(ui, "Overlay");
     ui.checkbox(&mut l.hud, "Show the load and the time");
     if l.hud {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Where");
-            ui.selectable_value(&mut l.hud_scope, HudScope::Terminals, "In each terminal, from the computer it runs on");
-            ui.selectable_value(&mut l.hud_scope, HudScope::Window, "In the window, from this computer");
-        });
-        if l.hud_scope == HudScope::Terminals {
-            ui.checkbox(&mut l.hud_active_only, "Only in the active terminal");
-        }
+        // In the panes, each from the computer it runs on (its SSH host's, or this one's).
+        l.hud_scope = HudScope::Terminals;
+        ui.checkbox(&mut l.hud_active_only, "Only in the active pane");
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut l.hud_cpu, "CPU");
             ui.checkbox(&mut l.hud_ram, "Memory");
