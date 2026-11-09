@@ -84,7 +84,15 @@ impl Doc {
     /// Any text as Markdown: a file shown with cat or less, a program's or an agent's output. What
     /// terminal programs draw with box characters and bullet glyphs is made plain Markdown first.
     pub fn new(text: &str) -> Self {
-        Doc { blocks: parse(&dedent(&glyphs(&tidy(text)))) }
+        let mut blocks = parse(&dedent(&glyphs(&tidy(text))));
+        // A code block or preformatted run with nothing in it (a program's frame drawn empty
+        // for a moment) would show as an empty box with a copy button.
+        blocks.retain(|b| match b {
+            Block::Code { code, .. } => !code.trim().is_empty(),
+            Block::Pre(text) => !text.trim().is_empty(),
+            _ => true,
+        });
+        Doc { blocks }
     }
 }
 

@@ -190,6 +190,11 @@ const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
 /// The text and Markdown views are made again from the scrollback at most this often (seconds)
 /// while output streams in.
 const REBUILD_EVERY: f64 = 0.1;
+/// The Markdown view builds its document again once output has been still this long (seconds),
+/// so text a program keeps redrawing (a spinner, a reply being streamed) does not churn it.
+const SETTLE: f64 = 0.35;
+/// ...and at least this often while output never stops, so a long run still shows progress.
+const SETTLE_AT_MOST: f64 = 1.2;
 
 /// Selected cells, in VS Code's selection colour for a dark or a light background.
 fn selection() -> Color32 {
@@ -310,6 +315,10 @@ struct Tab {
     md_heights: crate::markdown::Heights,
     /// When the text or Markdown view was last rebuilt from the scrollback, in egui's time.
     built_at: f64,
+    /// The output revision last seen by the Markdown view, and when it last changed: the view
+    /// waits for the output to settle before it builds the document again.
+    seen_rev: u64,
+    changed_at: f64,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
     /// Where a click asked the cursor to go, while arrow keys take it there.
@@ -685,6 +694,8 @@ impl TermWindow {
             nav_keys: true,
             md_heights: Default::default(),
             built_at: 0.0,
+            seen_rev: 0,
+            changed_at: 0.0,
             stitched: Vec::new(),
             last_screen: Vec::new(),
             overlays: Vec::new(),
@@ -1701,6 +1712,52 @@ mod tests {
         input::click_cursor(t, 1, 7, &mut out);
         assert_eq!(typed(&out), "\x1b[<0;8;2M\x1b[<0;8;2m");
         w.close_all();
+    }
+
+    /// Output that never pauses (a spinner, a reply streaming in) does not rebuild the Markdown
+    /// view every frame: it settles first, or catches up now and then; empty code blocks do not
+    /// show as boxes.
+    #[test]
+    fn the_markdown_view_waits_for_output_to_settle() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        let mut clock = 0.0;
+        let mut tick = |w: &mut TermWindow| {
+            clock += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                focused: true,
+                time: Some(clock),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                w.embedded(ui);
+            });
+        };
+        tick(&mut w);
+        w.tabs[0].view = View::Markdown;
+        tick(&mut w);
+        let built = |w: &TermWindow| w.tabs[0].reading.as_ref().map(|r| std::rc::Rc::as_ptr(&r.2) as usize);
+        let mut builds = std::collections::BTreeSet::new();
+        // One second of output every frame.
+        for k in 0..20 {
+            let t = &mut w.tabs[0];
+            t.parser.advance(&mut t.term, format!("\r\x1b[2K working {k}").as_bytes());
+            t.rev += 1;
+            tick(&mut w);
+            builds.extend(built(&w));
+        }
+        assert!(builds.len() <= 3, "rebuilt {} times in a second of streaming", builds.len());
+        // Then it stops: the last text shows once settled.
+        let t = &mut w.tabs[0];
+        t.parser.advance(&mut t.term, b"\r\n```\n```\ndone streaming\r\n");
+        t.rev += 1;
+        for _ in 0..12 {
+            tick(&mut w);
+        }
+        let doc = &w.tabs[0].reading.as_ref().expect("built").2;
+        assert!(doc.0.contains("done streaming"), "{:?}", doc.0);
+        assert!(!doc.1.blocks.iter().any(|b| matches!(b, crate::markdown::Block::Code { code, .. } if code.trim().is_empty())));
     }
 
     fn typed(cmds: &[Cmd]) -> String {

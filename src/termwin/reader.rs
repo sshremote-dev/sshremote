@@ -26,9 +26,16 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     fit(t, (area.width().min(960.0) - 40.0) / cw, area.height() / ch, out);
     let (first, last) = input_rows(t);
     let now = ui.input(|i| i.time);
-    let due = t.reading.is_none() || now - t.built_at >= REBUILD_EVERY;
+    if t.seen_rev != t.rev {
+        t.seen_rev = t.rev;
+        t.changed_at = now;
+    }
+    // Built again once the output settles, or now and then while it streams without a pause.
+    let settled = now - t.changed_at >= SETTLE || now - t.built_at >= SETTLE_AT_MOST;
+    let due = t.reading.is_none() || (settled && now - t.built_at >= REBUILD_EVERY);
     if !due {
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(REBUILD_EVERY));
+        let wait = (SETTLE - (now - t.changed_at)).min(SETTLE_AT_MOST - (now - t.built_at)).max(REBUILD_EVERY);
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
     if due && t.reading.as_ref().is_none_or(|r| r.0 != t.rev || r.1 != first) {
         t.built_at = now;
