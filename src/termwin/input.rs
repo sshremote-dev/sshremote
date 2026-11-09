@@ -163,6 +163,9 @@ pub(super) fn keyboard_with(
                 _ if insert_held() => {}
                 _ => send.push(0x03),
             },
+            // Shift+Delete arrives as a cut too: a terminal gets it as the key it is (xterm's
+            // Shift+Delete), Ctrl+X as Ctrl+X.
+            Event::Cut if ui.input(|i| i.modifiers.shift && !i.modifiers.ctrl) => send.extend_from_slice(b"\x1b[3;2~"),
             Event::Cut => send.push(0x18),
             Event::Paste(s) => {
                 let s = s.replace("\r\n", "\r").replace('\n', "\r").replace("\x1b[201~", "");
@@ -227,13 +230,7 @@ pub(super) fn keyboard_with(
 
 /// Whether Insert is held: on Windows Ctrl+Insert reaches us only as a copy, not as its key.
 fn insert_held() -> bool {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT};
-        unsafe { GetAsyncKeyState(VK_INSERT as i32) < 0 }
-    }
-    #[cfg(not(windows))]
-    false
+    crate::sys::insert_held()
 }
 
 /// Where a click asked the cursor to go (a screen line and column), reached with arrow keys a

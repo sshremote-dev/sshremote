@@ -24,6 +24,19 @@ pub fn quiet(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Whether Insert is down now: Ctrl+Insert and Shift+Insert reach the windows as a copy and a
+/// paste, and only this tells them from Ctrl+C and Ctrl+V.
+pub fn insert_held() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT};
+        // SAFETY: a plain query of the key's state.
+        unsafe { GetAsyncKeyState(VK_INSERT as i32) < 0 }
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 /// A string as Windows wants it: UTF-16 ending in a zero.
 #[cfg(windows)]
 pub fn wide(s: &str) -> Vec<u16> {

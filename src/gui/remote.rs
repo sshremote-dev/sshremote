@@ -1410,9 +1410,12 @@ impl Remote {
                     self.key(sym, pressed)?;
                 }
                 Event::ModifiersChanged(m) if !local => self.sync_mods(m)?,
-                Event::Copy if !local => self.tap('c' as u32)?,
-                Event::Cut if !local => self.tap('x' as u32)?,
-                Event::Paste(_) if !local => self.tap('v' as u32)?,
+                // Clipboard keys reach here as copy, cut and paste: the host gets the keys pressed,
+                // Ctrl+C, X and V, or Ctrl+Insert, Shift+Delete and Shift+Insert (with the
+                // modifiers already held there), never a bare letter.
+                Event::Copy if !local => self.tap(if crate::sys::insert_held() { xk::INSERT } else { 'c' as u32 })?,
+                Event::Cut if !local => self.tap(if self.mods.shift && !self.mods.ctrl { xk::DELETE } else { 'x' as u32 })?,
+                Event::Paste(_) if !local => self.tap(if self.mods.shift && !self.mods.ctrl { xk::INSERT } else { 'v' as u32 })?,
                 Event::Ime(egui::ImeEvent::Commit(text)) if !local => {
                     for c in text.chars() {
                         let sym = xk::of_char(c);

@@ -2262,6 +2262,29 @@ mod tests {
         assert!(!doc.1.blocks.iter().any(|b| matches!(b, crate::markdown::Block::Code { code, .. } if code.trim().is_empty())));
     }
 
+    /// Shift+Delete reaches the windows as a cut (as Ctrl+X does): the shell gets the key that was
+    /// pressed, not Ctrl+X.
+    #[test]
+    fn shift_delete_is_shift_delete() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let cut = |ctx: &egui::Context, w: &mut TermWindow, modifiers: egui::Modifiers| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+                focused: true,
+                events: vec![Event::ModifiersChanged(modifiers), Event::Cut],
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
+            typed(&out)
+        };
+        assert_eq!(cut(&ctx, &mut w, egui::Modifiers::SHIFT), "\u{1b}[3;2~");
+        assert_eq!(cut(&ctx, &mut w, egui::Modifiers::CTRL), "\u{18}");
+    }
+
     fn typed(cmds: &[Cmd]) -> String {
         let bytes: Vec<u8> = cmds
             .iter()
