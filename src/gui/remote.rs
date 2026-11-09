@@ -265,7 +265,7 @@ impl Remote {
             ui.label(RichText::new(format!("{}  Files on {host}", ic::FOLDER)).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let flat = |text: String| egui::Button::new(text).frame_when_inactive(false).min_size(Vec2::new(0.0, 28.0));
-                if ui.add(flat(format!("{}  Disconnect", ic::LINK_BREAK))).clicked() {
+                if ui.add(flat(format!("{}  Close", ic::X))).clicked() {
                     disconnect = true;
                 }
                 if ui
@@ -1575,7 +1575,7 @@ impl Remote {
 
     pub(super) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
         // A narrow window keeps every button within reach: the least used go into the options
-        // menu and Disconnect becomes an icon.
+        // menu and Close becomes an icon.
         let compact = !self.in_pane && ui.available_width() < 640.0;
         let screen = self.screen_controls();
         // A pane showing its shell: the shell's own controls first.
@@ -1715,7 +1715,7 @@ impl Remote {
         let fs = if self.in_pane { self.zoomed || self.filling } else { self.fullscreen };
         let fs_tip = if fs { "Leave full screen (Ctrl+Alt+Enter)" } else { "Full screen (Ctrl+Alt+Enter)" };
         let fs_glyph = if fs { ic::CORNERS_IN } else { ic::CORNERS_OUT };
-        // In a pane the workspace puts this button last, beside Disconnect, as for every pane.
+        // In a pane the workspace puts this button last, beside Close, as for every pane.
         if !self.in_pane && icon(ui, fs_glyph, fs_tip, fs).clicked() {
             *action = Some(Box::new(move |r, c| {
                 r.set_fullscreen(c, !fs);
@@ -1967,13 +1967,13 @@ impl Remote {
                 .frame_when_inactive(false)
                 .min_size(Vec2::splat(28.0))
         } else if compact {
-            tool_button(ic::LINK_BREAK, false)
+            tool_button(ic::X, false)
         } else {
-            egui::Button::new(RichText::new(format!("{}  Disconnect", ic::LINK_BREAK)).size(13.0))
+            egui::Button::new(RichText::new(format!("{}  Close", ic::X)).size(13.0))
                 .frame_when_inactive(false)
                 .min_size(Vec2::new(0.0, 28.0))
         };
-        if !self.in_pane && ui.add(end).on_hover_text("Disconnect").clicked() {
+        if !self.in_pane && ui.add(end).on_hover_text("Close: end the connection").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }
     }
@@ -2359,8 +2359,8 @@ mod actions {
         h.frame(vec![key(egui::Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::ALT)]).unwrap();
         assert!(!h.r.fullscreen, "Ctrl+Alt+Enter leaves full screen");
 
-        let ended = h.tool("Disconnect").is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
-        assert!(ended, "disconnect ends the session");
+        let ended = h.tool("Close").is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
+        assert!(ended, "close ends the session");
     }
 
     /// The quality, view and special-key menus.
@@ -2459,7 +2459,7 @@ mod actions {
         h.tool(ic::GEAR).unwrap();
         h.click("Chat").unwrap();
         assert!(h.r.chat.is_some(), "chat from the menu");
-        let ended = h.tool(ic::LINK_BREAK).is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
-        assert!(ended, "disconnect as an icon");
+        let ended = h.tool(ic::X).is_err() || (0..3).any(|_| h.frame(Vec::new()).is_err());
+        assert!(ended, "close as an icon");
     }
 }

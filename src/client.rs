@@ -578,7 +578,7 @@ impl Viewer {
             ("   g  get a remote file by its path    l  send a local file to Downloads    (f: browse)".into(), key),
             (String::new(), key),
             (" Leave".into(), "\x1b[1m"),
-            ("   q  disconnect (asks first)".into(), key),
+            ("   q  close (asks first)".into(), key),
         ];
         self.draw_rows(&rows)
     }
@@ -858,7 +858,7 @@ impl Viewer {
     /// A question over the view: y says yes.
     fn draw_confirm(&mut self, what: char) -> io::Result<()> {
         let (title, body) = match what {
-            'q' => (format!("Disconnect from {}?", self.host), "The screen, the shell and transfers end.".to_string()),
+            'q' => (format!("Close {}?", self.host), "The screen, the shell and transfers end.".to_string()),
             _ => {
                 let name = clean(self.target.as_deref().unwrap_or(""));
                 (format!("Delete {name} on {}?", self.host), "It cannot be brought back; a folder goes with everything in it.".to_string())
@@ -2109,7 +2109,7 @@ mod tests {
         assert!(screen.take().contains("hello"), "and shown");
         v.on_term(key(KeyCode::Esc)).unwrap();
         assert_eq!(v.overlay, Overlay::None);
-        // Disconnecting asks; no keeps the connection, y ends it.
+        // Closing asks; no keeps the connection, y ends it.
         v.on_term(menu.clone()).unwrap();
         v.on_term(key(KeyCode::Char('q'))).unwrap();
         assert_eq!(v.overlay, Overlay::Confirm('q'));
@@ -2118,7 +2118,7 @@ mod tests {
         v.on_term(menu).unwrap();
         v.on_term(key(KeyCode::Char('q'))).unwrap();
         v.on_term(key(KeyCode::Char('y'))).unwrap();
-        assert!(v.quit, "y disconnects");
+        assert!(v.quit, "y closes");
         v.sess.close();
     }
 

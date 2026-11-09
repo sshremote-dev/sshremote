@@ -188,7 +188,7 @@ impl eframe::App for ChatApp {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.label(RichText::new(&self.name).strong().size(15.0));
                     let state = if self.ended.is_some() {
-                        "disconnected; this window closes shortly"
+                        "the connection closed; this window closes shortly"
                     } else {
                         "viewing this screen over SSH Remote"
                     };
