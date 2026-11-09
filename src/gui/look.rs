@@ -963,102 +963,14 @@ pub(crate) fn frame(ctx: &egui::Context) {
         ctx.set_zoom_factor(l.ui_scale);
     }
     overlay(ctx, &l);
-    window_logo(ctx, &l);
-    badge(ctx, &l);
     if l.logo_motion && l.logo_file.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_millis(40));
     }
     editor_window(ctx);
 }
 
-/// A logo of one's own for the title bar, its frame for now and how clearly it shows.
-pub(crate) fn title_logo(ctx: &egui::Context) -> Option<(egui::TextureHandle, f32)> {
-    let l = get();
-    if l.logo_file.is_empty() || l.logo_place != LogoPlace::TitleBar {
-        return None;
-    }
-    let (tex, next) = picture(ctx, &l.logo_file, l.logo_motion, 22.0).ok()??;
-    if let Some(next) = next {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(next));
-    }
-    Some((tex, l.logo_opacity))
-}
 
-/// A logo of one's own over the window, where it was put: over the panes, under menus and
-/// dialogs, taking no clicks.
-fn window_logo(ctx: &egui::Context, l: &Look) {
-    if l.logo_file.is_empty() || l.logo_place == LogoPlace::TitleBar {
-        return;
-    }
-    let Ok(Some((tex, next))) = picture(ctx, &l.logo_file, l.logo_motion, l.logo_size) else { return };
-    if let Some(next) = next {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(next));
-    }
-    let s = tex.size_vec2();
-    let size = Vec2::new(l.logo_size, l.logo_size * s.y / s.x.max(1.0));
-    let area = ctx.content_rect();
-    // Clear of the title bar above and of the edges.
-    let (top, edge) = (area.top() + 44.0, 12.0);
-    let at = match l.logo_place {
-        LogoPlace::TopLeft => Pos2::new(area.left() + edge, top),
-        LogoPlace::TopRight => Pos2::new(area.right() - edge - size.x, top),
-        LogoPlace::BottomLeft => Pos2::new(area.left() + edge, area.bottom() - edge - size.y),
-        LogoPlace::BottomRight => Pos2::new(area.right() - edge - size.x, area.bottom() - edge - size.y),
-        LogoPlace::Center | LogoPlace::TitleBar => area.center() - size / 2.0,
-    };
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-logo")));
-    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    painter.image(tex.id(), Rect::from_min_size(at, size), full, Color32::from_white_alpha((l.logo_opacity * 255.0) as u8));
-}
 
-/// The badge in the window's bottom left corner: the logo and "SSH REMOTE (thinkbigx)", a light
-/// passing over the name now and then and the logo breathing with it; over the panes, taking no
-/// clicks.
-fn badge(ctx: &egui::Context, l: &Look) {
-    if !l.badge {
-        return;
-    }
-    let area = ctx.content_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-badge")));
-    let a = l.badge_opacity;
-    let t = ctx.input(|i| i.time) as f32;
-    // Every 7 s a light passes over it in 1.6 s.
-    let cycle = t % 7.0;
-    let sweep = (cycle < 1.6).then_some(cycle / 1.6);
-    let glow = sweep.map_or(0.0, |s| (s * std::f32::consts::PI).sin());
-    let dark = super::theme::dark();
-    let ink = if dark { Color32::from_rgb(225, 232, 245) } else { Color32::from_rgb(30, 40, 60) };
-    let at = Pos2::new(area.left() + 14.0, area.bottom() - 14.0);
-    // The logo, a little larger at the light's height.
-    let icon = 20.0 * (1.0 + 0.08 * glow);
-    if let Some(tex) = super::logo_texture(ctx) {
-        let r = Rect::from_center_size(Pos2::new(at.x + 10.0, at.y - 10.0), Vec2::splat(icon));
-        if glow > 0.0 {
-            painter.circle_filled(r.center(), 15.0, super::ACCENT.gamma_multiply(0.25 * glow * a));
-        }
-        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_white_alpha((a * 255.0) as u8));
-    }
-    let name = painter.layout_no_wrap("SSH REMOTE".into(), egui::FontId::proportional(13.0), ink.gamma_multiply(a));
-    let who = painter.layout_no_wrap("(thinkbigx)".into(), egui::FontId::proportional(11.5), ink.gamma_multiply(a * 0.7));
-    let x = at.x + 28.0;
-    let name_at = Pos2::new(x, at.y - 10.0 - name.size().y / 2.0);
-    let who_at = Pos2::new(x + name.size().x + 6.0, at.y - 10.0 - who.size().y / 2.0 + 1.0);
-    let span = Rect::from_min_max(Pos2::new(x, name_at.y), Pos2::new(who_at.x + who.size().x, at.y));
-    painter.galley(name_at, name.clone(), ink);
-    painter.galley(who_at, who.clone(), ink);
-    if let Some(s) = sweep {
-        // The light: the text again, bright, in a band moving across it.
-        let band_x = span.left() - 30.0 + (span.width() + 60.0) * s;
-        let band = Rect::from_min_max(Pos2::new(band_x - 18.0, span.top() - 4.0), Pos2::new(band_x + 18.0, span.bottom() + 4.0));
-        let lit = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("look-badge-lit"))).with_clip_rect(band);
-        let bright = super::ACCENT.lerp_to_gamma(Color32::WHITE, 0.55).gamma_multiply(a.max(0.5));
-        lit.galley_with_override_text_color(name_at, name, bright);
-        lit.galley_with_override_text_color(who_at, who, bright);
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
-    } else {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f32(7.0 - cycle));
-    }
-}
 
 /// The built-in logo's breathing now: its scale and the strength of the glow around it.
 pub(crate) fn logo_pulse(ctx: &egui::Context) -> (f32, f32) {
@@ -1299,60 +1211,6 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
             l.layers = Look::default().layers;
         }
     });
-
-    heading(ui, "Badge");
-    ui.checkbox(&mut l.badge, "SSH REMOTE (thinkbigx) in the bottom left corner");
-    if l.badge {
-        let mut pct = (l.badge_opacity * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 10.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How clearly it shows")).changed() {
-            l.badge_opacity = pct / 100.0;
-        }
-    }
-
-    heading(ui, "Logo");
-    ui.label(RichText::new("The built-in one, or a picture or animation of your own (Lottie .json or .lottie, GIF, PNG, WebP; transparency kept): drop it here, or give its path.").weak().size(12.0));
-    let row = ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut l.logo_file).hint_text("The built-in logo").desired_width(300.0));
-        if !l.logo_file.is_empty() && ui.button("Built-in").clicked() {
-            l.logo_file.clear();
-        }
-    });
-    ed.logo_row = Some(row.response.rect.expand2(Vec2::new(0.0, 30.0)));
-    ui.checkbox(&mut l.logo_motion, if l.logo_file.is_empty() { "Animate it (it breathes)" } else { "Play its animation" });
-    if !l.logo_file.is_empty() {
-        match picture(ui.ctx(), &l.logo_file, l.logo_motion, 64.0) {
-            Err(e) => {
-                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
-            }
-            Ok(None) => {
-                ui.label(RichText::new("Reading it\u{2026}").weak());
-            }
-            Ok(Some((t, _))) => {
-                let s = t.size_vec2();
-                ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(64.0, 64.0 * s.y / s.x.max(1.0))));
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Where");
-            for (p, name) in [
-                (LogoPlace::TitleBar, "Title bar"),
-                (LogoPlace::TopLeft, "Top left"),
-                (LogoPlace::TopRight, "Top right"),
-                (LogoPlace::BottomLeft, "Bottom left"),
-                (LogoPlace::BottomRight, "Bottom right"),
-                (LogoPlace::Center, "Centre"),
-            ] {
-                ui.selectable_value(&mut l.logo_place, p, name);
-            }
-        });
-        if l.logo_place != LogoPlace::TitleBar {
-            ui.add(egui::Slider::new(&mut l.logo_size, 16.0..=400.0).step_by(4.0).text("Size"));
-        }
-        let mut pct = (l.logo_opacity * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 5.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How clearly it shows")).changed() {
-            l.logo_opacity = pct / 100.0;
-        }
-    }
 
     heading(ui, "Overlay");
     ui.checkbox(&mut l.hud, "Show the load and the time");

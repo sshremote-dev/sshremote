@@ -140,14 +140,7 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         // The icon opens the system menu, as the system's own title bar does.
         let icon_rect = Rect::from_min_size(bar.min, Vec2::new(40.0, HEIGHT));
         let icon = ui.interact(icon_rect, ui.scope_id().with("chrome-icon"), Sense::click());
-        if let Some((tex, opacity)) = super::look::title_logo(&ctx) {
-            // A logo of one's own: fitted to the logo's place, as clear as chosen.
-            let s = tex.size_vec2();
-            let k = 22.0 / s.x.max(s.y).max(1.0);
-            let r = Rect::from_center_size(icon_rect.center(), s * k);
-            let tint = Color32::from_white_alpha((opacity * 255.0) as u8);
-            ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
-        } else if let Some(tex) = super::logo_texture(&ctx) {
+        if let Some(tex) = super::logo_texture(&ctx) {
             // Still, or breathing with a soft glow when the look asks for it.
             let (scale, glow) = super::look::logo_pulse(&ctx);
             if glow > 0.0 {
