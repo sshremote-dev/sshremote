@@ -15,6 +15,9 @@ pub(super) struct Remote {
     pub(super) active: bool,
     pub(super) zoom_request: Option<bool>,
     pub(super) zoomed: bool,
+    /// The pane is the whole full-screen window (zoomed, or the window's only pane in full
+    /// screen): the picture fills it.
+    pub(super) filling: bool,
     /// In a pane: it wants the system keys (pointer over its picture, "Send system keys" on);
     /// the app turns the grab on for whichever window and pane asks.
     pub(super) grab_wanted: bool,
@@ -139,6 +142,7 @@ impl Remote {
             active: true,
             zoom_request: None,
             zoomed: false,
+            filling: false,
             grab_wanted: false,
             pane_closed: false,
             terms: terminal.then(|| crate::termwin::TermWindow::new(ssh_cmd.clone())),
@@ -1243,7 +1247,7 @@ impl Remote {
         let tex = self.tex.as_ref()?;
         let size = Vec2::new(self.fb.w as f32, self.fb.h as f32) / ppp;
         let rect = match self.fit {
-            Fit::Window if self.fill_full && (self.fullscreen || self.zoomed) => area,
+            Fit::Window if self.fill_full && (self.fullscreen || self.zoomed || self.filling) => area,
             Fit::Window => {
                 let k = (area.width() / size.x).min(area.height() / size.y);
                 Rect::from_center_size(area.center(), size * k)
@@ -1971,6 +1975,12 @@ impl Remote {
         if !self.in_pane && ui.add(end).on_hover_text("Disconnect").clicked() {
             *action = Some(Box::new(|_, _| Err("disconnected".into())));
         }
+    }
+
+    /// Where the picture was drawn last frame.
+    #[cfg(test)]
+    pub(super) fn shown_rect(&self) -> Option<Rect> {
+        self.last_shown
     }
 
     /// The round trip to the host in milliseconds.

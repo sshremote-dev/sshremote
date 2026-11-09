@@ -9,8 +9,10 @@ import zlib
 from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 256)
-BLUE_TOP = (96, 165, 250)
-BLUE_BOTTOM = (37, 99, 235)
+PLATE_TOP = (0xF8, 0xFA, 0xFD)
+PLATE_BOTTOM = (0xE5, 0xEB, 0xF5)
+LIGHT = (0x4F, 0x8F, 0xF7)
+DEEP = (0x36, 0x59, 0xD9)
 
 
 def rounded_box(x, y, left, top, right, bottom, radius):
@@ -37,23 +39,38 @@ def polygon(x, y, points):
     return -distance if inside else distance
 
 
-def sample(x, y, small):
-    """A flat line icon on no tile, as current system and app icons are drawn: a screen with a
-    shell prompt, in one blue that deepens downwards."""
-    t = min(max((y - 40) / 180, 0), 1)
-    color = tuple(round(a + (b - a) * t) for a, b in zip(BLUE_TOP, BLUE_BOTTOM))
-    # Optical sizing: heavier strokes where the icon is a few pixels across.
-    stroke = 24 if small else 17
-    outer = rounded_box(x, y, 18, 38, 238, 190, 30)
-    inner = rounded_box(x, y, 18 + stroke, 38 + stroke, 238 - stroke, 190 - stroke, 30 - stroke / 2)
-    stand = min(capsule(x, y, 128, 192, 128, 214, stroke / 2),
-                capsule(x, y, 86, 220, 170, 220, stroke / 2))
-    r = 12 if small else 9
-    chevron = min(capsule(x, y, 72, 86, 104, 114, r), capsule(x, y, 104, 114, 72, 142, r))
-    underscore = capsule(x, y, 122, 142, 158, 142, r)
-    if max(outer, -inner) <= 0 or stand <= 0 or chevron <= 0 or underscore <= 0:
-        return (*color, 255)
-    return (0, 0, 0, 0)
+def portal(x, y):
+    """Distance to the centre line of the portal: a rounded frame open on the left."""
+    d = min(capsule(x, y, 104, 48, 184, 48, 0), capsule(x, y, 208, 72, 208, 184, 0),
+            capsule(x, y, 104, 208, 184, 208, 0))
+    for cx, cy, sx, sy in ((184, 72, 1, -1), (184, 184, 1, 1)):
+        if (x - cx) * sx >= 0 and (y - cy) * sy >= 0:
+            d = min(d, abs(math.hypot(x - cx, y - cy) - 24))
+    return d
+
+
+def chevron(x, y):
+    return min(capsule(x, y, 48, 88, 88, 128, 0), capsule(x, y, 88, 128, 48, 168, 0))
+
+
+def sample(x, y, size):
+    """A command chevron entering an open portal (one SSH connection into the whole machine),
+    on a light rounded plate: the chevron light blue in front, the portal deeper behind."""
+    u, v = (x - 128) / 112, (y - 128) / 112
+    if abs(u) ** 5 + abs(v) ** 5 > 1:
+        return (0, 0, 0, 0)
+    t = min(max((y - 16) / 224, 0), 1)
+    plate = tuple(round(a + (b - a) * t) for a, b in zip(PLATE_TOP, PLATE_BOTTOM))
+    # The mark at 0.78 of the plate, with a stroke set per size so small icons stay crisp.
+    k = 0.78
+    mx, my = 128 + (x - 128) / k, 128 + (y - 128) / k
+    device = {16: 2.0, 24: 3.0, 32: 3.5, 48: 5.25}.get(size)
+    w = 28 if device is None else device * 256 / size / k
+    if chevron(mx, my) <= w / 2:
+        return (*LIGHT, 255)
+    if portal(mx, my) <= w / 2:
+        return (*DEEP, 255)
+    return (*plate, 255)
 
 
 def render(size):
@@ -66,7 +83,7 @@ def render(size):
             for sy in range(ss):
                 for sx in range(ss):
                     rgba = sample((px * ss + sx + .5) * scale,
-                                  (py * ss + sy + .5) * scale, size <= 24)
+                                  (py * ss + sy + .5) * scale, size)
                     # Premultiplied accumulation avoids dark transparent fringes.
                     for c in range(3):
                         sums[c] += rgba[c] * rgba[3] / 255

@@ -829,6 +829,7 @@ impl Workspace {
                 State::Live(r) => {
                     r.active = is_active;
                     r.zoomed = self.zoom == Some(*id);
+                    r.filling = r.zoomed || (self.window_full && !several);
                     let keys = if is_active { grabbed.take().unwrap_or_default() } else { Vec::new() };
                     match r.show(&mut child, keys) {
                         Err(e) if e == "disconnected" => closing.push(*id),
@@ -2547,6 +2548,28 @@ mod tests {
             h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
         }
         assert!(!bar_shown(&h), "hidden again");
+        h.w.close_all();
+    }
+
+    /// In full screen a screen pane that has the window to itself fills it to the edges, zoomed or
+    /// as the window's only pane.
+    #[test]
+    #[ignore]
+    fn full_screen_pictures_fill_the_window() {
+        let mut h = Harness::new();
+        h.w.add(test_desktop(), Place::Tab, (false, false, false));
+        h.until("connected", |w| live(w, 0));
+        h.w.window_full = true;
+        let shown_of = |w: &Workspace| match &w.panes[0].state {
+            State::Live(r) => r.shown_rect(),
+            _ => None,
+        };
+        h.until("a picture", |w| shown_of(w).is_some());
+        for _ in 0..5 {
+            h.frame(Vec::new());
+        }
+        let shown = shown_of(&h.w).expect("a picture");
+        assert_eq!(shown, h.w.panes_area, "edge to edge, no bars");
         h.w.close_all();
     }
 
