@@ -85,7 +85,7 @@ fn tools() -> Value {
             "to_x": {"type": "integer"}, "to_y": {"type": "integer"}}))}},
         {"name": "type", "description": "Type text (any language) into the focused field.",
          "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
-        {"name": "key", "description": "Press a key or combination, e.g. \"enter\", \"ctrl+c\", \"alt+tab\", \"win+r\", \"ctrl+shift+esc\", \"f5\".",
+        {"name": "key", "description": "Press a key or combination, e.g. \"enter\", \"ctrl+c\", \"alt+tab\", \"win+r\", \"ctrl+shift+esc\", \"f5\", \"ctrl+grave\" (punctuation by name: grave, comma, period, slash, backslash, semicolon, quote, equal, minus, plus, bracketleft, bracketright).",
          "inputSchema": {"type": "object", "required": ["keys"], "properties": {"keys": {"type": "string"}}}},
         {"name": "scroll", "description": "Scroll at (x, y): dy > 0 scrolls down, dx > 0 right, in wheel steps.",
          "inputSchema": {"type": "object", "required": ["x", "y"], "properties": props(json!({
@@ -135,6 +135,17 @@ fn key_name(k: &str) -> Option<u32> {
         "menu" | "apps" => xk::MENU,
         "plus" => '+' as u32,
         "minus" => '-' as u32,
+        // Punctuation by name, as editors write shortcuts (VS Code's terminal is ctrl+backquote).
+        "grave" | "backquote" | "backtick" => '`' as u32,
+        "comma" => ',' as u32,
+        "period" | "dot" => '.' as u32,
+        "slash" => '/' as u32,
+        "backslash" => '\\' as u32,
+        "semicolon" => ';' as u32,
+        "quote" | "apostrophe" => '\'' as u32,
+        "equal" | "equals" => '=' as u32,
+        "bracketleft" => '[' as u32,
+        "bracketright" => ']' as u32,
         _ => {
             if let Some(k) = l.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()).and_then(xk::f) {
                 return Some(k);
@@ -375,7 +386,11 @@ impl Server {
                 let combo = args.get("keys").and_then(Value::as_str).ok_or("missing keys")?;
                 let syms: Vec<u32> = combo
                     .split('+')
-                    .map(|k| key_name(k.trim()).ok_or(format!("unknown key {k:?}")))
+                    .map(|k| {
+                        key_name(k.trim()).ok_or(format!(
+                            "unknown key {k:?}: use a character, f1..f24, or a name such as enter, tab, esc, backspace, delete, home, end, pageup, left, space, grave, comma, slash"
+                        ))
+                    })
                     .collect::<Result<_, _>>()?;
                 for &k in &syms {
                     self.send(ToAgent::KeyState { keysym: k, down: true })?;
@@ -595,6 +610,9 @@ mod tests {
         assert_eq!(key_name("F5"), Some(xk::F1 + 4));
         assert_eq!(key_name("a"), Some('a' as u32));
         assert_eq!(key_name("bogus"), None);
+        assert_eq!(key_name("grave"), Some('`' as u32), "VS Code's terminal: ctrl+grave");
+        assert_eq!(key_name("backslash"), Some('\\' as u32));
+        assert_eq!(key_name("quote"), Some('\'' as u32));
     }
 
     #[test]
