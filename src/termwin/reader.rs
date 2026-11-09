@@ -32,7 +32,9 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     }
     // Built again once the output settles, or now and then while it streams without a pause.
     let settled = now - t.changed_at >= SETTLE || now - t.built_at >= SETTLE_AT_MOST;
-    let due = t.reading.is_none() || (settled && now - t.built_at >= REBUILD_EVERY);
+    // Scrolled by the wheel, the program's new screen is shown at once, as the text view does.
+    let following = now - t.wheel_at < FOLLOW_WHEEL;
+    let due = t.reading.is_none() || following || (settled && now - t.built_at >= REBUILD_EVERY);
     if !due {
         let wait = (SETTLE - (now - t.changed_at)).min(SETTLE_AT_MOST - (now - t.built_at)).max(REBUILD_EVERY);
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
@@ -76,6 +78,16 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
     let doc_id = egui::Id::unique(("md-doc", t.id));
     // The document's identity: a new one is built when the output changes.
     let doc_key = std::rc::Rc::as_ptr(&read) as usize as u64;
+    // Kept at the bottom with the height of what is drawn now, not of the frame before: a new
+    // screen of a different height would otherwise show a frame out of place (the view shakes).
+    if markdown && t.md_bottom && t.md_laid != doc_key {
+        let width = area.width().min(960.0);
+        let pad = ((area.width() - width) / 2.0).max(0.0) + 20.0;
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let end = crate::markdown::lay_out(ui, doc, doc_key, doc_id, &th, &mut heights, pad, width - 40.0, 14.0);
+        let content = end + live_rows as f32 * ch + 6.0;
+        scroll = scroll.vertical_scroll_offset((content - area.height()).max(0.0));
+    }
     let shown = scroll.show_viewport(ui, |ui, view| {
         if markdown {
             // A readable column, as in the preview; the live rows sit under it on the same edge.
@@ -102,11 +114,19 @@ pub(super) fn reader(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool,
         }
     });
     t.md_heights = heights;
+    // Left at the bottom (or scrolled back there with the bar): followed there.
+    t.md_laid = doc_key;
+    t.md_bottom = shown.state.clamped_offset().y >= shown.content_size.y - shown.inner_rect.height() - 2.0;
     // A program that scrolls itself takes the wheel; what it then shows is read again.
     if program_scrolls(t) && t.exited.is_none() && wheel != 0 {
         let grid = t.term.grid();
         let send = wheel_bytes(*t.term.mode(), wheel, grid.columns() / 2, grid.screen_lines() / 2);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
+        t.wheel_at = now;
+        ui.ctx().request_repaint();
+    }
+    if following {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
     }
     let Some((rect, resp)) = live else { return };
     let rect = rect.intersect(shown.inner_rect);

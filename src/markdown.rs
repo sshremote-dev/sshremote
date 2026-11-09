@@ -1192,6 +1192,32 @@ pub fn show_in_view(
     width: f32,
     top: f32,
 ) -> f32 {
+    let end = lay_out(ui, doc, doc_key, id, th, heights, x, width, top);
+    let origin = ui.max_rect().min;
+    let (_, _, tops, _) = heights.layout.as_ref().expect("just laid out");
+    // In view, with a screen's margin either side so scrolling does not show gaps.
+    let (from, to) = (view.top() - view.height(), view.bottom() + view.height());
+    let first = tops.partition_point(|&(y, h)| y + h < from);
+    for (n, &(y, h)) in tops.iter().enumerate().skip(first) {
+        if y > to {
+            break;
+        }
+        let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("block", n))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        block(&mut child, th, &doc.blocks, n, id);
+    }
+    end
+}
+
+/// Where the document ends (see [`show_in_view`]), worked out when it or the width changes, so it
+/// is known before it is drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn lay_out(ui: &mut egui::Ui, doc: &Doc, doc_key: u64, id: egui::Id, th: &Theme, heights: &mut Heights, x: f32, width: f32, top: f32) -> f32 {
     let origin = ui.max_rect().min;
     let gap = ui.spacing().item_spacing.y;
     let w = width.round() as u32;
@@ -1216,24 +1242,7 @@ pub fn show_in_view(
         }
         heights.layout = Some((doc_key, w, tops, y));
     }
-    let (_, _, tops, end) = heights.layout.as_ref().expect("just laid out");
-    // In view, with a screen's margin either side so scrolling does not show gaps.
-    let (from, to) = (view.top() - view.height(), view.bottom() + view.height());
-    let first = tops.partition_point(|&(y, h)| y + h < from);
-    for (n, &(y, h)) in tops.iter().enumerate().skip(first) {
-        if y > to {
-            break;
-        }
-        let rect = Rect::from_min_size(origin + Vec2::new(x, y), Vec2::new(width, h.max(1.0)));
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .id_salt(("block", n))
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        block(&mut child, th, &doc.blocks, n, id);
-    }
-    *end
+    heights.layout.as_ref().expect("just laid out").3
 }
 
 /// Draws a whole document in the colours of `th` (the background it is drawn on).

@@ -193,6 +193,8 @@ const REBUILD_EVERY: f64 = 0.1;
 const SETTLE: f64 = 0.35;
 /// ...and at least this often while output never stops, so a long run still shows progress.
 const SETTLE_AT_MOST: f64 = 1.2;
+/// How long after a wheel step the Markdown view follows the program's screen without waiting.
+const FOLLOW_WHEEL: f64 = 0.6;
 
 /// Selected cells, in VS Code's selection colour for a dark or a light background.
 fn selection() -> Color32 {
@@ -308,6 +310,12 @@ struct Tab {
     /// The output revision last seen by the Markdown view, and when it last changed: the view
     /// waits for the output to settle before it builds the document again.
     seen_rev: u64,
+    /// When the wheel last went to a program that scrolls itself: what it shows then is read at once.
+    wheel_at: f64,
+    /// Whether the Markdown view was at the bottom: it stays there as the document changes.
+    md_bottom: bool,
+    /// The document last drawn in the Markdown view.
+    md_laid: u64,
     changed_at: f64,
     /// When something was last typed, in egui's time: the cursor stays lit, not blinking, after it.
     typed_at: f64,
@@ -681,6 +689,9 @@ impl TermWindow {
             md_heights: Default::default(),
             built_at: 0.0,
             seen_rev: 0,
+            wheel_at: f64::NEG_INFINITY,
+            md_bottom: true,
+            md_laid: 0,
             changed_at: 0.0,
             mouse_held: None,
             editor: None,
@@ -1795,18 +1806,22 @@ mod tests {
         // Scrolled up a little at a time, as a wheel does, then back down.
         let wheel = |dy: f32| Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
         frame(&mut w, &mut snap, vec![Event::PointerMoved(Pos2::new(500.0, 300.0))]);
-        for step in 0..12 {
-            for _ in 0..4 {
-                frame(&mut w, &mut snap, vec![wheel(60.0)]);
+        // In real time, as a hand on the wheel: a notch every 100 ms, every frame recorded with
+        // the document it showed.
+        let mut log = String::new();
+        let mut n = 0;
+        for (dir_dy, notches) in [(60.0, 30), (-60.0, 20)] {
+            for k in 0..notches * 2 {
+                let events = if k % 2 == 0 { vec![wheel(dir_dy)] } else { Vec::new() };
+                frame(&mut w, &mut snap, events);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let text = w.tabs[0].reading.as_ref().map(|r| r.2.0.clone()).unwrap_or_default();
+                log.push_str(&format!("===== frame {n} wheel {}\n{text}\n", if k % 2 == 0 { dir_dy } else { 0.0 }));
+                snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_{n:03}.png")));
+                n += 1;
             }
-            snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_up_{step:02}.png")));
         }
-        for step in 0..6 {
-            for _ in 0..4 {
-                frame(&mut w, &mut snap, vec![wheel(-120.0)]);
-            }
-            snap.save(&ctx, size, &dir.join(format!("claude_md_scroll_down_{step:02}.png")));
-        }
+        std::fs::write(dir.join("scroll_frames.txt"), log).unwrap();
         w.tabs[0].view = View::Text;
         for _ in 0..10 {
             frame(&mut w, &mut snap, Vec::new());
