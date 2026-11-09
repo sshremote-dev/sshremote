@@ -11,19 +11,56 @@ use eframe::egui;
 /// Whether a file is a Lottie animation, by its name.
 pub(crate) fn is_lottie(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.ends_with(".json") || p.ends_with(".lottie") || p == NIGHT_STILL || p == NIGHT_MOTION
+    p.ends_with(".json") || p.ends_with(".lottie") || built_in(path).is_some()
 }
 
-/// The built-in background, a deep night (assets/make_night.py writes it) in two parts: what
-/// stays (the blue starry sky, the Milky Way, mountains and pines), drawn once, and what moves
-/// over it (shooting stars and twinkling stars, over clear), drawn every frame and cheap to draw.
-pub(crate) const NIGHT_STILL: &str = "builtin:night-still";
-pub(crate) const NIGHT_MOTION: &str = "builtin:night-motion";
+/// A built-in animation (assets/make_scenes.py and make_styles.py write them): its name in the
+/// settings, what it is called, whether it never moves (drawn once), how often it is drawn, and
+/// the animation.
+pub(crate) struct BuiltIn {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub still: bool,
+    fps: f32,
+    bytes: &'static [u8],
+}
 
-/// What moves of the built-in night is drawn at most this large and this often: small bright
-/// shapes, they look the same scaled up.
+macro_rules! built_in {
+    ($id:literal, $label:literal, $still:literal, $fps:literal, $file:literal) => {
+        BuiltIn { id: concat!("builtin:", $id), label: $label, still: $still, fps: $fps, bytes: include_bytes!(concat!("../../assets/", $file)) }
+    };
+}
+
+pub(crate) const BUILT_INS: &[BuiltIn] = &[
+    built_in!("brand", "SSH REMOTE in 3D", false, 15.0, "brand_motion.json"),
+    built_in!("meadow-motion", "Meadow: flowers, clouds, butterflies", false, 15.0, "meadow_motion.json"),
+    built_in!("meadow-still", "Meadow: hills and sky", true, 1.0, "meadow_still.json"),
+    built_in!("night-motion", "Night lake: shooting stars", false, 24.0, "night_motion.json"),
+    built_in!("night-still", "Night lake: Milky Way, mountains, pines", true, 1.0, "night_still.json"),
+    built_in!("aurora-motion", "Aurora: waving lights", false, 15.0, "aurora_motion.json"),
+    built_in!("aurora-still", "Aurora: snowy peaks and frozen lake", true, 1.0, "aurora_still.json"),
+    built_in!("snow-motion", "Snowy evening: falling snow", false, 20.0, "snow_motion.json"),
+    built_in!("snow-still", "Snowy evening: cabin and pines", true, 1.0, "snow_still.json"),
+    built_in!("radar-motion", "Radar: sweep and blips", false, 24.0, "radar_motion.json"),
+    built_in!("radar-still", "Radar: screen", true, 1.0, "radar_still.json"),
+    built_in!("matrix-motion", "Code rain", false, 12.0, "matrix_motion.json"),
+    built_in!("matrix-still", "Code rain: dark green", true, 1.0, "matrix_still.json"),
+    built_in!("synthwave-motion", "Synthwave: grid rushing on", false, 24.0, "synthwave_motion.json"),
+    built_in!("synthwave-still", "Synthwave: neon sun and mountains", true, 1.0, "synthwave_still.json"),
+    built_in!("circuit-motion", "Circuit: running light", false, 20.0, "circuit_motion.json"),
+    built_in!("circuit-still", "Circuit board", true, 1.0, "circuit_still.json"),
+    built_in!("warp-motion", "Warp: stars streaking", false, 24.0, "warp_motion.json"),
+    built_in!("warp-still", "Deep space", true, 1.0, "warp_still.json"),
+    built_in!("network-motion", "Network: connections", false, 20.0, "network_motion.json"),
+    built_in!("network-still", "Network: globe", true, 1.0, "network_still.json"),
+];
+
+pub(crate) fn built_in(id: &str) -> Option<&'static BuiltIn> {
+    BUILT_INS.iter().find(|b| b.id == id)
+}
+
+/// Moving built-ins are drawn at most this large: soft shapes, they look the same scaled up.
 const MOTION_SIDE: f32 = 1280.0;
-const MOTION_FPS: f32 = 24.0;
 
 struct Player {
     key: String,
@@ -41,9 +78,9 @@ static PLAYERS: Mutex<Vec<Arc<Mutex<Player>>>> = Mutex::new(Vec::new());
 /// The animation's frame for now, as a texture `px` pixels on its longer side (rounded up, so a
 /// size that changes a little keeps its player).
 pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Result<Option<egui::TextureHandle>, String> {
-    let px = if path == NIGHT_MOTION { px.min(MOTION_SIDE) } else { px };
+    let px = if built_in(path).is_some_and(|b| !b.still) { px.min(MOTION_SIDE) } else { px };
     // What stays of the night is drawn once.
-    let play = play && path != NIGHT_STILL;
+    let play = play && !built_in(path).is_some_and(|b| b.still);
     let side = ((px / 64.0).ceil() * 64.0).clamp(64.0, 2048.0) as u32;
     let key = format!("{path}@{side}");
     let player = {
@@ -100,11 +137,8 @@ fn renderer() -> rasterlottie::Renderer {
 }
 
 fn load(path: &str) -> Result<rasterlottie::Animation, String> {
-    let bytes = if path == NIGHT_STILL {
-        include_bytes!("../../assets/night_still.json").to_vec()
-    } else if path == NIGHT_MOTION {
-        include_bytes!("../../assets/night_motion.json").to_vec()
-    } else {
+    let bytes = if let Some(b) = built_in(path) {
+        b.bytes.to_vec()    } else {
         std::fs::read(path).map_err(|e| e.to_string())?
     };
     // A `.lottie` is a zip package with the animation (and its pictures) inside.
@@ -219,7 +253,7 @@ fn run(path: &str, side: u32, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
     let longer = anim.width.max(anim.height).max(1) as f32;
     let config = rasterlottie::RenderConfig::new(rasterlottie::Rgba8::TRANSPARENT, side as f32 / longer);
     let (rate, length) = (anim.frame_rate.max(1.0), anim.duration_frames().max(1.0));
-    let step = Duration::from_secs_f32(1.0 / rate.min(if path == NIGHT_MOTION { MOTION_FPS } else { 30.0 }));
+    let step = Duration::from_secs_f32(1.0 / rate.min(built_in(path).map_or(30.0, |b| b.fps)));
     let start = Instant::now();
     let mut drawn_still = false;
     loop {

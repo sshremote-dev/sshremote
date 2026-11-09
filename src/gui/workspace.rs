@@ -1873,163 +1873,47 @@ mod tests {
     #[test]
     #[ignore]
     fn workspace_look_pictures() {
-        use crate::gui::look::{self, Corner, Fit, Look, Scope};
+        use crate::gui::look::{self, BgLayer, Fit, Look, Scope};
         let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
-        // A picture with something to see: soft colours and rings, as a JPEG.
-        let pic = dir.join("look_picture.jpg");
-        let img = image::RgbImage::from_fn(640, 400, |x, y| {
-            let (fx, fy) = (x as f32 / 640.0, y as f32 / 400.0);
-            let ring = (((fx - 0.6).powi(2) + (fy - 0.4).powi(2)).sqrt() * 40.0).sin() * 0.5 + 0.5;
-            image::Rgb([(60.0 + 160.0 * fx) as u8, (40.0 + 120.0 * ring) as u8, (120.0 + 120.0 * fy) as u8])
-        });
-        img.save(&pic).unwrap();
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         let shell = || Launch::Shell { label: profile.name.clone(), profile: profile.clone(), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
         h.w.add(shell(), Place::Tab, (false, false, false));
         h.w.add(shell(), Place::Split { below: false }, (false, false, false));
-        let base = Look {
-            custom_colors: true,
-            fg: [235, 235, 245],
-            bg: [16, 18, 30],
-            image: pic.to_string_lossy().into_owned(),
-            scope: Scope::Window,
-            fit: Fit::Fill,
-            image_strength: 0.45,
-            logo_motion: true,
-            hud: true,
-            hud_disk: true,
-            hud_corner: Corner::BottomRight,
-            ..Look::default()
-        };
         let shot = |h: &mut Harness, l: &Look, name: &str| {
             look::set(l.clone());
-            for _ in 0..30 {
+            for _ in 0..40 {
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 h.frame(Vec::new());
             }
             h.snap.save(&h.ctx, h.size, &dir.join(format!("look_{name}.png")));
         };
-        // The look out of the box: the built-in space with waves and the badge.
+        let built = |id: &str, strength: f32, fit: Fit| BgLayer { src: format!("builtin:{id}"), on: true, strength, fit, scope: Scope::Window };
+        // Out of the box: the 3D title over the meadow.
         shot(&mut h, &Look::default(), "default");
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            h.frame(Vec::new());
+        // Each built-in style: its picture and its animation, across the window.
+        for style in ["night", "aurora", "snow", "radar", "matrix", "synthwave", "circuit", "warp", "network"] {
+            let l = Look { layers: vec![built(&format!("{style}-motion"), 0.7, Fit::Fill), built(&format!("{style}-still"), 0.7, Fit::Fill)], ..Look::default() };
+            shot(&mut h, &l, style);
         }
-        h.snap.save(&h.ctx, h.size, &dir.join("look_default_later.png"));
-        shot(&mut h, &base, "window");
-        shot(&mut h, &Look { scope: Scope::Pane, ..base.clone() }, "pane");
-        shot(&mut h, &Look { fit: Fit::Tile, image_strength: 0.3, hud_corner: Corner::TopLeft, hud_bg: [40, 80, 200], hud_bg_alpha: 0.8, hud_text: 1.0, ..base.clone() }, "tile");
-        // The text and Markdown views over the picture.
-        for name in ["text", "markdown", "terminal"] {
-            for p in &mut h.w.panes {
-                if let State::Shell(t) = &mut p.state {
-                    t.start_view = Some(name.into());
-                }
-            }
-            shot(&mut h, &base, name);
-        }
+        // The title in front of the night lake, and the same with each pane its own.
+        let night = vec![built("brand", 0.8, Fit::Whole), built("night-motion", 0.7, Fit::Fill), built("night-still", 0.7, Fit::Fill)];
+        shot(&mut h, &Look { layers: night.clone(), ..Look::default() }, "brand_night");
+        let each: Vec<BgLayer> = night.iter().map(|b| BgLayer { scope: Scope::Pane, ..b.clone() }).collect();
+        shot(&mut h, &Look { layers: each, ..Look::default() }, "brand_night_panes");
+        // The layer list in Appearance.
         look::open(&h.ctx);
-        shot(&mut h, &base, "editor");
-        // Its lower half: the picture, the logo and the overlay.
-        let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -400.0), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+        shot(&mut h, &Look::default(), "editor");
+        let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -500.0), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
         h.frame(vec![Event::PointerMoved(Pos2::new(640.0, 450.0))]);
-        for _ in 0..4 {
+        for _ in 0..3 {
             h.frame(vec![wheel.clone()]);
         }
-        shot(&mut h, &base, "editor_lower");
-        // A picture with holes (its background colour shows through them), and a logo of one's
-        // own that moves, clear around its shape: in a corner of the window, then in the title bar.
-        let holes = dir.join("look_holes.png");
-        image::RgbaImage::from_fn(320, 200, |x, y| {
-            let d = ((x as f32 - 160.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
-            if ((d / 18.0) as u32).is_multiple_of(2) { image::Rgba([250, 180, 40, 255]) } else { image::Rgba([0, 0, 0, 0]) }
-        })
-        .save(&holes)
-        .unwrap();
-        let logo = dir.join("look_logo.gif");
-        {
-            let frame = |k: u32| {
-                let img = image::RgbaImage::from_fn(96, 96, |x, y| {
-                    let (dx, dy) = (x as f32 - 48.0, y as f32 - 48.0);
-                    let (r, a) = ((dx * dx + dy * dy).sqrt(), dy.atan2(dx) + k as f32 * 0.8);
-                    if (30.0..44.0).contains(&r) && a.sin() > -0.3 { image::Rgba([60, 140, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) }
-                });
-                image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1))
-            };
-            let mut enc = image::codecs::gif::GifEncoder::new(std::fs::File::create(&logo).unwrap());
-            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
-            enc.encode_frames((0..8).map(frame)).unwrap();
-        }
-        let own = Look {
-            image: holes.to_string_lossy().into_owned(),
-            fit: Fit::Tile,
-            image_strength: 0.6,
-            logo_file: logo.to_string_lossy().into_owned(),
-            logo_place: look::LogoPlace::BottomLeft,
-            logo_size: 140.0,
-            logo_opacity: 0.9,
-            logo_motion: true,
-            ..base.clone()
-        };
-        shot(&mut h, &own, "logo_corner");
-        shot(&mut h, &Look { logo_place: look::LogoPlace::TitleBar, ..own.clone() }, "logo_title");
-        // Lottie animations (from SSHREMOTE_LOTTIE_DIR): a logo in a corner and confetti across
-        // the window, playing; two moments half a second apart.
-        if let Some(src) = std::env::var_os("SSHREMOTE_LOTTIE_DIR").map(std::path::PathBuf::from) {
-            let lottie = Look {
-                image: src.join("confetti2.json").to_string_lossy().into_owned(),
-                fit: Fit::Fill,
-                image_strength: 0.9,
-                logo_file: src.join("dancing_star.json").to_string_lossy().into_owned(),
-                logo_place: look::LogoPlace::BottomLeft,
-                logo_size: 180.0,
-                logo_opacity: 1.0,
-                logo_motion: true,
-                ..base.clone()
-            };
-            shot(&mut h, &lottie, "lottie_a");
-            for _ in 0..10 {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                h.frame(Vec::new());
-            }
-            h.snap.save(&h.ctx, h.size, &dir.join("look_lottie_b.png"));
-            shot(&mut h, &Look { logo_place: look::LogoPlace::TitleBar, ..lottie.clone() }, "lottie_title");
-            // A photo across the whole window with an animation playing over it, both behind
-            // the text; two moments.
-            let photo = src.join("earth.jpg");
-            if photo.is_file() {
-                let both = Look {
-                    image: photo.to_string_lossy().into_owned(),
-                    scope: Scope::Window,
-                    fit: Fit::Fill,
-                    image_strength: 0.75,
-                    anim: src.join("confetti2.json").to_string_lossy().into_owned(),
-                    anim_fit: Fit::Fill,
-                    anim_strength: 1.0,
-                    logo_file: String::new(),
-                    hud_corner: Corner::TopRight,
-                    ..base.clone()
-                };
-                look::close();
-                look::set(both.clone());
-                for p in &mut h.w.panes {
-                    if let State::Shell(t) = &mut p.state {
-                        t.start_view = Some("terminal".into());
-                    }
-                }
-                shot(&mut h, &both, "photo_anim_a");
-                for _ in 0..12 {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    h.frame(Vec::new());
-                }
-                h.snap.save(&h.ctx, h.size, &dir.join("look_photo_anim_b.png"));
-            }
-        }
+        shot(&mut h, &Look::default(), "editor_layers");
+        look::close();
         // Other fonts and a larger interface, taken at once.
         if cfg!(windows) {
-            look::set(Look::default());
-            let fonts = Look { ui_font: r"C:\Windows\Fonts\georgia.ttf".into(), mono_font: r"C:\Windows\Fonts\cour.ttf".into(), ui_scale: 1.2, ..base.clone() };
+            let fonts = Look { ui_font: r"C:\Windows\Fonts\georgia.ttf".into(), mono_font: r"C:\Windows\Fonts\cour.ttf".into(), ui_scale: 1.2, ..Look::default() };
             shot(&mut h, &fonts, "fonts");
         }
         look::set(Look::default());
@@ -2045,7 +1929,7 @@ mod tests {
         use crate::gui::look::{self, HudScope, Look};
         let (Some(dir), Ok(host)) = (std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from), std::env::var("SSHREMOTE_SSH_HOST")) else { return };
         let mut h = Harness::new();
-        look::set(Look { image: String::new(), anim: String::new(), ..Look::default() });
+        look::set(Look { layers: Vec::new(), ..Look::default() });
         let ssh = Launch::Shell { label: host.clone(), profile: crate::termwin::ssh_profile(&host, ""), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: Some(vec!["ssh".into(), host.clone()]) };
         h.w.add(ssh, Place::Tab, (false, false, false));
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
@@ -2063,7 +1947,7 @@ mod tests {
         assert!(shown(&mut h, &format!("{host}  \u{B7}  CPU")), "the SSH terminal shows its host's figures");
         assert!(shown(&mut h, "this computer  \u{B7}  CPU"), "the local one this computer's");
         h.snap.save(&h.ctx, h.size, &dir.join("host_figures.png"));
-        look::set(Look { image: String::new(), anim: String::new(), hud_active_only: true, ..Look::default() });
+        look::set(Look { layers: Vec::new(), hud_active_only: true, ..Look::default() });
         for _ in 0..5 {
             h.frame(Vec::new());
         }

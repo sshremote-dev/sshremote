@@ -59,6 +59,31 @@ pub(crate) enum Corner {
     BottomRight,
 }
 
+/// One layer of the background: a built-in animation or a file of one's own, whether it shows,
+/// how strongly, how it is placed, and whether each pane has its own or the window one.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct BgLayer {
+    pub src: String,
+    pub on: bool,
+    pub strength: f32,
+    pub fit: Fit,
+    pub scope: Scope,
+}
+
+impl BgLayer {
+    fn built_in(id: &str, strength: f32, fit: Fit) -> Self {
+        BgLayer { src: id.to_string(), on: true, strength, fit, scope: Scope::Window }
+    }
+}
+
+/// What a layer is called in the list: a built-in's name, a file's name.
+fn layer_name(src: &str) -> String {
+    super::lottie::built_in(src).map_or_else(
+        || std::path::Path::new(src).file_name().map_or(src.to_string(), |n| n.to_string_lossy().into_owned()),
+        |b| b.label.to_string(),
+    )
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Look {
     /// Font files for the interface and for the terminal ("" for the system's own).
@@ -70,16 +95,8 @@ pub(crate) struct Look {
     pub custom_colors: bool,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
-    /// A picture behind the terminal panes ("" for none), and how much of it shows (0 to 1).
-    pub image: String,
-    pub scope: Scope,
-    pub fit: Fit,
-    pub image_strength: f32,
-    /// An animation (or picture) over the picture, behind the text too: how it is placed and how
-    /// strongly it shows.
-    pub anim: String,
-    pub anim_fit: Fit,
-    pub anim_strength: f32,
+    /// What is behind the terminal panes: layers, the first in front.
+    pub layers: Vec<BgLayer>,
     /// The "SSH REMOTE (thinkbigx)" badge in the window's bottom left corner, and how clearly.
     pub badge: bool,
     pub badge_opacity: f32,
@@ -115,13 +132,12 @@ impl Default for Look {
             custom_colors: false,
             fg: [215, 218, 224],
             bg: [22, 23, 28],
-            image: super::lottie::NIGHT_STILL.to_string(),
-            scope: Scope::Window,
-            fit: Fit::Fill,
-            image_strength: 0.6,
-            anim: super::lottie::NIGHT_MOTION.to_string(),
-            anim_fit: Fit::Fill,
-            anim_strength: 0.6,
+            // The 3D title in front, the meadow's life over its hills and sky.
+            layers: vec![
+                BgLayer::built_in("builtin:brand", 0.45, Fit::Whole),
+                BgLayer::built_in("builtin:meadow-motion", 0.45, Fit::Fill),
+                BgLayer::built_in("builtin:meadow-still", 0.4, Fit::Fill),
+            ],
             badge: true,
             badge_opacity: 0.6,
             logo_motion: false,
@@ -174,10 +190,10 @@ impl Look {
         serde_json::json!({
             "ui_font": self.ui_font, "mono_font": self.mono_font, "ui_scale": self.ui_scale,
             "custom_colors": self.custom_colors, "fg": self.fg, "bg": self.bg,
-            "image": self.image, "scope": name_of(&SCOPES, self.scope), "fit": name_of(&FITS, self.fit),
-            "image_strength": self.image_strength, "logo_motion": self.logo_motion,
+            "layers": self.layers.iter().map(|b| serde_json::json!({"src": b.src, "on": b.on, "strength": b.strength,
+                "fit": name_of(&FITS, b.fit), "scope": name_of(&SCOPES, b.scope)})).collect::<Vec<_>>(),
+            "logo_motion": self.logo_motion,
             "badge": self.badge, "badge_opacity": self.badge_opacity,
-            "anim": self.anim, "anim_fit": name_of(&FITS, self.anim_fit), "anim_strength": self.anim_strength,
             "logo_file": self.logo_file, "logo_place": name_of(&LOGO_PLACES, self.logo_place),
             "logo_size": self.logo_size, "logo_opacity": self.logo_opacity,
             "hud": self.hud, "hud_cpu": self.hud_cpu, "hud_ram": self.hud_ram, "hud_disk": self.hud_disk,
@@ -208,15 +224,23 @@ impl Look {
             custom_colors: flag("custom_colors", d.custom_colors),
             fg: rgb("fg", d.fg),
             bg: rgb("bg", d.bg),
-            image: text("image", &d.image),
-            scope: from_name(&SCOPES, v.get("scope").and_then(|x| x.as_str()), d.scope),
-            fit: from_name(&FITS, v.get("fit").and_then(|x| x.as_str()), d.fit),
-            image_strength: num("image_strength", d.image_strength, 0.0, 1.0),
-            anim: text("anim", &d.anim),
+            layers: match v.get("layers").and_then(|x| x.as_array()) {
+                Some(list) => list
+                    .iter()
+                    .filter_map(|b| {
+                        Some(BgLayer {
+                            src: b.get("src")?.as_str()?.to_string(),
+                            on: b.get("on").and_then(|x| x.as_bool()).unwrap_or(true),
+                            strength: b.get("strength").and_then(|x| x.as_f64()).map_or(0.5, |x| (x as f32).clamp(0.0, 1.0)),
+                            fit: from_name(&FITS, b.get("fit").and_then(|x| x.as_str()), Fit::Fill),
+                            scope: from_name(&SCOPES, b.get("scope").and_then(|x| x.as_str()), Scope::Window),
+                        })
+                    })
+                    .collect(),
+                None => d.layers.clone(),
+            },
             badge: flag("badge", d.badge),
             badge_opacity: num("badge_opacity", d.badge_opacity, 0.1, 1.0),
-            anim_fit: from_name(&FITS, v.get("anim_fit").and_then(|x| x.as_str()), d.anim_fit),
-            anim_strength: num("anim_strength", d.anim_strength, 0.0, 1.0),
             logo_motion: flag("logo_motion", d.logo_motion),
             logo_file: text("logo_file", ""),
             logo_place: from_name(&LOGO_PLACES, v.get("logo_place").and_then(|x| x.as_str()), d.logo_place),
@@ -274,7 +298,7 @@ fn mirror(l: &Look) {
     let rgb = |c: [u8; 3]| (c[0] as u64) << 16 | (c[1] as u64) << 8 | c[2] as u64;
     CUSTOM.store(if l.custom_colors { 1 << 48 | rgb(l.fg) << 24 | rgb(l.bg) } else { 0 }, Ordering::Relaxed);
     MOTION.store(l.logo_motion, Ordering::Relaxed);
-    PICTURE.store(!l.image.is_empty() && l.image_strength > 0.0 || !l.anim.is_empty() && l.anim_strength > 0.0, Ordering::Relaxed);
+    PICTURE.store(l.layers.iter().any(|b| b.on && b.strength > 0.0), Ordering::Relaxed);
 }
 
 /// The terminal's own text and background colours, when chosen.
@@ -415,17 +439,14 @@ pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32) -> Color32 {
         return base;
     }
     let l = get();
-    let place = match l.scope {
-        Scope::Pane => rect,
-        Scope::Window => ui.ctx().content_rect(),
-    };
-    // The picture, then the animation over it: both behind the text.
+    // From the back of the list to its front.
     let mut shown = false;
-    if !l.image.is_empty() && l.image_strength > 0.0 {
-        shown |= layer(ui, rect, place, &l.image, l.fit, l.image_strength);
-    }
-    if !l.anim.is_empty() && l.anim_strength > 0.0 {
-        shown |= layer(ui, rect, place, &l.anim, l.anim_fit, l.anim_strength);
+    for b in l.layers.iter().rev().filter(|b| b.on && b.strength > 0.0) {
+        let place = match b.scope {
+            Scope::Pane => rect,
+            Scope::Window => ui.ctx().content_rect(),
+        };
+        shown |= layer(ui, rect, place, &b.src, b.fit, b.strength);
     }
     if shown { Color32::TRANSPARENT } else { base }
 }
@@ -1063,7 +1084,8 @@ struct Editor {
     /// Where the logo's and the animation's rows were: a file dropped there goes to that one,
     /// elsewhere to the background picture.
     logo_row: Option<Rect>,
-    anim_row: Option<Rect>,
+    /// A file's path to add as a layer.
+    new_file: String,
 }
 
 /// Opens the Appearance settings in this window.
@@ -1109,11 +1131,8 @@ fn editor_window(ctx: &egui::Context) {
         let path = p.to_string_lossy().into_owned();
         if over(ed.logo_row) {
             l.logo_file = path;
-        } else if over(ed.anim_row) {
-            l.anim = path;
         } else {
-            l.image = path;
-            ed.image_error = None;
+            l.layers.insert(0, BgLayer { src: path, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
         }
     }
     if l != before {
@@ -1211,99 +1230,75 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         crate::termwin::scheme_picker(ui);
     }
 
-    heading(ui, "Background picture");
-    ui.label(RichText::new("Behind the terminal panes. Drop a picture on this window, or give its path.").weak().size(12.0));
+    heading(ui, "Background layers");
+    ui.label(RichText::new("Behind the terminal panes, the top of the list in front. Add built-in ones or your own pictures and animations (PNG, JPEG, WebP, GIF, Lottie); drop a file on this window to add it.").weak().size(12.0));
+    let mut act: Option<(usize, i8)> = None;
+    for (i, ly) in l.layers.iter_mut().enumerate() {
+        egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut ly.on, "");
+                if let Ok(Some((t, _))) = picture(ui.ctx(), &ly.src, false, 64.0) {
+                    let s = t.size_vec2();
+                    ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(56.0, 56.0 * s.y / s.x.max(1.0))).corner_radius(3));
+                }
+                ui.label(RichText::new(layer_name(&ly.src)).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(ic::X).on_hover_text("Remove").clicked() {
+                        act = Some((i, 0));
+                    }
+                    if ui.small_button(ic::CARET_DOWN).on_hover_text("Further back").clicked() {
+                        act = Some((i, 1));
+                    }
+                    if ui.small_button(ic::CARET_UP).on_hover_text("Further forward").clicked() {
+                        act = Some((i, -1));
+                    }
+                });
+            });
+            if let Err(e) = picture(ui.ctx(), &ly.src, false, 64.0) {
+                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
+            }
+            let mut pct = (ly.strength * 100.0).round();
+            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Strength")).changed() {
+                ly.strength = pct / 100.0;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
+                    ui.selectable_value(&mut ly.fit, f, name);
+                }
+                ui.separator();
+                ui.selectable_value(&mut ly.scope, Scope::Window, "Whole window");
+                ui.selectable_value(&mut ly.scope, Scope::Pane, "Each pane");
+            });
+        });
+    }
+    match act {
+        Some((i, 0)) => {
+            l.layers.remove(i);
+        }
+        Some((i, -1)) if i > 0 => l.layers.swap(i, i - 1),
+        Some((i, 1)) if i + 1 < l.layers.len() => l.layers.swap(i, i + 1),
+        _ => {}
+    }
     ui.horizontal(|ui| {
-        if l.image == super::lottie::NIGHT_STILL {
-            ui.label(RichText::new("The built-in night sky").strong());
-        } else {
-            let edit = ui.add(egui::TextEdit::singleline(&mut l.image).hint_text("Picture or animation (PNG, JPEG, WebP, GIF, Lottie)").desired_width(300.0));
-            if edit.changed() {
-                ed.image_error = None;
+        ui.menu_button(format!("{}  Add built-in", ic::PLUS), |ui| {
+            for b in super::lottie::BUILT_INS {
+                let kind = if b.still { "picture" } else { "animation" };
+                if ui.button(format!("{}  ({kind})", b.label)).clicked() {
+                    let fit = if b.id == "builtin:brand" { Fit::Whole } else { Fit::Fill };
+                    l.layers.insert(0, BgLayer { src: b.id.to_string(), on: true, strength: 0.5, fit, scope: Scope::Window });
+                    ui.close();
+                }
             }
-            if ui.button("Built-in").clicked() {
-                l.image = super::lottie::NIGHT_STILL.to_string();
-            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut ed.new_file).hint_text("Your file's path").desired_width(220.0));
+        if ui.add_enabled(!ed.new_file.trim().is_empty(), egui::Button::new("Add")).clicked() {
+            l.layers.insert(0, BgLayer { src: ed.new_file.trim().to_string(), on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
+            ed.new_file.clear();
         }
-        if !l.image.is_empty() && ui.button("None").clicked() {
-            l.image.clear();
+        if ui.button("Defaults").on_hover_text("The default layers again").clicked() {
+            l.layers = Look::default().layers;
         }
     });
-    if !l.image.is_empty() {
-        match picture(ui.ctx(), &l.image, true, 160.0) {
-            Err(e) => {
-                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
-            }
-            Ok(None) => {
-                ui.label(RichText::new("Reading it\u{2026}").weak());
-            }
-            Ok(Some((t, _))) => {
-                let s = t.size_vec2();
-                let w = 160.0_f32.min(s.x);
-                ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(w, w * s.y / s.x)).corner_radius(4));
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Placed");
-            for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
-                ui.selectable_value(&mut l.fit, f, name);
-            }
-        });
-        let mut pct = (l.image_strength * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How much it shows")).changed() {
-            l.image_strength = pct / 100.0;
-        }
-    }
-
-    ui.add_space(4.0);
-    ui.label(RichText::new("Animation over the picture").strong());
-    ui.label(RichText::new("Plays over the picture, behind the text, in the same place (each pane or the whole window). Drop it on this row, or give its path.").weak().size(12.0));
-    let row = ui.horizontal(|ui| {
-        if l.anim == super::lottie::NIGHT_MOTION {
-            ui.label(RichText::new("The built-in shooting stars").strong());
-        } else {
-            ui.add(egui::TextEdit::singleline(&mut l.anim).hint_text("Lottie .json or .lottie, GIF, WebP, PNG").desired_width(300.0));
-            if ui.button("Built-in").clicked() {
-                l.anim = super::lottie::NIGHT_MOTION.to_string();
-            }
-        }
-        if !l.anim.is_empty() && ui.button("None").clicked() {
-            l.anim.clear();
-        }
-    });
-    ed.anim_row = Some(row.response.rect.expand2(Vec2::new(0.0, 20.0)));
-    if !l.anim.is_empty() {
-        match picture(ui.ctx(), &l.anim, true, 160.0) {
-            Err(e) => {
-                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
-            }
-            Ok(None) => {
-                ui.label(RichText::new("Reading it\u{2026}").weak());
-            }
-            Ok(Some((t, _))) => {
-                let s = t.size_vec2();
-                ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::new(96.0, 96.0 * s.y / s.x.max(1.0))));
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Placed");
-            for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
-                ui.selectable_value(&mut l.anim_fit, f, name);
-            }
-        });
-        let mut pct = (l.anim_strength * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("How much it shows")).changed() {
-            l.anim_strength = pct / 100.0;
-        }
-    }
-    // Where both go: behind each pane on its own, or once across the window.
-    if !l.image.is_empty() || !l.anim.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label("Both for");
-            ui.selectable_value(&mut l.scope, Scope::Pane, "Each pane");
-            ui.selectable_value(&mut l.scope, Scope::Window, "The whole window");
-        });
-    }
 
     heading(ui, "Badge");
     ui.checkbox(&mut l.badge, "SSH REMOTE (thinkbigx) in the bottom left corner");
@@ -1399,6 +1394,7 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         crate::termwin::reset_look();
     }
     let _ = &ed.image_error;
+    let _ = Fit::Center;
 }
 
 #[cfg(test)]
@@ -1412,9 +1408,7 @@ mod tests {
             ui_scale: 1.25,
             custom_colors: true,
             fg: [1, 2, 3],
-            image: "C:\\p.jpg".into(),
-            scope: Scope::Window,
-            fit: Fit::Tile,
+            layers: vec![BgLayer { src: "/pictures/p.jpg".into(), on: false, strength: 0.3, fit: Fit::Tile, scope: Scope::Pane }],
             hud: true,
             hud_corner: Corner::TopLeft,
             hud_bg_alpha: 0.5,
@@ -1422,6 +1416,8 @@ mod tests {
         };
         assert_eq!(Look::from_json(&l.to_json()), l);
         assert_eq!(Look::from_json("not json"), Look::default());
+        assert_eq!(Look::default().layers.first().map(|b| b.src.as_str()), Some("builtin:brand"), "the title first");
+        assert!(Look::default().layers.iter().all(|b| super::super::lottie::built_in(&b.src).is_some()));
     }
 
     /// A logo animation (a GIF here) comes as its frames with their times, its transparent parts
