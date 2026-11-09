@@ -522,9 +522,14 @@ impl Theme {
         t.bg = bg;
         t.fg = fg;
         let shade = if dark { Color32::WHITE } else { Color32::BLACK };
-        t.code_bg = bg.lerp_to_gamma(shade, 0.05);
-        t.table_head = bg.lerp_to_gamma(shade, 0.06);
-        t.table_alt = bg.lerp_to_gamma(shade, 0.025);
+        // Boxes in the background's own colour, see-through, so a picture behind shows.
+        let veil = |c: Color32, a: u8| {
+            let [r, g, b, _] = c.to_array();
+            Color32::from_rgba_unmultiplied(r, g, b, a)
+        };
+        t.code_bg = veil(bg.lerp_to_gamma(shade, 0.05), 150);
+        t.table_head = veil(bg.lerp_to_gamma(shade, 0.08), 140);
+        t.table_alt = veil(bg.lerp_to_gamma(shade, 0.03), 70);
         t.rule = bg.lerp_to_gamma(shade, 0.16);
         t.weak = bg.lerp_to_gamma(fg, 0.6);
         t
