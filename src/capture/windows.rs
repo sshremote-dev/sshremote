@@ -7,7 +7,7 @@ use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, COLORONCOLOR, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, COLORONCOLOR, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR,
     MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
 };
@@ -214,12 +214,15 @@ impl Gdi {
         let (w, h) = (self.target.0 as i32, self.target.1 as i32);
         let (dw, dh) = (self.desk.0 as i32, self.desk.1 as i32);
         let (x, y) = (self.origin.0 - at.0, self.origin.1 - at.1);
+        // From the screen, layered windows too: menus, tooltips and other pop-ups are layered,
+        // and a plain copy leaves them out.
+        let rop = if src == self.screen { SRCCOPY | CAPTUREBLT } else { SRCCOPY };
         unsafe {
             if (w, h) == (dw, dh) {
-                BitBlt(self.mem, 0, 0, w, h, src, x, y, SRCCOPY) != 0
+                BitBlt(self.mem, 0, 0, w, h, src, x, y, rop) != 0
             } else {
                 SetStretchBltMode(self.mem, COLORONCOLOR);
-                StretchBlt(self.mem, 0, 0, w, h, src, x, y, dw, dh, SRCCOPY) != 0
+                StretchBlt(self.mem, 0, 0, w, h, src, x, y, dw, dh, rop) != 0
             }
         }
     }

@@ -176,23 +176,29 @@ pub fn layout(scope: &Scope, screen: R) -> Option<Layout> {
     let wins = z_order();
     let mut cache = Vec::new();
     let mine: Vec<bool> = wins.iter().map(|w| belongs(scope, w, &mut cache)).collect();
-    let main = |w: &Win, m: bool| m && !w.transient;
+    let stack: Vec<(R, bool, bool)> = wins.iter().zip(&mine).map(|(w, &m)| (w.rect, m, w.transient)).collect();
+    arrange(&stack, screen)
+}
+
+/// From the windows (top first: where, whether shared, whether a pop-up), the area to capture
+/// and the shared parts in it. The area is the shared windows' and their open pop-ups' (menus,
+/// dialogs, drop-down lists), so a menu reaching past its window is seen whole; with no shared
+/// window on screen, none.
+pub fn arrange(stack: &[(R, bool, bool)], screen: R) -> Option<Layout> {
     let mut area: Option<R> = None;
-    for (w, &m) in wins.iter().zip(&mine) {
-        let take = match scope {
-            Scope::Window(h) => w.hwnd == *h,
-            _ => main(w, m),
-        };
-        if take {
-            area = Some(area.map_or(w.rect, |a| a.union(&w.rect)));
-        }
+    for &(rect, _, _) in stack.iter().filter(|w| w.1 && !w.2) {
+        area = Some(area.map_or(rect, |a| a.union(&rect)));
     }
-    let area = area?.and(&screen);
+    let mut area = area?;
+    for &(rect, _, _) in stack.iter().filter(|w| w.1 && w.2) {
+        area = area.union(&rect);
+    }
+    let area = area.and(&screen);
     if area.empty() {
         return None;
     }
-    let stack: Vec<(R, bool)> = wins.iter().zip(&mine).map(|(w, &m)| (w.rect, m)).collect();
-    Some(Layout { area, shown: super::region::shown_parts(&stack, area) })
+    let parts: Vec<(R, bool)> = stack.iter().map(|&(r, m, _)| (r, m)).collect();
+    Some(Layout { area, shown: super::region::shown_parts(&parts, area) })
 }
 
 /// Whether the focused window belongs to what is shared, so keys may go to it.
@@ -256,6 +262,23 @@ pub fn foreground() -> HWND {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shared window's menu or dialog reaching past it widens what is captured, and shows over
+    /// the window; other programs' windows stay out, and a pop-up alone is not a shared window.
+    #[test]
+    fn pop_ups_of_the_shared_window_are_captured_whole() {
+        let r = |l, t, r, b| R { l, t, r, b };
+        let screen = r(0, 0, 1920, 1080);
+        let window = r(100, 100, 900, 700);
+        let menu = r(850, 400, 1100, 800);
+        let other = r(950, 100, 1500, 600);
+        let l = arrange(&[(menu, true, true), (other, false, false), (window, true, false)], screen).unwrap();
+        assert_eq!(l.area, r(100, 100, 1100, 800), "the menu widens the area");
+        assert!(l.shown.contains(&menu), "the menu shows, whole: {:?}", l.shown);
+        let no_menu = arrange(&[(other, false, false), (window, true, false)], screen).unwrap();
+        assert_eq!(no_menu.area, window);
+        assert!(arrange(&[(menu, true, true)], screen).is_none(), "a pop-up alone shares nothing");
+    }
 
     #[test]
     fn program_names_drop_the_folder_and_extension() {
