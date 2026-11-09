@@ -33,10 +33,10 @@ macro_rules! built_in {
 
 pub(crate) const BUILT_INS: &[BuiltIn] = &[
     built_in!("brand", "SSH REMOTE in 3D", false, 15.0, "brand_motion.json"),
-    built_in!("meadow-motion", "Meadow: flowers, clouds, butterflies", false, 15.0, "meadow_motion.json"),
-    built_in!("meadow-still", "Meadow: hills and sky", true, 1.0, "meadow_still.json"),
     built_in!("night-motion", "Night lake: shooting stars", false, 24.0, "night_motion.json"),
     built_in!("night-still", "Night lake: Milky Way, mountains, pines", true, 1.0, "night_still.json"),
+    built_in!("meadow-motion", "Meadow: flowers, clouds, butterflies", false, 15.0, "meadow_motion.json"),
+    built_in!("meadow-still", "Meadow: hills and sky", true, 1.0, "meadow_still.json"),
     built_in!("aurora-motion", "Aurora: waving lights", false, 15.0, "aurora_motion.json"),
     built_in!("aurora-still", "Aurora: snowy peaks and frozen lake", true, 1.0, "aurora_still.json"),
     built_in!("snow-motion", "Snowy evening: falling snow", false, 20.0, "snow_motion.json"),

@@ -387,19 +387,42 @@ def text_shapes(text, font_file, size, at, spacing=0.0):
                 c["i"][0] = c["i"].pop()
                 c["v"].pop()
                 c["o"].pop()
-            self.contours.append({"ty": "sh", "ks": static({"c": True, **{k: [list(x) for x in v] for k, v in c.items()}})})
+            self.contours.append({k: [list(x) for x in v] for k, v in c.items()})
             self.cur = None
 
-    shapes, x = [], 0.0
+    letters, x = [], 0.0
     for ch in text:
         name = cmap.get(ord(ch))
         if name is None:
             continue
         pen = Pen(x)
         gs[name].draw(pen)
-        shapes += pen.contours
+        if pen.contours:
+            letters.append([{"ty": "sh", "ks": static({"c": True, **keyhole(pen.contours)})}])
         x += gs[name].width * scale + spacing
-    return shapes, x
+    return letters, x
+
+
+def keyhole(contours):
+    """Contours made one: the largest, with each other one joined in by a bridge there and back
+    to its nearest point. A renderer that fills each path alone then still leaves the holes
+    (their outlines run the other way)."""
+    def area(c):
+        v = c["v"]
+        return abs(sum(v[i][0] * v[(i + 1) % len(v)][1] - v[(i + 1) % len(v)][0] * v[i][1] for i in range(len(v)))) / 2
+    contours = sorted(contours, key=area, reverse=True)
+    out = {k: list(v) for k, v in contours[0].items()}
+    for c in contours[1:]:
+        a, b = min(((i, j) for i in range(len(out["v"])) for j in range(len(c["v"]))),
+                   key=lambda ij: math.dist(out["v"][ij[0]], c["v"][ij[1]]))
+        n = len(c["v"])
+        order = [(b + k) % n for k in range(n)]
+        va, ia, oa = out["v"][a], out["i"][a], out["o"][a]
+        vs = [va] + [c["v"][k] for k in order] + [c["v"][b], va]
+        ins = [ia] + [[0, 0]] + [c["i"][k] for k in order[1:]] + [c["i"][b], [0, 0]]
+        outs = [[0, 0]] + [c["o"][k] for k in order] + [[0, 0], oa]
+        out["v"][a:a + 1], out["i"][a:a + 1], out["o"][a:a + 1] = vs, ins, outs
+    return out
 
 
 def logo_shapes(cx, cy, size):
@@ -421,20 +444,28 @@ def brand():
     loop = LOOP
     hack, ubuntu = font_path("Hack-Regular.ttf"), font_path("Ubuntu-Light.ttf")
     size = 150
-    title, width = text_shapes("SSH REMOTE", hack, size, (0, 0), spacing=6)
+    _, width = text_shapes("SSH REMOTE", hack, size, (0, 0), spacing=6)
     logo = 190
     total = logo + 50 + width
     left = W / 2 - total / 2
     tx, ty = left + logo + 50, H / 2 + size * 0.36
-    title, _ = text_shapes("SSH REMOTE", hack, size, (tx, ty), spacing=6)
-    sub, sub_w = text_shapes("(thinkbigx)", ubuntu, 64, (0, 0))
-    sub, _ = text_shapes("(thinkbigx)", ubuntu, 64, (tx + width - sub_w, ty + 92))
+    letters, _ = text_shapes("SSH REMOTE", hack, size, (tx, ty), spacing=6)
+    _, sub_w = text_shapes("(thinkbigx)", ubuntu, 64, (0, 0))
+    sub_letters, _ = text_shapes("(thinkbigx)", ubuntu, 64, (tx + width - sub_w, ty + 92))
+    sub = [sh for l in sub_letters for sh in l]
+
+    # Each letter rises and falls in turn, a wave running through the title.
+    def bob(k):
+        return keys([(t, [0, v]) for t, v in wave(loop, 96, 12, -k / 10, steps=12)])
+
+    def word(paint):
+        return [group(l + [paint], p=bob(k)) for k, l in enumerate(letters)]
 
     # The turn: the depth's direction swings slowly, as if the title turned in the light.
     depth_n = 9
     def offset(i):
-        return keys([(t, [math.cos(math.radians(a)) * i * 2.6, math.sin(math.radians(60)) * i * 2.4])
-                     for t, a in wave(loop, loop, 50, 0, steps=12, centre=90)])
+        return keys([(t, [math.cos(math.radians(a)) * i * 3.2, math.sin(math.radians(55)) * i * 2.8, 0])
+                     for t, a in wave(loop, loop / 2, 70, 0, steps=12, centre=90)])
     deep, mid_c = hexc("#050c24"), hexc("#3a6ff0")
     layers_ = []
     # A shooting star crossing above, now and then.
@@ -447,20 +478,20 @@ def brand():
     # The light passing over the face: a bright band seen only through the letters.
     band = group([rect(140, 700, (0, 0)), gradient(1, (-70, 0), (70, 0), [(0, (1, 1, 1)), (1, (1, 1, 1))], [(0, 0), (0.5, 0.85), (1, 0)])], r=20)
     sweep = keys([(0, [tx - 400, H / 2, 0]), (60, [tx - 400, H / 2, 0]), (110, [tx + width + 300, H / 2, 0]), (loop, [tx + width + 300, H / 2, 0])], ease=(0.4, 0, 0.6, 1))
-    matte = layer("face for the light", [group(title + sub + [eo(fill((1, 1, 1)))])], loop)
+    matte = layer("face for the light", word(fill((1, 1, 1))) + [group(sub + [fill((1, 1, 1))])], loop)
     matte["td"] = 1
     lit = layer("light", [band], loop, transform(sweep))
     lit["tt"] = 1
     layers_ += [matte, lit]
     # The face: white to light blue, with a fine bright edge.
-    face = [group(title + [stroke((1, 1, 1), 2, 60), eo(gradient(1, (0, ty - size * 0.75), (0, ty), [(0, (1, 1, 1)), (1, hexc("#9fc2ff"))]))]),
-            group(sub + [eo(fill(hexc("#c9d8f5"), 90))])]
+    face_paint = gradient(1, (0, ty - size * 0.75), (0, ty), [(0, (1, 1, 1)), (1, hexc("#9fc2ff"))])
+    face = word(face_paint) + [group(sub + [fill(hexc("#c9d8f5"), 90)])]
     layers_.append(layer("face", face, loop))
     # The depth: copies behind the face, darker as they go back.
     for i in range(depth_n, 0, -1):
         f = i / depth_n
         colour = tuple(m + (d - m) * f for m, d in zip(mid_c, deep))
-        layers_.append(layer(f"depth {i}", [group(title + [eo(fill(colour))], p=offset(i))], loop))
+        layers_.append(layer(f"depth {i}", word(fill(colour)), loop, transform(offset(i))))
     # The logo, turning like a coin now and then, with its own depth.
     lx, ly = left + logo / 2, H / 2 - 10
     plate, portal, chevron, w = logo_shapes(0, 0, logo)

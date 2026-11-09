@@ -132,13 +132,13 @@ impl Default for Look {
             custom_colors: false,
             fg: [215, 218, 224],
             bg: [22, 23, 28],
-            // The 3D title in front, the meadow's life over its hills and sky.
+            // The 3D title in front, the night's shooting stars over its lake and mountains.
             layers: vec![
                 BgLayer::built_in("builtin:brand", 0.45, Fit::Whole),
-                BgLayer::built_in("builtin:meadow-motion", 0.45, Fit::Fill),
-                BgLayer::built_in("builtin:meadow-still", 0.4, Fit::Fill),
+                BgLayer::built_in("builtin:night-motion", 0.6, Fit::Fill),
+                BgLayer::built_in("builtin:night-still", 0.6, Fit::Fill),
             ],
-            badge: true,
+            badge: false,
             badge_opacity: 0.6,
             logo_motion: false,
             logo_file: String::new(),
@@ -152,7 +152,7 @@ impl Default for Look {
             hud_clock: true,
             hud_corner: Corner::TopRight,
             hud_scope: HudScope::Terminals,
-            hud_active_only: false,
+            hud_active_only: true,
             hud_text: 0.75,
             hud_bg: [0, 0, 0],
             hud_bg_alpha: 0.6,
