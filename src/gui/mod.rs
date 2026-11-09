@@ -104,13 +104,14 @@ pub(crate) mod ic {
     pub const X: &str = "\u{E4F6}";
 }
 
-/// The logo as a texture, loaded once per window context, for title bars.
+/// The logo as a texture for title bars, in the variant of the theme shown, loaded once each.
 pub(crate) fn logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
-    let id = egui::Id::unique("sshremote-logo-texture");
+    let dark = theme::dark();
+    let id = egui::Id::unique(("sshremote-logo-texture", dark));
     if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
         return Some(t);
     }
-    let i = app_icon()?;
+    let i = themed_icon(dark)?;
     let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
     let t = ctx.load_texture("sshremote-logo", img, egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, t.clone()));
@@ -123,9 +124,18 @@ pub(crate) fn app_icon() -> Option<egui::IconData> {
     ICON.get_or_init(decode_icon).clone()
 }
 
+/// The logo for a light or a dark theme: a light plate, or a dark one with brighter blues.
+pub(crate) fn themed_icon(dark: bool) -> Option<egui::IconData> {
+    static DARK: std::sync::OnceLock<Option<egui::IconData>> = std::sync::OnceLock::new();
+    if dark { DARK.get_or_init(|| decode_png(include_bytes!("../../assets/sshremote-dark.png"))).clone() } else { app_icon() }
+}
+
 fn decode_icon() -> Option<egui::IconData> {
-    let mut reader =
-        png::Decoder::new(std::io::Cursor::new(&include_bytes!("../../assets/sshremote.png")[..])).read_info().ok()?;
+    decode_png(include_bytes!("../../assets/sshremote.png"))
+}
+
+fn decode_png(bytes: &[u8]) -> Option<egui::IconData> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
     let mut rgba = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut rgba).ok()?;
     rgba.truncate(info.buffer_size());

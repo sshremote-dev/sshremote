@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""SSH Remote icon. Python 3 standard library only; run: python make_icon.py.
+"""SSH Remote icon. Python 3 standard library only; run: python make_icon.py [dark].
+`dark` draws the variant for dark themes (a dark plate, brighter blues) as icon-dark.*.
 Independent optical masters, SDF geometry, 4x/8x area supersampling.
 Outputs go to the current working directory, not the script directory.
 """
 import math
+import sys
 import struct
 import zlib
 from pathlib import Path
@@ -103,15 +105,22 @@ def png(size, pixels):
 
 
 def main():
+    global PLATE_TOP, PLATE_BOTTOM, LIGHT, DEEP
+    suffix = ''
+    if 'dark' in sys.argv[1:]:
+        # The same mark for dark themes: a dark plate, and blues bright enough on it.
+        PLATE_TOP, PLATE_BOTTOM = (0x2A, 0x31, 0x3D), (0x17, 0x1B, 0x23)
+        LIGHT, DEEP = (0x7C, 0xB4, 0xFF), (0x4F, 0x7C, 0xF5)
+        suffix = '-dark'
     masters = {size: render(size) for size in SIZES}
     images = [(size, png(size, masters[size])) for size in SIZES]
-    Path('icon.png').write_bytes(images[-1][1])
+    Path(f'icon{suffix}.png').write_bytes(images[-1][1])
     offset = 6 + 16 * len(images)
     entries = bytearray()
     for size, data in images:
         entries.extend(struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), offset))
         offset += len(data)
-    Path('icon.ico').write_bytes(struct.pack('<HHH', 0, 1, len(images)) + entries + b''.join(data for _, data in images))
+    Path(f'icon{suffix}.ico').write_bytes(struct.pack('<HHH', 0, 1, len(images)) + entries + b''.join(data for _, data in images))
     # Review sheet: actual pixels and nearest-neighbor enlargements for optical QA.
     width, height = 768, 420
     sheet = bytearray((230, 234, 238, 255) * (width * height))

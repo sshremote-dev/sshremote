@@ -52,6 +52,15 @@ pub fn behaviour(ctx: &egui::Context) {
         }
         ctx.data_mut(|d| d.insert_temp(key, seen + 1));
     }
+    // The window's own icon (the task bar's, while it runs) in the theme's variant.
+    let dark = super::theme::dark();
+    let icon_key = egui::Id::unique(("chrome-icon-theme", ctx.viewport_id()));
+    if ctx.data(|d| d.get_temp::<bool>(icon_key)) != Some(dark) {
+        ctx.data_mut(|d| d.insert_temp(icon_key, dark));
+        if let Some(icon) = super::themed_icon(dark) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
+        }
+    }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
