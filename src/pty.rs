@@ -121,6 +121,7 @@ pub struct Local {
 
 impl Local {
     /// Starts `argv` (the login shell when empty); `wake` is called whenever output arrives.
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
     pub fn spawn(argv: &[String], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
         Self::spawn_in(argv, None, cols, rows, wake)
     }

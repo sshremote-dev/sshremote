@@ -85,11 +85,22 @@ struct State {
     waker: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
+#[cfg(not(test))]
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+#[cfg(not(test))]
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_with(State::default))
+}
+
+// Tests run side by side: each keeps its own host.
+#[cfg(test)]
+thread_local!(static STATE: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) });
+
+#[cfg(test)]
+fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with(|s| f(s.borrow_mut().get_or_insert_with(State::default)))
 }
 
 /// Starts every installed extension that runs beside the app; `waker` repaints the window.
