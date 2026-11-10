@@ -53,6 +53,8 @@ pub struct Offer {
     pub description: String,
     pub url: String,
     pub sha256: String,
+    /// Only with a premium license.
+    pub premium: bool,
 }
 
 fn root() -> Option<PathBuf> {
@@ -320,22 +322,27 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 }
 
 /// The key that signs the registry's index (ed25519, checked with OpenSSH's ssh-keygen).
-const SIGNER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFgMJKE5ZmC2xmWV5LZMjrpbZ3d9JoC0GJX0QNUEGsQX";
+pub const SIGNER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFgMJKE5ZmC2xmWV5LZMjrpbZ3d9JoC0GJX0QNUEGsQX";
 const SIGNER_ID: &str = "registry@sshremote.dev";
 const NAMESPACE: &str = "sshremote-registry";
 
 /// Checks the index against its signature with `ssh-keygen -Y verify`.
 fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
+    verify_with(data, sig, SIGNER, NAMESPACE).map_err(|e| format!("the registry's index is not signed by sshremote.dev; nothing installed ({e})"))
+}
+
+/// Checks `data` against an ssh signature by `key` in `namespace`.
+pub fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("sshremote-verify-{}-{:?}", std::process::id(), std::thread::current().id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let signers = dir.join("allowed_signers");
     let sig_file = dir.join("index.sig");
     let r = (|| {
-        std::fs::write(&signers, format!("{SIGNER_ID} namespaces=\"{NAMESPACE}\" {SIGNER}
+        std::fs::write(&signers, format!("{SIGNER_ID} namespaces=\"{namespace}\" {key}
 ")).map_err(|e| e.to_string())?;
         std::fs::write(&sig_file, sig).map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new("ssh-keygen");
-        cmd.args(["-Y", "verify", "-I", SIGNER_ID, "-n", NAMESPACE, "-f"]).arg(&signers).arg("-s").arg(&sig_file);
+        cmd.args(["-Y", "verify", "-I", SIGNER_ID, "-n", namespace, "-f"]).arg(&signers).arg("-s").arg(&sig_file);
         cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
         crate::sys::quiet(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("ssh-keygen (OpenSSH) is needed to check the registry: {e}"))?;
@@ -344,7 +351,7 @@ fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
         if out.status.success() {
             Ok(())
         } else {
-            Err(format!("the registry's index is not signed by sshremote.dev; nothing installed ({})", String::from_utf8_lossy(&out.stderr).trim()))
+            Err(format!("bad signature: {}", String::from_utf8_lossy(&out.stderr).trim()))
         }
     })();
     let _ = std::fs::remove_file(&signers);
@@ -379,6 +386,7 @@ pub fn offers() -> Result<Vec<Offer>, String> {
                         // Relative to the index, as the registry lays packages out beside it.
                         url: if url.contains("://") { url } else { format!("{base}/{url}") },
                         sha256: s("sha256")?.to_lowercase(),
+                        premium: e.get("premium").and_then(|x| x.as_bool()).unwrap_or(false),
                     })
                 })
                 .collect()
@@ -390,6 +398,9 @@ pub fn offers() -> Result<Vec<Offer>, String> {
 /// index names.
 pub fn install_offer(o: &Offer) -> Result<Manifest, String> {
     use sha2::Digest;
+    if o.premium && !crate::license::premium() {
+        return Err(format!("{} comes with a premium license: see https://sshremote.dev/premium", o.name));
+    }
     let bytes = fetch(&o.url)?;
     let hash: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if hash != o.sha256 {
@@ -479,6 +490,7 @@ pub struct ExtTool {
     file: String,
     status: Option<(bool, String)>,
     registry: String,
+    license_file: String,
 }
 
 impl ExtTool {
@@ -568,6 +580,9 @@ impl ExtTool {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&o.name).strong());
                         ui.label(RichText::new(&o.version).weak().size(12.0));
+                        if o.premium {
+                            ui.label(RichText::new("Premium").color(crate::gui::brand()).size(12.0));
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if have.is_none() && ui.button(format!("{}  Install", ic::DOWNLOAD)).clicked() {
                                 let o = o.clone();
@@ -588,6 +603,29 @@ impl ExtTool {
             if ui.add_enabled(!self.file.trim().is_empty(), egui::Button::new("Install")).clicked() {
                 let f = self.file.trim().to_string();
                 act = Some(Box::new(move || install_file(Path::new(&f)).map(|m| format!("{} {} installed.", m.name, m.version))));
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("License").strong());
+        match crate::license::current() {
+            Some(l) => {
+                ui.label(crate::license::describe(&l));
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("The free edition.").weak());
+                    ui.hyperlink_to("Premium", "https://sshremote.dev/premium");
+                });
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.license_file).hint_text("A license file").desired_width(320.0));
+            if ui.add_enabled(!self.license_file.trim().is_empty(), egui::Button::new("Install")).clicked() {
+                let f = self.license_file.trim().to_string();
+                act = Some(Box::new(move || {
+                    let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
+                    crate::license::install(&text).map(|l| format!("License installed: {}", crate::license::describe(&l)))
+                }));
             }
         });
         ui.add_space(8.0);
@@ -659,6 +697,10 @@ mod tests {
         assert_eq!(installed().iter().find(|m| m.id == "dev.sshremote.test-sea").unwrap().version, "1.0.0");
         let bad = Offer { sha256: "00".repeat(32), ..offers[0].clone() };
         assert!(install_offer(&bad).unwrap_err().contains("checksum"));
+        if !crate::license::premium() {
+            let premium = Offer { premium: true, ..offers[0].clone() };
+            assert!(install_offer(&premium).unwrap_err().contains("premium license"));
+        }
         remove("dev.sshremote.test-sea").unwrap();
         assert!(installed().iter().all(|m| m.id != "dev.sshremote.test-sea"));
     }

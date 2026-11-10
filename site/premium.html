@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH Remote Premium</title>
+<style>
+  :root { color-scheme: dark; --bg: #0b1220; --fg: #e6edf7; --dim: #93a4bf; --brand: #5aa9ff; }
+  body { margin: 0; font: 16px/1.6 system-ui, sans-serif; background: radial-gradient(1200px 600px at 70% -10%, #1b3a6b 0%, var(--bg) 60%); color: var(--fg); min-height: 100vh; }
+  main { max-width: 860px; margin: 0 auto; padding: 72px 24px; }
+  h1 { font-size: 40px; margin: 0; } p.lead { font-size: 19px; color: var(--dim); }
+  .plans { display: flex; flex-wrap: wrap; gap: 16px; margin: 32px 0; }
+  .plan { flex: 1 1 260px; border: 1px solid #22314d; border-radius: 12px; padding: 22px; background: #0f1828; }
+  .plan h2 { margin: 0 0 4px; } .price { font-size: 28px; font-weight: 700; } .dim { color: var(--dim); }
+  code { background: #15213a; padding: 2px 6px; border-radius: 4px; }
+  a { color: var(--brand); }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="./">&larr; SSH Remote</a></p>
+  <h1>Premium</h1>
+  <p class="lead">SSH Remote stays open source and complete for one person's own machines. Premium adds the extensions and services that cost something to make and run.</p>
+  <div class="plans">
+    <div class="plan">
+      <h2>Free</h2>
+      <div class="price">0</div>
+      <p class="dim">Terminal workspace, remote screen, files, chat, MCP, the web gateway, all free extensions.</p>
+    </div>
+    <div class="plan">
+      <h2>Premium</h2>
+      <div class="price">Coming soon</div>
+      <p class="dim">Premium extensions from the registry (style packs, scripts), and priority fixes.</p>
+    </div>
+  </div>
+  <h2>Using a license</h2>
+  <p>A license is a small signed file. Install it in <b>Tools &rarr; Extensions &rarr; License</b>, or with <code>sshremote license install FILE</code>; <code>sshremote license show</code> tells what is installed. It is checked on your computer, with no account and nothing sent anywhere.</p>
+</main>
+</body>
+</html>

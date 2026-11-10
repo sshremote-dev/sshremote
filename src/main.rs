@@ -18,6 +18,7 @@ mod hosts;
 #[cfg(windows)]
 mod keygrab;
 mod keys;
+mod license;
 mod markdown;
 mod mcp;
 mod net;
@@ -58,6 +59,7 @@ usage: sshremote                       open the window: connect screen, recent h
                                   the workspace with a terminal pane: a local shell, or ssh to HOST;
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
+       sshremote license [show | install FILE | remove]   the premium license
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx
@@ -380,6 +382,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "--stats" => gui::look::print_stats(),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
+        "license" => license::cli(&args[1..]),
         // The gateway browsers reach terminals through (sshremote.dev/web).
         "web" => web::run(&args[1..]),
         // stdout carries JSON-RPC only; everything else goes to stderr.
