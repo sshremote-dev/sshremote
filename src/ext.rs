@@ -30,6 +30,10 @@ pub struct Manifest {
     pub version: String,
     pub description: String,
     pub layers: Vec<LayerDef>,
+    /// The script (WebAssembly), its commands (id, label) and what it may do.
+    pub main: Option<String>,
+    pub commands: Vec<(String, String)>,
+    pub permissions: Vec<String>,
 }
 
 /// A background layer an extension brings.
@@ -99,7 +103,34 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Manifest { name: if s("name").is_empty() { id.clone() } else { s("name") }, id, version: s("version"), description: s("description"), layers })
+    let main = v.get("main").and_then(|x| x.as_str()).filter(|f| !f.contains("..") && !f.starts_with('/') && !f.contains(':')).map(str::to_string);
+    let commands = v
+        .pointer("/contributes/commands")
+        .and_then(|x| x.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| {
+                    let id = c.get("id")?.as_str()?;
+                    let ok = !id.is_empty() && id.len() <= 60 && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+                    ok.then(|| (id.to_string(), c.get("label").and_then(|x| x.as_str()).unwrap_or(id).to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let permissions: Vec<String> = v.get("permissions").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    if let Some(p) = permissions.iter().find(|p| !crate::script::PERMISSIONS.iter().any(|(k, _)| k == p)) {
+        return Err(format!("extension.json asks for a permission this sshremote does not know: {p}"));
+    }
+    Ok(Manifest {
+        name: if s("name").is_empty() { id.clone() } else { s("name") },
+        id,
+        version: s("version"),
+        description: s("description"),
+        layers,
+        main,
+        commands,
+        permissions,
+    })
 }
 
 /// The extensions installed, by name.
@@ -187,6 +218,11 @@ pub fn roll_back(id: &str) -> Result<(), String> {
 /// Makes a package from a folder with extension.json.
 pub fn pack(dir: &Path, out: &Path) -> Result<Manifest, String> {
     let m = parse_manifest(&std::fs::read_to_string(dir.join("extension.json")).map_err(|e| format!("extension.json: {e}"))?)?;
+    if let Some(main) = &m.main
+        && !dir.join(main).is_file()
+    {
+        return Err(format!("{main} is named in extension.json but not there"));
+    }
     for l in &m.layers {
         if !dir.join(&l.file).is_file() {
             return Err(format!("{} is named in extension.json but not there", l.file));
@@ -417,12 +453,19 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         Some("remove") => remove(arg(1)?),
         Some("roll-back") => roll_back(arg(1)?),
+        Some("run") => {
+            let (ext, id) = (arg(1)?, arg(2)?);
+            let c = crate::script::commands().into_iter().find(|c| c.ext == ext && c.id == id).ok_or(format!("{ext} has no command {id}"))?;
+            let (text, _) = crate::script::run_command(&c, args.get(3).map_or("", String::as_str), "")?;
+            println!("{text}");
+            Ok(())
+        }
         Some("pack") => {
             let m = pack(Path::new(arg(1)?), Path::new(arg(2)?))?;
             println!("packed {} {}", m.id, m.version);
             Ok(())
         }
-        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | pack DIR OUT.sshx".into()),
+        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | run ID COMMAND [TEXT] | pack DIR OUT.sshx".into()),
     }
 }
 
@@ -492,6 +535,14 @@ impl ExtTool {
             });
             if !m.description.is_empty() {
                 ui.label(RichText::new(&m.description).weak().size(12.0));
+            }
+            if !m.commands.is_empty() {
+                let names: Vec<&str> = m.commands.iter().map(|(_, l)| l.as_str()).collect();
+                ui.label(RichText::new(format!("Commands (a terminal's right-click menu): {}", names.join(", "))).weak().size(12.0));
+            }
+            for p in &m.permissions {
+                let text = crate::script::PERMISSIONS.iter().find(|(k, _)| k == p).map_or(p.as_str(), |(_, t)| *t);
+                ui.label(RichText::new(format!("May: {text}")).weak().size(12.0));
             }
         }
         ui.add_space(8.0);

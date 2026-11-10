@@ -30,6 +30,7 @@ base64 = "0.22"
 unicode-width = "0.2"
 spake2 = "0.4"
 zstd = "0.14.3"
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "auto-dispatch"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -61,3 +62,6 @@ lto = "fat"
 codegen-units = 1
 # Function names stay for the crash notes; the rest of the debug data goes.
 strip = "debuginfo"
+
+[dev-dependencies]
+wat = "1"

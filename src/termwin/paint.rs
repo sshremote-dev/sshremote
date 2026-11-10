@@ -428,6 +428,7 @@ pub(super) fn screen(
     let mut clear = false;
     let mut find = false;
     let mut view = None;
+    let mut script: Option<crate::script::Command> = None;
     resp.context_menu(|ui| {
         crate::gui::menu_look(ui);
         if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
@@ -473,7 +474,29 @@ pub(super) fn screen(
             clear = true;
             ui.close();
         }
+        // Commands of installed script extensions.
+        let commands = crate::script::commands();
+        if !commands.is_empty() {
+            ui.separator();
+            ui.menu_button("Extensions", |ui| {
+                for c in commands {
+                    if ui.button(&c.label).clicked() {
+                        script = Some(c);
+                        ui.close();
+                    }
+                }
+            });
+        }
     });
+    if let Some(c) = script {
+        let selection = t.term.selection_to_string().unwrap_or_default();
+        match crate::script::run_command(&c, &selection, "") {
+            // Typed as a paste, so nothing runs before it is looked at.
+            Ok((text, true)) if !text.is_empty() => ui.ctx().input_mut(|i| i.events.push(egui::Event::Paste(text))),
+            Ok((text, _)) => ui.ctx().copy_text(text),
+            Err(e) => ui.ctx().copy_text(format!("sshremote: {e}")),
+        }
+    }
     if select_all {
         let grid = t.term.grid();
         let history = (grid.total_lines() - grid.screen_lines()) as i32;

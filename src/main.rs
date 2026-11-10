@@ -32,6 +32,7 @@ mod service;
 mod session;
 mod shot;
 mod sixel;
+mod script;
 mod sys;
 mod termwin;
 mod tools;
