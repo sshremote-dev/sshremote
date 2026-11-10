@@ -1,20 +1,28 @@
-// Without windows, much is there for the windows only.
-#![cfg_attr(not(feature = "gui"), allow(dead_code, unused_imports))]
+// A build with only some parts leaves helpers the others use unused.
+#![cfg_attr(not(all(feature = "gui", feature = "remote")), allow(dead_code, unused_imports))]
 mod admin;
+#[cfg(feature = "remote")]
 mod agent;
+#[cfg(feature = "remote")]
 mod audio;
 mod backup;
 mod bilevel;
+#[cfg(feature = "remote")]
 mod capture;
+#[cfg(feature = "remote")]
 mod chat;
+#[cfg(feature = "remote")]
 mod client;
+#[cfg(feature = "remote")]
 mod clip;
 mod color;
 #[cfg(windows)]
+#[cfg(feature = "remote")]
 mod conpty;
 mod ext;
+#[cfg(feature = "remote")]
 mod files;
-#[cfg(feature = "gui")]
+#[cfg(all(feature = "gui", feature = "remote"))]
 mod filewin;
 #[cfg(feature = "gui")]
 mod gui;
@@ -25,21 +33,29 @@ mod keygrab;
 mod keys;
 mod license;
 mod modules;
+mod options;
 #[cfg(feature = "gui")]
 mod markdown;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(feature = "remote")]
 mod net;
 mod proto;
 mod pty;
+#[cfg(feature = "remote")]
 mod quant;
 #[cfg(windows)]
+#[cfg(feature = "remote")]
 mod relay;
 mod scroll;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "remote"))]
 mod service;
+#[cfg(feature = "remote")]
 mod session;
+mod shared;
+#[cfg(feature = "remote")]
 mod shot;
+#[cfg(feature = "remote")]
 mod sixel;
 mod script;
 mod sys;
@@ -47,12 +63,15 @@ mod sys;
 mod termwin;
 #[cfg(feature = "gui")]
 mod tools;
+#[cfg(feature = "remote")]
 mod transport;
+#[cfg(feature = "remote")]
 mod ui;
 mod vault;
 #[cfg(feature = "web")]
 mod web;
 // Some keys are only sent on to Windows.
+#[cfg(feature = "remote")]
 mod video;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod xk;
@@ -102,12 +121,12 @@ options:
 
 keys: Ctrl+] opens the menu (q quit, 0-4 presets, a auto, m colour, +/- scale, f fps, z zoom, r refresh)";
 
-fn parse_client(args: &[String]) -> Result<session::Options, String> {
-    let mut o = session::Options {
+fn parse_client(args: &[String]) -> Result<options::Options, String> {
+    let mut o = options::Options {
         host: None,
         local: false,
         gui: false,
-        remote: session::REMOTE.into(),
+        remote: options::REMOTE.into(),
         capture: String::new(),
         ssh_args: Vec::new(),
         password: None,
@@ -244,7 +263,7 @@ fn saved_login(host: &str, argv: &[String]) -> i32 {
     let mut cmd = std::process::Command::new(&argv[0]);
     if let (Some(secret), Ok(exe)) = (vault::get(host), std::env::current_exe()) {
         cmd.args(["-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new"]);
-        cmd.env("SSH_ASKPASS", exe).env("SSH_ASKPASS_REQUIRE", "force").env(transport::ASKPASS_SECRET, secret);
+        cmd.env("SSH_ASKPASS", exe).env("SSH_ASKPASS_REQUIRE", "force").env(vault::ASKPASS_SECRET, secret);
     }
     cmd.args(&argv[1..]);
     #[cfg(unix)]
@@ -280,7 +299,7 @@ fn note_crashes() {
 
 ",
                 env!("CARGO_PKG_VERSION"),
-                files::local_time(when),
+                sys::local_time(when),
                 std::backtrace::Backtrace::force_capture()
             );
             use std::io::Write;
@@ -296,7 +315,7 @@ fn main() {
     note_crashes();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ssh runs this program as its askpass helper with the prompt as the only argument.
-    if let Ok(secret) = std::env::var(transport::ASKPASS_SECRET)
+    if let Ok(secret) = std::env::var(vault::ASKPASS_SECRET)
         && args.len() == 1
         && !args[0].starts_with("--")
     {
@@ -329,7 +348,7 @@ fn main() {
             return;
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");
-        if let Err(e) = client::run(opt) {
+        if let Err(e) = open_window(opt) {
             // No console here: the reason goes beside the settings too.
             if let Some(dir) = hosts::config_dir() {
                 let _ = std::fs::write(
@@ -378,25 +397,27 @@ fn run(args: &[String]) -> Result<(), String> {
     match args[0].as_str() {
         #[cfg(feature = "gui")]
         "terminal" => terminal(&args[1..]),
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "remote"))]
         "--install-service" => service::install(),
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "remote"))]
         "--uninstall-service" => service::uninstall(),
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "remote"))]
         "--service" => service::dispatch(),
+        #[cfg(feature = "remote")]
         "--serve" => {
             let o = options(&args[1..], &["--listen", "--via", "--password", "--capture"])?;
             let get = |k: &str| o.get(k).map(String::as_str);
             net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
         }
+        #[cfg(feature = "remote")]
         "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
-        #[cfg(feature = "gui")]
+        #[cfg(all(feature = "gui", feature = "remote"))]
         "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
         #[cfg(feature = "gui")]
         "--stats" => gui::look::print_stats(),
         #[cfg(not(feature = "gui"))]
-        "--chat-window" | "--stats" | "terminal" => Err(client::NO_WINDOWS.into()),
+        "--stats" | "terminal" => Err(NO_WINDOWS.into()),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
         "license" => license::cli(&args[1..]),
@@ -414,6 +435,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "mcp" => modules::need("mcp").and_then(|()| ext::run_provided("mcp", &args[1..])),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
+        #[cfg(feature = "remote")]
         _ if args.iter().any(|a| a == "--agent") => {
             let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).map(String::as_str);
             let pipe = get("--pipe");
@@ -424,7 +446,35 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             r
         }
+        #[cfg(feature = "remote")]
         _ => parse_client(args).and_then(client::run),
+        // Without them here, the Remote desktop extension brings screens, files, the agent and
+        // the terminal viewer; the window itself opens here.
+        #[cfg(not(feature = "remote"))]
+        _ => {
+            // The agent, the service and --serve/--relay go to the extension as they are.
+            if let Some(opt) = parse_client(args).ok().filter(|o| o.gui && o.host.is_none() && !o.local) {
+                return open_window(opt);
+            }
+            ext::run_provided("remote", args)
+        }
+    }
+}
+
+/// What a build without windows says when one is asked for.
+#[cfg(not(feature = "gui"))]
+pub const NO_WINDOWS: &str = "this sshremote has no windows (a build for the command line and services)";
+
+/// The open window: the workspace and its tools.
+fn open_window(opt: options::Options) -> Result<(), String> {
+    #[cfg(feature = "remote")]
+    return client::run(opt);
+    #[cfg(all(feature = "gui", not(feature = "remote")))]
+    return gui::run(&opt);
+    #[cfg(not(any(feature = "gui", feature = "remote")))]
+    {
+        let _ = opt;
+        Err(NO_WINDOWS.into())
     }
 }
 

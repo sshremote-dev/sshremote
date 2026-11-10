@@ -137,7 +137,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
     let provides: Vec<String> = v
         .pointer("/contributes/provides")
         .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|p| p.as_str()).filter(|p| crate::modules::ALL.iter().any(|m| m.0 == *p)).map(str::to_string).collect())
+        .map(|a| a.iter().filter_map(|p| p.as_str()).filter(|p| *p == "remote" || crate::modules::ALL.iter().any(|m| m.0 == *p)).map(str::to_string).collect())
         .unwrap_or_default();
     if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
         return Err("extension.json brings programs without the \"native\" permission".into());
@@ -248,11 +248,30 @@ pub fn run_provided(cmd: &str, args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Runs a command of the extension that serves `cmd` and waits; its error output if it fails.
+#[cfg_attr(feature = "remote", allow(dead_code))]
+pub fn call_provided(cmd: &str, args: &[String]) -> Result<(), String> {
+    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
+    let out = std::process::Command::new(&program).args(args).output().map_err(|e| format!("{name}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("sshremote: ").to_string())
+}
+
+/// Starts a command of the extension that serves `cmd` (a window of its own) without waiting.
+#[cfg_attr(feature = "remote", allow(dead_code))]
+pub fn spawn_provided(cmd: &str, args: &[String]) -> Result<(), String> {
+    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
+    std::process::Command::new(&program).args(args).spawn().map(|_| ()).map_err(|e| format!("{name}: {e}"))
+}
+
 /// What to install for a command neither built in nor installed.
 pub fn missing(cmd: &str) -> String {
     let id = match cmd {
         "web" => "dev.sshremote.web-gateway",
         "mcp" => "dev.sshremote.mcp-server",
+        "remote" => "dev.sshremote.remote-desktop",
         _ => "",
     };
     format!("`{cmd}` comes as an extension here: sshremote ext install {id}")

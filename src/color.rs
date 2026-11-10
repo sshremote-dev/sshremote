@@ -1,4 +1,4 @@
-use crate::capture::Image;
+use crate::shared::Image;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

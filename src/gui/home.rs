@@ -162,7 +162,12 @@ impl App {
             };
             let r = ui.add_enabled(admin, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text(need);
             if r.clicked() {
+                let flag = if installed { "--uninstall-service" } else { "--install-service" };
+                #[cfg(feature = "remote")]
                 let result = if installed { crate::service::uninstall() } else { crate::service::install() };
+                #[cfg(not(feature = "remote"))]
+                let result = crate::ext::call_provided("remote", &[flag.to_string()]);
+                let _ = flag;
                 self.service = None;
                 self.error = result.err().map(|e| format!("Service: {e}"));
                 ui.close();
@@ -613,6 +618,7 @@ impl App {
         if host.is_empty() {
             return Err("Enter a host, for example user@192.168.1.20".into());
         }
+        #[cfg(feature = "remote")]
         if let Some(addr) = crate::net::Address::parse(&host) {
             if mode == PaneMode::Terminal {
                 return Err("sshremote:// addresses reach the screen and files only.".into());

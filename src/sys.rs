@@ -78,6 +78,50 @@ pub fn command_line(argv: &[String]) -> String {
     argv.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ")
 }
 
+/// A modification time as local "YYYY-MM-DD HH:MM".
+pub fn local_time(secs: u64) -> String {
+    if secs == 0 {
+        return String::new();
+    }
+    let (y, mo, d, h, mi) = local_parts(secs);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+}
+
+#[cfg(unix)]
+fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    (tm.tm_year as i64 + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
+}
+
+#[cfg(windows)]
+fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let ticks = (secs + 11_644_473_600) * 10_000_000;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc);
+        if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            local = utc;
+        }
+    }
+    (local.wYear as i64, local.wMonth as u32, local.wDay as u32, local.wHour as u32, local.wMinute as u32)
+}
+
+/// A size for people: 1.5 MB.
+pub fn human(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MB", n as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

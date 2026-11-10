@@ -58,6 +58,30 @@ pub(super) enum Place {
     Split { below: bool },
 }
 
+/// The command line that opens `target` in the Remote desktop extension's window.
+#[cfg(not(feature = "remote"))]
+fn remote_args(target: &Target, mode: PaneMode) -> Vec<String> {
+    let mut a = vec!["--gui".to_string()];
+    match target {
+        Target::Local { .. } => a.push("--local".into()),
+        Target::Ssh { host, port, args, .. } => {
+            if let Some(p) = port {
+                a.extend(["--ssh".into(), "-p".into(), "--ssh".into(), p.to_string()]);
+            }
+            for x in args {
+                a.extend(["--ssh".into(), x.clone()]);
+            }
+            a.push(host.clone());
+        }
+    }
+    match mode {
+        PaneMode::Files => a.extend(["--open".into(), "files".into()]),
+        PaneMode::Terminal => a.extend(["--open".into(), "terminal".into()]),
+        PaneMode::Screen => {}
+    }
+    a
+}
+
 /// Seconds a lost connection is tried again before the pane asks.
 const GIVE_UP: f64 = 30.0;
 
@@ -376,6 +400,8 @@ pub(super) struct Workspace {
     reveal_until: f64,
     /// Hosts reached, for the recent list.
     pub(super) reached: Vec<String>,
+    /// Why something asked for could not open, for the app to show.
+    pub(super) failed: Option<String>,
     /// The width the active pane's controls took last frame, to know when they must fold.
     controls_w: f32,
     /// The tab being dragged (to a new place, or out into a window of its own).
@@ -434,6 +460,7 @@ impl Workspace {
             window_full: false,
             reveal_until: 0.0,
             reached: Vec::new(),
+            failed: None,
             controls_w: 260.0,
             dragging: None,
             grab_dx: 0.0,
@@ -458,6 +485,14 @@ impl Workspace {
 
     /// Opens what the open view chose, in a new tab or beside the active pane.
     pub(super) fn add(&mut self, launch: Launch, place: Place, start: (bool, bool, bool)) {
+        // Screens and files come from the Remote desktop extension, in a window of its own.
+        #[cfg(not(feature = "remote"))]
+        if let Launch::Agent { target, mode, .. } = &launch {
+            if let Err(e) = crate::ext::spawn_provided("remote", &remote_args(target, *mode)) {
+                self.failed = Some(e);
+            }
+            return;
+        }
         let id = self.next_id;
         self.next_id += 1;
         let pane = match launch {
@@ -663,6 +698,12 @@ impl Workspace {
         }
     }
 
+    #[cfg(not(feature = "remote"))]
+    fn go_live(&mut self, _: usize, sess: Session, _: mpsc::Receiver<Ev>, _: &egui::Context) {
+        match sess {}
+    }
+
+    #[cfg(feature = "remote")]
     fn go_live(&mut self, i: usize, sess: Session, rx: mpsc::Receiver<Ev>, ctx: &egui::Context) {
         let ctl = Control::new(&self.opt, Mode::True);
         let waker = ctx.clone();
@@ -1393,7 +1434,7 @@ impl Workspace {
             .ui(ui, |ui| {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(190.0);
-                for m in PaneMode::ALL.into_iter().filter(|m| m.on()) {
+                for m in PaneMode::ALL.into_iter().filter(|m| m.on() && (cfg!(feature = "remote") || *m == PaneMode::Terminal)) {
                     if ui.add(egui::Button::selectable(cur == m, format!("{}  {}", m.glyph(), m.name()))).clicked() {
                         chosen = Some(m);
                         ui.close();

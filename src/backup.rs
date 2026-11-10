@@ -38,7 +38,7 @@ fn auto_folder() -> Option<PathBuf> {
 
 fn stamp() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    crate::files::local_time(secs).replace([' ', ':'], "-")
+    crate::sys::local_time(secs).replace([' ', ':'], "-")
 }
 
 /// A key from a passphrase by PBKDF2-HMAC-SHA256, stretched so guessing is slow.

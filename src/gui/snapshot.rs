@@ -264,6 +264,7 @@ mod pictures {
         }
     }
 
+    #[cfg(feature = "remote")]
     #[test]
     #[ignore]
     fn menus_chat() {

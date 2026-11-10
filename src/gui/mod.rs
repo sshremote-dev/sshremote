@@ -10,15 +10,22 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, ViewportCommand,
 };
 
+#[cfg(feature = "remote")]
 use crate::clip::Clip;
 use crate::color::Mode;
 use crate::proto::{MOD_SUPER, PRESETS, SUPER_L, ToAgent, ToClient};
-use crate::session::{Action, Control, Ev, Framebuffer, Options, REMOTE, Session};
+#[cfg(feature = "remote")]
+use crate::session::{Action, Control, Ev, Framebuffer, Session};
+use crate::options::{Options, REMOTE};
 use workspace::{Launch, PaneMode, Place};
-use crate::transport::Target;
+use crate::options::Target;
 
 pub(crate) mod chrome;
 mod home;
+#[cfg(feature = "remote")]
+mod remote;
+#[cfg(not(feature = "remote"))]
+#[path = "remote_off.rs"]
 mod remote;
 pub(crate) mod workspace;
 pub(crate) mod theme;
@@ -28,6 +35,8 @@ mod lottie;
 pub(crate) mod snapshot;
 
 use remote::Remote;
+#[cfg(not(feature = "remote"))]
+use remote::{Ev, Session};
 use theme::filled;
 pub(crate) use theme::primary;
 pub use theme::{set_theme, style};
@@ -211,7 +220,13 @@ fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
+        #[cfg(feature = "remote")]
         let r = Session::open(&target, true).map(|(s, _tx, rx)| (s, rx));
+        #[cfg(not(feature = "remote"))]
+        let r = {
+            let _ = target;
+            Err(crate::ext::missing("remote"))
+        };
         let _ = tx.send(r);
         ctx.request_repaint();
     });
@@ -713,6 +728,9 @@ impl eframe::App for App {
             closing = w.closing_window;
             main_grab = out.grab;
             reached = std::mem::take(&mut w.reached);
+            if let Some(e) = w.failed.take() {
+                self.error = Some(e);
+            }
             self.open_dialog(&ctx, &mut w);
             self.screen = Screen::Work(w);
         }
@@ -975,7 +993,7 @@ fn tab_ghost(ctx: &egui::Context, glyph: &str, name: &str, panes: usize, at: Pos
     });
 }
 
-pub(crate) use crate::files::human;
+pub(crate) use crate::sys::human;
 
 #[cfg(test)]
 mod tests {

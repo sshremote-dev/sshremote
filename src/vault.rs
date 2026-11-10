@@ -2,6 +2,9 @@
 //! Service through `secret-tool` on Linux, or the macOS keychain. Nothing is written to sshremote's
 //! own files.
 
+/// Environment variable through which `sshremote` answers ssh's askpass call.
+pub const ASKPASS_SECRET: &str = "SSHREMOTE_SSH_SECRET";
+
 /// The store's name, or None when this system has none sshremote can use.
 pub fn backend() -> Option<&'static str> {
     static BACKEND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();

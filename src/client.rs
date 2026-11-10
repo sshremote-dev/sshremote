@@ -1725,16 +1725,12 @@ impl Viewer {
     }
 }
 
-/// What a build without windows says when one is asked for.
-#[cfg(not(feature = "gui"))]
-pub const NO_WINDOWS: &str = "this sshremote has no windows (a build for the command line and services)";
-
 pub fn run(opt: Options) -> Result<(), String> {
     if opt.gui {
         #[cfg(feature = "gui")]
         return crate::gui::run(&opt);
         #[cfg(not(feature = "gui"))]
-        return Err(NO_WINDOWS.into());
+        return Err(crate::NO_WINDOWS.into());
     }
     let (sess, tx, rx) = Session::connect(&opt)?;
     let mut v = Viewer::new(&opt, sess, if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) });

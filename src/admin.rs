@@ -97,7 +97,7 @@ pub fn relaunch(_args: &[String]) -> Result<bool, String> {
 pub fn service_installed() -> bool {
     use std::os::windows::process::CommandExt;
     std::process::Command::new("sc")
-        .args(["query", crate::service::NAME])
+        .args(["query", "sshremote"])
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .output()
         .is_ok_and(|o| o.status.success())

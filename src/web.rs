@@ -370,7 +370,7 @@ fn screen(mut r: BufReader<TcpStream>, w: Arc<Mutex<TcpStream>>, host: &str, vie
             host: host.to_string(),
             port: None,
             args: Vec::new(),
-            remote: crate::session::REMOTE.into(),
+            remote: crate::options::REMOTE.into(),
             capture: "auto".into(),
             password: None,
             unattended: false,

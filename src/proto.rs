@@ -146,7 +146,7 @@ pub enum ToAgent {
     /// Asks for the windows that can be shared on their own.
     ListWindows,
     /// Shares the screen, a window or a program.
-    Share(crate::capture::Share),
+    Share(crate::shared::Share),
     /// Installs what the window list needs on the host (the GNOME Shell helper).
     InstallHelper,
     /// Opens the desktop's own sharing dialog on the remote screen to choose there.
@@ -340,7 +340,7 @@ pub enum ToClient {
     },
     /// The shareable windows, or why there is no list.
     WindowList {
-        list: Vec<crate::capture::WindowInfo>,
+        list: Vec<crate::shared::WindowInfo>,
         error: String,
     },
     /// What is shared now; `kind` is `Share`'s number on the wire (0: the whole screen).
@@ -682,7 +682,7 @@ impl ToAgent {
                 },
                 text: String::from_utf8_lossy(c.rest()).into_owned(),
             },
-            33 => ToAgent::Share(crate::capture::Share::from_wire(c.u8()?, c.u64()?).ok_or_else(unknown)?),
+            33 => ToAgent::Share(crate::shared::Share::from_wire(c.u8()?, c.u64()?).ok_or_else(unknown)?),
             _ => return Err(unknown()),
         })
     }
@@ -961,7 +961,7 @@ impl ToClient {
                 let n = c.u32()? as usize;
                 let mut list = Vec::with_capacity(n.min(1024));
                 for _ in 0..n {
-                    list.push(crate::capture::WindowInfo {
+                    list.push(crate::shared::WindowInfo {
                         id: c.u64()?,
                         title: c.str()?,
                         app: c.str()?,
@@ -1068,7 +1068,7 @@ mod tests {
             ToAgent::TermResize { id: 1, cols: 120, rows: 40 },
             ToAgent::TermClose { id: 1 },
             ToAgent::ListWindows,
-            ToAgent::Share(crate::capture::Share::App(0x1234)),
+            ToAgent::Share(crate::shared::Share::App(0x1234)),
             ToAgent::InstallHelper,
             ToAgent::PickOnRemote,
             ToAgent::UiState { text: true, max: 150 },
@@ -1088,7 +1088,7 @@ mod tests {
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },
             ToClient::WindowList {
-                list: vec![crate::capture::WindowInfo {
+                list: vec![crate::shared::WindowInfo {
                     id: 9,
                     title: "Inbox".into(),
                     app: "chrome".into(),

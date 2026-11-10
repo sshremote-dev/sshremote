@@ -10,41 +10,8 @@ use std::time::{Duration, Instant};
 use crate::color::{Mode, unpack};
 use crate::proto::{Frame, MOD_CTRL, PRESETS, Settings, ToAgent, ToClient, read_msg, write_msg};
 use crate::transport::{self, Link, Target};
+pub use crate::options::Options;
 
-#[derive(Clone)]
-pub struct Options {
-    pub host: Option<String>,
-    pub local: bool,
-    pub gui: bool,
-    pub remote: String,
-    pub capture: String,
-    pub ssh_args: Vec<String>,
-    /// One-time password of a `sshremote --serve` agent.
-    pub password: Option<String>,
-    /// `None` is the auto preset.
-    pub preset: Option<usize>,
-    pub budget: f64,
-    pub mode: Option<Mode>,
-    pub scale: Option<u8>,
-    pub fps: Option<u8>,
-    pub cell: Option<(usize, usize)>,
-    /// Headless run: (seconds, view size, optional PPM dump of the final framebuffer).
-    pub probe: Option<(f64, (u16, u16), Option<String>)>,
-    /// Probe only: text typed one key per 500 ms after a 2 s settle, to measure per-key traffic.
-    pub probe_type: String,
-    /// Probe only: scroll steps sent the same way after the typed text.
-    pub probe_scroll: usize,
-    /// Probe only: a file uploaded at the start, to check transfers end to end.
-    pub probe_send: Option<String>,
-    /// Probe only: a remote file or folder downloaded at the start.
-    pub probe_fetch: Option<String>,
-    /// Probe only: asks for this monitor at the start.
-    pub probe_monitor: Option<u8>,
-    /// Plays the host's sound.
-    pub sound: bool,
-    /// Window mode: what the session opens with besides the screen: "terminal" or "files".
-    pub open: String,
-}
 
 pub enum Ev {
     Net(ToClient),
@@ -99,8 +66,6 @@ impl Options {
     }
 }
 
-/// Command that starts the agent on a host, finding it in the usual install places.
-pub const REMOTE: &str = "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" sshremote --agent";
 
 impl Session {
     /// Starts the agent and waits for its hello.
