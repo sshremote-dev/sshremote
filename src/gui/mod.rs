@@ -33,6 +33,8 @@ pub(crate) mod look;
 mod lottie;
 #[cfg(test)]
 pub(crate) mod snapshot;
+mod project;
+mod signin;
 
 use remote::Remote;
 #[cfg(not(feature = "remote"))]
@@ -308,6 +310,13 @@ pub struct App {
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
     #[cfg_attr(not(windows), allow(dead_code))]
     service: Option<bool>,
+    /// Tabs to open next frame: a project, or the last session at start.
+    restore: Option<serde_json::Value>,
+    /// The main window's tabs as last kept, and when they were looked at.
+    layout: Option<serde_json::Value>,
+    layout_at: Option<Instant>,
+    /// The name typed for saving the open tabs as a project.
+    project_name: String,
 }
 
 impl Form {
@@ -331,7 +340,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let local = opt.local;
     let budget = opt.budget;
     let open = opt.open.clone();
-    let size = if auto_start { [1280.0, 800.0] } else { OPEN_SIZE };
+    let project = opt.project.clone();
+    let size = if auto_start || project.is_some() || project::last().is_some() { [1280.0, 800.0] } else { OPEN_SIZE };
     let native = native_options("SSH Remote", size);
     eframe::run_native(
         "sshremote",
@@ -346,6 +356,14 @@ pub fn run(opt: &Options) -> Result<(), String> {
             std::thread::spawn(crate::backup::auto);
             if auto_start {
                 app.connect(local);
+            } else if let Some(name) = &project {
+                match project::load(name) {
+                    Ok(v) => app.restore = Some(v),
+                    Err(e) => app.error = Some(e),
+                }
+            } else {
+                // The tabs open when the window was last closed, as they were.
+                app.restore = project::last();
             }
             Ok(Box::new(app))
         }),
@@ -607,6 +625,10 @@ impl App {
             grab_window: None,
             sized_for: None,
             queued: Vec::new(),
+            restore: None,
+            layout: None,
+            layout_at: None,
+            project_name: String::new(),
         }
     }
 }
@@ -715,6 +737,22 @@ impl eframe::App for App {
                 w.add(launch, place, start);
             }
         }
+        // A project or the last session: its tabs beside any open now.
+        if let Some(v) = self.restore.take() {
+            if !matches!(self.screen, Screen::Work(_)) {
+                self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
+                if !maximized && !fullscreen {
+                    ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
+                }
+            }
+            if let Screen::Work(w) = &mut self.screen {
+                w.picker = None;
+                if w.restore(&v) == 0 {
+                    self.error = Some("Nothing in those tabs could be opened again.".into());
+                }
+            }
+        }
         // System keys caught for a host go to the window whose pane asked for them last frame.
         let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
         let (main_keys, window_keys) = if self.grab_window.is_some() { (Vec::new(), grabbed) } else { (grabbed, Vec::new()) };
@@ -732,6 +770,15 @@ impl eframe::App for App {
                 self.error = Some(e);
             }
             self.open_dialog(&ctx, &mut w);
+            // The tabs are kept as they change, so a crash or a power cut loses nothing.
+            if !self.quit_when_empty && self.layout_at.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
+                self.layout_at = Some(Instant::now());
+                let v = w.to_json();
+                if self.layout.as_ref() != Some(&v) {
+                    project::keep_last(Some(&v));
+                    self.layout = Some(v);
+                }
+            }
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);

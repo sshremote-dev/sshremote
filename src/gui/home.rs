@@ -53,6 +53,7 @@ impl App {
             probe_monitor: None,
             sound: false,
             open: String::new(),
+            project: None,
         }
     }
 
@@ -226,6 +227,7 @@ impl App {
             (Section::New, ic::PLUS, "New connection"),
             (Section::Local, ic::DESKTOP, "This computer"),
             (Section::Ssh, ic::GLOBE, "SSH hosts"),
+            (Section::Projects, ic::FOLDER, "Projects"),
             (Section::Tools, ic::WRENCH, "Tools"),
         ] {
             let on = self.section == s;
@@ -270,9 +272,69 @@ impl App {
                 }
             }
             Section::Ssh => self.ssh_section(ui, &mut go),
+            Section::Projects => self.projects_section(ui),
             Section::Tools => self.tools_section(ui),
         }
         go
+    }
+
+    /// Projects: the open tabs saved by name, and the saved ones to open again.
+    fn projects_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Projects").size(16.0).strong());
+        ui.label(
+            RichText::new("A project keeps the tabs, their splits and what each pane runs. Passwords are not kept: they are asked for when a pane opens.")
+                .weak()
+                .size(12.0),
+        );
+        ui.add_space(8.0);
+        let open = self.layout.as_ref().filter(|l| l.get("tabs").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty())).cloned();
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.project_name).hint_text("Name for the open tabs").desired_width(260.0));
+            let can = open.is_some() && !self.project_name.trim().is_empty();
+            let b = ui.add_enabled(can, egui::Button::new(format!("{}  Save", ic::ARCHIVE)));
+            if b.on_disabled_hover_text("Open some tabs and give them a name").clicked()
+                && let Some(l) = &open
+            {
+                match super::project::save(&self.project_name, l) {
+                    Ok(()) => self.project_name.clear(),
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        });
+        ui.add_space(8.0);
+        let mut reopen = super::project::reopen();
+        if ui.checkbox(&mut reopen, "Open the last tabs again at start").changed() {
+            super::project::set_reopen(reopen);
+        }
+        ui.add_space(8.0);
+        let names = super::project::list();
+        if names.is_empty() {
+            ui.label(RichText::new("No projects saved yet.").weak());
+        }
+        for name in names {
+            let layout = super::project::load(&name);
+            let sub = layout.as_ref().map_or_else(|e| e.clone(), super::project::summary);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic::FOLDER).size(16.0));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&name).strong());
+                    ui.label(RichText::new(sub).weak().size(12.0));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(format!("{}  Delete", ic::TRASH)).clicked() {
+                        if let Err(e) = super::project::remove(&name) {
+                            self.error = Some(e);
+                        }
+                    }
+                    if ui.add_enabled(layout.is_ok(), egui::Button::new(format!("{}  Open", ic::PLAY))).clicked()
+                        && let Ok(l) = layout
+                    {
+                        self.restore = Some(l);
+                    }
+                });
+            });
+            ui.separator();
+        }
     }
 
     /// The tools: a list of them, or the one open, as a page with a way back.
@@ -682,6 +744,7 @@ pub(super) enum Section {
     New,
     Local,
     Ssh,
+    Projects,
     Tools,
 }
 

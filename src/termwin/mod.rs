@@ -537,6 +537,27 @@ impl TermWindow {
     }
 
     /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
+    /// What the first tab runs and the view it shows ("terminal", "text", "markdown"), to open
+    /// the same again later.
+    pub fn saved(&self) -> Option<(Profile, &'static str)> {
+        let Some(tab) = self.tabs.first() else {
+            // Not started yet: what it will run, in the view it will start in.
+            let (profile, _) = self.pending.first()?;
+            let view = match self.start_view.as_deref() {
+                Some("text") => "text",
+                Some("markdown") => "markdown",
+                _ => "terminal",
+            };
+            return Some((profile.clone(), view));
+        };
+        let view = match tab.view {
+            View::Terminal => "terminal",
+            View::Text => "text",
+            View::Markdown => "markdown",
+        };
+        Some((tab.profile.clone(), view))
+    }
+
     pub fn single(profile: Profile) -> Self {
         let mut w = Self::standalone(profile, Vec::new());
         w.standalone = false;

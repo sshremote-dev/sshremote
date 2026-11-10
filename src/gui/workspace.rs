@@ -84,6 +84,74 @@ fn remote_args(target: &Target, mode: PaneMode) -> Vec<String> {
     a
 }
 
+/// Where a saved pane connects: no password, which is asked for again.
+fn target_json(t: &Target) -> Option<serde_json::Value> {
+    use serde_json::json;
+    match t {
+        Target::Local { capture } => Some(json!({ "local": capture })),
+        Target::Ssh { host, port, args, remote, capture, .. } => {
+            Some(json!({ "ssh": host, "port": port, "args": args, "remote": remote, "capture": capture }))
+        }
+        // A one-time password reaches a --serve agent once only.
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
+fn target_from(v: &serde_json::Value) -> Option<Target> {
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    if let Some(capture) = s("local") {
+        return Some(Target::Local { capture });
+    }
+    Some(Target::Ssh {
+        host: s("ssh").filter(|h| !h.is_empty())?,
+        port: v.get("port").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok()),
+        args: strings(v.get("args")).unwrap_or_default(),
+        remote: s("remote").unwrap_or_else(|| crate::options::REMOTE.to_string()),
+        capture: s("capture").unwrap_or_default(),
+        password: None,
+        unattended: false,
+    })
+}
+
+fn strings(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    Some(v?.as_array()?.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+}
+
+fn node_from(v: &serde_json::Value) -> Option<Node> {
+    if let Some(id) = v.get("pane").and_then(|p| p.as_u64()) {
+        return Some(Node::Leaf(id));
+    }
+    Some(Node::Split {
+        below: v.get("below")?.as_bool()?,
+        ratio: (v.get("ratio")?.as_f64()? as f32).clamp(0.05, 0.95),
+        a: Box::new(node_from(v.get("a")?)?),
+        b: Box::new(node_from(v.get("b")?)?),
+    })
+}
+
+/// A saved pane's launch, and the view its shell was shown in.
+fn launch_from(v: &serde_json::Value) -> Option<(Launch, Option<String>)> {
+    let label = v.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string();
+    let target = target_from(v.get("target")?)?;
+    let ssh_cmd = strings(v.get("ssh_cmd"));
+    if let Some(sh) = v.get("shell") {
+        let name = sh.get("name").and_then(|n| n.as_str()).unwrap_or("Terminal").to_string();
+        let argv = strings(sh.get("argv"))?;
+        // The icon of the local profile of that name, if there still is one.
+        let icon = crate::termwin::local_profiles().into_iter().find(|p| p.name == name).map_or(super::ic::TERMINAL, |p| p.icon);
+        let profile = crate::termwin::Profile { name, icon, launch: crate::termwin::Launch::Local(argv) };
+        let view = sh.get("view").and_then(|x| x.as_str()).filter(|v| *v != "terminal").map(str::to_string);
+        return Some((Launch::Shell { profile, label, target, ssh_cmd }, view));
+    }
+    let mode = match v.get("mode").and_then(|m| m.as_str()) {
+        Some("Files") => PaneMode::Files,
+        Some("Terminal") => PaneMode::Terminal,
+        _ => PaneMode::Screen,
+    };
+    Some((Launch::Agent { target, label, ssh_cmd, mode }, None))
+}
+
 /// Seconds a lost connection is tried again before the pane asks.
 const GIVE_UP: f64 = 30.0;
 
@@ -103,12 +171,14 @@ struct Down {
     given_up: bool,
     /// A connection that worked before and was lost (rather than a first attempt).
     again: bool,
+    /// The sign-in dialog was shown for this failure.
+    asked: bool,
 }
 
 impl Down {
     fn new(again: bool, why: String) -> Down {
         let now = Instant::now();
-        Down { rx: None, since: now, next: now, attempt: 0, why, given_up: false, again }
+        Down { rx: None, since: now, next: now, attempt: 0, why, given_up: false, again, asked: false }
     }
 }
 
@@ -404,6 +474,8 @@ pub(super) struct Workspace {
     pub(super) reached: Vec<String>,
     /// Why something asked for could not open, for the app to show.
     pub(super) failed: Option<String>,
+    /// A host refused the login: the dialog asking how to sign in.
+    signin: Option<super::signin::SignIn>,
     /// The width the active pane's controls took last frame, to know when they must fold.
     controls_w: f32,
     /// The tab being dragged (to a new place, or out into a window of its own).
@@ -463,6 +535,7 @@ impl Workspace {
             reveal_until: 0.0,
             reached: Vec::new(),
             failed: None,
+            signin: None,
             controls_w: 260.0,
             dragging: None,
             grab_dx: 0.0,
@@ -487,13 +560,31 @@ impl Workspace {
 
     /// Opens what the open view chose, in a new tab or beside the active pane.
     pub(super) fn add(&mut self, launch: Launch, place: Place, start: (bool, bool, bool)) {
+        let Some(id) = self.new_pane(launch, start) else { return };
+        match place {
+            Place::Split { below } if !self.tabs.is_empty() => {
+                let tab = &mut self.tabs[self.current];
+                tab.root.split(tab.active, id, below);
+                tab.root.even_out(id, below);
+                tab.active = id;
+            }
+            _ => {
+                self.tabs.push(Tab { root: Node::Leaf(id), active: id });
+                self.current = self.tabs.len() - 1;
+            }
+        }
+        self.zoom = None;
+    }
+
+    /// A pane for `launch`, not yet in any tab; None when it opens elsewhere.
+    fn new_pane(&mut self, launch: Launch, start: (bool, bool, bool)) -> Option<u64> {
         // Screens and files come from the Remote desktop extension, in a window of its own.
         #[cfg(not(feature = "remote"))]
         if let Launch::Agent { target, mode, .. } = &launch {
             if let Err(e) = crate::ext::spawn_provided("remote", &remote_args(target, *mode)) {
                 self.failed = Some(e);
             }
-            return;
+            return None;
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -520,19 +611,81 @@ impl Workspace {
             },
         };
         self.panes.push(pane);
-        match place {
-            Place::Split { below } if !self.tabs.is_empty() => {
-                let tab = &mut self.tabs[self.current];
-                tab.root.split(tab.active, id, below);
-                tab.root.even_out(id, below);
-                tab.active = id;
-            }
-            _ => {
-                self.tabs.push(Tab { root: Node::Leaf(id), active: id });
-                self.current = self.tabs.len() - 1;
+        Some(id)
+    }
+
+    /// The tabs, their splits and what each pane runs, to open again later. Passwords are not
+    /// kept: they are asked for again.
+    pub(super) fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        fn node(n: &Node) -> serde_json::Value {
+            match n {
+                Node::Leaf(id) => json!({ "pane": id }),
+                Node::Split { below, ratio, a, b } => json!({ "below": below, "ratio": ratio, "a": node(a), "b": node(b) }),
             }
         }
-        self.zoom = None;
+        let panes: serde_json::Map<String, serde_json::Value> = self
+            .panes
+            .iter()
+            .filter_map(|p| {
+                let mut v = json!({ "label": p.label, "target": target_json(&p.target)?, "ssh_cmd": p.ssh_cmd });
+                match &p.state {
+                    State::Shell(t) => {
+                        let (profile, view) = t.saved()?;
+                        let crate::termwin::Launch::Local(argv) = profile.launch else { return None };
+                        v["shell"] = json!({ "name": profile.name, "argv": argv, "view": view });
+                    }
+                    State::Live(r) => v["mode"] = json!(r.mode().name()),
+                    State::Down(_) => v["mode"] = json!(p.mode.name()),
+                }
+                Some((p.id.to_string(), v))
+            })
+            .collect();
+        let tabs: Vec<_> = self.tabs.iter().map(|t| json!({ "root": node(&t.root), "active": t.active })).collect();
+        json!({ "version": 1, "tabs": tabs, "panes": panes, "current": self.current })
+    }
+
+    /// Opens what `to_json` kept, as new tabs; what can no longer be opened is left out. How
+    /// many tabs opened.
+    pub(super) fn restore(&mut self, v: &serde_json::Value) -> usize {
+        let panes = v.get("panes").and_then(|p| p.as_object());
+        let mut made = std::collections::HashMap::new();
+        let mut opened = 0;
+        for tab in v.get("tabs").and_then(|t| t.as_array()).into_iter().flatten() {
+            let Some(saved) = tab.get("root").and_then(node_from) else { continue };
+            let mut ids = Vec::new();
+            saved.leaves(&mut ids);
+            let mut root = Some(saved);
+            for old in ids {
+                let made_pane = panes.and_then(|p| p.get(&old.to_string())).and_then(|p| {
+                    let (launch, view) = launch_from(p)?;
+                    let id = self.new_pane(launch, (false, false, false))?;
+                    if let (Some(view), Some(State::Shell(t))) = (view, self.panes.last_mut().map(|p| &mut p.state)) {
+                        t.start_view = Some(view);
+                    }
+                    Some(id)
+                });
+                match made_pane {
+                    Some(new) => {
+                        made.insert(old, new);
+                    }
+                    None => root = root.and_then(|r| r.remove(old)),
+                }
+            }
+            let Some(mut root) = root else { continue };
+            root.renumber(&made);
+            let mut leaves = Vec::new();
+            root.leaves(&mut leaves);
+            let active = tab.get("active").and_then(|a| a.as_u64()).and_then(|a| made.get(&a).copied()).filter(|a| leaves.contains(a));
+            self.tabs.push(Tab { active: active.unwrap_or(leaves[0]), root });
+            opened += 1;
+        }
+        if opened > 0 {
+            let cur = v.get("current").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+            self.current = (self.tabs.len() - opened + cur).min(self.tabs.len() - 1);
+            self.zoom = None;
+        }
+        opened
     }
 
     /// The first pane's shell starts in this view (terminal, text or markdown).
@@ -697,6 +850,42 @@ impl Workspace {
         }
         if waiting {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        self.sign_in(ctx);
+    }
+
+    /// A host that refused the login is asked about once: the dialog with what it is, then the
+    /// connection tried again with what was typed.
+    fn sign_in(&mut self, ctx: &egui::Context) {
+        if self.signin.is_none() {
+            for p in &mut self.panes {
+                if let State::Down(d) = &mut p.state
+                    && d.given_up
+                    && !d.asked
+                    && super::signin::refused(&d.why)
+                {
+                    d.asked = true;
+                    self.signin = super::signin::SignIn::new(p.id, &p.target, p.mode.name(), &d.why);
+                    break;
+                }
+            }
+        }
+        let Some(pane) = self.signin.as_ref().map(|s| s.pane) else { return };
+        let Some(i) = self.index(pane) else {
+            self.signin = None;
+            return;
+        };
+        let target = self.panes[i].target.clone();
+        let Some(s) = &mut self.signin else { return };
+        match s.show(ctx, &target) {
+            Some(super::signin::Answer::Connect(t)) => {
+                let p = &mut self.panes[i];
+                p.target = t;
+                p.state = State::Down(Down::new(false, String::new()));
+                self.signin = None;
+            }
+            Some(super::signin::Answer::Cancel) => self.signin = None,
+            None => {}
         }
     }
 
@@ -2537,6 +2726,45 @@ mod tests {
     }
 
     /// Every pane can fill the window: a terminal gets the button among its controls.
+    /// The tabs kept and opened again: the same splits, programs, views and hosts, and never a
+    /// password.
+    #[test]
+    fn tabs_are_kept_and_opened_again_without_passwords() {
+        let mut h = Harness::new();
+        let local = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = |label: &str, argv: Vec<String>| Launch::Shell {
+            label: label.into(),
+            profile: crate::termwin::Profile { name: local.name.clone(), icon: local.icon, launch: crate::termwin::Launch::Local(argv) },
+            target: Target::Local { capture: "auto".into() },
+            ssh_cmd: None,
+        };
+        let host = Target::Ssh { host: "dev@build".into(), port: Some(2222), args: vec!["-A".into()], remote: "sshremote --agent".into(), capture: String::new(), password: Some("hunter2".into()), unattended: false };
+        h.w.add(shell("one", vec![]), Place::Tab, (false, false, false));
+        h.w.add(shell("logs", vec!["tail".into(), "-f".into(), "x.log".into()]), Place::Split { below: true }, (false, false, false));
+        if let State::Shell(t) = &mut h.w.panes[1].state {
+            t.start_view = Some("markdown".into());
+        }
+        h.w.add(Launch::Agent { target: host, label: "build".into(), ssh_cmd: None, mode: PaneMode::Files }, Place::Tab, (false, false, false));
+        let saved = h.w.to_json();
+        let text = saved.to_string();
+        assert!(!text.contains("hunter2"), "no password is kept");
+        let mut again = Workspace::new(h.w.opt.clone());
+        let tabs = again.restore(&saved);
+        let expect = if cfg!(feature = "remote") { 2 } else { 1 };
+        assert_eq!(tabs, expect, "a tab for each, the screen's elsewhere without the remote part");
+        let back = again.to_json();
+        let first = &back["tabs"][0]["root"];
+        assert_eq!(first["below"], true, "the split kept its direction");
+        let pane = |n: &serde_json::Value| back["panes"][n["pane"].as_u64().unwrap().to_string()].clone();
+        assert_eq!(pane(&first["a"])["label"], "one");
+        assert_eq!(pane(&first["b"])["shell"]["argv"], serde_json::json!(["tail", "-f", "x.log"]));
+        assert_eq!(pane(&first["b"])["shell"]["view"], "markdown", "the view it was shown in");
+        if cfg!(feature = "remote") {
+            let files = pane(&back["tabs"][1]["root"]);
+            assert_eq!((files["mode"].as_str(), files["target"]["ssh"].as_str(), files["target"]["port"].as_u64()), (Some("Files"), Some("dev@build"), Some(2222)));
+        }
+    }
+
     #[test]
     fn a_terminal_pane_fills_the_window() {
         let mut h = Harness::new();
