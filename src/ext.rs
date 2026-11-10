@@ -283,10 +283,50 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
+/// The key that signs the registry's index (ed25519, checked with OpenSSH's ssh-keygen).
+const SIGNER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFgMJKE5ZmC2xmWV5LZMjrpbZ3d9JoC0GJX0QNUEGsQX";
+const SIGNER_ID: &str = "registry@sshremote.dev";
+const NAMESPACE: &str = "sshremote-registry";
+
+/// Checks the index against its signature with `ssh-keygen -Y verify`.
+fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("sshremote-verify-{}-{:?}", std::process::id(), std::thread::current().id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let signers = dir.join("allowed_signers");
+    let sig_file = dir.join("index.sig");
+    let r = (|| {
+        std::fs::write(&signers, format!("{SIGNER_ID} namespaces=\"{NAMESPACE}\" {SIGNER}
+")).map_err(|e| e.to_string())?;
+        std::fs::write(&sig_file, sig).map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new("ssh-keygen");
+        cmd.args(["-Y", "verify", "-I", SIGNER_ID, "-n", NAMESPACE, "-f"]).arg(&signers).arg("-s").arg(&sig_file);
+        cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        crate::sys::quiet(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("ssh-keygen (OpenSSH) is needed to check the registry: {e}"))?;
+        child.stdin.take().ok_or("ssh-keygen")?.write_all(data).map_err(|e| e.to_string())?;
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!("the registry's index is not signed by sshremote.dev; nothing installed ({})", String::from_utf8_lossy(&out.stderr).trim()))
+        }
+    })();
+    let _ = std::fs::remove_file(&signers);
+    let _ = std::fs::remove_file(&sig_file);
+    let _ = std::fs::remove_dir(&dir);
+    r
+}
+
 /// What the registry offers.
 pub fn offers() -> Result<Vec<Offer>, String> {
     let url = registry_url();
-    let v: serde_json::Value = serde_json::from_slice(&fetch(&url)?).map_err(|e| format!("the registry's index: {e}"))?;
+    let index = fetch(&url)?;
+    // Over the network the index must carry the registry's signature; it names each package's
+    // checksum, so the packages are vouched for with it. A local index (a mirror on disk) is trusted.
+    if url.starts_with("https://") || url.starts_with("http://") {
+        verify(&index, &fetch(&format!("{url}.sig"))?)?;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&index).map_err(|e| format!("the registry's index: {e}"))?;
     let base = url.rsplit_once(['/', '\\']).map_or(String::new(), |(b, _)| b.to_string());
     Ok(v.get("extensions")
         .and_then(|x| x.as_array())
@@ -570,6 +610,19 @@ mod tests {
         assert!(install_offer(&bad).unwrap_err().contains("checksum"));
         remove("dev.sshremote.test-sea").unwrap();
         assert!(installed().iter().all(|m| m.id != "dev.sshremote.test-sea"));
+    }
+
+    /// The live registry's signature is checked: good as published, refused once changed.
+    #[test]
+    #[ignore]
+    fn registry_signature() {
+        let url = REGISTRY;
+        let index = fetch(url).unwrap();
+        let sig = fetch(&format!("{url}.sig")).unwrap();
+        verify(&index, &sig).unwrap();
+        let mut bad = index.clone();
+        bad.extend_from_slice(b" ");
+        assert!(verify(&bad, &sig).is_err());
     }
 
     #[test]
