@@ -1,0 +1,23 @@
+{
+  "id": "EXT_ID",
+  "name": "EXT_NAME",
+  "version": "0.1.0",
+  "api": 2,
+  "description": "What it does, in a sentence.",
+  "activation": "startup",
+  "permissions": ["native", "workspace.open"],
+  "programs": {
+    "windows-x86_64": "EXT_BIN.exe",
+    "linux-x86_64": "EXT_BIN",
+    "macos-aarch64": "EXT_BIN"
+  },
+  "contributes": {
+    "commands": [
+      { "id": "hello", "label": "Say hello", "key": "Ctrl+Alt+H" },
+      { "id": "ask", "label": "Open a terminal from a form" }
+    ],
+    "settings": [
+      { "id": "greeting", "label": "Greeting", "type": "text", "default": "Hello" }
+    ]
+  }
+}

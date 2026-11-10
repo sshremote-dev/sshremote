@@ -2880,6 +2880,28 @@ mod tests {
         h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
         let sent = crate::exthost::test_sent();
         assert!(sent.iter().any(|(e, m, p)| e == "t.panel" && m == "reply" && p["id"] == 5 && p["result"]["value"] == "8080"), "{sent:?}");
+        // A form: the first field typed in, the box ticked, Enter; the values come back by id.
+        crate::exthost::test_message("t.panel", serde_json::json!({ "id": 6, "method": "input.form", "params": { "title": "Forward", "submit": "Forward", "fields": [
+            { "id": "dest", "label": "Leads to", "type": "text" },
+            { "id": "tls", "label": "Use TLS", "type": "bool" },
+            { "id": "host", "label": "Host", "type": "choice", "choices": ["db", "web"] }
+        ] } }));
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(!h.snap.find("Leads to").is_empty() && !h.snap.find("Use TLS").is_empty(), "the form's fields show");
+        h.frame(vec![Event::Text("localhost:80".into())]);
+        let tick = h.snap.find("Use TLS")[0];
+        let at = Pos2::new(tick.right() + 20.0, tick.center().y);
+        h.frame(vec![Event::PointerMoved(at)]);
+        let press = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        h.frame(vec![press(true)]);
+        h.frame(vec![press(false)]);
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        let sent = crate::exthost::test_sent();
+        assert!(
+            sent.iter().any(|(_, m, p)| m == "reply" && p["id"] == 6 && p["result"]["values"] == serde_json::json!({ "dest": "localhost:80", "tls": true, "host": "db" })),
+            "{sent:?}"
+        );
         crate::exthost::test_message("t.panel", serde_json::json!({ "method": "exit" }));
     }
 

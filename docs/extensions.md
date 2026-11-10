@@ -110,11 +110,18 @@ other links open in the browser.
 forwards in `~/.ssh/config`, runs `ssh -N` for the ones started from its panel, keeps a count in
 the status bar and opens a shell on a host with `terminal.open`.
 
-While writing an extension, let sshremote install it each time its folder changes:
+Start one from the template, a Rust host extension with a status bar item, a command with a key,
+a panel, a setting and a form:
 
 ```
+sshremote ext new my-extension
 sshremote ext dev my-extension
 ```
+
+`ext dev` builds it (`cargo build --release`, when there is a Cargo.toml), installs it, and does
+both again each time a file of the folder or of its src/ folder changes. Any language works: name
+the program for each platform in `programs`, put it in the folder, and `ext dev` installs it. A
+package holds only what the manifest names: extension.json, the programs, the script and layers.
 
 The open app notices the new version within two seconds, stops the old program and starts the new
 one. (Packing by hand works too: `sshremote ext pack DIR OUT.sshx`, then `sshremote ext install

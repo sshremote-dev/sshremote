@@ -338,6 +338,83 @@ pub fn parse_key(text: &str) -> Option<(u8, String)> {
     (mods & 5 != 0 || plain_ok).then_some((mods, key))
 }
 
+/// The files `ext new` writes, from assets/extension-template.
+const TEMPLATE: [(&str, &str); 5] = [
+    ("extension.json", include_str!("../assets/extension-template/extension.json")),
+    ("Cargo.toml", include_str!("../assets/extension-template/Cargo.toml")),
+    ("src/main.rs", include_str!("../assets/extension-template/src/main.rs")),
+    ("README.md", include_str!("../assets/extension-template/README.md")),
+    (".gitignore", include_str!("../assets/extension-template/gitignore.txt")),
+];
+
+/// A new extension in `dir`, named after the folder: a Rust program with a status bar item, a
+/// command with a key, a panel, a setting and a form.
+pub fn new_extension(dir: &Path) -> Result<Manifest, String> {
+    if dir.exists() && std::fs::read_dir(dir).map_err(|e| e.to_string())?.next().is_some() {
+        return Err(format!("{} is not empty", dir.display()));
+    }
+    let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let bin: String = folder.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').to_string();
+    if bin.is_empty() || !bin.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return Err("name the folder with letters first, as my-extension".into());
+    }
+    let name: String = bin.split('-').filter(|w| !w.is_empty()).map(|w| w[..1].to_uppercase() + &w[1..]).collect::<Vec<_>>().join(" ");
+    let id = format!("local.{bin}");
+    for (file, text) in TEMPLATE {
+        let to = dir.join(file);
+        if let Some(d) = to.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        let text = text.replace("EXT_ID", &id).replace("EXT_NAME", &name).replace("EXT_BIN", &bin);
+        std::fs::write(&to, text).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    parse_manifest(&std::fs::read_to_string(dir.join("extension.json")).map_err(|e| e.to_string())?)
+}
+
+/// A Rust extension (a Cargo.toml beside it) built for this computer, its program put where
+/// extension.json names it; anything else is left as it is.
+fn build(dir: &Path) -> Result<(), String> {
+    let cargo = dir.join("Cargo.toml");
+    if !cargo.is_file() {
+        return Ok(());
+    }
+    let m = parse_manifest(&std::fs::read_to_string(dir.join("extension.json")).map_err(|e| format!("extension.json: {e}"))?)?;
+    let here = platform();
+    let Some((_, program)) = m.programs.iter().find(|(p, _)| *p == here) else { return Ok(()) };
+    let text = std::fs::read_to_string(&cargo).map_err(|e| e.to_string())?;
+    let bin = text.lines().find_map(|l| l.trim().strip_prefix("name").map(|r| r.trim_start().trim_start_matches('=').trim().trim_matches('"').to_string())).ok_or("Cargo.toml has no name")?;
+    println!("building {bin}...");
+    let ok = std::process::Command::new("cargo").args(["build", "--release", "--quiet"]).current_dir(dir).status().map_err(|e| format!("cargo: {e}"))?;
+    if !ok.success() {
+        return Err("the build failed (see above)".into());
+    }
+    let exe = dir.join("target").join("release").join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(&exe, dir.join(program)).map_err(|e| format!("{}: {e}", exe.display()))?;
+    Ok(())
+}
+
+/// What a dev folder's sources look like: its files and those under src/, but not what the build
+/// makes (target/, the programs, Cargo.lock), which would start it again.
+fn source_stamp(dir: &Path) -> String {
+    let programs: Vec<String> = parse_manifest(&std::fs::read_to_string(dir.join("extension.json")).unwrap_or_default())
+        .map(|m| m.programs.into_iter().map(|(_, f)| f).collect())
+        .unwrap_or_default();
+    // Cargo writes its lock file as it builds.
+    let made = |e: &&str| e.starts_with("Cargo.lock:") || programs.iter().any(|p| e.starts_with(&format!("{p}:")));
+    let mut out = folder_stamp(dir).split(',').filter(|e| !made(e)).collect::<Vec<_>>().join(",");
+    let mut stack = vec![dir.join("src")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            }
+        }
+        out.push('|');
+        out.push_str(&folder_stamp(&d));
+    }
+    out
+}
+
 /// The times and sizes of the files in a folder (not its subfolders), to notice a change.
 fn folder_stamp(dir: &Path) -> String {
     let mut v: Vec<String> = std::fs::read_dir(dir)
@@ -461,21 +538,23 @@ pub fn pack(dir: &Path, out: &Path) -> Result<Manifest, String> {
             return Err(format!("{} is named in extension.json but not there", l.file));
         }
     }
+    // Only what the manifest names goes in: not sources, build folders or leftovers.
+    let mut named = vec!["extension.json".to_string()];
+    named.extend(m.main.clone());
+    named.extend(m.layers.iter().map(|l| l.file.clone()));
+    let programs: Vec<String> = m.programs.iter().map(|(_, f)| f.clone()).filter(|f| dir.join(f).is_file()).collect();
+    if !m.programs.is_empty() && programs.is_empty() {
+        return Err("none of the programs named in extension.json is there: build one first".into());
+    }
+    named.extend(programs);
+    named.sort();
+    named.dedup();
     let file = std::fs::File::create(out).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-                continue;
-            }
-            let rel = p.strip_prefix(dir).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
-            zip.start_file(rel, opts).map_err(|e| e.to_string())?;
-            zip.write_all(&std::fs::read(&p).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        }
+    for f in &named {
+        zip.start_file(f.as_str(), opts).map_err(|e| e.to_string())?;
+        zip.write_all(&std::fs::read(dir.join(f)).map_err(|e| format!("{f}: {e}"))?).map_err(|e| e.to_string())?;
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(m)
@@ -713,16 +792,23 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Packs and installs a folder whenever it changes; a running app starts the new version.
+        Some("new") => {
+            let dir = Path::new(arg(1)?);
+            let m = new_extension(dir)?;
+            println!("made {} ({}) in {}", m.name, m.id, dir.display());
+            println!("next: sshremote ext dev {}", dir.display());
+            Ok(())
+        }
         Some("dev") => {
             let dir = Path::new(arg(1)?).to_path_buf();
             let out = std::env::temp_dir().join(format!("sshremote-dev-{}.sshx", std::process::id()));
             let mut seen = String::new();
             println!("watching {} (Ctrl+C to stop)", dir.display());
             loop {
-                let now = folder_stamp(&dir);
+                let now = source_stamp(&dir);
                 if now != seen {
                     seen = now;
-                    match pack(&dir, &out).and_then(|_| install_file(&out)) {
+                    match build(&dir).and_then(|()| pack(&dir, &out)).and_then(|_| install_file(&out)) {
                         Ok(m) => println!("installed {} {} at {}", m.name, m.version, crate::license::today()),
                         Err(e) => println!("not installed: {e}"),
                     }
@@ -766,7 +852,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             println!("packed {} {}", m.id, m.version);
             Ok(())
         }
-        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | run ID COMMAND [TEXT] | pack DIR OUT.sshx | dev DIR".into()),
+        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | run ID COMMAND [TEXT] | pack DIR OUT.sshx | new DIR | dev DIR".into()),
     }
 }
 

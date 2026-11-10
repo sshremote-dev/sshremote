@@ -94,7 +94,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote module [list | on ID | off ID]   turn parts of the app on or off
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
-       sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx|dev DIR
+       sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx|new DIR|dev DIR
                                   extensions: style packs from sshremote.dev or a file
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
