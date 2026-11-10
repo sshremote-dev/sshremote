@@ -56,6 +56,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 }
 
 /// The modules part of the Extensions page.
+#[cfg(feature = "gui")]
 pub fn ui(ui: &mut eframe::egui::Ui) {
     for (id, name, what) in ALL {
         let mut v = on(id);

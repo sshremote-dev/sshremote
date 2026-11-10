@@ -979,7 +979,7 @@ impl Viewer {
             let name: String = format!("{name}{mark}");
             let name = cut_visible(&name, name_w);
             let pad = name_w.saturating_sub(visible_len(&name));
-            let size = if *dir { String::new() } else { crate::gui::human(*size) };
+            let size = if *dir { String::new() } else { crate::files::human(*size) };
             let when = crate::files::local_time(*mtime);
             let style = if i == self.files.sel { "\x1b[7m" } else if *dir { "\x1b[34;1m" } else { "" };
             rows.push((format!("   {name}{} {size:>size_w$}  {when}", " ".repeat(pad)), style));
@@ -998,7 +998,7 @@ impl Viewer {
     /// The status line in the files view: the selection, and the transfers going on.
     fn files_line(&self) -> String {
         let sel = self.files.shown().get(self.files.sel).map(|e| {
-            let what = if e.dir { "folder".to_string() } else { crate::gui::human(e.size) };
+            let what = if e.dir { "folder".to_string() } else { crate::files::human(e.size) };
             let when = crate::files::local_time(e.mtime);
             if when.is_empty() { format!("{}  {what}", e.name) } else { format!("{}  {what}  {when}", e.name) }
         });
@@ -1071,6 +1071,7 @@ impl Viewer {
             KeyCode::Char('o') => {
                 let dir = crate::files::downloads();
                 let _ = std::fs::create_dir_all(&dir);
+                #[cfg(feature = "gui")]
                 crate::tools::open_path(&dir);
                 return self.notify(&format!("Opened {}", dir.display()));
             }
@@ -1724,9 +1725,16 @@ impl Viewer {
     }
 }
 
+/// What a build without windows says when one is asked for.
+#[cfg(not(feature = "gui"))]
+pub const NO_WINDOWS: &str = "this sshremote has no windows (a build for the command line and services)";
+
 pub fn run(opt: Options) -> Result<(), String> {
     if opt.gui {
+        #[cfg(feature = "gui")]
         return crate::gui::run(&opt);
+        #[cfg(not(feature = "gui"))]
+        return Err(NO_WINDOWS.into());
     }
     let (sess, tx, rx) = Session::connect(&opt)?;
     let mut v = Viewer::new(&opt, sess, if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) });

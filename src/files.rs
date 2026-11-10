@@ -414,6 +414,17 @@ fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
     (local.wYear as i64, local.wMonth as u32, local.wDay as u32, local.wHour as u32, local.wMinute as u32)
 }
 
+
+/// A size for people: 1.5 MB.
+pub(crate) fn human(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MB", n as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

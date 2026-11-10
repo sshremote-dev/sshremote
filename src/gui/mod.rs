@@ -975,14 +975,7 @@ fn tab_ghost(ctx: &egui::Context, glyph: &str, name: &str, panes: usize, at: Pos
     });
 }
 
-pub(crate) fn human(n: u64) -> String {
-    match n {
-        0..1024 => format!("{n} B"),
-        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
-        1_048_576..1_073_741_824 => format!("{:.1} MB", n as f64 / 1_048_576.0),
-        _ => format!("{:.1} GB", n as f64 / 1_073_741_824.0),
-    }
-}
+pub(crate) use crate::files::human;
 
 #[cfg(test)]
 mod tests {

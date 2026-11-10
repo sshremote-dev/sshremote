@@ -1,3 +1,5 @@
+// Without windows, much is there for the windows only.
+#![cfg_attr(not(feature = "gui"), allow(dead_code, unused_imports))]
 mod admin;
 mod agent;
 mod audio;
@@ -12,14 +14,18 @@ mod color;
 mod conpty;
 mod ext;
 mod files;
+#[cfg(feature = "gui")]
 mod filewin;
+#[cfg(feature = "gui")]
 mod gui;
 mod hosts;
 #[cfg(windows)]
+#[cfg(feature = "gui")]
 mod keygrab;
 mod keys;
 mod license;
 mod modules;
+#[cfg(feature = "gui")]
 mod markdown;
 #[cfg(feature = "mcp")]
 mod mcp;
@@ -37,7 +43,9 @@ mod shot;
 mod sixel;
 mod script;
 mod sys;
+#[cfg(feature = "gui")]
 mod termwin;
+#[cfg(feature = "gui")]
 mod tools;
 mod transport;
 mod ui;
@@ -368,6 +376,7 @@ fn options(args: &[String], known: &[&str]) -> Result<std::collections::HashMap<
 /// Runs what the command line asks for.
 fn run(args: &[String]) -> Result<(), String> {
     match args[0].as_str() {
+        #[cfg(feature = "gui")]
         "terminal" => terminal(&args[1..]),
         #[cfg(windows)]
         "--install-service" => service::install(),
@@ -381,9 +390,13 @@ fn run(args: &[String]) -> Result<(), String> {
             net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
         }
         "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
+        #[cfg(feature = "gui")]
         "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
+        #[cfg(feature = "gui")]
         "--stats" => gui::look::print_stats(),
+        #[cfg(not(feature = "gui"))]
+        "--chat-window" | "--stats" | "terminal" => Err(client::NO_WINDOWS.into()),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
         "license" => license::cli(&args[1..]),
@@ -415,6 +428,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "gui")]
 /// `terminal [HOST [PORT]] [--split HOST] [--split-down HOST] [--view V] [-- CMD...]`.
 fn terminal(args: &[String]) -> Result<(), String> {
     // "local" is a shell here.

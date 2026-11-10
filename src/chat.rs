@@ -6,8 +6,10 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+#[cfg(feature = "gui")]
 use std::time::Duration;
 
+#[cfg(feature = "gui")]
 use eframe::egui::{self, Color32, RichText};
 
 /// One message per line: backslashes and newlines escaped.
@@ -112,6 +114,7 @@ fn viewer_name() -> String {
 }
 
 /// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
+#[cfg(feature = "gui")]
 pub fn run_window(name: String) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -146,6 +149,7 @@ pub fn run_window(name: String) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "gui")]
 struct ChatApp {
     incoming: Receiver<String>,
     /// (from the viewer, text)
@@ -157,6 +161,7 @@ struct ChatApp {
     name: String,
 }
 
+#[cfg(feature = "gui")]
 impl eframe::App for ChatApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -355,12 +360,14 @@ pub fn clear_history(host: &str) {
 
 /// The conversation as message bubbles, as in a messaging app: the other side's on the left with
 /// their name over the first of a run, one's own on the right in the accent colour.
+#[cfg(feature = "gui")]
 pub fn show_lines(ui: &mut egui::Ui, lines: &[Line], them: &str, me: &str) {
     show_lines_since(ui, lines, 0, them, me);
 }
 
 /// One message as a row of text, as in Slack: the first of a run under the sender's initial and
 /// name, the next ones under it; no bubble, only a faint tint on the row under the pointer.
+#[cfg(feature = "gui")]
 fn message(ui: &mut egui::Ui, theirs: bool, who: &str, text: &str, at: u64, first: bool, width: f32) {
     const AVATAR: f32 = 28.0;
     const GAP: f32 = 10.0;
@@ -404,6 +411,7 @@ fn message(ui: &mut egui::Ui, theirs: bool, who: &str, text: &str, at: u64, firs
 }
 
 /// Like `show_lines`, with the first `earlier` messages from before this session set apart.
+#[cfg(feature = "gui")]
 pub fn show_lines_since(ui: &mut egui::Ui, lines: &[Line], earlier: usize, them: &str, me: &str) {
     if lines.is_empty() {
         ui.add_space(ui.available_height() * 0.3);
@@ -435,6 +443,7 @@ pub fn show_lines_since(ui: &mut egui::Ui, lines: &[Line], earlier: usize, them:
 }
 
 /// A message field with a send button inside it; Enter sends. Returns the text when sent.
+#[cfg(feature = "gui")]
 pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option<String> {
     let mut sent = None;
     let field = ui.visuals().extreme_bg_color;

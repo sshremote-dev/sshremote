@@ -14,8 +14,10 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "gui")]
 use eframe::egui::{self, RichText};
 
+#[cfg(feature = "gui")]
 use crate::gui::ic;
 
 /// What extensions this program can read.
@@ -550,6 +552,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 
 /// The Extensions tool: what is installed, what the registry offers, installing from a file.
 #[derive(Default)]
+#[cfg(feature = "gui")]
 pub struct ExtTool {
     offers: Option<Result<Vec<Offer>, String>>,
     loading: Option<std::sync::mpsc::Receiver<Result<Vec<Offer>, String>>>,
@@ -559,6 +562,7 @@ pub struct ExtTool {
     license_file: String,
 }
 
+#[cfg(feature = "gui")]
 impl ExtTool {
     pub fn new() -> Self {
         ExtTool { registry: registry_url(), ..Default::default() }
