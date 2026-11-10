@@ -22,7 +22,9 @@ const MEMORY: usize = 64 << 20;
 const OUTPUT: usize = 1 << 20;
 
 /// What a script may be given and may do, as extension.json names them.
-pub const PERMISSIONS: [(&str, &str); 3] = [
+pub const PERMISSIONS: [(&str, &str); 5] = [
+    ("workspace.open", "Open terminals in the workspace"),
+    ("workspace.read", "Know which tabs and hosts are open"),
     ("native", "Run its own program on this computer, with your rights"),
     ("terminal.selection", "Read the text selected in a terminal when you run its command"),
     ("terminal.write", "Type its result into the terminal (as a paste you can still edit)"),
@@ -94,6 +96,7 @@ fn trap(e: wasmi::Error, store: &Store<State>) -> String {
 pub fn commands() -> Vec<Command> {
     crate::ext::installed()
         .into_iter()
+        .filter(|m| m.main.is_some())
         .flat_map(|m| m.commands.iter().map(|(id, label)| Command { ext: m.id.clone(), id: id.clone(), label: label.clone() }).collect::<Vec<_>>())
         .collect()
 }

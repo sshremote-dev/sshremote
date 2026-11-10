@@ -690,6 +690,24 @@ fn inline(text: &str, size: f32, th: &Theme, strong: bool) -> (LayoutJob, Links)
     (job, links)
 }
 
+thread_local!(static ACTIONS: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) });
+
+/// A link clicked: an extension panel's own links go back to the extension as actions, others open.
+fn follow(url: &str) {
+    let caught = url.starts_with("sshremote:") && ACTIONS.with(|a| a.borrow_mut().as_mut().map(|v| v.push(url.to_string())).is_some());
+    if !caught {
+        crate::termwin::open_url(url);
+    }
+}
+
+/// Runs `f` (drawing a document) and returns the `sshremote:` links clicked in it meanwhile.
+pub fn catch_actions<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    ACTIONS.with(|a| *a.borrow_mut() = Some(Vec::new()));
+    let r = f();
+    let caught = ACTIONS.with(|a| a.borrow_mut().take()).unwrap_or_default();
+    (r, caught)
+}
+
 /// Lays out and draws inline text that wraps to the width, opens links on click and can be selected.
 fn rich(ui: &mut egui::Ui, text: &str, size: f32, th: &Theme, strong: bool) {
     let (mut job, links) = inline(text, size, th, strong);
@@ -704,7 +722,7 @@ fn rich(ui: &mut egui::Ui, text: &str, size: f32, th: &Theme, strong: bool) {
     if let Some((_, url)) = over {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         if r.clicked() {
-            crate::termwin::open_url(url);
+            follow(url);
         }
         r.on_hover_text(url.as_str());
     }
@@ -1004,14 +1022,14 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
     let pad = Vec2::new(13.0, 6.0);
     // Column widths from the cells' natural widths, each capped so long text wraps.
     let lay = |ui: &egui::Ui, text: &str, head: bool, width: f32| {
-        let (mut job, _) = inline(text, BODY, th, head);
+        let (mut job, links) = inline(text, BODY, th, head);
         job.wrap.max_width = width;
-        ui.ctx().fonts_mut(|f| f.layout_job(job))
+        (ui.ctx().fonts_mut(|f| f.layout_job(job)), links)
     };
     let mut widths = vec![30.0f32; cols];
     for (r, row) in rows.iter().enumerate() {
         for (c, cell) in row.iter().enumerate() {
-            widths[c] = widths[c].max(lay(ui, cell, r == 0, f32::INFINITY).size().x.min(380.0));
+            widths[c] = widths[c].max(lay(ui, cell, r == 0, f32::INFINITY).0.size().x.min(380.0));
         }
     }
     let shown = egui::ScrollArea::horizontal().id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
@@ -1024,8 +1042,10 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
             })
             .collect();
         let heights: Vec<f32> =
-            galleys.iter().map(|row| row.iter().map(|g| g.size().y).fold(0.0, f32::max) + 2.0 * pad.y).collect();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(total, heights.iter().sum()), Sense::hover());
+            galleys.iter().map(|row| row.iter().map(|g| g.0.size().y).fold(0.0, f32::max) + 2.0 * pad.y).collect();
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, heights.iter().sum()), Sense::click());
+        let pointer = resp.hover_pos();
+        let mut over_link: Option<String> = None;
         let p = ui.painter();
         let mut y = rect.top();
         for (r, row) in galleys.iter().enumerate() {
@@ -1043,7 +1063,7 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
                 fill,
             );
             let mut x = rect.left();
-            for (c, g) in row.iter().enumerate() {
+            for (c, (g, links)) in row.iter().enumerate() {
                 let w = widths[c] + 2.0 * pad.x;
                 let free = widths[c] - g.size().x;
                 let dx = match align.get(c).copied().unwrap_or(Align::Left) {
@@ -1051,7 +1071,15 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
                     Align::Center => free / 2.0,
                     Align::Right => free,
                 };
-                p.galley(Pos2::new(x + pad.x + dx, y + pad.y), g.clone(), th.fg);
+                let at = Pos2::new(x + pad.x + dx, y + pad.y);
+                p.galley(at, g.clone(), th.fg);
+                // A link in the cell under the pointer.
+                if let Some(pt) = pointer.filter(|pt| !links.is_empty() && Rect::from_min_size(at, g.size()).contains(*pt)) {
+                    let i = g.cursor_from_pos(pt - at).index.0;
+                    if let Some((_, url)) = links.iter().find(|(r, _)| r.contains(&i)) {
+                        over_link = Some(url.clone());
+                    }
+                }
                 p.rect_stroke(
                     Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)),
                     CornerRadius::ZERO,
@@ -1061,6 +1089,13 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
                 x += w;
             }
             y += h;
+        }
+        if let Some(url) = over_link {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                follow(&url);
+            }
+            resp.on_hover_text(url);
         }
     });
     // Copied as tab-separated text, which spreadsheets take as cells.
@@ -1269,7 +1304,6 @@ pub fn block_text(b: &Block) -> String {
 }
 
 /// Draws a whole document in the colours of `th` (the background it is drawn on).
-#[cfg(test)]
 pub fn show(ui: &mut egui::Ui, doc: &Doc, id: egui::Id, th: &Theme) {
     blocks(ui, th, &doc.blocks, id);
 }

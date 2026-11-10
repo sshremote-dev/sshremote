@@ -20,6 +20,7 @@ mod color;
 #[cfg(feature = "remote")]
 mod conpty;
 mod ext;
+mod exthost;
 #[cfg(feature = "remote")]
 mod files;
 #[cfg(all(feature = "gui", feature = "remote"))]

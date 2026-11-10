@@ -84,6 +84,19 @@ fn remote_args(target: &Target, mode: PaneMode) -> Vec<String> {
     a
 }
 
+/// A pane as extensions are told of it: its label, what it shows, and the host.
+fn pane_info(p: &Pane) -> serde_json::Value {
+    let host = match &p.target {
+        Target::Ssh { host, .. } => host.clone(),
+        _ => String::new(),
+    };
+    let mode = match &p.state {
+        State::Live(r) => r.mode(),
+        _ => p.mode,
+    };
+    serde_json::json!({ "pane": p.id, "label": p.label, "mode": mode.name(), "host": host })
+}
+
 /// Where a saved pane connects: no password, which is asked for again.
 fn target_json(t: &Target) -> Option<serde_json::Value> {
     use serde_json::json;
@@ -476,6 +489,11 @@ pub(super) struct Workspace {
     pub(super) failed: Option<String>,
     /// A host refused the login: the dialog asking how to sign in.
     signin: Option<super::signin::SignIn>,
+    /// The extensions' side panel, and the command palette while open (its filter and choice).
+    side: super::extui::Side,
+    palette: Option<(String, usize)>,
+    /// The panes the extensions were last told of.
+    told: Vec<u64>,
     /// The width the active pane's controls took last frame, to know when they must fold.
     controls_w: f32,
     /// The tab being dragged (to a new place, or out into a window of its own).
@@ -536,6 +554,9 @@ impl Workspace {
             reached: Vec::new(),
             failed: None,
             signin: None,
+            side: Default::default(),
+            palette: None,
+            told: Vec::new(),
             controls_w: 260.0,
             dragging: None,
             grab_dx: 0.0,
@@ -854,6 +875,72 @@ impl Workspace {
         self.sign_in(ctx);
     }
 
+    /// What extensions ask of the workspace, the command palette, and what they are told.
+    fn extensions(&mut self, ctx: &egui::Context) {
+        for r in crate::exthost::take_requests() {
+            match r {
+                crate::exthost::Request::OpenTerminal { argv, label, split } => self.open_command(argv, label, split),
+                crate::exthost::Request::Paste(text) => ctx.input_mut(|i| i.events.push(egui::Event::Paste(text))),
+            }
+        }
+        if let Some((filter, at)) = &mut self.palette {
+            match super::extui::palette(ctx, filter, at) {
+                Some(Some(e)) => {
+                    self.palette = None;
+                    self.run_entry(e, ctx);
+                }
+                Some(None) => self.palette = None,
+                None => {}
+            }
+        }
+        // Panes opened and closed, for the extensions that watch the workspace.
+        let now: Vec<u64> = self.panes.iter().map(|p| p.id).collect();
+        if now != self.told {
+            for p in self.panes.iter().filter(|p| !self.told.contains(&p.id)) {
+                crate::exthost::event("pane.opened", pane_info(p));
+            }
+            for id in self.told.iter().filter(|id| !now.contains(id)) {
+                crate::exthost::event("pane.closed", serde_json::json!({ "pane": id }));
+            }
+            self.told = now;
+        }
+    }
+
+    /// A terminal running `argv` (the login shell when empty), in a tab or beside the active pane.
+    fn open_command(&mut self, argv: Vec<String>, label: String, split: Option<bool>) {
+        let local = crate::termwin::local_profiles().into_iter().next().expect("a local shell");
+        let label = if label.is_empty() { argv.first().cloned().unwrap_or_else(|| local.name.clone()) } else { label };
+        let profile = if argv.is_empty() { local } else { crate::termwin::Profile { name: label.clone(), icon: super::ic::TERMINAL, launch: crate::termwin::Launch::Local(argv) } };
+        let launch = Launch::Shell { profile, label, target: Target::Local { capture: "auto".into() }, ssh_cmd: None };
+        let place = match split {
+            Some(below) if !self.tabs.is_empty() => Place::Split { below },
+            _ => Place::Tab,
+        };
+        self.add(launch, place, (false, false, false));
+    }
+
+    fn run_entry(&mut self, e: super::extui::Entry, ctx: &egui::Context) {
+        use super::extui::Run;
+        match e.run {
+            Run::Host { ext, id } => crate::exthost::command(&ext, &id, ""),
+            Run::Script(c) => match crate::script::run_command(&c, "", "") {
+                Ok((text, true)) if !text.is_empty() => ctx.input_mut(|i| i.events.push(egui::Event::Paste(text))),
+                Ok((text, _)) => ctx.copy_text(text),
+                Err(err) => self.failed = Some(err),
+            },
+            Run::Builtin("tab") => self.picker = Some(Place::Tab),
+            Run::Builtin("right") => self.picker = Some(Place::Split { below: false }),
+            Run::Builtin("down") => self.picker = Some(Place::Split { below: true }),
+            Run::Builtin(_) => self.side.open = !self.side.open,
+            Run::Project(name) => match super::project::load(&name) {
+                Ok(v) => {
+                    self.restore(&v);
+                }
+                Err(err) => self.failed = Some(err),
+            },
+        }
+    }
+
     /// A host that refused the login is asked about once: the dialog with what it is, then the
     /// connection tried again with what was typed.
     fn sign_in(&mut self, ctx: &egui::Context) {
@@ -1032,7 +1119,8 @@ impl Workspace {
                 self.reveal_until = now + 0.6;
             }
         }
-        let area = ui.available_rect_before_wrap();
+        self.extensions(&ctx);
+        let area = super::extui::edges(ui, ui.available_rect_before_wrap(), &mut self.side);
         self.panes_area = area;
         self.shortcuts(&ctx, area);
         let full = self.window_full;
@@ -1220,6 +1308,8 @@ impl Workspace {
             self.set_zoom(ctx, z);
         } else if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
+        } else if take(cs, Key::P) {
+            self.palette = Some((String::new(), 0));
         } else if take(cs, Key::W) {
             self.confirm = Some(Confirm::Pane(active));
         } else if take(cs, Key::Tab) && !self.tabs.is_empty() {
@@ -2726,6 +2816,58 @@ mod tests {
     }
 
     /// Every pane can fill the window: a terminal gets the button among its controls.
+    /// What extensions add, driven as a user would: a panel's link goes back to its extension as
+    /// an action, the palette runs what is chosen, and a terminal asked for opens.
+    #[test]
+    fn extensions_show_panels_take_commands_and_open_terminals() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        let md = "Tunnels
+
+| Host | |
+|---|---|
+| db | [Start](sshremote:start?host=db) |
+";
+        crate::exthost::test_message("t.panel", serde_json::json!({ "method": "panel.show", "params": { "id": "p", "title": "Tunnels here", "markdown": md } }));
+        crate::exthost::test_message("t.panel", serde_json::json!({ "method": "status.set", "params": { "id": "n", "text": "2 tunnels" } }));
+        for _ in 0..4 {
+            h.frame(Vec::new());
+        }
+        assert!(!h.snap.find("Tunnels here").is_empty() && !h.snap.find("2 tunnels").is_empty(), "the panel and the status item show");
+        if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
+            h.snap.save(&h.ctx, h.size, &std::path::Path::new(&dir).join("ext_panel.png"));
+        }
+        let start = h.snap.find("Start")[0].center();
+        crate::exthost::test_sent();
+        h.frame(vec![Event::PointerMoved(start)]);
+        let press = |pressed| Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        h.frame(vec![press(true)]);
+        h.frame(vec![press(false)]);
+        let sent = crate::exthost::test_sent();
+        assert!(
+            sent.iter().any(|(e, m, p)| e == "t.panel" && m == "action" && p["action"] == "start" && p["args"]["host"] == "db"),
+            "the link came back as an action: {sent:?}"
+        );
+        // The palette: Ctrl+Shift+P, a filter, Enter.
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.frame(vec![Event::PointerMoved(Pos2::new(300.0, 300.0))]);
+        h.frame(Vec::new());
+        h.frame(vec![key(egui::Key::P, egui::Modifiers::CTRL | egui::Modifiers::SHIFT)]);
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(!h.snap.find("Split down").is_empty(), "the palette lists the workspace's commands");
+        h.frame(vec![Event::Text("split down".into())]);
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        assert_eq!(h.w.picker, Some(Place::Split { below: true }), "Enter ran the command");
+        h.w.picker = None;
+        // A terminal an extension asks for opens beside the active pane.
+        crate::exthost::test_request(crate::exthost::Request::OpenTerminal { argv: vec!["ssh".into(), "db".into()], label: "db".into(), split: Some(false) });
+        h.frame(Vec::new());
+        assert!(h.w.panes.iter().any(|p| p.label == "db"), "the terminal opened");
+        crate::exthost::test_message("t.panel", serde_json::json!({ "method": "exit" }));
+    }
+
     /// The tabs kept and opened again: the same splits, programs, views and hosts, and never a
     /// password.
     #[test]

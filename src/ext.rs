@@ -21,7 +21,7 @@ use eframe::egui::{self, RichText};
 use crate::gui::ic;
 
 /// What extensions this program can read.
-pub const API: u64 = 1;
+pub const API: u64 = 2;
 /// Where the registry's index is unless a setting names another (a company's own mirror).
 pub const REGISTRY: &str = "https://sshremote.dev/registry/v1/index.json";
 
@@ -39,6 +39,8 @@ pub struct Manifest {
     /// Its own programs, by platform ("windows-x86_64"), and the commands they serve ("web").
     pub programs: Vec<(String, String)>,
     pub provides: Vec<String>,
+    /// "startup": its program runs beside the app, talking with the extension host.
+    pub activation: Option<String>,
 }
 
 /// A background layer an extension brings.
@@ -151,7 +153,12 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
     if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
         return Err("extension.json brings programs without the \"native\" permission".into());
     }
+    let activation = v.get("activation").and_then(|x| x.as_str()).map(str::to_string);
+    if activation.is_some() && programs.is_empty() {
+        return Err("extension.json has an activation but no program to run".into());
+    }
     Ok(Manifest {
+        activation,
         programs,
         provides,
         name: if s("name").is_empty() { id.clone() } else { s("name") },
@@ -215,6 +222,8 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
             std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
         }
     }
+    #[cfg(not(test))]
+    crate::exthost::stop(&m.id);
     let place = root.join(&m.id);
     let old = root.join(format!(".{}.old", m.id));
     let _ = std::fs::remove_dir_all(&old);
@@ -222,8 +231,13 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
         std::fs::rename(&place, &old).map_err(|e| e.to_string())?;
     }
     std::fs::rename(&fresh, &place).map_err(|e| e.to_string())?;
-    changed();
+    changed_id(&m.id);
     Ok(m)
+}
+
+/// An installed extension's folder.
+pub fn folder(id: &str) -> Option<PathBuf> {
+    valid_id(id).then(|| root().map(|r| r.join(id))).flatten()
 }
 
 /// This computer's platform as extensions name it.
@@ -291,9 +305,11 @@ pub fn remove(id: &str) -> Result<(), String> {
         return Err("no such extension".into());
     }
     let root = root().ok_or("no settings folder")?;
+    #[cfg(not(test))]
+    crate::exthost::stop(id);
     std::fs::remove_dir_all(root.join(id)).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(root.join(format!(".{id}.old")));
-    changed();
+    changed_id(id);
     Ok(())
 }
 
@@ -304,10 +320,12 @@ pub fn roll_back(id: &str) -> Result<(), String> {
     if !valid_id(id) || !old.exists() {
         return Err("no earlier version kept".into());
     }
+    #[cfg(not(test))]
+    crate::exthost::stop(id);
     let place = root.join(id);
     let _ = std::fs::remove_dir_all(&place);
     std::fs::rename(old, place).map_err(|e| e.to_string())?;
-    changed();
+    changed_id(id);
     Ok(())
 }
 
@@ -352,11 +370,23 @@ pub fn layers() -> Vec<(String, String, bool)> {
     cache.get_or_insert_with(read_layers).clone()
 }
 
+/// The extension last installed, updated or removed, for the host to run again as it now is.
+static CHANGED_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn changed_id(id: &str) {
+    *CHANGED_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+    changed();
+}
+
 /// Read once; installing and removing read again.
 static LAYERS: std::sync::Mutex<Option<Vec<(String, String, bool)>>> = std::sync::Mutex::new(None);
 
 fn changed() {
     *LAYERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    #[cfg(not(test))]
+    if let Some(id) = CHANGED_ID.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        crate::exthost::reload(&id);
+    }
     UPDATES.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
 }
 
@@ -681,6 +711,15 @@ impl ExtTool {
                 let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
                 ui.label(RichText::new(format!("Brings: {}", cmds.join(", "))).weak().size(12.0));
             }
+            if m.activation.is_some() {
+                ui.horizontal(|ui| {
+                    let on = crate::exthost::running(&m.id);
+                    ui.label(RichText::new(if on { "Running beside the app" } else { "Not running" }).weak().size(12.0));
+                    if ui.small_button(if on { "Restart" } else { "Start" }).clicked() {
+                        crate::exthost::reload(&m.id);
+                    }
+                });
+            }
             for p in &m.permissions {
                 let text = crate::script::PERMISSIONS.iter().find(|(k, _)| k == p).map_or(p.as_str(), |(_, t)| *t);
                 ui.label(RichText::new(format!("May: {text}")).weak().size(12.0));
@@ -747,6 +786,17 @@ impl ExtTool {
             }
         });
         ui.add_space(8.0);
+        let log = crate::exthost::log();
+        if !log.is_empty() {
+            egui::CollapsingHeader::new("What extensions reported").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
+                    for line in log.iter().rev().take(200).rev() {
+                        ui.label(RichText::new(line).monospace().size(11.0));
+                    }
+                });
+            });
+            ui.add_space(8.0);
+        }
         ui.label(RichText::new("Modules").strong());
         ui.label(RichText::new("Parts of the app beyond the terminal; one turned off leaves the menus.").weak().size(12.0));
         crate::modules::ui(ui);

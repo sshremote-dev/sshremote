@@ -35,6 +35,7 @@ mod lottie;
 pub(crate) mod snapshot;
 mod project;
 mod signin;
+mod extui;
 
 use remote::Remote;
 #[cfg(not(feature = "remote"))]
@@ -343,7 +344,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let project = opt.project.clone();
     let size = if auto_start || project.is_some() || project::last().is_some() { [1280.0, 800.0] } else { OPEN_SIZE };
     let native = native_options("SSH Remote", size);
-    eframe::run_native(
+    let r = eframe::run_native(
         "sshremote",
         native,
         Box::new(move |cc| {
@@ -354,6 +355,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
             let grabbed = None;
             let mut app = App::new(form, budget, &open, grabbed);
             std::thread::spawn(crate::backup::auto);
+            let ctx = cc.egui_ctx.clone();
+            crate::exthost::start(move || ctx.request_repaint());
             if auto_start {
                 app.connect(local);
             } else if let Some(name) = &project {
@@ -368,7 +371,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
             Ok(Box::new(app))
         }),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    crate::exthost::stop_all();
+    r
 }
 
 /// Window options shared by the viewer and the chat window.
@@ -681,7 +686,7 @@ impl TermStart {
 pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Option<String>) -> Result<(), String> {
     let opt = crate::parse_client(&["--gui".into()])?;
     let native = native_options("SSH Remote", [960.0, 600.0]);
-    eframe::run_native(
+    let r = eframe::run_native(
         "sshremote",
         native,
         Box::new(move |cc| {
@@ -691,6 +696,8 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
             #[cfg(not(windows))]
             let grabbed = None;
             let mut app = App::new(Form::from(&opt), opt.budget, "", grabbed);
+            let ctx = cc.egui_ctx.clone();
+            crate::exthost::start(move || ctx.request_repaint());
             let mut w = workspace::Workspace::new(app.options());
             w.add(first.launch(), Place::Tab, (false, false, false));
             for (p, side) in panes {
@@ -704,7 +711,9 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
             Ok(Box::new(app))
         }),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    crate::exthost::stop_all();
+    r
 }
 
 /// The open window's size, about a file dialog's.
@@ -715,6 +724,7 @@ pub(crate) const MIN_WORK: [f32; 2] = [760.0, 480.0];
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::exthost::pump();
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         // The open window is not dressed in the look: that is for the working windows.
         look::PLAIN.store(matches!(self.screen, Screen::Connect), std::sync::atomic::Ordering::Relaxed);
