@@ -445,7 +445,13 @@ pub fn offers() -> Result<Vec<Offer>, String> {
             list.iter()
                 .filter_map(|e| {
                     let s = |k: &str| e.get(k).and_then(|x| x.as_str()).map(str::to_string);
-                    let url = s("url")?;
+                    // A native extension is packed for each platform: this one's, or none here.
+                    let pkg = match e.get("platforms") {
+                        Some(p) => p.get(platform())?,
+                        None => e,
+                    };
+                    let p = |k: &str| pkg.get(k).and_then(|x| x.as_str()).map(str::to_string);
+                    let url = p("url")?;
                     Some(Offer {
                         id: s("id").filter(|i| valid_id(i))?,
                         name: s("name").unwrap_or_default(),
@@ -453,7 +459,7 @@ pub fn offers() -> Result<Vec<Offer>, String> {
                         description: s("description").unwrap_or_default(),
                         // Relative to the index, as the registry lays packages out beside it.
                         url: if url.contains("://") { url } else { format!("{base}/{url}") },
-                        sha256: s("sha256")?.to_lowercase(),
+                        sha256: p("sha256")?.to_lowercase(),
                         premium: e.get("premium").and_then(|x| x.as_bool()).unwrap_or(false),
                     })
                 })
@@ -810,6 +816,16 @@ mod tests {
         }
         remove("dev.sshremote.test-gw").unwrap();
         assert!(provider("web").is_none());
+        // In the registry it is packed for each platform; only this one's is offered here.
+        let index = d.join("index.json");
+        std::fs::write(&index, format!(r#"{{"api":1,"extensions":[
+            {{"id":"dev.sshremote.test-gw","version":"1","platforms":{{"{here}":{{"url":"gw-here.sshx","sha256":"AB"}},"plan9-mips":{{"url":"gw-p9.sshx","sha256":"cd"}}}}}},
+            {{"id":"dev.sshremote.test-other","version":"1","platforms":{{"plan9-mips":{{"url":"o.sshx","sha256":"cd"}}}}}}]}}"#)).unwrap();
+        TEST_REGISTRY.with(|r| *r.borrow_mut() = Some(index.to_string_lossy().into_owned()));
+        let o = offers().unwrap();
+        assert_eq!(o.len(), 1, "nothing for another platform");
+        assert!(o[0].url.ends_with("gw-here.sshx") && o[0].sha256 == "ab");
+        TEST_REGISTRY.with(|r| *r.borrow_mut() = None);
     }
 
     /// The live registry's signature is checked: good as published, refused once changed.
