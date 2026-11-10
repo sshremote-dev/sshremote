@@ -354,7 +354,9 @@ impl Remote {
         let strip = if docked { 0.0 } else { 42.0 };
         let area = if self.pinned { screen.with_min_y(screen.top() + strip) } else { screen };
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
-        ui.painter().rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
+        // Around the picture (scaled down, or of another shape), the background layers show, as
+        // behind the terminals; black when there are none.
+        super::look::backdrop(ui, area, Color32::BLACK);
         let inline = self.term_inline && self.terms.is_some();
         // Side panels, as in an editor: the chat on the right, the terminal along the bottom; the
         // picture takes what is left, so both can be used while watching.
