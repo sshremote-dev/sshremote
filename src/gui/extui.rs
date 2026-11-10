@@ -16,8 +16,8 @@ pub(super) struct Side {
     pub shown: Option<(String, String)>,
     /// The panel's document, made again when its text changes.
     doc: Option<(u64, crate::markdown::Doc)>,
-    /// What is typed for an extension's question.
-    pub answer: String,
+    /// What is typed for an extension's question, field by field.
+    pub answers: Vec<String>,
     /// The newest panel change looked at.
     seen: u64,
     /// The last notice from an extension, and when it came.
@@ -134,8 +134,11 @@ fn side_panel(ui: &mut egui::Ui, rect: Rect, panels: &[crate::exthost::Panel], s
 /// An extension's question, while one waits: a dialog with its prompt and a field.
 pub(super) fn question(ctx: &egui::Context, side: &mut Side) {
     let Some(a) = crate::exthost::ask() else { return };
-    let (modal, fit) = super::modal(ctx, "extension-question", Vec2::new(440.0, 200.0));
-    let mut done: Option<Option<String>> = None;
+    if side.answers.len() != a.fields.len() {
+        side.answers = a.fields.iter().map(|f| if f.kind == "choice" && f.value.is_empty() { f.choices[0].clone() } else { f.value.clone() }).collect();
+    }
+    let (modal, fit) = super::modal(ctx, "extension-question", Vec2::new(460.0, 120.0 + 40.0 * a.fields.len() as f32));
+    let mut done: Option<Option<Vec<String>>> = None;
     let r = modal.show(ctx, |ui| {
         ui.set_width(fit.x);
         let title = if a.title.is_empty() { a.name.clone() } else { format!("{}: {}", a.name, a.title) };
@@ -144,16 +147,43 @@ pub(super) fn question(ctx: &egui::Context, side: &mut Side) {
             ui.label(&a.prompt);
         }
         ui.add_space(6.0);
-        if side.answer.is_empty() && !a.value.is_empty() {
-            side.answer = a.value.clone();
-        }
-        let edit = ui.add(egui::TextEdit::singleline(&mut side.answer).password(a.secret).desired_width(fit.x));
-        edit.request_focus();
+        let one = a.fields.len() == 1 && a.fields[0].label.is_empty();
+        egui::Grid::new("extension-question-fields").num_columns(if one { 1 } else { 2 }).spacing([12.0, 6.0]).show(ui, |ui| {
+            for (n, f) in a.fields.iter().enumerate() {
+                if !one {
+                    ui.label(&f.label);
+                }
+                let v = &mut side.answers[n];
+                let width = if one { fit.x } else { fit.x - 150.0 };
+                match f.kind.as_str() {
+                    "bool" => {
+                        let mut on = v == "true";
+                        if ui.checkbox(&mut on, "").changed() {
+                            *v = on.to_string();
+                        }
+                    }
+                    "choice" => {
+                        egui::ComboBox::from_id_salt(("extension-question-choice", n)).selected_text(v.clone()).width(width).show_ui(ui, |ui| {
+                            for c in &f.choices {
+                                ui.selectable_value(v, c.clone(), c);
+                            }
+                        });
+                    }
+                    kind => {
+                        let e = ui.add(egui::TextEdit::singleline(v).password(kind == "secret").desired_width(width));
+                        if n == 0 && !ui.memory(|m| m.focused().is_some()) {
+                            e.request_focus();
+                        }
+                    }
+                }
+                ui.end_row();
+            }
+        });
         ui.add_space(8.0);
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.horizontal(|ui| {
-            if ui.add(theme::primary("OK")).clicked() || enter {
-                done = Some(Some(std::mem::take(&mut side.answer)));
+            if ui.add(theme::primary(a.submit.as_str())).clicked() || enter {
+                done = Some(Some(side.answers.clone()));
             }
             if ui.button("Cancel").clicked() {
                 done = Some(None);
@@ -164,7 +194,7 @@ pub(super) fn question(ctx: &egui::Context, side: &mut Side) {
         done = Some(None);
     }
     if let Some(v) = done {
-        side.answer.clear();
+        side.answers.clear();
         crate::exthost::answer(v);
     }
 }

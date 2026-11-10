@@ -338,6 +338,22 @@ pub fn parse_key(text: &str) -> Option<(u8, String)> {
     (mods & 5 != 0 || plain_ok).then_some((mods, key))
 }
 
+/// The times and sizes of the files in a folder (not its subfolders), to notice a change.
+fn folder_stamp(dir: &Path) -> String {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
+            let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+            Some(format!("{}:{t}:{}", e.file_name().to_string_lossy(), m.len()))
+        })
+        .collect();
+    v.sort();
+    v.join(",")
+}
+
 /// An installed extension's folder.
 pub fn folder(id: &str) -> Option<PathBuf> {
     valid_id(id).then(|| root().map(|r| r.join(id))).flatten()
@@ -696,6 +712,24 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // Packs and installs a folder whenever it changes; a running app starts the new version.
+        Some("dev") => {
+            let dir = Path::new(arg(1)?).to_path_buf();
+            let out = std::env::temp_dir().join(format!("sshremote-dev-{}.sshx", std::process::id()));
+            let mut seen = String::new();
+            println!("watching {} (Ctrl+C to stop)", dir.display());
+            loop {
+                let now = folder_stamp(&dir);
+                if now != seen {
+                    seen = now;
+                    match pack(&dir, &out).and_then(|_| install_file(&out)) {
+                        Ok(m) => println!("installed {} {} at {}", m.name, m.version, crate::license::today()),
+                        Err(e) => println!("not installed: {e}"),
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(700));
+            }
+        }
         Some("available") => {
             for o in offers()? {
                 println!("{}  {}  {}{}", o.id, o.version, o.name, if o.built_in() { "  (built in here)" } else { "" });
@@ -732,7 +766,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             println!("packed {} {}", m.id, m.version);
             Ok(())
         }
-        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | run ID COMMAND [TEXT] | pack DIR OUT.sshx".into()),
+        _ => Err("usage: sshremote ext list | available | install FILE-OR-ID | update | remove ID | roll-back ID | run ID COMMAND [TEXT] | pack DIR OUT.sshx | dev DIR".into()),
     }
 }
 

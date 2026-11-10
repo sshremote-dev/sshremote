@@ -8,7 +8,6 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use serde_json::{Value, json};
@@ -45,9 +44,38 @@ pub struct Ask {
     id: Value,
     pub title: String,
     pub prompt: String,
+    pub fields: Vec<Field>,
+    /// The button that sends the answers.
+    pub submit: String,
+    /// A form (answered with every field by id) rather than one question (answered with its value).
+    form: bool,
+}
+
+/// One field of a form: "text", "secret", "number", "bool" or "choice" (one of `choices`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
     pub value: String,
-    /// Typed as a password.
-    pub secret: bool,
+    pub choices: Vec<String>,
+}
+
+fn field_from(v: &Value) -> Option<Field> {
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let kind = match s("type").as_str() {
+        "" => "text".to_string(),
+        k @ ("text" | "secret" | "number" | "bool" | "choice") => k.to_string(),
+        _ => return None,
+    };
+    let value = match v.get("value") {
+        Some(Value::String(x)) => x.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(x) => x.to_string(),
+    };
+    let choices: Vec<String> = v.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let id = s("id");
+    (!id.is_empty() && (kind != "choice" || !choices.is_empty())).then(|| Field { label: if s("label").is_empty() { id.clone() } else { s("label") }, id, kind, value, choices })
 }
 
 /// What an extension asks of the workspace.
@@ -78,6 +106,10 @@ struct State {
     asks: Vec<Ask>,
     log: Vec<String>,
     rx: Option<Receiver<(String, Value)>>,
+    /// What each extension started from looked like (times and sizes), to notice a new version
+    /// installed from outside, and when that was last looked at.
+    stamps: std::collections::HashMap<String, String>,
+    looked: Option<std::time::Instant>,
     tx: Option<Sender<(String, Value)>>,
     next: u64,
     rev: u64,
@@ -86,7 +118,7 @@ struct State {
 }
 
 #[cfg(not(test))]
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+static STATE: std::sync::Mutex<Option<State>> = std::sync::Mutex::new(None);
 
 #[cfg(not(test))]
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -120,8 +152,12 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     let here = crate::ext::platform();
     let file = m.programs.iter().find(|(p, _)| *p == here).map(|(_, f)| f.clone()).ok_or("no program for this computer")?;
     let dir = crate::ext::folder(&m.id).ok_or("not installed")?;
-    let mut cmd = Command::new(dir.join(&file));
-    cmd.current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A copy runs, so the installed file is never held open: installing over it works while the
+    // app runs (Windows refuses to replace a running program).
+    let program = run_copy(&m.id, &dir.join(&file))?;
+    let mut cmd = Command::new(&program);
+    // Not in its own folder either, which Windows would then keep from being replaced.
+    cmd.current_dir(program.parent().unwrap_or(&dir)).env("SSHREMOTE_EXTENSION_DIR", &dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -164,6 +200,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         }
     });
     with(|s| {
+        s.stamps.insert(m.id.clone(), stamp(m));
         s.running.retain(|r| r.id != m.id);
         s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), stdin, child });
     });
@@ -171,12 +208,78 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         "api": API,
         "app": env!("CARGO_PKG_VERSION"),
         "platform": here,
-        "extension": { "id": m.id, "version": m.version },
+        "extension": { "id": m.id, "version": m.version, "folder": dir.to_string_lossy() },
         "permissions": m.permissions,
         "settings": crate::ext::settings_json(m),
     });
     request(&m.id, "initialize", params);
     Ok(())
+}
+
+/// The program copied out of the extension's folder, once for each version of it.
+fn run_copy(id: &str, program: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let meta = std::fs::metadata(program).map_err(|e| format!("{}: {e}", program.display()))?;
+    let when = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
+    let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = std::env::temp_dir().join("sshremote-extensions").join(id);
+    let copy = dir.join(format!("{when}-{}-{name}", meta.len()));
+    if !copy.is_file() {
+        // Earlier versions' copies go, unless one still runs.
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::copy(program, &copy).map_err(|e| format!("{}: {e}", copy.display()))?;
+    }
+    Ok(copy)
+}
+
+/// What an installed extension looks like on disk: its manifest's and programs' times and sizes.
+fn stamp(m: &crate::ext::Manifest) -> String {
+    let Some(dir) = crate::ext::folder(&m.id) else { return String::new() };
+    std::iter::once("extension.json".to_string())
+        .chain(m.programs.iter().map(|(_, f)| f.clone()))
+        .filter_map(|f| {
+            let meta = std::fs::metadata(dir.join(&f)).ok()?;
+            let t = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+            Some(format!("{f}:{t}:{}", meta.len()))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Every two seconds: extensions installed, updated or removed from outside (the command line,
+/// `sshremote ext dev`) start, start again or stop.
+fn look_for_changes() {
+    let due = with(|s| {
+        let due = s.waker.is_some() && s.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(2));
+        if due {
+            s.looked = Some(std::time::Instant::now());
+        }
+        due
+    });
+    if !due {
+        return;
+    }
+    let installed: Vec<crate::ext::Manifest> = crate::ext::installed().into_iter().filter(|m| m.activation.as_deref() == Some("startup")).collect();
+    let running: Vec<String> = with(|s| s.running.iter().map(|r| r.id.clone()).collect());
+    for id in &running {
+        if !installed.iter().any(|m| &m.id == id) {
+            stop(id);
+        }
+    }
+    for m in &installed {
+        let (known, was) = with(|s| (s.stamps.contains_key(&m.id), s.stamps.get(&m.id).cloned()));
+        let now = stamp(m);
+        if !known || was.as_deref() != Some(now.as_str()) {
+            with(|s| s.stamps.insert(m.id.clone(), now));
+            if known || !running.contains(&m.id) {
+                reload(&m.id);
+            }
+        }
+    }
 }
 
 fn keep_log(s: &mut State, line: String) {
@@ -234,6 +337,7 @@ fn reply(ext: &str, id: &Value, result: Result<Value, String>) {
 /// What the extensions said since the last frame: applied to the status bar and panels, and
 /// what they ask of the workspace kept for it to take.
 pub fn pump() {
+    look_for_changes();
     let msgs: Vec<(String, Value)> = with(|s| s.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default());
     for (ext, msg) in msgs {
         handle(&ext, &msg);
@@ -295,12 +399,23 @@ fn handle(ext: &str, msg: &Value) {
             let need = if method == "terminal.open" { "workspace.open" } else { "terminal.write" };
             Err(format!("{method} needs the \"{need}\" permission in extension.json"))
         }
-        "input.ask" => {
+        "input.ask" | "input.form" => {
             let Some(id) = msg.get("id").cloned() else { return };
+            let form = method == "input.form";
+            let fields: Vec<Field> = if form {
+                p.get("fields").and_then(|f| f.as_array()).map(|a| a.iter().filter_map(field_from).collect()).unwrap_or_default()
+            } else {
+                let kind = if p.get("secret").and_then(|x| x.as_bool()).unwrap_or(false) { "secret" } else { "text" };
+                vec![Field { id: "value".into(), label: String::new(), kind: kind.into(), value: str_of("value"), choices: Vec::new() }]
+            };
+            if fields.is_empty() {
+                reply(ext, &id, Err("a form needs fields".into()));
+                return;
+            }
             with(|s| {
                 let name = s.running.iter().find(|r| r.id == ext).map_or(ext.to_string(), |r| r.name.clone());
-                let ask = Ask { ext: ext.into(), name, id, title: str_of("title"), prompt: str_of("prompt"), value: str_of("value"), secret: p.get("secret").and_then(|x| x.as_bool()).unwrap_or(false) };
-                s.asks.push(ask);
+                let submit = if str_of("submit").is_empty() { "OK".to_string() } else { str_of("submit") };
+                s.asks.push(Ask { ext: ext.into(), name, id, title: str_of("title"), prompt: str_of("prompt"), fields, submit, form });
             });
             // Answered when the user is done.
             return;
@@ -420,9 +535,23 @@ pub fn ask() -> Option<Ask> {
 }
 
 /// The answer to the question shown: the text, or None when it was cancelled.
-pub fn answer(value: Option<String>) {
+pub fn answer(values: Option<Vec<String>>) {
     let Some(a) = with(|s| (!s.asks.is_empty()).then(|| s.asks.remove(0))) else { return };
-    let result = value.map(|v| json!({ "value": v })).ok_or_else(|| "cancelled".to_string());
+    let result = values
+        .map(|v| {
+            let typed = |f: &Field, x: &str| match f.kind.as_str() {
+                "bool" => json!(x == "true"),
+                "number" => x.trim().parse::<f64>().map_or(json!(x), |n| json!(n)),
+                _ => json!(x),
+            };
+            if a.form {
+                let map: serde_json::Map<String, Value> = a.fields.iter().zip(&v).map(|(f, x)| (f.id.clone(), typed(f, x))).collect();
+                json!({ "values": map })
+            } else {
+                json!({ "value": v.first().cloned().unwrap_or_default() })
+            }
+        })
+        .ok_or_else(|| "cancelled".to_string());
     reply(&a.ext, &a.id, result);
 }
 
@@ -553,10 +682,25 @@ mod tests {
         // A question waits for its answer, which goes back as the reply.
         test_sent();
         handle("x.q", &json!({ "id": 9, "method": "input.ask", "params": { "title": "Port", "prompt": "Which port?", "value": "5432" } }));
-        assert_eq!(ask().map(|a| (a.title, a.value)), Some(("Port".into(), "5432".into())));
-        answer(Some("6543".into()));
+        assert_eq!(ask().map(|a| (a.title, a.fields[0].value.clone())), Some(("Port".into(), "5432".into())));
+        answer(Some(vec!["6543".into()]));
         assert!(ask().is_none());
         let sent = test_sent();
         assert!(sent.iter().any(|(e, m, p)| e == "x.q" && m == "reply" && p["id"] == 9 && p["result"]["value"] == "6543"), "{sent:?}");
+        // A form: its fields typed in the answer, by id; a bad field is left out.
+        handle("x.q", &json!({ "id": 10, "method": "input.form", "params": { "title": "Forward", "fields": [
+            { "id": "host", "type": "choice", "choices": ["db", "web"] },
+            { "id": "port", "type": "number", "value": 8080 },
+            { "id": "tls", "type": "bool" },
+            { "id": "odd", "type": "colour" }
+        ] } }));
+        let a = ask().unwrap();
+        assert_eq!(a.fields.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["host", "port", "tls"]);
+        assert_eq!(a.fields[1].value, "8080");
+        answer(Some(vec!["web".into(), "9090".into(), "true".into()]));
+        let sent = test_sent();
+        assert!(sent.iter().any(|(_, m, p)| m == "reply" && p["id"] == 10 && p["result"]["values"] == json!({ "host": "web", "port": 9090.0, "tls": true })), "{sent:?}");
+        handle("x.q", &json!({ "id": 11, "method": "input.form", "params": { "fields": [] } }));
+        assert!(ask().is_none() && test_sent().iter().any(|(_, m, p)| m == "reply" && p["id"] == 11 && p["error"].is_string()), "an empty form is refused");
     }
 }

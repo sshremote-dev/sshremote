@@ -91,12 +91,14 @@ From the extension to the app:
 | `panel.close` | `id` | |
 | `notify` | `text` | |
 | `input.ask` (a request) | `title`, `prompt`, `value`, `secret` | |
+| `input.form` (a request) | `title`, `prompt`, `submit`, `fields`: `id`, `label`, `type` (`text`, `secret`, `number`, `bool`, `choice`), `value`, `choices` | |
 | `log` | `text` | |
 | `terminal.open` | `argv` (empty: the login shell), `label`, `split` (`right`, `down`, or a new tab) | `workspace.open` |
 | `terminal.paste` | `text` | `terminal.write` |
 
-`input.ask` shows a dialog with a field; its answer is `{"value": "..."}`, or an error when the
-user cancels. What the extension writes to stderr is kept in the log on the Extensions page.
+`input.ask` shows a dialog with a field; its answer is `{"value": "..."}`. `input.form` shows one
+with several fields; its answer is `{"values": {"port": 5432, "tls": true, ...}}`. Both answer
+with an error when the user cancels. What the extension writes to stderr is kept in the log on the Extensions page.
 
 Panels are Markdown: headings, lists, tables, code, and links. A link to
 `sshremote:start?host=db` comes back to the extension as the action `start` with `{"host": "db"}`;
@@ -108,15 +110,18 @@ other links open in the browser.
 forwards in `~/.ssh/config`, runs `ssh -N` for the ones started from its panel, keeps a count in
 the status bar and opens a shell on a host with `terminal.open`.
 
-To try an extension while writing it, pack the folder and install the file:
+While writing an extension, let sshremote install it each time its folder changes:
 
 ```
-sshremote ext pack my-extension my-extension.sshx
-sshremote ext install my-extension.sshx
+sshremote ext dev my-extension
 ```
 
-Installing again stops the running program, puts the new one in place and starts it. The
-Extensions page shows whether it runs, restarts it, and shows its log.
+The open app notices the new version within two seconds, stops the old program and starts the new
+one. (Packing by hand works too: `sshremote ext pack DIR OUT.sshx`, then `sshremote ext install
+OUT.sshx`.) The app runs a copy of the program, in a folder of its own, so the installed files are
+never held open; the extension's folder is in `initialize` (`extension.folder`) and in the
+`SSHREMOTE_EXTENSION_DIR` environment variable. The Extensions page shows whether it runs,
+restarts it, and shows its log.
 
 ## Projects
 
