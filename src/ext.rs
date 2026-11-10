@@ -268,13 +268,12 @@ pub fn spawn_provided(cmd: &str, args: &[String]) -> Result<(), String> {
 
 /// What to install for a command neither built in nor installed.
 pub fn missing(cmd: &str) -> String {
-    let id = match cmd {
-        "web" => "dev.sshremote.web-gateway",
-        "mcp" => "dev.sshremote.mcp-server",
-        "remote" => "dev.sshremote.remote-desktop",
-        _ => "",
+    let (name, id) = match cmd {
+        "web" => ("The web gateway comes", "dev.sshremote.web-gateway"),
+        "mcp" => ("The MCP server comes", "dev.sshremote.mcp-server"),
+        _ => ("Remote screens, files and the agent come", "dev.sshremote.remote-desktop"),
     };
-    format!("`{cmd}` comes as an extension here: sshremote ext install {id}")
+    format!("{name} with an extension: sshremote ext install {id}, or Tools > Extensions")
 }
 
 /// Removes an installed extension (its layers in use show nothing from then on).

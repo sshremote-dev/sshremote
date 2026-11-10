@@ -29,7 +29,16 @@ pub fn built_in(id: &str) -> bool {
     match id {
         "web" => cfg!(feature = "web"),
         "mcp" => cfg!(feature = "mcp"),
+        "screen" | "files" | "chat" | "sound" => cfg!(feature = "remote"),
         _ => true,
+    }
+}
+
+/// The command an extension serves for this part.
+pub fn served_by(id: &str) -> &str {
+    match id {
+        "web" | "mcp" => id,
+        _ => "remote",
     }
 }
 
@@ -73,8 +82,8 @@ pub fn ui(ui: &mut eframe::egui::Ui) {
             if ui.checkbox(&mut v, *name).on_hover_text(*what).changed() {
                 set(id, v);
             }
-            if v && !built_in(id) && crate::ext::provider(id).is_none() {
-                ui.label(eframe::egui::RichText::new(crate::ext::missing(id)).weak().size(12.0));
+            if v && !built_in(id) && crate::ext::provider(served_by(id)).is_none() {
+                ui.label(eframe::egui::RichText::new(crate::ext::missing(served_by(id))).weak().size(12.0));
             }
         });
     }
