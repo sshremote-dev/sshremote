@@ -42,10 +42,18 @@ an app that must stay safe on machines that hold SSH keys:
     "linux-x86_64": "tunnels"
   },
   "contributes": {
-    "commands": [{ "id": "show", "label": "Show the tunnels" }]
+    "commands": [{ "id": "show", "label": "Show the tunnels", "key": "Ctrl+Alt+T" }],
+    "settings": [
+      { "id": "interval", "label": "Keep-alive (seconds)", "type": "number", "default": 30 },
+      { "id": "token", "label": "API token", "type": "secret" }
+    ]
   }
 }
 ```
+
+A command's `key` needs Ctrl or Alt (or is a function key alone), so typing is never taken.
+Settings are `text`, `secret`, `bool` or `number`; they are edited on the Extensions page, a
+`secret` is kept in the system's password store and the others in the settings file.
 
 Permissions:
 
@@ -66,7 +74,8 @@ From the app to the extension:
 
 | Method | Params | When |
 |---|---|---|
-| `initialize` | `api`, `app`, `platform`, `extension`, `permissions` | Right after the program starts |
+| `initialize` | `api`, `app`, `platform`, `extension`, `permissions`, `settings` | Right after the program starts |
+| `settings` | the settings, by id | One was changed on the Extensions page |
 | `command` | `id`, `selection` (with `terminal.selection`) | A contributed command was chosen (palette, status bar, menu) |
 | `action` | `panel`, `action`, `args` | A `sshremote:ACTION?KEY=VALUE` link was clicked in one of its panels |
 | `event` | `name` (`pane.opened`, `pane.closed`), `data` | With `workspace.read` |
@@ -81,11 +90,13 @@ From the extension to the app:
 | `panel.show` | `id`, `title`, `markdown` | |
 | `panel.close` | `id` | |
 | `notify` | `text` | |
+| `input.ask` (a request) | `title`, `prompt`, `value`, `secret` | |
 | `log` | `text` | |
 | `terminal.open` | `argv` (empty: the login shell), `label`, `split` (`right`, `down`, or a new tab) | `workspace.open` |
 | `terminal.paste` | `text` | `terminal.write` |
 
-What the extension writes to stderr is kept in the log on the Extensions page.
+`input.ask` shows a dialog with a field; its answer is `{"value": "..."}`, or an error when the
+user cancels. What the extension writes to stderr is kept in the log on the Extensions page.
 
 Panels are Markdown: headings, lists, tables, code, and links. A link to
 `sshremote:start?host=db` comes back to the extension as the action `start` with `{"host": "db"}`;
@@ -111,6 +122,11 @@ Extensions page shows whether it runs, restarts it, and shows its log.
 
 The core keeps the open tabs as the last session, reopened at start, and as named projects (the
 Projects page of the open view, `sshremote --project NAME`, or the command palette). A project
-holds the tabs, the splits, what each pane runs and the view it is shown in, and the host, port
-and options of each connection. It never holds a password: a host that refuses the login asks with
-a dialog that names the host, the user, the port and what the connection is for.
+holds the tabs, the splits, what each pane runs, the folder its shell was in and the view it is
+shown in, and the host, port and options of each connection. It never holds a password: a host
+that refuses the login asks with a dialog that names the host, the user, the port and what the
+connection is for.
+
+Shells say their folder the way terminals expect: OSC 7 (`ESC ] 7 ; file://HOST/PATH`) or OSC 9;9
+(`ESC ] 9 ; 9 ; PATH`, as for Windows Terminal). Local PowerShell and Command Prompt tabs are set up
+to say it; on Linux the folder of a local shell is also read from the system.

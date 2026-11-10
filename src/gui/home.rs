@@ -248,6 +248,9 @@ impl App {
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
         let ui = &mut ui;
         ui.add_space(4.0);
+        if self.section != Section::New {
+            self.error_box(ui);
+        }
         match self.section {
             Section::New => self.new_section(ui, &mut go),
             Section::Local => {
@@ -510,6 +513,11 @@ impl App {
             });
             ui.end_row();
         });
+        self.error_box(ui);
+    }
+
+    /// Why the last thing asked for could not open, on whichever page is shown.
+    fn error_box(&self, ui: &mut egui::Ui) {
         if let Some(e) = &self.error {
             let (what, hint) = friendly(e);
             ui.add_space(8.0);
@@ -526,7 +534,7 @@ impl App {
                         ui.label(RichText::new(hint).weak());
                     }
                 });
-        }
+    }
     }
 
     /// The known hosts: favorites, recent ones and ~/.ssh/config aliases, with search.

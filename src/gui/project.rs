@@ -50,8 +50,8 @@ pub fn save(name: &str, layout: &serde_json::Value) -> Result<(), String> {
 
 pub fn load(name: &str) -> Result<serde_json::Value, String> {
     let f = file_name(name).ok_or("no such project")?;
-    let text = std::fs::read_to_string(projects().ok_or("no settings folder")?.join(f)).map_err(|e| format!("{name}: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
+    let text = std::fs::read_to_string(projects().ok_or("no settings folder")?.join(f)).map_err(|e| format!("The project {name}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("The project {name} could not be read: {e}"))
 }
 
 pub fn remove(name: &str) -> Result<(), String> {

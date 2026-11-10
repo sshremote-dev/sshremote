@@ -35,12 +35,64 @@ pub struct Manifest {
     /// The script (WebAssembly), its commands (id, label) and what it may do.
     pub main: Option<String>,
     pub commands: Vec<(String, String)>,
+    /// Keys that run commands: (command id, "Ctrl+Alt+T").
+    pub keys: Vec<(String, String)>,
+    /// What can be set for it on the Extensions page.
+    pub settings: Vec<Setting>,
     pub permissions: Vec<String>,
     /// Its own programs, by platform ("windows-x86_64"), and the commands they serve ("web").
     pub programs: Vec<(String, String)>,
     pub provides: Vec<String>,
     /// "startup": its program runs beside the app, talking with the extension host.
     pub activation: Option<String>,
+}
+
+/// A setting an extension declares: its id, what it is called, its kind ("text", "secret",
+/// "bool", "number") and its value until changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Setting {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub default: String,
+}
+
+/// An extension's setting as it is now; a secret one is kept by the system's password store.
+pub fn setting(ext: &str, s: &Setting) -> String {
+    if s.kind == "secret" {
+        return crate::vault::get(&secret_name(ext, &s.id)).unwrap_or_default();
+    }
+    crate::hosts::setting(&format!("ext.{ext}.{}", s.id)).unwrap_or_else(|| s.default.clone())
+}
+
+pub fn set_setting(ext: &str, s: &Setting, value: &str) -> Result<(), String> {
+    if s.kind == "secret" {
+        return crate::vault::set(&secret_name(ext, &s.id), value);
+    }
+    crate::hosts::set_setting(&format!("ext.{ext}.{}", s.id), &value.replace(['\n', '\r'], " "));
+    Ok(())
+}
+
+fn secret_name(ext: &str, id: &str) -> String {
+    format!("sshremote-extension:{ext}:{id}")
+}
+
+/// All of an extension's settings as JSON, as it is told them.
+pub fn settings_json(m: &Manifest) -> serde_json::Value {
+    let map: serde_json::Map<String, serde_json::Value> = m
+        .settings
+        .iter()
+        .map(|s| {
+            let v = setting(&m.id, s);
+            let v = match s.kind.as_str() {
+                "bool" => serde_json::json!(v == "true"),
+                "number" => v.parse::<f64>().map_or(serde_json::json!(v), |n| serde_json::json!(n)),
+                _ => serde_json::json!(v),
+            };
+            (s.id.clone(), v)
+        })
+        .collect();
+    serde_json::Value::Object(map)
 }
 
 /// A background layer an extension brings.
@@ -135,6 +187,36 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let word = |s: &str| !s.is_empty() && s.len() <= 60 && s.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let keys = v
+        .pointer("/contributes/commands")
+        .and_then(|x| x.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| Some((c.get("id")?.as_str()?.to_string(), c.get("key")?.as_str()?.to_string())))
+                .filter(|(id, k)| word(id) && crate::ext::parse_key(k).is_some())
+                .collect()
+        })
+        .unwrap_or_default();
+    let settings = v
+        .pointer("/contributes/settings")
+        .and_then(|x| x.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| {
+                    let id = c.get("id")?.as_str()?.to_string();
+                    let kind = c.get("type").and_then(|x| x.as_str()).unwrap_or("text").to_string();
+                    let default = match c.get("default") {
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::Null) | None => String::new(),
+                        Some(other) => other.to_string(),
+                    };
+                    let ok = word(&id) && ["text", "secret", "bool", "number"].contains(&kind.as_str());
+                    ok.then(|| Setting { label: c.get("label").and_then(|x| x.as_str()).unwrap_or(&id).to_string(), id, kind, default })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let permissions: Vec<String> = v.get("permissions").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
     if let Some(p) = permissions.iter().find(|p| !crate::script::PERMISSIONS.iter().any(|(k, _)| k == p)) {
         return Err(format!("extension.json asks for a permission this sshremote does not know: {p}"));
@@ -158,6 +240,8 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         return Err("extension.json has an activation but no program to run".into());
     }
     Ok(Manifest {
+        keys,
+        settings,
         activation,
         programs,
         provides,
@@ -233,6 +317,25 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
     std::fs::rename(&fresh, &place).map_err(|e| e.to_string())?;
     changed_id(&m.id);
     Ok(m)
+}
+
+/// A key as extensions name it ("Ctrl+Alt+T", "Ctrl+Shift+F5"): its modifiers and its key.
+pub fn parse_key(text: &str) -> Option<(u8, String)> {
+    let mut mods = 0u8;
+    let mut key = None;
+    for part in text.split('+').map(str::trim) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods |= 1,
+            "shift" => mods |= 2,
+            "alt" => mods |= 4,
+            k if key.is_none() && !k.is_empty() => key = Some(k.to_string()),
+            _ => return None,
+        }
+    }
+    // A key that types nothing alone (letters need Ctrl or Alt), so typing is never taken.
+    let key = key?;
+    let plain_ok = key.starts_with('f') && key.len() > 1 && key[1..].parse::<u8>().is_ok();
+    (mods & 5 != 0 || plain_ok).then_some((mods, key))
 }
 
 /// An installed extension's folder.
@@ -645,6 +748,8 @@ pub struct ExtTool {
     status: Option<(bool, String)>,
     registry: String,
     license_file: String,
+    /// Settings being edited, by extension and setting.
+    edits: std::collections::HashMap<(String, String), String>,
 }
 
 #[cfg(feature = "gui")]
@@ -710,6 +815,47 @@ impl ExtTool {
             if !m.provides.is_empty() {
                 let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
                 ui.label(RichText::new(format!("Brings: {}", cmds.join(", "))).weak().size(12.0));
+            }
+            if !m.settings.is_empty() {
+                egui::CollapsingHeader::new("Settings").id_salt(("ext-settings", &m.id)).show(ui, |ui| {
+                    let mut save = false;
+                    egui::Grid::new(("ext-settings-grid", &m.id)).num_columns(2).show(ui, |ui| {
+                        for s in &m.settings {
+                            let key = (m.id.clone(), s.id.clone());
+                            let v = self.edits.entry(key).or_insert_with(|| setting(&m.id, s));
+                            ui.label(&s.label);
+                            match s.kind.as_str() {
+                                "bool" => {
+                                    let mut on = v == "true";
+                                    if ui.checkbox(&mut on, "").changed() {
+                                        *v = on.to_string();
+                                        save = true;
+                                    }
+                                }
+                                kind => {
+                                    let r = ui.add(egui::TextEdit::singleline(v).password(kind == "secret").desired_width(240.0));
+                                    save |= r.lost_focus();
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if save {
+                        let mut err = None;
+                        for s in &m.settings {
+                            if let Some(v) = self.edits.get(&(m.id.clone(), s.id.clone()))
+                                && *v != setting(&m.id, s)
+                                && let Err(e) = set_setting(&m.id, s, v)
+                            {
+                                err = Some(e);
+                            }
+                        }
+                        crate::exthost::settings_changed(&m.id);
+                        if let Some(e) = err {
+                            self.status = Some((false, e));
+                        }
+                    }
+                });
             }
             if m.activation.is_some() {
                 ui.horizontal(|ui| {
@@ -991,6 +1137,19 @@ mod tests {
         let mut bad = index.clone();
         bad.extend_from_slice(b" ");
         assert!(verify(&bad, &sig).is_err());
+    }
+
+    #[test]
+    fn keys_and_settings_are_read() {
+        assert_eq!(parse_key("Ctrl+Alt+T"), Some((5, "t".into())));
+        assert_eq!(parse_key("F5"), Some((0, "f5".into())));
+        assert_eq!(parse_key("T"), None, "a key that types is never taken");
+        assert_eq!(parse_key("Shift+T"), None);
+        let m = parse_manifest(r#"{"id":"x.y","contributes":{"commands":[{"id":"go","label":"Go","key":"Ctrl+Shift+G"},{"id":"no","key":"Q"}],
+            "settings":[{"id":"port","label":"Port","type":"number","default":5432},{"id":"token","type":"secret"},{"id":"bad","type":"colour"}]}}"#).unwrap();
+        assert_eq!(m.keys, vec![("go".to_string(), "Ctrl+Shift+G".to_string())]);
+        let ids: Vec<_> = m.settings.iter().map(|s| (s.id.as_str(), s.kind.as_str(), s.default.as_str())).collect();
+        assert_eq!(ids, [("port", "number", "5432"), ("token", "secret", "")]);
     }
 
     #[test]

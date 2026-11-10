@@ -37,6 +37,19 @@ pub struct Panel {
     pub rev: u64,
 }
 
+/// A question an extension asked the user: the answer goes back as the reply to its request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub ext: String,
+    pub name: String,
+    id: Value,
+    pub title: String,
+    pub prompt: String,
+    pub value: String,
+    /// Typed as a password.
+    pub secret: bool,
+}
+
 /// What an extension asks of the workspace.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
@@ -61,6 +74,8 @@ struct State {
     panels: Vec<Panel>,
     requests: Vec<Request>,
     notices: Vec<String>,
+    /// Questions extensions asked, answered in turn.
+    asks: Vec<Ask>,
     log: Vec<String>,
     rx: Option<Receiver<(String, Value)>>,
     tx: Option<Sender<(String, Value)>>,
@@ -147,6 +162,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         "platform": here,
         "extension": { "id": m.id, "version": m.version },
         "permissions": m.permissions,
+        "settings": crate::ext::settings_json(m),
     });
     request(&m.id, "initialize", params);
     Ok(())
@@ -191,6 +207,8 @@ fn request(ext: &str, method: &str, params: Value) {
 }
 
 fn reply(ext: &str, id: &Value, result: Result<Value, String>) {
+    #[cfg(test)]
+    SENT.with(|v| v.borrow_mut().push((ext.to_string(), "reply".to_string(), json!({ "id": id, "result": result.clone().ok(), "error": result.clone().err() }))));
     let msg = match result {
         Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
         Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": e } }),
@@ -266,6 +284,16 @@ fn handle(ext: &str, msg: &Value) {
             let need = if method == "terminal.open" { "workspace.open" } else { "terminal.write" };
             Err(format!("{method} needs the \"{need}\" permission in extension.json"))
         }
+        "input.ask" => {
+            let Some(id) = msg.get("id").cloned() else { return };
+            with(|s| {
+                let name = s.running.iter().find(|r| r.id == ext).map_or(ext.to_string(), |r| r.name.clone());
+                let ask = Ask { ext: ext.into(), name, id, title: str_of("title"), prompt: str_of("prompt"), value: str_of("value"), secret: p.get("secret").and_then(|x| x.as_bool()).unwrap_or(false) };
+                s.asks.push(ask);
+            });
+            // Answered when the user is done.
+            return;
+        }
         "notify" => with(|s| {
             let name = s.running.iter().find(|r| r.id == ext).map_or(ext.to_string(), |r| r.name.clone());
             s.notices.push(format!("{name}: {}", str_of("text")));
@@ -288,9 +316,10 @@ fn handle(ext: &str, msg: &Value) {
     }
 }
 
-/// An extension that ended: its items and panels go with it.
+/// An extension that ended: its items, panels and questions go with it.
 fn forget(ext: &str) {
     with(|s| {
+        s.asks.retain(|a| a.ext != ext);
         s.running.retain(|r| r.id != ext);
         s.items.retain(|i| i.ext != ext);
         s.panels.retain(|p| p.ext != ext);
@@ -372,6 +401,40 @@ pub fn items() -> Vec<Item> {
 
 pub fn panels() -> Vec<Panel> {
     with(|s| s.panels.clone())
+}
+
+/// The question to show now, if any.
+pub fn ask() -> Option<Ask> {
+    with(|s| s.asks.first().cloned())
+}
+
+/// The answer to the question shown: the text, or None when it was cancelled.
+pub fn answer(value: Option<String>) {
+    let Some(a) = with(|s| (!s.asks.is_empty()).then(|| s.asks.remove(0))) else { return };
+    let result = value.map(|v| json!({ "value": v })).ok_or_else(|| "cancelled".to_string());
+    reply(&a.ext, &a.id, result);
+}
+
+/// Tells a running extension its settings changed.
+pub fn settings_changed(ext: &str) {
+    if let Some(m) = crate::ext::installed().into_iter().find(|m| m.id == ext)
+        && running(ext)
+    {
+        send(ext, "settings", crate::ext::settings_json(&m), None);
+    }
+}
+
+/// The keys of running extensions' commands: (modifiers, key, extension, command).
+pub fn keys() -> Vec<(u8, String, String, String)> {
+    let running: Vec<String> = with(|s| s.running.iter().map(|r| r.id.clone()).collect());
+    crate::ext::installed()
+        .into_iter()
+        .filter(|m| running.contains(&m.id))
+        .flat_map(|m| {
+            let id = m.id.clone();
+            m.keys.into_iter().filter_map(move |(cmd, k)| crate::ext::parse_key(&k).map(|(mods, key)| (mods, key, id.clone(), cmd)))
+        })
+        .collect()
 }
 
 pub fn take_requests() -> Vec<Request> {
@@ -476,5 +539,13 @@ mod tests {
         handle("x.y", &json!({ "method": "exit" }));
         assert!(items().iter().all(|i| i.ext != "x.y") && panels().iter().all(|p| p.ext != "x.y"), "gone with it");
         assert_eq!(unescape("a%20b+c%2Fd"), "a b c/d");
+        // A question waits for its answer, which goes back as the reply.
+        test_sent();
+        handle("x.q", &json!({ "id": 9, "method": "input.ask", "params": { "title": "Port", "prompt": "Which port?", "value": "5432" } }));
+        assert_eq!(ask().map(|a| (a.title, a.value)), Some(("Port".into(), "5432".into())));
+        answer(Some("6543".into()));
+        assert!(ask().is_none());
+        let sent = test_sent();
+        assert!(sent.iter().any(|(e, m, p)| e == "x.q" && m == "reply" && p["id"] == 9 && p["result"]["value"] == "6543"), "{sent:?}");
     }
 }

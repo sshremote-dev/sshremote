@@ -652,9 +652,9 @@ impl Workspace {
                 let mut v = json!({ "label": p.label, "target": target_json(&p.target)?, "ssh_cmd": p.ssh_cmd });
                 match &p.state {
                     State::Shell(t) => {
-                        let (profile, view) = t.saved()?;
+                        let (profile, view, cwd) = t.saved()?;
                         let crate::termwin::Launch::Local(argv) = profile.launch else { return None };
-                        v["shell"] = json!({ "name": profile.name, "argv": argv, "view": view });
+                        v["shell"] = json!({ "name": profile.name, "argv": argv, "view": view, "cwd": cwd });
                     }
                     State::Live(r) => v["mode"] = json!(r.mode().name()),
                     State::Down(_) => v["mode"] = json!(p.mode.name()),
@@ -681,8 +681,9 @@ impl Workspace {
                 let made_pane = panes.and_then(|p| p.get(&old.to_string())).and_then(|p| {
                     let (launch, view) = launch_from(p)?;
                     let id = self.new_pane(launch, (false, false, false))?;
-                    if let (Some(view), Some(State::Shell(t))) = (view, self.panes.last_mut().map(|p| &mut p.state)) {
-                        t.start_view = Some(view);
+                    if let Some(State::Shell(t)) = self.panes.last_mut().map(|p| &mut p.state) {
+                        t.start_view = view;
+                        t.start_cwd = p.pointer("/shell/cwd").and_then(|c| c.as_str()).map(str::to_string);
                     }
                     Some(id)
                 });
@@ -882,6 +883,10 @@ impl Workspace {
                 crate::exthost::Request::OpenTerminal { argv, label, split } => self.open_command(argv, label, split),
                 crate::exthost::Request::Paste(text) => ctx.input_mut(|i| i.events.push(egui::Event::Paste(text))),
             }
+        }
+        super::extui::question(ctx, &mut self.side);
+        if self.palette.is_none() && self.picker.is_none() {
+            super::extui::keys(ctx);
         }
         if let Some((filter, at)) = &mut self.palette {
             match super::extui::palette(ctx, filter, at) {
@@ -2865,6 +2870,16 @@ mod tests {
         crate::exthost::test_request(crate::exthost::Request::OpenTerminal { argv: vec!["ssh".into(), "db".into()], label: "db".into(), split: Some(false) });
         h.frame(Vec::new());
         assert!(h.w.panes.iter().any(|p| p.label == "db"), "the terminal opened");
+        // An extension's question: a dialog, an answer typed, Enter; the answer goes back.
+        crate::exthost::test_sent();
+        crate::exthost::test_message("t.panel", serde_json::json!({ "id": 5, "method": "input.ask", "params": { "title": "Port", "prompt": "Which port to forward?" } }));
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(!h.snap.find("Which port to forward?").is_empty(), "the question shows");
+        h.frame(vec![Event::Text("8080".into())]);
+        h.frame(vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        let sent = crate::exthost::test_sent();
+        assert!(sent.iter().any(|(e, m, p)| e == "t.panel" && m == "reply" && p["id"] == 5 && p["result"]["value"] == "8080"), "{sent:?}");
         crate::exthost::test_message("t.panel", serde_json::json!({ "method": "exit" }));
     }
 

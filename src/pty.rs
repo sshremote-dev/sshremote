@@ -29,7 +29,7 @@ pub struct Terms {
 impl Terms {
     /// Starts a shell; returns a message to send if it failed.
     pub fn open(&mut self, id: u32, cols: u16, rows: u16) -> Option<ToClient> {
-        match sys::spawn(cols.max(2), rows.max(1), None) {
+        match sys::spawn(cols.max(2), rows.max(1), None, None) {
             Ok((input, output, handle)) => {
                 // Bounded, so a flood of output waits for the reader instead of filling memory.
                 let (tx, rx) = mpsc::sync_channel(64);
@@ -122,7 +122,13 @@ pub struct Local {
 impl Local {
     /// Starts `argv` (the login shell when empty); `wake` is called whenever output arrives.
     pub fn spawn(argv: &[String], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
-        let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv))?;
+        Self::spawn_in(argv, None, cols, rows, wake)
+    }
+
+    /// The same, starting in `dir` (when it is a folder there) rather than the home folder.
+    pub fn spawn_in(argv: &[String], dir: Option<&str>, cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
+        let dir = dir.filter(|d| std::path::Path::new(d).is_dir());
+        let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv), dir)?;
         let (tx, out) = mpsc::sync_channel(64);
         std::thread::spawn(move || read_loop_waking(output, tx, wake));
         Ok(Local { input, out, sys })
@@ -135,6 +141,11 @@ impl Local {
 
     pub fn resize(&self, cols: u16, rows: u16) {
         self.sys.resize(cols.max(2), rows.max(1));
+    }
+
+    /// The folder the program is in, where the system tells it (Linux).
+    pub fn cwd(&self) -> Option<String> {
+        self.sys.cwd()
     }
 
     /// Output since the last call, and why the program ended once it has.
@@ -173,7 +184,7 @@ mod sys {
     }
 
     /// The user's shell started as a login shell on a new pseudo-terminal.
-    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>, dir: Option<&str>) -> Result<(File, File, Handle), String> {
         unsafe {
             let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             if m < 0 {
@@ -197,7 +208,7 @@ mod sys {
             let ws = winsize(cols, rows);
             libc::ioctl(m, libc::TIOCSWINSZ, &ws);
             let login = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-            let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
+            let home: std::ffi::OsString = dir.map_or_else(|| std::env::var_os("HOME").unwrap_or_else(|| "/".into()), Into::into);
             let (shell, args): (String, Vec<String>) = match argv {
                 Some([first, rest @ ..]) => (first.clone(), rest.to_vec()),
                 _ => (login, vec!["-l".into()]),
@@ -225,6 +236,11 @@ mod sys {
     }
 
     impl Handle {
+        pub fn cwd(&self) -> Option<String> {
+            let pid = self.child.lock().ok()?.as_ref()?.id();
+            std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
+        }
+
         pub fn resize(&self, cols: u16, rows: u16) {
             let ws = winsize(cols, rows);
             unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
@@ -293,7 +309,7 @@ mod sys {
     use crate::sys::command_line;
 
     /// PowerShell (or cmd) attached to a new pseudo console.
-    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>, dir: Option<&str>) -> Result<(File, File, Handle), String> {
         let user = std::env::var("USERNAME").unwrap_or_default();
         if user.eq_ignore_ascii_case("SYSTEM") || user.ends_with('$') {
             return Err("the agent runs as the Windows service; connect over SSH for a terminal".into());
@@ -350,7 +366,7 @@ mod sys {
             };
             for cmd in &wanted {
                 let mut line = wide(cmd);
-                let dir = wide(&home);
+                let dir = wide(dir.unwrap_or(&home));
                 if CreateProcessW(
                     null(),
                     line.as_mut_ptr(),
@@ -388,6 +404,11 @@ mod sys {
     }
 
     impl Handle {
+        /// Windows does not tell another program's folder; the shell's own word is used.
+        pub fn cwd(&self) -> Option<String> {
+            None
+        }
+
         pub fn resize(&self, cols: u16, rows: u16) {
             unsafe { ResizePseudoConsole(self.console as _, COORD { X: cols as i16, Y: rows as i16 }) };
         }

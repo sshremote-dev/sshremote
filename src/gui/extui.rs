@@ -16,6 +16,8 @@ pub(super) struct Side {
     pub shown: Option<(String, String)>,
     /// The panel's document, made again when its text changes.
     doc: Option<(u64, crate::markdown::Doc)>,
+    /// What is typed for an extension's question.
+    pub answer: String,
     /// The newest panel change looked at.
     seen: u64,
     /// The last notice from an extension, and when it came.
@@ -127,6 +129,63 @@ fn side_panel(ui: &mut egui::Ui, rect: Rect, panels: &[crate::exthost::Panel], s
     for a in actions {
         crate::exthost::action(&panel.ext, &panel.id, &a);
     }
+}
+
+/// An extension's question, while one waits: a dialog with its prompt and a field.
+pub(super) fn question(ctx: &egui::Context, side: &mut Side) {
+    let Some(a) = crate::exthost::ask() else { return };
+    let (modal, fit) = super::modal(ctx, "extension-question", Vec2::new(440.0, 200.0));
+    let mut done: Option<Option<String>> = None;
+    let r = modal.show(ctx, |ui| {
+        ui.set_width(fit.x);
+        let title = if a.title.is_empty() { a.name.clone() } else { format!("{}: {}", a.name, a.title) };
+        ui.label(RichText::new(title).size(16.0).strong());
+        if !a.prompt.is_empty() {
+            ui.label(&a.prompt);
+        }
+        ui.add_space(6.0);
+        if side.answer.is_empty() && !a.value.is_empty() {
+            side.answer = a.value.clone();
+        }
+        let edit = ui.add(egui::TextEdit::singleline(&mut side.answer).password(a.secret).desired_width(fit.x));
+        edit.request_focus();
+        ui.add_space(8.0);
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal(|ui| {
+            if ui.add(theme::primary("OK")).clicked() || enter {
+                done = Some(Some(std::mem::take(&mut side.answer)));
+            }
+            if ui.button("Cancel").clicked() {
+                done = Some(None);
+            }
+        });
+    });
+    if r.should_close() && done.is_none() {
+        done = Some(None);
+    }
+    if let Some(v) = done {
+        side.answer.clear();
+        crate::exthost::answer(v);
+    }
+}
+
+/// Runs the command whose key was pressed; whether one was.
+pub(super) fn keys(ctx: &egui::Context) -> bool {
+    let mut ran = false;
+    for (mods, key, ext, cmd) in crate::exthost::keys() {
+        let name = if key.len() == 1 { key.to_ascii_uppercase() } else { format!("{}{}", key[..1].to_ascii_uppercase(), &key[1..]) };
+        let Some(k) = egui::Key::from_name(&name) else { continue };
+        let want = egui::Modifiers { ctrl: mods & 1 != 0, shift: mods & 2 != 0, alt: mods & 4 != 0, command: mods & 1 != 0, mac_cmd: false };
+        let hit = ctx.input_mut(|i| {
+            let at = i.events.iter().position(|e| matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. } if *key == k && modifiers.matches_logically(want) && modifiers.shift == want.shift && modifiers.alt == want.alt));
+            at.map(|n| i.events.remove(n)).is_some()
+        });
+        if hit {
+            crate::exthost::command(&ext, &cmd, "");
+            ran = true;
+        }
+    }
+    ran
 }
 
 /// One entry of the command palette.
