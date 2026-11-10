@@ -1842,7 +1842,7 @@ impl Remote {
             (ic::PAUSE, "Pause the picture to save traffic; fetch single frames when needed")
         };
         // Which of chat, screenshot, pause and one frame were asked for, from the bar or the menu.
-        let (mut chat, mut shot, mut pause, mut frame) = (false, false, false, false);
+        let (mut chat, mut shot, mut pause, mut frame, mut helper) = (false, false, false, false, false);
         if !compact {
             // Chat is with the person at the screen: shown with the screen only.
             chat = screen && icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
@@ -1889,11 +1889,23 @@ impl Remote {
                     shot = item(ui, ic::CAMERA, "Screenshot", shot_tip);
                     pause = item(ui, pause_glyph, if self.paused { "Resume" } else { "Pause" }, pause_tip);
                     frame = self.paused && item(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", "Fetch one frame");
+                    // A GNOME host shows single windows and programs with its helper only.
+                    if self.label.ends_with("gnome") {
+                        let tip = "Lets you share one window or program of this GNOME host; it starts at the host's next login";
+                        helper = item(ui, ic::DOWNLOAD, "Install the window helper on this host", tip);
+                    }
                 }
             });
             // A paused picture shows on the menu button too when its own button is folded away.
             let more = if compact && self.paused { more.highlight() } else { more };
             more.on_hover_text("Options");
+        }
+        if helper {
+            // The answer shows in the window chooser, opened on its windows' page.
+            *action = Some(Box::new(|r, _| {
+                r.picker = Some((None, 1));
+                r.send(ToAgent::InstallHelper)
+            }));
         }
         if chat {
             *action = Some(Box::new(|r, _| {
