@@ -24,6 +24,15 @@ pub fn set(id: &str, on: bool) {
     crate::hosts::set_setting(&format!("module.{id}"), if on { "on" } else { "off" });
 }
 
+/// Whether this build carries the part itself (the others come from an extension).
+pub fn built_in(id: &str) -> bool {
+    match id {
+        "web" => cfg!(feature = "web"),
+        "mcp" => cfg!(feature = "mcp"),
+        _ => true,
+    }
+}
+
 /// An error for a command whose part is off.
 pub fn need(id: &str) -> Result<(), String> {
     if on(id) {
@@ -60,9 +69,14 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 pub fn ui(ui: &mut eframe::egui::Ui) {
     for (id, name, what) in ALL {
         let mut v = on(id);
-        if ui.checkbox(&mut v, *name).on_hover_text(*what).changed() {
-            set(id, v);
-        }
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut v, *name).on_hover_text(*what).changed() {
+                set(id, v);
+            }
+            if v && !built_in(id) && crate::ext::provider(id).is_none() {
+                ui.label(eframe::egui::RichText::new(crate::ext::missing(id)).weak().size(12.0));
+            }
+        });
     }
 }
 

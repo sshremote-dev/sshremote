@@ -249,7 +249,6 @@ pub fn run_provided(cmd: &str, args: &[String]) -> Result<(), String> {
 }
 
 /// What to install for a command neither built in nor installed.
-#[cfg_attr(all(feature = "web", feature = "mcp"), allow(dead_code))]
 pub fn missing(cmd: &str) -> String {
     let id = match cmd {
         "web" => "dev.sshremote.web-gateway",
@@ -331,6 +330,7 @@ static LAYERS: std::sync::Mutex<Option<Vec<(String, String, bool)>>> = std::sync
 
 fn changed() {
     *LAYERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
 }
 
 fn read_layers() -> Vec<(String, String, bool)> {
@@ -488,6 +488,27 @@ pub fn newer(a: &str, b: &str) -> bool {
     let parts = |v: &str| v.split(['.', '-']).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     parts(a) > parts(b)
 }
+
+/// How many installed extensions the registry has newer versions of: looked up in the
+/// background (again after each install), None until it answers or when it cannot be reached.
+#[cfg(feature = "gui")]
+pub fn updates_waiting() -> Option<usize> {
+    if cfg!(test) {
+        return None;
+    }
+    let mut state = UPDATES.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.1 {
+        state.1 = true;
+        std::thread::spawn(|| {
+            let n = offers().ok().map(|o| installed().iter().filter(|m| o.iter().any(|x| x.id == m.id && newer(&x.version, &m.version))).count());
+            UPDATES.lock().unwrap_or_else(|e| e.into_inner()).0 = n;
+        });
+    }
+    state.0
+}
+
+/// The count of updates waiting, and whether it has been asked for since the last change.
+static UPDATES: std::sync::Mutex<(Option<usize>, bool)> = std::sync::Mutex::new((None, false));
 
 /// Updates every installed extension the registry has a newer version of; what was updated.
 pub fn update_all() -> Result<Vec<String>, String> {
@@ -664,9 +685,18 @@ impl ExtTool {
                             ui.label(RichText::new("Premium").color(crate::gui::brand()).size(12.0));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if have.is_none() && ui.button(format!("{}  Install", ic::DOWNLOAD)).clicked() {
-                                let o = o.clone();
-                                act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed.", m.name, m.version))));
+                            let locked = o.premium && !crate::license::premium();
+                            match have {
+                                Some(_) => {
+                                    ui.label(RichText::new("Installed").weak().size(12.0));
+                                }
+                                None => {
+                                    let b = ui.add_enabled(!locked, egui::Button::new(format!("{}  Install", ic::DOWNLOAD)));
+                                    if b.on_disabled_hover_text("Comes with a premium license").clicked() {
+                                        let o = o.clone();
+                                        act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed.", m.name, m.version))));
+                                    }
+                                }
                             }
                         });
                     });
@@ -826,6 +856,45 @@ mod tests {
         assert_eq!(o.len(), 1, "nothing for another platform");
         assert!(o[0].url.ends_with("gw-here.sshx") && o[0].sha256 == "ab");
         TEST_REGISTRY.with(|r| *r.borrow_mut() = None);
+    }
+
+    /// The Extensions page drawn without a window: an installed native extension shows what it
+    /// brings and may do, the registry's offers, the modules and the license.
+    #[test]
+    fn extensions_page_shows_what_each_brings() {
+        use eframe::egui::{self, Pos2, Rect, Vec2};
+        let root = std::env::temp_dir().join(format!("sshremote-ext-page-root-{}", std::process::id()));
+        TEST_ROOT.with(|r| *r.borrow_mut() = Some(root));
+        let d = std::env::temp_dir().join(format!("sshremote-ext-page-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("gw"), b"x").unwrap();
+        let here = platform();
+        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-page","name":"Page gateway","version":"1.2.0","description":"A gateway.","permissions":["native"],"programs":{{"{here}":"gw"}},"contributes":{{"provides":["web"]}}}}"#)).unwrap();
+        let pkg = d.with_extension("sshx");
+        pack(&d, &pkg).unwrap();
+        install_file(&pkg).unwrap();
+        let offer = |id: &str, name: &str, premium| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), premium };
+        let mut tool = ExtTool { offers: Some(Ok(vec![
+            offer("dev.sshremote.test-sea", "Sea pack", false),
+            offer("dev.sshremote.test-gold", "Gold pack", true),
+            Offer { version: "1.3.0".into(), ..offer("dev.sshremote.test-page", "Page gateway", false) },
+        ])), ..ExtTool::new() };
+        let ctx = egui::Context::default();
+        crate::gui::style(&ctx);
+        let size = Vec2::new(900.0, 1400.0);
+        let mut snap = crate::gui::snapshot::Snap::default();
+        for k in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
+            snap.frame(&ctx, input, |ui| tool.ui(ui));
+        }
+        for text in ["Page gateway", "Brings: sshremote web", "Run its own program", "Sea pack", "Gold pack", "Premium", "Modules", "Web gateway", "License", "Update to 1.3.0", "Installed"] {
+            assert!(!snap.find(text).is_empty(), "{text} is shown");
+        }
+        if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
+            snap.save(&ctx, size, &std::path::Path::new(&dir).join("extensions_page.png"));
+        }
+        remove("dev.sshremote.test-page").unwrap();
     }
 
     /// The live registry's signature is checked: good as published, refused once changed.

@@ -291,7 +291,11 @@ impl App {
             if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, a background picture, the logo and an overlay of the load and time") {
                 super::look::open(ui.ctx());
             }
-            if place_row(ui, ic::PLUS, "Extensions", "Style packs and more: from sshremote.dev or a file, updated and removed") {
+            let sub = match crate::ext::updates_waiting() {
+                Some(n) if n > 0 => format!("{n} update{} waiting", if n == 1 { "" } else { "s" }),
+                _ => "Style packs and more: from sshremote.dev or a file, updated and removed".to_string(),
+            };
+            if place_row(ui, ic::PLUS, "Extensions", &sub) {
                 self.exts = Some(crate::ext::ExtTool::new());
             }
             if cfg!(windows) {
