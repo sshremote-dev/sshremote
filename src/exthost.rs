@@ -93,6 +93,7 @@ struct Running {
     permissions: Vec<String>,
     stdin: ChildStdin,
     child: Child,
+    run: u64,
 }
 
 #[derive(Default)]
@@ -105,12 +106,14 @@ struct State {
     /// Questions extensions asked, answered in turn.
     asks: Vec<Ask>,
     log: Vec<String>,
-    rx: Option<Receiver<(String, Value)>>,
+    /// Messages by extension and run, so one from a program already replaced is told apart.
+    rx: Option<Receiver<(String, u64, Value)>>,
     /// What each extension started from looked like (times and sizes), to notice a new version
     /// installed from outside, and when that was last looked at.
     stamps: std::collections::HashMap<String, String>,
     looked: Option<std::time::Instant>,
-    tx: Option<Sender<(String, Value)>>,
+    tx: Option<Sender<(String, u64, Value)>>,
+    runs: u64,
     next: u64,
     rev: u64,
     /// Wakes the window when a message arrives.
@@ -177,18 +180,22 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         (s.tx.clone().expect("set"), s.waker.clone())
     });
     let id = m.id.clone();
+    let run = with(|s| {
+        s.runs += 1;
+        s.runs
+    });
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             let msg = serde_json::from_str::<Value>(&line).unwrap_or_else(|e| json!({ "method": "log", "params": { "text": format!("not JSON-RPC ({e}): {line}") } }));
-            if tx.send((id.clone(), msg)).is_err() {
+            if tx.send((id.clone(), run, msg)).is_err() {
                 break;
             }
             if let Some(w) = &waker {
                 w();
             }
         }
-        let _ = tx.send((id.clone(), json!({ "method": "exit" })));
+        let _ = tx.send((id.clone(), run, json!({ "method": "exit" })));
         if let Some(w) = &waker {
             w();
         }
@@ -202,7 +209,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     with(|s| {
         s.stamps.insert(m.id.clone(), stamp(m));
         s.running.retain(|r| r.id != m.id);
-        s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), stdin, child });
+        s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), stdin, child, run });
     });
     let params = json!({
         "api": API,
@@ -338,8 +345,12 @@ fn reply(ext: &str, id: &Value, result: Result<Value, String>) {
 /// what they ask of the workspace kept for it to take.
 pub fn pump() {
     look_for_changes();
-    let msgs: Vec<(String, Value)> = with(|s| s.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default());
-    for (ext, msg) in msgs {
+    let msgs: Vec<(String, u64, Value)> = with(|s| s.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default());
+    for (ext, run, msg) in msgs {
+        // From a program stopped since (an update replaced it): nothing it says counts now.
+        if !with(|s| s.running.iter().any(|r| r.id == ext && r.run == run)) {
+            continue;
+        }
         handle(&ext, &msg);
     }
 }
