@@ -34,6 +34,9 @@ pub struct Manifest {
     pub main: Option<String>,
     pub commands: Vec<(String, String)>,
     pub permissions: Vec<String>,
+    /// Its own programs, by platform ("windows-x86_64"), and the commands they serve ("web").
+    pub programs: Vec<(String, String)>,
+    pub provides: Vec<String>,
 }
 
 /// A background layer an extension brings.
@@ -123,7 +126,23 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
     if let Some(p) = permissions.iter().find(|p| !crate::script::PERMISSIONS.iter().any(|(k, _)| k == p)) {
         return Err(format!("extension.json asks for a permission this sshremote does not know: {p}"));
     }
+    let inside = |f: &str| !f.is_empty() && !f.contains("..") && !f.starts_with('/') && !f.contains(':') && !f.contains('\\');
+    let programs: Vec<(String, String)> = v
+        .get("programs")
+        .and_then(|x| x.as_object())
+        .map(|o| o.iter().filter_map(|(k, f)| f.as_str().filter(|f| inside(f)).map(|f| (k.clone(), f.to_string()))).collect())
+        .unwrap_or_default();
+    let provides: Vec<String> = v
+        .pointer("/contributes/provides")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|p| p.as_str()).filter(|p| crate::modules::ALL.iter().any(|m| m.0 == *p)).map(str::to_string).collect())
+        .unwrap_or_default();
+    if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
+        return Err("extension.json brings programs without the \"native\" permission".into());
+    }
     Ok(Manifest {
+        programs,
+        provides,
         name: if s("name").is_empty() { id.clone() } else { s("name") },
         id,
         version: s("version"),
@@ -179,6 +198,11 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
         }
         let mut out = std::fs::File::create(&to).map_err(|e| e.to_string())?;
         std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        if m.programs.iter().any(|(_, p)| fresh.join(p) == to) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        }
     }
     let place = root.join(&m.id);
     let old = root.join(format!(".{}.old", m.id));
@@ -189,6 +213,48 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
     std::fs::rename(&fresh, &place).map_err(|e| e.to_string())?;
     changed();
     Ok(m)
+}
+
+/// This computer's platform as extensions name it.
+pub fn platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        o => o,
+    };
+    format!("{os}-{}", std::env::consts::ARCH)
+}
+
+/// The installed program that serves a command (`web`, `mcp`) here, and its extension's name.
+pub fn provider(cmd: &str) -> Option<(PathBuf, String)> {
+    let root = root()?;
+    let here = platform();
+    installed().into_iter().find_map(|m| {
+        let file = m.programs.iter().find(|(p, _)| *p == here)?.1.clone();
+        m.provides.iter().any(|p| p == cmd).then(|| (root.join(&m.id).join(file), m.name.clone()))
+    })
+}
+
+/// Runs a command through the extension that serves it, as if built in; its exit code is ours.
+#[cfg_attr(all(feature = "web", feature = "mcp"), allow(dead_code))]
+pub fn run_provided(cmd: &str, args: &[String]) -> Result<(), String> {
+    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
+    let status = std::process::Command::new(&program).arg(cmd).args(args).status().map_err(|e| format!("{name}: {}: {e}", program.display()))?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(c) => std::process::exit(c),
+        None => Err(format!("{name} stopped")),
+    }
+}
+
+/// What to install for a command neither built in nor installed.
+#[cfg_attr(all(feature = "web", feature = "mcp"), allow(dead_code))]
+pub fn missing(cmd: &str) -> String {
+    let id = match cmd {
+        "web" => "dev.sshremote.web-gateway",
+        "mcp" => "dev.sshremote.mcp-server",
+        _ => "",
+    };
+    format!("`{cmd}` comes as an extension here: sshremote ext install {id}")
 }
 
 /// Removes an installed extension (its layers in use show nothing from then on).
@@ -552,6 +618,10 @@ impl ExtTool {
                 let names: Vec<&str> = m.commands.iter().map(|(_, l)| l.as_str()).collect();
                 ui.label(RichText::new(format!("Commands (a terminal's right-click menu): {}", names.join(", "))).weak().size(12.0));
             }
+            if !m.provides.is_empty() {
+                let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
+                ui.label(RichText::new(format!("Brings: {}", cmds.join(", "))).weak().size(12.0));
+            }
             for p in &m.permissions {
                 let text = crate::script::PERMISSIONS.iter().find(|(k, _)| k == p).map_or(p.as_str(), |(_, t)| *t);
                 ui.label(RichText::new(format!("May: {text}")).weak().size(12.0));
@@ -707,6 +777,35 @@ mod tests {
         }
         remove("dev.sshremote.test-sea").unwrap();
         assert!(installed().iter().all(|m| m.id != "dev.sshremote.test-sea"));
+    }
+
+    /// A native extension: its program for this platform serves the command it names; programs
+    /// without the "native" permission are refused.
+    #[test]
+    fn native_programs_serve_their_commands() {
+        assert!(parse_manifest(r#"{"id":"x.y","programs":{"linux-x86_64":"x"}}"#).unwrap_err().contains("native"));
+        let m = parse_manifest(r#"{"id":"x.y","permissions":["native"],"programs":{"a":"../x","b":"ok"},"contributes":{"provides":["web","nope"]}}"#).unwrap();
+        assert_eq!((m.programs, m.provides), (vec![("b".to_string(), "ok".to_string())], vec!["web".to_string()]));
+        scratch();
+        let d = std::env::temp_dir().join(format!("sshremote-ext-native-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("gw"), b"#!/bin/sh
+").unwrap();
+        let here = platform();
+        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-gw","version":"1","permissions":["native"],"programs":{{"{here}":"gw"}},"contributes":{{"provides":["web"]}}}}"#)).unwrap();
+        let pkg = d.with_extension("sshx");
+        pack(&d, &pkg).unwrap();
+        install_file(&pkg).unwrap();
+        let (prog, _) = provider("web").unwrap();
+        assert!(prog.is_file() && provider("mcp").is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&prog).unwrap().permissions().mode() & 0o111, 0o111, "made runnable");
+        }
+        remove("dev.sshremote.test-gw").unwrap();
+        assert!(provider("web").is_none());
     }
 
     /// The live registry's signature is checked: good as published, refused once changed.

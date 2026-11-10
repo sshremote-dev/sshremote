@@ -22,7 +22,8 @@ const MEMORY: usize = 64 << 20;
 const OUTPUT: usize = 1 << 20;
 
 /// What a script may be given and may do, as extension.json names them.
-pub const PERMISSIONS: [(&str, &str); 2] = [
+pub const PERMISSIONS: [(&str, &str); 3] = [
+    ("native", "Run its own program on this computer, with your rights"),
     ("terminal.selection", "Read the text selected in a terminal when you run its command"),
     ("terminal.write", "Type its result into the terminal (as a paste you can still edit)"),
 ];

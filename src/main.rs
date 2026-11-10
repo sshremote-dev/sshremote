@@ -21,6 +21,7 @@ mod keys;
 mod license;
 mod modules;
 mod markdown;
+#[cfg(feature = "mcp")]
 mod mcp;
 mod net;
 mod proto;
@@ -41,6 +42,7 @@ mod tools;
 mod transport;
 mod ui;
 mod vault;
+#[cfg(feature = "web")]
 mod web;
 // Some keys are only sent on to Windows.
 mod video;
@@ -387,9 +389,16 @@ fn run(args: &[String]) -> Result<(), String> {
         "license" => license::cli(&args[1..]),
         "module" => modules::cli(&args[1..]),
         // The gateway browsers reach terminals through (sshremote.dev/web).
+        #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
+        // Built without them, the registry's extension brings the gateway and the MCP server.
+        #[cfg(not(feature = "web"))]
+        "web" => modules::need("web").and_then(|()| ext::run_provided("web", &args[1..])),
         // stdout carries JSON-RPC only; everything else goes to stderr.
+        #[cfg(feature = "mcp")]
         "mcp" => modules::need("mcp").and_then(|()| parse_client(&args[1..])).and_then(|o| mcp::run(&o)),
+        #[cfg(not(feature = "mcp"))]
+        "mcp" => modules::need("mcp").and_then(|()| ext::run_provided("mcp", &args[1..])),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
         _ if args.iter().any(|a| a == "--agent") => {

@@ -37,6 +37,7 @@ pub fn png_from_rgb(w: usize, h: usize, rgb: &[u8], grey: bool) -> Result<Vec<u8
 }
 
 /// Decodes a PNG made by `png_from_rgb` (RGB or grey) into RGB.
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
 pub fn rgb_from_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let mut dec = png::Decoder::new(data).read_info().map_err(|e| e.to_string())?;
     let mut buf = vec![0; dec.output_buffer_size()];
@@ -52,6 +53,7 @@ pub fn rgb_from_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
 }
 
 /// The rectangle `(x, y, w, h)` of an RGB image, clamped to it.
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
 pub fn crop(w: usize, h: usize, rgb: &[u8], r: (usize, usize, usize, usize)) -> (usize, usize, Vec<u8>) {
     let (x, y) = (r.0.min(w.saturating_sub(1)), r.1.min(h.saturating_sub(1)));
     let (cw, ch) = (r.2.clamp(1, w - x), r.3.clamp(1, h - y));
@@ -63,6 +65,7 @@ pub fn crop(w: usize, h: usize, rgb: &[u8], r: (usize, usize, usize, usize)) -> 
 }
 
 /// Box-filtered downscale so the width is at most `max_w` (text stays more legible than with nearest).
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
 pub fn shrink(w: usize, h: usize, rgb: &[u8], max_w: usize) -> (usize, usize, Vec<u8>) {
     if w <= max_w || max_w == 0 {
         return (w, h, rgb.to_vec());
