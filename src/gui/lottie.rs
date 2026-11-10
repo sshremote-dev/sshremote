@@ -35,25 +35,19 @@ pub(crate) const BUILT_INS: &[BuiltIn] = &[
     built_in!("brand", "SSH REMOTE in 3D", false, 15.0, "brand_motion.json"),
     built_in!("night-motion", "Night lake: shooting stars", false, 24.0, "night_motion.json"),
     built_in!("night-still", "Night lake: Milky Way, mountains, pines", true, 1.0, "night_still.json"),
-    built_in!("meadow-motion", "Meadow: flowers, clouds, butterflies", false, 15.0, "meadow_motion.json"),
-    built_in!("meadow-still", "Meadow: hills and sky", true, 1.0, "meadow_still.json"),
-    built_in!("aurora-motion", "Aurora: waving lights", false, 15.0, "aurora_motion.json"),
-    built_in!("aurora-still", "Aurora: snowy peaks and frozen lake", true, 1.0, "aurora_still.json"),
-    built_in!("snow-motion", "Snowy evening: falling snow", false, 20.0, "snow_motion.json"),
-    built_in!("snow-still", "Snowy evening: cabin and pines", true, 1.0, "snow_still.json"),
-    built_in!("radar-motion", "Radar: sweep and blips", false, 24.0, "radar_motion.json"),
-    built_in!("radar-still", "Radar: screen", true, 1.0, "radar_still.json"),
-    built_in!("matrix-motion", "Code rain", false, 12.0, "matrix_motion.json"),
-    built_in!("matrix-still", "Code rain: dark green", true, 1.0, "matrix_still.json"),
-    built_in!("synthwave-motion", "Synthwave: grid rushing on", false, 24.0, "synthwave_motion.json"),
-    built_in!("synthwave-still", "Synthwave: neon sun and mountains", true, 1.0, "synthwave_still.json"),
-    built_in!("circuit-motion", "Circuit: running light", false, 20.0, "circuit_motion.json"),
-    built_in!("circuit-still", "Circuit board", true, 1.0, "circuit_still.json"),
-    built_in!("warp-motion", "Warp: stars streaking", false, 24.0, "warp_motion.json"),
-    built_in!("warp-still", "Deep space", true, 1.0, "warp_still.json"),
-    built_in!("network-motion", "Network: connections", false, 20.0, "network_motion.json"),
-    built_in!("network-still", "Network: globe", true, 1.0, "network_still.json"),
 ];
+
+/// Styles that were built in and are now the registry's style packs: where an old setting's layer went.
+pub(crate) fn moved(id: &str) -> Option<String> {
+    let name = id.strip_prefix("builtin:")?;
+    let (style, kind) = name.rsplit_once('-')?;
+    let pack = match style {
+        "meadow" | "aurora" | "snow" => "dev.sshremote.nature-scenes",
+        "radar" | "matrix" | "synthwave" | "circuit" | "warp" | "network" => "dev.sshremote.tech-styles",
+        _ => return None,
+    };
+    matches!(kind, "motion" | "still").then(|| format!("ext:{pack}/{style}_{kind}.json"))
+}
 
 pub(crate) fn built_in(id: &str) -> Option<&'static BuiltIn> {
     BUILT_INS.iter().find(|b| b.id == id)
@@ -291,6 +285,14 @@ fn run(path: &str, side: u32, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moved_styles_point_at_their_packs() {
+        assert_eq!(moved("builtin:aurora-still").as_deref(), Some("ext:dev.sshremote.nature-scenes/aurora_still.json"));
+        assert_eq!(moved("builtin:warp-motion").as_deref(), Some("ext:dev.sshremote.tech-styles/warp_motion.json"));
+        assert_eq!(moved("builtin:night-still"), None, "still built in");
+        assert!(built_in("builtin:night-still").is_some() && built_in("builtin:radar-still").is_none());
+    }
 
     /// Lottie files from SSHREMOTE_LOTTIE_DIR drawn halfway through, on a checkered background so
     /// their transparency shows, into SSHREMOTE_SNAP_DIR; which could not be drawn, and why.

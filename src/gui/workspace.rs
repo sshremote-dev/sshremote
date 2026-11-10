@@ -1889,10 +1889,10 @@ mod tests {
             h.snap.save(&h.ctx, h.size, &dir.join(format!("look_{name}.png")));
         };
         let built = |id: &str, strength: f32, fit: Fit| BgLayer { src: format!("builtin:{id}"), on: true, strength, fit, scope: Scope::Window };
-        // Out of the box: the 3D title over the meadow.
+        // Out of the box: the 3D title over the night lake.
         shot(&mut h, &Look::default(), "default");
-        // Each built-in style: its picture and its animation, across the window.
-        for style in ["night", "aurora", "snow", "radar", "matrix", "synthwave", "circuit", "warp", "network"] {
+        // The built-in style: its picture and its animation, across the window.
+        for style in ["night"] {
             let l = Look { layers: vec![built(&format!("{style}-motion"), 0.7, Fit::Fill), built(&format!("{style}-still"), 0.7, Fit::Fill)], ..Look::default() };
             shot(&mut h, &l, style);
         }

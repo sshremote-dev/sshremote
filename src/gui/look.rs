@@ -232,7 +232,7 @@ impl Look {
                     .iter()
                     .filter_map(|b| {
                         Some(BgLayer {
-                            src: b.get("src")?.as_str()?.to_string(),
+                            src: { let s = b.get("src")?.as_str()?; super::lottie::moved(s).unwrap_or_else(|| s.to_string()) },
                             on: b.get("on").and_then(|x| x.as_bool()).unwrap_or(true),
                             strength: b.get("strength").and_then(|x| x.as_f64()).map_or(0.5, |x| (x as f32).clamp(0.0, 1.0)),
                             fit: from_name(&FITS, b.get("fit").and_then(|x| x.as_str()), Fit::Fill),
@@ -338,6 +338,10 @@ fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Optio
     // An extension's layer: its file in the extension's folder; a still one drawn once.
     let resolved;
     let (path, play) = if path.starts_with("ext:") {
+        if crate::ext::label(path).is_none() {
+            let id = path[4..].split('/').next().unwrap_or("");
+            return Err(format!("needs the extension {id}: Tools > Extensions"));
+        }
         resolved = crate::ext::resolve(path);
         (resolved.as_str(), play && !crate::ext::is_still(path))
     } else {
