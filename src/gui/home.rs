@@ -253,10 +253,10 @@ impl App {
                     }
                 }
                 ui.separator();
-                if row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
+                if PaneMode::Screen.on() && row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
                     go = Some((String::new(), String::new(), How::This(PaneMode::Screen)));
                 }
-                if row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
+                if PaneMode::Files.on() && row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
                     go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
                 }
                 // A synthetic screen for trying the viewer, in development builds only.
@@ -285,7 +285,7 @@ impl App {
             if place_row(ui, ic::LOCK_KEY, "Saved passwords", "Passwords for SSH sign-in, in the system's password store") {
                 self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
             }
-            if place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
+            if crate::modules::on("backup") && place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
                 self.backup = Some(crate::tools::BackupTool::new());
             }
             if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, a background picture, the logo and an overlay of the load and time") {
@@ -387,7 +387,7 @@ impl App {
         let enter = host.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            for mode in PaneMode::ALL {
+            for mode in PaneMode::ALL.into_iter().filter(|m| m.on()) {
                 let b = theme::primary(format!("{}  {}", mode.glyph(), mode.name())).min_size(Vec2::new(0.0, 32.0));
                 if ui.add(b).clicked() || (enter && mode == PaneMode::Terminal) {
                     let how = match mode {
@@ -530,10 +530,10 @@ impl App {
                     if ui.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
                         starred = Some((h.clone(), !fav));
                     }
-                    if icon(ui, ic::FOLDER, "Files", false).clicked() {
+                    if PaneMode::Files.on() && icon(ui, ic::FOLDER, "Files", false).clicked() {
                         *go = Some((h.clone(), p.clone(), How::Files));
                     }
-                    if icon(ui, ic::MONITOR, "Screen sharing", false).clicked() {
+                    if PaneMode::Screen.on() && icon(ui, ic::MONITOR, "Screen sharing", false).clicked() {
                         *go = Some((h.clone(), p.clone(), How::Screen));
                     }
                     if !direct && icon(ui, ic::TERMINAL, "Terminal", false).clicked() {

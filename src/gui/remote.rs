@@ -1847,7 +1847,7 @@ impl Remote {
         let (mut chat, mut shot, mut pause, mut frame, mut helper) = (false, false, false, false, false);
         if !compact {
             // Chat is with the person at the screen: shown with the screen only.
-            chat = screen && icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
+            chat = screen && crate::modules::on("chat") && icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
             shot = screen && icon(ui, ic::CAMERA, shot_tip, false).clicked();
             // Paused: the play button shows as on, so the frozen state is plain to see.
             if screen {
@@ -1867,7 +1867,9 @@ impl Remote {
                 ui.checkbox(&mut self.view_only, "View only")
                     .on_hover_text("Watch without sending keys, clicks or the wheel");
                 ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
-                sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
+                if crate::modules::on("sound") {
+                    sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
+                }
                 if cfg!(windows) {
                     let tip = "While this screen is the active pane, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
                     ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
@@ -1887,7 +1889,7 @@ impl Remote {
                         }
                         clicked
                     };
-                    chat = item(ui, &chat_glyph, "Chat", chat_tip);
+                    chat = crate::modules::on("chat") && item(ui, &chat_glyph, "Chat", chat_tip);
                     shot = item(ui, ic::CAMERA, "Screenshot", shot_tip);
                     pause = item(ui, pause_glyph, if self.paused { "Resume" } else { "Pause" }, pause_tip);
                     frame = self.paused && item(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", "Fetch one frame");

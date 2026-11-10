@@ -606,6 +606,10 @@ impl ExtTool {
             }
         });
         ui.add_space(8.0);
+        ui.label(RichText::new("Modules").strong());
+        ui.label(RichText::new("Parts of the app beyond the terminal; one turned off leaves the menus.").weak().size(12.0));
+        crate::modules::ui(ui);
+        ui.add_space(8.0);
         ui.label(RichText::new("License").strong());
         match crate::license::current() {
             Some(l) => {

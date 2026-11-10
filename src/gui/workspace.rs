@@ -23,6 +23,15 @@ impl PaneMode {
         }
     }
 
+    /// Whether its module is on (the terminal always is).
+    pub(crate) fn on(self) -> bool {
+        match self {
+            PaneMode::Terminal => true,
+            PaneMode::Screen => crate::modules::on("screen"),
+            PaneMode::Files => crate::modules::on("files"),
+        }
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             PaneMode::Terminal => "Terminal",
@@ -1384,7 +1393,7 @@ impl Workspace {
             .ui(ui, |ui| {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(190.0);
-                for m in PaneMode::ALL {
+                for m in PaneMode::ALL.into_iter().filter(|m| m.on()) {
                     if ui.add(egui::Button::selectable(cur == m, format!("{}  {}", m.glyph(), m.name()))).clicked() {
                         chosen = Some(m);
                         ui.close();

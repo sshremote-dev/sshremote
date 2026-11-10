@@ -19,6 +19,7 @@ mod hosts;
 mod keygrab;
 mod keys;
 mod license;
+mod modules;
 mod markdown;
 mod mcp;
 mod net;
@@ -60,6 +61,7 @@ usage: sshremote                       open the window: connect screen, recent h
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
        sshremote license [show | install FILE | remove]   the premium license
+       sshremote module [list | on ID | off ID]   turn parts of the app on or off
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx
@@ -383,10 +385,11 @@ fn run(args: &[String]) -> Result<(), String> {
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
         "license" => license::cli(&args[1..]),
+        "module" => modules::cli(&args[1..]),
         // The gateway browsers reach terminals through (sshremote.dev/web).
-        "web" => web::run(&args[1..]),
+        "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
         // stdout carries JSON-RPC only; everything else goes to stderr.
-        "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
+        "mcp" => modules::need("mcp").and_then(|()| parse_client(&args[1..])).and_then(|o| mcp::run(&o)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
         _ if args.iter().any(|a| a == "--agent") => {
