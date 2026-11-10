@@ -60,6 +60,15 @@ pub struct Offer {
     pub sha256: String,
     /// Only with a premium license.
     pub premium: bool,
+    /// Commands its program serves ("remote", "web").
+    pub provides: Vec<String>,
+}
+
+impl Offer {
+    /// Whether this sshremote already has what it brings.
+    pub fn built_in(&self) -> bool {
+        !self.provides.is_empty() && self.provides.iter().all(|p| crate::modules::built_in(p))
+    }
 }
 
 fn root() -> Option<PathBuf> {
@@ -479,6 +488,7 @@ pub fn offers() -> Result<Vec<Offer>, String> {
                         url: if url.contains("://") { url } else { format!("{base}/{url}") },
                         sha256: p("sha256")?.to_lowercase(),
                         premium: e.get("premium").and_then(|x| x.as_bool()).unwrap_or(false),
+                        provides: e.get("provides").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -555,7 +565,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         Some("available") => {
             for o in offers()? {
-                println!("{}  {}  {}", o.id, o.version, o.name);
+                println!("{}  {}  {}{}", o.id, o.version, o.name, if o.built_in() { "  (built in here)" } else { "" });
             }
             Ok(())
         }
@@ -707,6 +717,9 @@ impl ExtTool {
                             match have {
                                 Some(_) => {
                                     ui.label(RichText::new("Installed").weak().size(12.0));
+                                }
+                                None if o.built_in() => {
+                                    ui.label(RichText::new("Built in here").weak().size(12.0));
                                 }
                                 None => {
                                     let b = ui.add_enabled(!locked, egui::Button::new(format!("{}  Install", ic::DOWNLOAD)));
@@ -892,11 +905,12 @@ mod tests {
         let pkg = d.with_extension("sshx");
         pack(&d, &pkg).unwrap();
         install_file(&pkg).unwrap();
-        let offer = |id: &str, name: &str, premium| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), premium };
+        let offer = |id: &str, name: &str, premium| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), premium, provides: Vec::new() };
         let mut tool = ExtTool { offers: Some(Ok(vec![
             offer("dev.sshremote.test-sea", "Sea pack", false),
             offer("dev.sshremote.test-gold", "Gold pack", true),
             Offer { version: "1.3.0".into(), ..offer("dev.sshremote.test-page", "Page gateway", false) },
+            Offer { provides: vec!["remote".into()], ..offer("dev.sshremote.test-rd", "Desk pack", false) },
         ])), ..ExtTool::new() };
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
@@ -906,9 +920,10 @@ mod tests {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
             snap.frame(&ctx, input, |ui| tool.ui(ui));
         }
-        for text in ["Page gateway", "Brings: sshremote web", "Run its own program", "Sea pack", "Gold pack", "Premium", "Modules", "Web gateway", "License", "Update to 1.3.0", "Installed"] {
+        for text in ["Page gateway", "Brings: sshremote web", "Run its own program", "Sea pack", "Gold pack", "Premium", "Modules", "Web gateway", "License", "Update to 1.3.0", "Installed", "Desk pack"] {
             assert!(!snap.find(text).is_empty(), "{text} is shown");
         }
+        assert_eq!(!snap.find("Built in here").is_empty(), cfg!(feature = "remote"), "the extension a build carries itself");
         if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
             snap.save(&ctx, size, &std::path::Path::new(&dir).join("extensions_page.png"));
         }

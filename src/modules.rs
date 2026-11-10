@@ -29,7 +29,7 @@ pub fn built_in(id: &str) -> bool {
     match id {
         "web" => cfg!(feature = "web"),
         "mcp" => cfg!(feature = "mcp"),
-        "screen" | "files" | "chat" | "sound" => cfg!(feature = "remote"),
+        "screen" | "files" | "chat" | "sound" | "remote" => cfg!(feature = "remote"),
         _ => true,
     }
 }
