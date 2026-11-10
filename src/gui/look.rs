@@ -78,6 +78,9 @@ impl BgLayer {
 
 /// What a layer is called in the list: a built-in's name, a file's name.
 fn layer_name(src: &str) -> String {
+    if let Some(l) = crate::ext::label(src) {
+        return l;
+    }
     super::lottie::built_in(src).map_or_else(
         || std::path::Path::new(src).file_name().map_or(src.to_string(), |n| n.to_string_lossy().into_owned()),
         |b| b.label.to_string(),
@@ -332,6 +335,14 @@ static PICTURES: Mutex<Vec<(String, Loaded)>> = Mutex::new(Vec::new());
 /// The picture's frame for now as a texture, once read (in the background the first time), and
 /// when the next frame is due for one that moves.
 fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Option<(egui::TextureHandle, Option<f64>)>, String> {
+    // An extension's layer: its file in the extension's folder; a still one drawn once.
+    let resolved;
+    let (path, play) = if path.starts_with("ext:") {
+        resolved = crate::ext::resolve(path);
+        (resolved.as_str(), play && !crate::ext::is_still(path))
+    } else {
+        (path, play)
+    };
     // A Lottie animation plays in a thread of its own, drawn at the size it shows.
     if super::lottie::is_lottie(path) {
         return super::lottie::frame(ctx, path, px * ctx.pixels_per_point(), play).map(|t| t.map(|t| (t, None)));
@@ -1204,6 +1215,18 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
                 if ui.button(format!("{}  ({kind})", b.label)).clicked() {
                     let fit = if b.id == "builtin:brand" { Fit::Whole } else { Fit::Fill };
                     l.layers.push(BgLayer { src: b.id.to_string(), on: true, strength: 0.5, fit, scope: Scope::Window });
+                    ui.close();
+                }
+            }
+            let ext = crate::ext::layers();
+            if !ext.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("From extensions").weak().size(12.0));
+            }
+            for (src, label, still) in ext {
+                let kind = if still { "picture" } else { "animation" };
+                if ui.button(format!("{label}  ({kind})")).clicked() {
+                    l.layers.push(BgLayer { src, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
                     ui.close();
                 }
             }

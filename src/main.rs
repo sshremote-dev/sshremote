@@ -10,6 +10,7 @@ mod clip;
 mod color;
 #[cfg(windows)]
 mod conpty;
+mod ext;
 mod files;
 mod filewin;
 mod gui;
@@ -55,6 +56,8 @@ usage: sshremote                       open the window: connect screen, recent h
                                   the workspace with a terminal pane: a local shell, or ssh to HOST;
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
+       sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx
+                                  extensions: style packs from sshremote.dev or a file
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
                                   wait for viewers without ssh (prints a one-time password)
@@ -366,6 +369,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
         "--stats" => gui::look::print_stats(),
+        // Extensions: list, install from a file or the registry, update, remove, pack.
+        "ext" => ext::cli(&args[1..]),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer

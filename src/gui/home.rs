@@ -272,7 +272,7 @@ impl App {
 
     /// The tools: a list of them, or the one open, as a page with a way back.
     fn tools_section(&mut self, ui: &mut egui::Ui) {
-        let open = [self.keys.is_some(), self.config.is_some(), self.vault.is_some(), self.backup.is_some()];
+        let open = [self.keys.is_some(), self.config.is_some(), self.vault.is_some(), self.backup.is_some(), self.exts.is_some()];
         let Some(which) = open.iter().position(|&o| o) else {
             ui.label(RichText::new("Tools").size(16.0).strong());
             ui.add_space(6.0);
@@ -291,6 +291,9 @@ impl App {
             if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, a background picture, the logo and an overlay of the load and time") {
                 super::look::open(ui.ctx());
             }
+            if place_row(ui, ic::PLUS, "Extensions", "Style packs and more: from sshremote.dev or a file, updated and removed") {
+                self.exts = Some(crate::ext::ExtTool::new());
+            }
             if cfg!(windows) {
                 ui.add_space(6.0);
                 ui.separator();
@@ -303,6 +306,7 @@ impl App {
             (ic::GLOBE, "SSH hosts (~/.ssh/config)"),
             (ic::LOCK_KEY, "Saved passwords"),
             (ic::ARCHIVE, "Backup and restore"),
+            (ic::PLUS, "Extensions"),
         ][which];
         let mut back = false;
         ui.horizontal(|ui| {
@@ -323,6 +327,8 @@ impl App {
                 v.ui(ui, &known);
             } else if let Some(b) = &mut self.backup {
                 b.ui(ui, &mut changed);
+            } else if let Some(e) = &mut self.exts {
+                e.ui(ui);
             }
             ui.add_space(12.0);
         });
@@ -363,6 +369,7 @@ impl App {
                 self.config = None;
                 self.vault = None;
                 self.backup = None;
+                self.exts = None;
             }
         }
     }

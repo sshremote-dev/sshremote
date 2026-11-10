@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH Remote</title>
+<meta name="description" content="An SSH terminal with the remote screen, files, chat and MCP, over SSH alone.">
+<style>
+  :root { color-scheme: dark; --bg: #0b1220; --fg: #e6edf7; --dim: #93a4bf; --brand: #5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.6 system-ui, sans-serif; background: radial-gradient(1200px 600px at 70% -10%, #1b3a6b 0%, var(--bg) 60%); color: var(--fg); min-height: 100vh; }
+  main { max-width: 860px; margin: 0 auto; padding: 72px 24px; }
+  h1 { font-size: 48px; margin: 0 0 4px; letter-spacing: 1px; }
+  h1 small { font-size: 18px; color: var(--dim); font-weight: 400; }
+  h2 { margin-top: 48px; font-size: 22px; }
+  p.lead { font-size: 20px; color: var(--dim); }
+  a { color: var(--brand); }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 8px; background: var(--brand); color: #04101f; text-decoration: none; font-weight: 600; }
+  .btn.alt { background: transparent; color: var(--fg); border: 1px solid #2d3d58; }
+  ul { padding-left: 20px; }
+  code { background: #15213a; padding: 2px 6px; border-radius: 4px; }
+  #exts div { padding: 10px 0; border-bottom: 1px solid #1d2a44; }
+  #exts span { color: var(--dim); }
+  footer { margin-top: 64px; color: var(--dim); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SSH Remote <small>(thinkbigx)</small></h1>
+  <p class="lead">An SSH terminal that also shows and operates the remote screen, moves files, chats and serves AI agents over MCP. SSH is the only transport: no relay, no open ports.</p>
+  <div class="row">
+    <a class="btn" href="download/sshremote-windows-x86_64.exe">Windows</a>
+    <a class="btn" href="download/sshremote-linux-x86_64">Linux</a>
+    <a class="btn alt" href="https://github.com/thinkbigx/sshremote">Source on GitHub</a>
+  </div>
+  <h2>What it does</h2>
+  <ul>
+    <li>Terminal workspace with tabs and split panes, local shells and SSH hosts.</li>
+    <li>The remote desktop in a window or in the terminal, from low bandwidth to full quality.</li>
+    <li>Files, clipboard, chat, and an MCP server so an agent can see and operate a host.</li>
+    <li>Appearance you can make your own: fonts, colours, animated background layers.</li>
+  </ul>
+  <h2>Extensions</h2>
+  <p>Install from <b>Tools → Extensions</b> in the app, or with <code>sshremote ext install ID</code>. Update all with <code>sshremote ext update</code>.</p>
+  <div id="exts"><span>Loading the registry…</span></div>
+  <footer>Open source. © thinkbigx</footer>
+</main>
+<script>
+fetch("registry/v1/index.json").then(r => r.json()).then(i => {
+  const box = document.getElementById("exts");
+  box.textContent = "";
+  for (const e of i.extensions) {
+    const d = document.createElement("div");
+    const b = document.createElement("b"); b.textContent = e.name + " ";
+    const s = document.createElement("span"); s.textContent = e.version + " · " + e.id;
+    const p = document.createElement("div"); p.style.border = "0"; p.style.padding = "0"; p.textContent = e.description;
+    d.append(b, s, p); box.append(d);
+  }
+}).catch(() => { document.getElementById("exts").textContent = "The registry is not reachable right now."; });
+</script>
+</body>
+</html>

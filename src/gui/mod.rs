@@ -289,6 +289,7 @@ pub struct App {
     queued: Vec<(workspace::Launch, workspace::Place, (bool, bool, bool))>,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
+    exts: Option<crate::ext::ExtTool>,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
     #[cfg_attr(not(windows), allow(dead_code))]
     service: Option<bool>,
@@ -581,6 +582,7 @@ impl App {
             ),
             vault: None,
             backup: None,
+            exts: None,
             service: None,
             section: home::Section::Ssh,
             windows: Vec::new(),
