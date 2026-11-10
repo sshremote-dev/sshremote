@@ -38,10 +38,11 @@ mod tools;
 mod transport;
 mod ui;
 mod vault;
+mod web;
 // Some keys are only sent on to Windows.
+mod video;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod xk;
-mod video;
 
 use color::Mode;
 
@@ -56,6 +57,8 @@ usage: sshremote                       open the window: connect screen, recent h
                                   the workspace with a terminal pane: a local shell, or ssh to HOST;
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
+       sshremote web [--listen ADDR] [--password-file F]
+                                  terminals in a browser: this computer and its ~/.ssh/config hosts
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx
                                   extensions: style packs from sshremote.dev or a file
        sshremote --agent [--capture B] remote side, started by the viewer
@@ -314,8 +317,13 @@ fn main() {
         if let Err(e) = client::run(opt) {
             // No console here: the reason goes beside the settings too.
             if let Some(dir) = hosts::config_dir() {
-                let _ = std::fs::write(dir.join("crash.txt"), format!("sshremote stopped: {e}
-"));
+                let _ = std::fs::write(
+                    dir.join("crash.txt"),
+                    format!(
+                        "sshremote stopped: {e}
+"
+                    ),
+                );
             }
             eprintln!("sshremote: {e}");
             std::process::exit(1);
@@ -371,6 +379,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--stats" => gui::look::print_stats(),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
+        // The gateway browsers reach terminals through (sshremote.dev/web).
+        "web" => web::run(&args[1..]),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         "mcp" => parse_client(&args[1..]).and_then(|o| mcp::run(&o)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer

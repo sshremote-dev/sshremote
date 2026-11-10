@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH Remote Web</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  :root { color-scheme: dark; --bg: #0b1220; --fg: #e6edf7; --dim: #93a4bf; --brand: #5aa9ff; --bad: #ff7a7a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  #card { max-width: 380px; margin: 12vh auto 0; padding: 28px; border: 1px solid #22314d; border-radius: 12px;
+          background: radial-gradient(500px 240px at 80% -20%, #1b3a6b 0%, #0f1828 70%); }
+  h1 { margin: 0 0 4px; font-size: 24px; } h1 small { color: var(--dim); font-size: 14px; font-weight: 400; }
+  p { color: var(--dim); margin: 0 0 18px; }
+  input, select, button { width: 100%; box-sizing: border-box; font: inherit; padding: 9px 12px; margin: 6px 0;
+          border-radius: 8px; border: 1px solid #2d3d58; background: #0b1424; color: var(--fg); }
+  button { background: var(--brand); color: #04101f; border: 0; font-weight: 600; cursor: pointer; }
+  #error { color: var(--bad); min-height: 1.5em; }
+  #bar { display: none; height: 34px; align-items: center; gap: 10px; padding: 0 10px; background: #0f1828; border-bottom: 1px solid #22314d; }
+  #bar b { flex: 1; } #bar button { width: auto; margin: 0; padding: 4px 12px; }
+  #term { display: none; position: absolute; top: 35px; left: 0; right: 0; bottom: 0; padding: 4px; }
+</style>
+</head>
+<body>
+<div id="card">
+  <h1>SSH Remote <small>web</small></h1>
+  <p>Terminals in the browser, through this gateway.</p>
+  <form id="signin">
+    <input id="password" type="password" placeholder="Gateway password" autocomplete="current-password" autofocus>
+    <button>Sign in</button>
+  </form>
+  <form id="pick" style="display:none">
+    <select id="host"></select>
+    <button>Open</button>
+  </form>
+  <div id="error"></div>
+</div>
+<div id="bar"><b id="title"></b><button id="leave">Close</button></div>
+<div id="term"></div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let ws, term, fit;
+const base = location.pathname.replace(/[^/]*$/, "");
+const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "ws";
+
+function fail(text) { $("error").textContent = text; }
+
+$("signin").onsubmit = e => {
+  e.preventDefault();
+  fail("");
+  ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => ws.send(JSON.stringify({ password: $("password").value }));
+  ws.onerror = () => fail("The gateway could not be reached.");
+  ws.onmessage = m => {
+    if (typeof m.data !== "string") return;
+    const v = JSON.parse(m.data);
+    if (v.error) { fail(v.error); return; }
+    if (v.hosts) {
+      $("signin").style.display = "none";
+      $("pick").style.display = "";
+      const sel = $("host");
+      sel.textContent = "";
+      for (const h of v.hosts) { const o = document.createElement("option"); o.textContent = h; sel.append(o); }
+      sel.focus();
+    }
+  };
+};
+
+$("pick").onsubmit = e => {
+  e.preventDefault();
+  const host = $("host").value;
+  $("card").style.display = "none";
+  $("bar").style.display = "flex";
+  $("term").style.display = "block";
+  $("title").textContent = host;
+  document.title = host + " - SSH Remote Web";
+  term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000,
+    fontFamily: "'Cascadia Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace",
+    theme: { background: "#0b1220" } });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($("term"));
+  fit.fit();
+  const enc = new TextEncoder();
+  ws.onmessage = m => {
+    if (typeof m.data === "string") {
+      const v = JSON.parse(m.data);
+      if (v.error) term.write("\r\n\x1b[31m" + v.error + "\x1b[0m\r\n");
+      if (v.end) term.write("\r\n\x1b[2m[" + v.end + "]\x1b[0m\r\n");
+    } else {
+      term.write(new Uint8Array(m.data));
+    }
+  };
+  ws.onclose = () => term.write("\r\n\x1b[2m[closed]\x1b[0m\r\n");
+  ws.send(JSON.stringify({ open: host, cols: term.cols, rows: term.rows }));
+  term.onData(d => ws.readyState === 1 && ws.send(enc.encode(d)));
+  term.onResize(s => ws.readyState === 1 && ws.send(JSON.stringify({ resize: [s.cols, s.rows] })));
+  addEventListener("resize", () => fit.fit());
+  term.focus();
+};
+
+$("leave").onclick = () => { if (ws) ws.close(); location.reload(); };
+</script>
+</body>
+</html>
