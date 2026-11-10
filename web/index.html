@@ -18,6 +18,9 @@
   #error { color: var(--bad); min-height: 1.5em; }
   #bar { display: none; height: 34px; align-items: center; gap: 10px; padding: 0 10px; background: #0f1828; border-bottom: 1px solid #22314d; }
   #bar b { flex: 1; } #bar button { width: auto; margin: 0; padding: 4px 12px; }
+  button.alt { background: transparent; color: var(--fg); border: 1px solid #2d3d58; }
+  #screen { display: none; position: absolute; top: 35px; left: 0; right: 0; bottom: 0; background: #000; }
+  #screen canvas { width: 100%; height: 100%; object-fit: contain; cursor: default; outline: none; }
   #term { display: none; position: absolute; top: 35px; left: 0; right: 0; bottom: 0; padding: 4px; }
 </style>
 </head>
@@ -31,12 +34,14 @@
   </form>
   <form id="pick" style="display:none">
     <select id="host"></select>
-    <button>Open</button>
+    <button>Terminal</button>
+    <button type="button" id="openScreen" class="alt">Screen</button>
   </form>
   <div id="error"></div>
 </div>
 <div id="bar"><b id="title"></b><button id="leave">Close</button></div>
 <div id="term"></div>
+<div id="screen"><canvas id="canvas" tabindex="0"></canvas></div>
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
 <script>
@@ -72,11 +77,8 @@ $("signin").onsubmit = e => {
 $("pick").onsubmit = e => {
   e.preventDefault();
   const host = $("host").value;
-  $("card").style.display = "none";
-  $("bar").style.display = "flex";
+  chrome(host, "terminal");
   $("term").style.display = "block";
-  $("title").textContent = host;
-  document.title = host + " - SSH Remote Web";
   term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000,
     fontFamily: "'Cascadia Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace",
     theme: { background: "#0b1220" } });
@@ -100,6 +102,111 @@ $("pick").onsubmit = e => {
   term.onResize(s => ws.readyState === 1 && ws.send(JSON.stringify({ resize: [s.cols, s.rows] })));
   addEventListener("resize", () => fit.fit());
   term.focus();
+};
+
+function chrome(host, what) {
+  $("card").style.display = "none";
+  $("bar").style.display = "flex";
+  $("title").textContent = host + " · " + what;
+  document.title = host + " - SSH Remote Web";
+}
+
+// Keys as X keysyms, which the agent takes on every system.
+const NAMED = { Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b, Delete: 0xffff, Home: 0xff50,
+  ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54, PageUp: 0xff55, PageDown: 0xff56,
+  End: 0xff57, Insert: 0xff63, ContextMenu: 0xff67, Pause: 0xff13, PrintScreen: 0xff61, CapsLock: 0xffe5 };
+const SIDED = { Shift: [0xffe1, 0xffe2], Control: [0xffe3, 0xffe4], Alt: [0xffe9, 0xffea], Meta: [0xffeb, 0xffec], AltGraph: [0xfe03, 0xfe03] };
+function keysym(e) {
+  if (NAMED[e.key]) return NAMED[e.key];
+  if (SIDED[e.key]) return SIDED[e.key][e.location === 2 ? 1 : 0];
+  const f = /^F(\d{1,2})$/.exec(e.key);
+  if (f) return 0xffbe + Number(f[1]) - 1;
+  if ([...e.key].length === 1) {
+    // With Ctrl or Alt the key's own letter, not what the layout made of it.
+    let c = e.key.codePointAt(0);
+    if ((e.ctrlKey || e.altKey) && /^Key[A-Z]$/.test(e.code)) c = e.code.charCodeAt(3) + (e.shiftKey ? 0 : 32);
+    return c < 0x100 ? c : 0x01000000 + c;
+  }
+  return 0;
+}
+
+$("openScreen").onclick = () => {
+  const host = $("host").value;
+  chrome(host, "screen");
+  $("screen").style.display = "block";
+  const canvas = $("canvas"), ctx = canvas.getContext("2d");
+  const want = () => [Math.round(canvas.clientWidth * devicePixelRatio), Math.round(canvas.clientHeight * devicePixelRatio)];
+  const send = v => ws.readyState === 1 && ws.send(JSON.stringify(v));
+  const [w, h] = want();
+  let busy = false, next = null;
+  ws.onmessage = m => {
+    if (typeof m.data === "string") {
+      const v = JSON.parse(m.data);
+      if (v.status) $("title").textContent = v.status;
+      if (v.screen) $("title").textContent = host + " · screen " + v.screen[0] + "×" + v.screen[1];
+      if (v.error || v.end) $("title").textContent = host + " · " + (v.error || v.end);
+      return;
+    }
+    // The newest picture only, drawn when the last one is done.
+    next = m.data;
+    if (busy) return;
+    const draw = () => {
+      if (!next) { busy = false; return; }
+      busy = true;
+      const blob = new Blob([next], { type: "image/jpeg" });
+      next = null;
+      createImageBitmap(blob).then(b => {
+        if (canvas.width !== b.width || canvas.height !== b.height) { canvas.width = b.width; canvas.height = b.height; }
+        ctx.drawImage(b, 0, 0);
+        b.close();
+        draw();
+      }, () => draw());
+    };
+    draw();
+  };
+  ws.onclose = () => { $("title").textContent = host + " · closed"; };
+  ws.send(JSON.stringify({ open: host, screen: true, w, h }));
+  // Pointer positions in the picture's pixels, past the letterbox around it.
+  const point = e => {
+    const r = canvas.getBoundingClientRect();
+    const k = Math.min(r.width / canvas.width, r.height / canvas.height);
+    const ox = (r.width - canvas.width * k) / 2, oy = (r.height - canvas.height * k) / 2;
+    const x = Math.floor((e.clientX - r.left - ox) / k), y = Math.floor((e.clientY - r.top - oy) / k);
+    return x >= 0 && y >= 0 && x < canvas.width && y < canvas.height ? [x, y] : null;
+  };
+  const BUTTON = [1, 2, 3, 8, 9];
+  canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
+  canvas.onpointerdown = e => {
+    canvas.focus();
+    const p = point(e); if (!p) return;
+    canvas.setPointerCapture(e.pointerId);
+    send({ move: p }); send({ button: [BUTTON[e.button] || 1, 1] });
+    e.preventDefault();
+  };
+  canvas.onpointerup = e => send({ button: [BUTTON[e.button] || 1, 0] });
+  canvas.oncontextmenu = e => e.preventDefault();
+  let wheel = [0, 0];
+  canvas.onwheel = e => {
+    e.preventDefault();
+    const unit = e.deltaMode === 0 ? 40 : e.deltaMode === 1 ? 1 : 0.1;
+    wheel[0] += e.deltaX / unit; wheel[1] += e.deltaY / unit;
+    const sx = Math.trunc(wheel[0]), sy = Math.trunc(wheel[1]);
+    if (sx || sy) { send({ wheel: [sx, sy] }); wheel = [wheel[0] - sx, wheel[1] - sy]; }
+  };
+  const held = new Set();
+  canvas.onkeydown = e => {
+    const k = keysym(e); if (!k) return;
+    e.preventDefault(); held.add(k); send({ key: [k, 1] });
+  };
+  canvas.onkeyup = e => {
+    const k = keysym(e); if (!k) return;
+    e.preventDefault(); held.delete(k); send({ key: [k, 0] });
+  };
+  // Keys still down when the page loses focus come up, so none sticks on the host.
+  canvas.onblur = () => { for (const k of held) send({ key: [k, 0] }); held.clear(); };
+  let t;
+  addEventListener("resize", () => { clearTimeout(t); t = setTimeout(() => send({ view: want() }), 250); });
+  canvas.focus();
 };
 
 $("leave").onclick = () => { if (ws) ws.close(); location.reload(); };

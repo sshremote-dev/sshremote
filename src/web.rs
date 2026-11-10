@@ -145,7 +145,9 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
                 format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes(),
             )
             .map_err(|e| e.to_string())?;
+            // On both handles: on Windows a clone keeps its own timeout.
             let _ = conn.set_read_timeout(None);
+            let _ = r.get_ref().set_read_timeout(None);
             session(r, conn.try_clone().map_err(|e| e.to_string())?, gate, who)
         }
         _ => respond(&conn, "404 Not Found", "text/plain", b"not here"),
@@ -289,6 +291,10 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     if !list.iter().any(|h| h == host) {
         return send_json(&w, serde_json::json!({ "error": "That host is not offered here." }));
     }
+    if v.get("screen").and_then(|x| x.as_bool()) == Some(true) {
+        let size = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(1280).clamp(64, 7680) as u16;
+        return screen(r, w, host, (size("w"), size("h")));
+    }
     let size = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(2, 500) as u16;
     let argv: Vec<String> = if host == HERE { Vec::new() } else { vec!["ssh".into(), "-tt".into(), host.to_string()] };
     let (wake_tx, wake) = mpsc::sync_channel::<()>(1);
@@ -345,6 +351,134 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     Ok(())
 }
 
+/// What the browser sends while it shows a screen.
+enum Input {
+    Agent(crate::proto::ToAgent),
+    View(u16, u16),
+    Gone,
+}
+
+/// The host's screen in the browser: the session's frames kept here and sent on as JPEG pictures
+/// (at most 12 a second, only when something changed); pointer, buttons, wheel and keys back.
+fn screen(mut r: BufReader<TcpStream>, w: Arc<Mutex<TcpStream>>, host: &str, view: (u16, u16)) -> Result<(), String> {
+    use crate::proto::{Settings, ToAgent, ToClient};
+    use crate::session::{Ev, Session};
+    let target = if host == HERE {
+        crate::transport::Target::Local { capture: "auto".into() }
+    } else {
+        crate::transport::Target::Ssh {
+            host: host.to_string(),
+            port: None,
+            args: Vec::new(),
+            remote: crate::session::REMOTE.into(),
+            capture: "auto".into(),
+            password: None,
+            unattended: false,
+        }
+    };
+    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
+    let (mut sess, _tx, rx) = match Session::open(&target, true) {
+        Ok(x) => x,
+        Err(e) => return send_json(&w, serde_json::json!({ "error": e })),
+    };
+    let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
+    sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
+    send_json(&w, serde_json::json!({ "screen": [sess.desk.0, sess.desk.1] }))?;
+    // The browser's input on its own thread, handed over here.
+    let (in_tx, input) = mpsc::channel();
+    let w_in = w.clone();
+    std::thread::spawn(move || {
+        loop {
+            let msg = match read_frame(&mut r, &w_in) {
+                Ok(Frame::Text(t)) => serde_json::from_str::<serde_json::Value>(&t).ok().and_then(|v| browser_input(&v)),
+                Ok(Frame::Binary(_)) => None,
+                Ok(Frame::Close) | Err(_) => Some(Input::Gone),
+            };
+            if let Some(m) = msg {
+                let gone = matches!(m, Input::Gone);
+                if in_tx.send(m).is_err() || gone {
+                    return;
+                }
+            }
+        }
+    });
+    let mut fb = crate::session::Framebuffer::default();
+    let (mut dirty, mut sent) = (false, Instant::now() - Duration::from_secs(1));
+    let end = loop {
+        match rx.recv_timeout(Duration::from_millis(15)) {
+            Ok(Ev::Net(ToClient::Frame(f))) => {
+                fb.apply(&f).map_err(|e| e.to_string())?;
+                sess.send(ToAgent::Ack(f.id)).map_err(|e| e.to_string())?;
+                dirty = true;
+            }
+            Ok(Ev::Net(ToClient::Error(e))) | Ok(Ev::Closed(e)) => break e,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break "the session ended".into(),
+        }
+        let mut gone = false;
+        for m in input.try_iter() {
+            match m {
+                Input::Agent(a) => sess.send(a).map_err(|e| e.to_string())?,
+                Input::View(vw, vh) => sess.send(ToAgent::Settings(settings((vw, vh)))).map_err(|e| e.to_string())?,
+                Input::Gone => gone = true,
+            }
+        }
+        if gone {
+            break String::new();
+        }
+        if dirty && fb.w > 0 && sent.elapsed() >= Duration::from_millis(80) {
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 82)
+                .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
+                .map_err(|e| e.to_string())?;
+            if send(&w, 0x2, &jpeg).is_err() {
+                break String::new();
+            }
+            (dirty, sent) = (false, Instant::now());
+        }
+    };
+    sess.close();
+    if !end.is_empty() {
+        let _ = send_json(&w, serde_json::json!({ "end": end }));
+    }
+    if let Ok(s) = w.lock() {
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
+    Ok(())
+}
+
+/// One message of the browser's: {"move":[x,y]}, {"button":[b,down]}, {"wheel":[dx,dy]},
+/// {"key":[keysym,down]}, {"view":[w,h]}; points in the picture's pixels, wheel steps down/right
+/// positive.
+fn browser_input(v: &serde_json::Value) -> Option<Input> {
+    use crate::proto::ToAgent;
+    let pair = |k: &str| -> Option<(i64, i64)> {
+        let a = v.get(k)?.as_array()?;
+        let n = |i: usize| a.get(i).and_then(|x| x.as_i64().or_else(|| x.as_bool().map(i64::from)));
+        Some((n(0)?, n(1)?))
+    };
+    if let Some((x, y)) = pair("move") {
+        return Some(Input::Agent(ToAgent::Pointer { x: x.clamp(0, 65535) as u16, y: y.clamp(0, 65535) as u16 }));
+    }
+    if let Some((b, down)) = pair("button") {
+        return Some(Input::Agent(ToAgent::Button { button: b.clamp(1, 9) as u8, pressed: down != 0 }));
+    }
+    if let Some((dx, dy)) = pair("wheel") {
+        return Some(Input::Agent(if dy != 0 {
+            ToAgent::Scroll { steps: dy.clamp(-10, 10) as i8 }
+        } else {
+            ToAgent::HScroll { steps: dx.clamp(-10, 10) as i8 }
+        }));
+    }
+    if let Some((k, down)) = pair("key") {
+        return Some(Input::Agent(ToAgent::KeyState { keysym: k.clamp(0, u32::MAX as i64) as u32, down: down != 0 }));
+    }
+    if let Some((vw, vh)) = pair("view") {
+        return Some(Input::View(vw.clamp(64, 7680) as u16, vh.clamp(64, 4320) as u16));
+    }
+    None
+}
+
 fn pty_spawn(argv: &[String], cols: u16, rows: u16, wake: mpsc::SyncSender<()>) -> Result<crate::pty::Local, String> {
     crate::pty::Local::spawn(
         argv,
@@ -399,6 +533,19 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_input_messages() {
+        use crate::proto::ToAgent;
+        let i = |t: &str| browser_input(&serde_json::from_str(t).unwrap());
+        assert!(matches!(i(r#"{"move":[10,20]}"#), Some(Input::Agent(ToAgent::Pointer { x: 10, y: 20 }))));
+        assert!(matches!(i(r#"{"button":[3,1]}"#), Some(Input::Agent(ToAgent::Button { button: 3, pressed: true }))));
+        assert!(matches!(i(r#"{"wheel":[0,-2]}"#), Some(Input::Agent(ToAgent::Scroll { steps: -2 }))));
+        assert!(matches!(i(r#"{"wheel":[1,0]}"#), Some(Input::Agent(ToAgent::HScroll { steps: 1 }))));
+        assert!(matches!(i(r#"{"key":[65293,0]}"#), Some(Input::Agent(ToAgent::KeyState { keysym: 0xff0d, down: false }))));
+        assert!(matches!(i(r#"{"view":[10,99999]}"#), Some(Input::View(64, 4320))));
+        assert!(i(r#"{"other":1}"#).is_none());
+    }
 
     #[test]
     fn handshake_hash() {
