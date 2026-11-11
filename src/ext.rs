@@ -1055,6 +1055,12 @@ impl ExtTool {
     }
 
     fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
+        let mut to_installed = false;
+        self.parts_card(ui, act, &mut to_installed);
+        ui.add_space(10.0);
+        ui.label(RichText::new(format!("Added extensions ({})", installed.len())).strong());
+        ui.label(RichText::new("Installed by you from the registry or a package file; each can be removed.").weak().size(12.0));
+        ui.add_space(4.0);
         if installed.is_empty() {
             card(ui, |ui| {
                 ui.label(RichText::new(format!("{}  No extensions yet", ic::PUZZLE_PIECE)).size(15.0).strong());
@@ -1312,14 +1318,18 @@ impl ExtTool {
     fn parts_card(&mut self, ui: &mut egui::Ui, act: &mut Act, to_installed: &mut bool) {
         let offers: Vec<Offer> = self.offers.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
         card(ui, |ui| {
-            ui.label(RichText::new(format!("{}  What this app has", ic::SQUARES_FOUR)).strong());
+            ui.label(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong());
             ui.label(
-                RichText::new("The core is always here: terminals, SSH hosts, projects, the tools and extensions themselves. The parts below are built in or come with an extension, and each can be turned off (it leaves the menus).")
+                RichText::new("Built in: inside the program you downloaded, never removed. Extension: brought by an added extension below. Untick a part to hide it from the menus.")
                     .weak()
                     .size(12.0),
             );
             ui.add_space(4.0);
             egui::Grid::new("parts").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.add_enabled(false, egui::Checkbox::new(&mut true, "Core"));
+                ui.label(RichText::new("Terminals, SSH hosts, projects, the tools, extensions").weak().size(12.0));
+                tag(ui, "Built in", crate::gui::good());
+                ui.end_row();
                 for (id, name, what) in crate::modules::ALL {
                     let mut on = crate::modules::on(id);
                     if ui.checkbox(&mut on, *name).on_hover_text(*what).changed() {
@@ -1330,7 +1340,7 @@ impl ExtTool {
                     if crate::modules::built_in(id) {
                         tag(ui, "Built in", crate::gui::good());
                     } else if let Some((_, by)) = provider(serves) {
-                        tag(ui, &format!("From {by}"), crate::gui::good());
+                        tag(ui, &format!("Extension: {by}"), crate::gui::brand());
                     } else if let Some(o) = offers.iter().find(|o| o.provides.iter().any(|p| p == serves)) {
                         if ui.small_button(format!("{}  Get {}", ic::DOWNLOAD, o.name)).clicked() {
                             let o = o.clone();
@@ -1347,8 +1357,6 @@ impl ExtTool {
     }
 
     fn manage_tab(&mut self, ui: &mut egui::Ui, act: &mut Act, to_installed: &mut bool) {
-        self.parts_card(ui, act, to_installed);
-        ui.add_space(6.0);
         card(ui, |ui| {
             ui.label(RichText::new(format!("{}  Install a package file", ic::UPLOAD)).strong());
             ui.label(RichText::new("A .sshx file someone gave you, or one you made with sshremote ext pack.").weak().size(12.0));
@@ -1559,9 +1567,9 @@ mod tests {
         crate::gui::style(&ctx);
         let size = Vec2::new(760.0, 900.0);
         let pages: [(ExtTab, &str, &[&str]); 3] = [
-            (ExtTab::Installed, "installed", &["Installed (1)", "1 update", "Page gateway", "Program", "Adds sshremote web", "run its own program", "Update to 1.3.0", "How to use it"]),
+            (ExtTab::Installed, "installed", &["Parts of this app", "Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "Adds sshremote web", "run its own program", "Update to 1.3.0", "How to use it"]),
             (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Premium", "Installed", "Desk pack", "Install"]),
-            (ExtTab::Manage, "manage", &["Install a package file", "What this app has", "Web gateway", "License", "Registry", "sshremote ext new my-tool"]),
+            (ExtTab::Manage, "manage", &["Install a package file", "License", "Registry", "sshremote ext new my-tool"]),
         ];
         for (tab, name, texts) in pages {
             tool.tab = tab;

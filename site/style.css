@@ -256,3 +256,6 @@ footer a:hover { color: var(--fg); }
 .feature > *, .steps > *, .index > *, .hero .wrap > * { min-width: 0; }
 .chips:empty { display: none; }
 @media (max-width: 620px) { .wrap { padding: 0 20px; } .stage::before { inset: 12% -20px -1px; } }
+svg.ph { fill: currentColor; stroke: none; }
+svg.logo { fill: initial; stroke: none; }
+.brand svg.logo { width: 26px; height: 26px; }
