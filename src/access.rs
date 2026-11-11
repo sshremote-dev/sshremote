@@ -641,7 +641,9 @@ pub fn service_is_this() -> bool {
     }
     #[cfg(unix)]
     {
-        return unit_file().and_then(|f| std::fs::read_to_string(f).ok()).is_none_or(|t| std::env::current_exe().is_ok_and(|e| t.contains(&e.display().to_string())));
+        return unit_file()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .is_none_or(|t| t.contains("--service") && std::env::current_exe().is_ok_and(|e| t.contains(&e.display().to_string())));
     }
     #[allow(unreachable_code)]
     true
@@ -780,7 +782,8 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             if stored()?.is_none() {
                 save(&c)?;
             }
-            let service = args.iter().any(|a| a == "--service");
+            // systemd sets INVOCATION_ID for what its units start, older units included.
+            let service = args.iter().any(|a| a == "--service") || std::env::var_os("INVOCATION_ID").is_some();
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", spaced(&c.id), c.relay);
             let keep = || {
@@ -820,7 +823,8 @@ pub mod relay {
     const TRIES_A_MINUTE: u32 = 60;
     const STATUS_A_MINUTE: u32 = 600;
     /// Calls to one ID a minute, and calls waiting for it at once.
-    const CALLS_A_MINUTE: u32 = 20;
+    const CALLS_A_MINUTE: u32 = 60;
+    const CALLS_FROM_ONE_A_MINUTE: u32 = 5;
     const CALLS_WAITING: usize = 4;
     /// New IDs one address may take a day; an ID is kept only after its agent stayed a minute.
     const NEW_IDS_A_DAY: u32 = 50;
@@ -899,6 +903,7 @@ pub mod relay {
         calls: HashMap<String, mpsc::Sender<TcpStream>>,
         /// Calls by ID in the current minute, and waiting now.
         calls_by_id: HashMap<String, (Instant, u32)>,
+        calls_by_source: HashMap<(String, IpAddr), (Instant, u32)>,
         waiting_by_id: HashMap<String, usize>,
         /// Lines and status questions by address in the current minute; new IDs by address today.
         tries: HashMap<IpAddr, (Instant, u32)>,
@@ -958,6 +963,7 @@ pub mod relay {
             self.tries.retain(|_, (t, _)| t.elapsed() < minute);
             self.statuses.retain(|_, (t, _)| t.elapsed() < minute);
             self.calls_by_id.retain(|_, (t, _)| t.elapsed() < minute);
+            self.calls_by_source.retain(|_, (t, _)| t.elapsed() < minute);
             self.new_ids.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(24 * 3600));
             let cut = now().saturating_sub(KEEP_ID);
             let before = self.owners.len();
@@ -1059,7 +1065,7 @@ pub mod relay {
     }
 
     /// What a connection asks, read within [`HELLO`]: the line and the address it counts for.
-    fn hello(s: &mut TcpStream, peer: IpAddr) -> Option<(String, IpAddr)> {
+    fn hello(hub: &Shared, s: &mut TcpStream, peer: IpAddr, counted: &mut Option<IpAddr>) -> Option<(String, IpAddr)> {
         let deadline = Instant::now() + HELLO;
         let mut first = hello_line(s, deadline)?;
         let mut ip = peer;
@@ -1080,6 +1086,11 @@ pub mod relay {
             }
             if peer.is_loopback() {
                 ip = real?;
+                // Counted as its own address from here, as a direct connection is from the start.
+                if !up(&mut lock(hub).hello, key(ip), HELLO_PER_ADDRESS) {
+                    return None;
+                }
+                *counted = Some(ip);
             }
             s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n").ok()?;
             first = hello_line(s, deadline)?;
@@ -1089,9 +1100,16 @@ pub mod relay {
     }
 
     fn connection(hub: &Shared, mut s: TcpStream, peer: IpAddr) {
-        let asked = hello(&mut s, peer);
-        if !peer.is_loopback() {
-            down(&mut lock(hub).hello, key(peer));
+        let mut counted = None;
+        let asked = hello(hub, &mut s, peer, &mut counted);
+        {
+            let mut h = lock(hub);
+            if !peer.is_loopback() {
+                down(&mut h.hello, key(peer));
+            }
+            if let Some(c) = counted {
+                down(&mut h.hello, key(c));
+            }
         }
         let Some((first, ip)) = asked else { return };
         let words: Vec<String> = first.split_whitespace().map(str::to_string).collect();
@@ -1134,7 +1152,7 @@ pub mod relay {
         let _held = Held(hub.clone(), ip);
         match words.as_slice() {
             ["listen", id, token] if valid_id(id) && (16..=128).contains(&token.len()) => listen(hub, s, id, token, ip),
-            ["viewer", id] if id.len() <= 32 => viewer(hub, s, id),
+            ["viewer", id] if id.len() <= 32 => viewer(hub, s, id, ip),
             // The older one-off protocol of `sshremote --serve --via`: never for an ID remote
             // access holds or another waiter has, and a few waiters an address.
             ["agent", id] if id.len() <= 32 => {
@@ -1158,10 +1176,16 @@ pub mod relay {
         let (tx, rx) = mpsc::channel::<String>();
         let (number, mut kept) = {
             let mut h = lock(hub);
-            let known = h.owners.contains_key(id);
-            if !h.may_use(id, token) || (!known && !within(&mut h.new_ids, key(ip), Duration::from_secs(24 * 3600), NEW_IDS_A_DAY)) {
+            if !h.may_use(id, token) {
                 drop(h);
                 let _ = writeln!(s, "taken");
+                return;
+            }
+            // New IDs are counted when kept; an address past its day's allowance waits.
+            let known = h.owners.contains_key(id);
+            if !known && h.new_ids.get(&key(ip)).is_some_and(|(t, n)| t.elapsed() < Duration::from_secs(24 * 3600) && *n >= NEW_IDS_A_DAY) {
+                drop(h);
+                let _ = writeln!(s, "busy: too many new IDs from this address today");
                 return;
             }
             h.next += 1;
@@ -1180,6 +1204,9 @@ pub mod relay {
                     let mut h = lock(hub);
                     if !h.may_use(id, token) {
                         break;
+                    }
+                    if !h.owners.contains_key(id) {
+                        within(&mut h.new_ids, key(ip), Duration::from_secs(24 * 3600), u32::MAX);
                     }
                     h.keep(id, token);
                     kept = Some(Instant::now());
@@ -1221,7 +1248,7 @@ pub mod relay {
     }
 
     /// A viewer: its call passed to the agent, and the agent's answering connection paired with it.
-    fn viewer(hub: &Shared, mut s: TcpStream, id: &str) {
+    fn viewer(hub: &Shared, mut s: TcpStream, id: &str, ip: IpAddr) {
         let agent = lock(hub).agents.get(id).map(|(_, t, _)| t.clone());
         let Some(agent) = agent else {
             // An agent of the older protocol, if one waits under that ID.
@@ -1243,7 +1270,13 @@ pub mod relay {
         {
             let mut h = lock(hub);
             let waiting = h.waiting_by_id.get(id).copied().unwrap_or(0);
-            if h.calls.len() >= 10_000 || waiting >= CALLS_WAITING || !within(&mut h.calls_by_id, id.to_string(), Duration::from_secs(60), CALLS_A_MINUTE) {
+            // A few calls a minute from any one address, so one cannot keep the owner out alone.
+            let minute = Duration::from_secs(60);
+            if h.calls.len() >= 10_000
+                || waiting >= CALLS_WAITING
+                || !within(&mut h.calls_by_source, (id.to_string(), key(ip)), minute, CALLS_FROM_ONE_A_MINUTE)
+                || !within(&mut h.calls_by_id, id.to_string(), minute, CALLS_A_MINUTE)
+            {
                 drop(h);
                 let _ = writeln!(s, "too many attempts; wait a minute");
                 return;

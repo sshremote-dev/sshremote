@@ -368,7 +368,10 @@ impl App {
             if c.as_mut().is_some_and(|ch| ch.try_wait().ok().flatten().is_some()) {
                 *c = None;
             }
+            // Versions before 1.6.1 do not end with the window: they are not started from here.
+            let fit = crate::ext::installed().iter().any(|m| m.provides.iter().any(|p| p == "remote") && !crate::ext::newer("1.6.1", &m.version));
             if on && c.is_none()
+                && fit
                 && let Some((program, _)) = crate::ext::provider("remote")
             {
                 let mut cmd = std::process::Command::new(program);
