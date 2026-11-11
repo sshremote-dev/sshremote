@@ -132,7 +132,7 @@ restarts it, and shows its log.
 
 ## Projects
 
-The core keeps the open tabs as the last session, reopened at start, and as named projects (the
+The core keeps the open tabs as the last session (reopened at start when that is turned on in Projects) and as named projects (the
 Projects page of the open view, `sshremote --project NAME`, or the command palette). A project
 holds the tabs, the splits, what each pane runs, the folder its shell was in and the view it is
 shown in, and the host, port and options of each connection. It never holds a password: a host

@@ -101,9 +101,9 @@ pub fn last() -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(last_file()?).ok()?).ok()
 }
 
-/// Whether the last session's tabs open at start (on unless turned off).
+/// Whether the last session's tabs open at start (off unless turned on).
 pub fn reopen() -> bool {
-    crate::hosts::setting("reopen_tabs").as_deref() != Some("off")
+    crate::hosts::setting("reopen_tabs").as_deref() == Some("on")
 }
 
 pub fn set_reopen(on: bool) {

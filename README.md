@@ -59,7 +59,8 @@ What is opened goes into the workspace:
 
 ## Projects
 
-The open tabs, panes and their folders are kept and come back at the next start; named projects
+The open tabs, panes and their folders are kept, and come back at the next start when Projects →
+"Open the last tabs again" is on (off at first, so the app starts on the open dialog alone); named projects
 open with `sshremote --project NAME`. Passwords are never kept with them: a sign-in dialog showing
 the host asks again when one is needed.
 
