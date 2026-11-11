@@ -1362,12 +1362,10 @@ impl Viewer {
                     }
                 }
             }
-            ToClient::Snapshot(png) => {
-                let path = crate::shot::save_path();
-                match std::fs::write(&path, &png) {
-                    Ok(()) => self.notify(&format!("Screenshot saved to {}", path.display()))?,
-                    Err(e) => self.notify(&format!("Screenshot: {e}"))?,
-                }
+            ToClient::Snapshot(png) => self.notify(&crate::session::save_snapshot(&png))?,
+            ToClient::Hello { w, h, backend } => {
+                self.sess.hello(w, h, backend);
+                self.label = format!("{} {w}x{h} {}", self.host, self.sess.backend);
             }
             ToClient::Monitors { list, current } => {
                 if self.probe.is_some() {
@@ -1450,11 +1448,10 @@ impl Viewer {
                 }
             }
             ToClient::FetchData { id, data } => {
-                if let Some(crate::files::Note::Progress { id, received }) = self.inbox.data(id, &data) {
+                if let Some(crate::files::Note::Progress { id, received }) = self.sess.fetch_data(&mut self.inbox, id, &data)? {
                     if let Some(t) = self.transfers.iter_mut().find(|t| !t.upload && t.id == id) {
                         t.done = received;
                     }
-                    self.sess.send(ToAgent::FetchAck { id, received })?;
                     if self.view == View::Files {
                         self.status()?;
                     }
@@ -1462,14 +1459,9 @@ impl Viewer {
             }
             ToClient::FetchEnd { id, ok, text } => {
                 self.transfers.retain(|t| t.upload || t.id != id);
-                let note = self.inbox.end(id, ok, &text);
-                match note {
-                Some(crate::files::Note::Done { ok, text, .. }) => {
-                    let t = if ok { format!("Saved {text}") } else { format!("Download failed: {text}") };
-                    self.notify(&t)?
-                }
                 // One that never started was reported when it failed.
-                _ => {}
+                if let Some(crate::files::Note::Done { ok, text, .. }) = self.inbox.end(id, ok, &text) {
+                    self.notify(&if ok { format!("Saved {text}") } else { format!("Download failed: {text}") })?;
                 }
             }
             _ => {}

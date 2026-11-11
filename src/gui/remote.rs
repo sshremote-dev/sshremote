@@ -483,14 +483,7 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
-                Ok(Ev::Net(ToClient::Snapshot(png))) => {
-                    let path = crate::shot::save_path();
-                    let msg = match std::fs::write(&path, &png) {
-                        Ok(()) => format!("Screenshot saved to {}", path.display()),
-                        Err(e) => format!("Screenshot: {e}"),
-                    };
-                    self.notify(&msg);
-                }
+                Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::session::save_snapshot(&png)),
                 Ok(Ev::Net(ToClient::Chat(t))) => {
                     crate::chat::append_history(self.host(), true, &t);
                     match self.chat.as_mut() {
@@ -507,7 +500,7 @@ impl Remote {
                 }
                 Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
                     // Another monitor: new size, and the capture must be fitted again.
-                    self.sess.desk = (w, h);
+                    self.sess.hello(w, h, backend.clone());
                     let host = self.label.split("  ").next().unwrap_or("").to_string();
                     self.label = format!("{host}  {w}x{h}  {backend}");
                     self.view = (0, 0);
@@ -562,15 +555,16 @@ impl Remote {
                         self.downloads.push((id, name, tag));
                     }
                 }
-                Ok(Ev::Net(ToClient::FetchData { id, data })) => match self.inbox.data(id, &data) {
-                    Some(crate::files::Note::Progress { id, received }) => {
-                        self.send(ToAgent::FetchAck { id, received })?
-                    }
+                Ok(Ev::Net(ToClient::FetchData { id, data })) => match self
+                    .sess
+                    .fetch_data(&mut self.inbox, id, &data)
+                    .map_err(|e| format!("connection lost: {e}"))?
+                {
                     Some(crate::files::Note::Done { text, .. }) => {
                         self.downloads.retain(|d| d.0 != id);
                         self.notify(&text);
                     }
-                    None => {}
+                    _ => {}
                 },
                 Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
                     if id != 0 && !self.downloads.iter().any(|d| d.0 == id) {

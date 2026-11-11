@@ -13,6 +13,15 @@ use crate::transport::{self, Link, Target};
 pub use crate::options::Options;
 
 
+/// Saves a screenshot sent by the agent; the text tells where, or why not.
+pub fn save_snapshot(png: &[u8]) -> String {
+    let path = crate::shot::save_path();
+    match std::fs::write(&path, png) {
+        Ok(()) => format!("Screenshot saved to {}", path.display()),
+        Err(e) => format!("Screenshot: {e}"),
+    }
+}
+
 pub enum Ev {
     Net(ToClient),
     Closed(String),
@@ -167,6 +176,21 @@ impl Session {
         let w = self.writer.as_mut().ok_or_else(|| io::Error::other("closed"))?;
         write_msg(w, k, &p)?;
         w.flush()
+    }
+
+    /// A re-announced desktop (another monitor or shared area): the new size and backend.
+    pub fn hello(&mut self, w: u16, h: u16, backend: String) {
+        self.desk = (w, h);
+        self.backend = backend;
+    }
+
+    /// Writes a chunk of a download and acknowledges the progress to the agent.
+    pub fn fetch_data(&mut self, inbox: &mut crate::files::Inbox, id: u32, data: &[u8]) -> io::Result<Option<crate::files::Note>> {
+        let note = inbox.data(id, data);
+        if let Some(crate::files::Note::Progress { id, received }) = note {
+            self.send(ToAgent::FetchAck { id, received })?;
+        }
+        Ok(note)
     }
 
     /// Called from the network thread after each message, so a window can repaint at once.
