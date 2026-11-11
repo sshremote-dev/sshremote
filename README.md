@@ -51,6 +51,31 @@ What is opened goes into the workspace:
   backups of hosts and settings, with all of `~/.ssh` encrypted under a passphrase.
 - On Windows the window asks for administrator rights at start and works without them.
 
+## Editions
+
+- **SSH Remote** (`--no-default-features --features gui,remote`): everything above built in.
+- **SSH Remote Terminal** (`--features gui`): the terminal and tools; screens, files, chat and
+  sound come as the Remote desktop extension.
+
+## Projects
+
+The open tabs, panes and their folders are kept and come back at the next start; named projects
+open with `sshremote --project NAME`. Passwords are never kept with them: a sign-in dialog showing
+the host asks again when one is needed.
+
+## Extensions
+
+Style packs, WASM scripts, command-line programs and resident extensions that add status bar items,
+a side panel, palette commands (Ctrl+Shift+P), keys, forms and settings, each limited to the
+permissions it names. See [docs/extensions.md](docs/extensions.md).
+
+```sh
+sshremote ext available            # from the signed registry
+sshremote ext install ID
+sshremote ext new my-tool          # a Rust extension to start from
+sshremote ext dev my-tool          # build, install and reload on every change
+```
+
 ## In a terminal
 
 ```sh
