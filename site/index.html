@@ -3,70 +3,151 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SSH Remote</title>
-<meta name="description" content="An SSH terminal with the remote screen, files, chat and MCP, over SSH alone.">
-<style>
-  :root { color-scheme: dark; --bg: #0b1220; --fg: #e6edf7; --dim: #93a4bf; --brand: #5aa9ff; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 16px/1.6 system-ui, sans-serif; background: radial-gradient(1200px 600px at 70% -10%, #1b3a6b 0%, var(--bg) 60%); color: var(--fg); min-height: 100vh; }
-  main { max-width: 860px; margin: 0 auto; padding: 72px 24px; }
-  h1 { font-size: 48px; margin: 0 0 4px; letter-spacing: 1px; }
-  h1 small { font-size: 18px; color: var(--dim); font-weight: 400; }
-  h2 { margin-top: 48px; font-size: 22px; }
-  p.lead { font-size: 20px; color: var(--dim); }
-  p.dim { color: var(--dim); }
-  a { color: var(--brand); }
-  .row { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
-  .btn { display: inline-block; padding: 10px 18px; border-radius: 8px; background: var(--brand); color: #04101f; text-decoration: none; font-weight: 600; }
-  .btn.alt { background: transparent; color: var(--fg); border: 1px solid #2d3d58; }
-  ul { padding-left: 20px; }
-  code { background: #15213a; padding: 2px 6px; border-radius: 4px; }
-  #exts div { padding: 10px 0; border-bottom: 1px solid #1d2a44; }
-  #exts span { color: var(--dim); }
-  footer { margin-top: 64px; color: var(--dim); font-size: 14px; }
-</style>
+<title>SSH Remote: terminal, remote screen and files over SSH</title>
+<meta name="description" content="Remote control over the SSH login you already have: tabs and panes, the host's screen, files, projects, an MCP server for AI agents and extensions. Or connect by ID and password through a relay.">
+<meta name="theme-color" content="#0a111d">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="site.js"></script>
 </head>
 <body>
-<main>
-  <h1>SSH Remote <small>(thinkbigx)</small></h1>
-  <p class="lead">An SSH terminal that also shows and operates the remote screen, moves files, chats and serves AI agents over MCP. SSH is the only transport: no relay, no open ports.</p>
-  <div class="row">
-    <a class="btn" href="download/sshremote-windows-x86_64.exe">Windows</a>
-    <a class="btn" href="download/sshremote-linux-x86_64">Linux</a>
-    <a class="btn alt" href="web/">Open in the browser</a>
-    <a class="btn alt" href="https://github.com/thinkbigx/sshremote">Source on GitHub</a>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="./"><span aria-hidden="true" data-i="logo"></span>SSH Remote</a>
+  <button class="icon-btn" id="menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav"><span data-i="menu"></span></button>
+  <nav id="nav" aria-label="Main">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#download">Download</a>
+    <a href="extensions.html">Extensions</a>
+    <a href="docs.html">Docs</a>
+    <a href="premium.html">Premium</a>
+    <a href="https://github.com/thinkbigx/sshremote">GitHub</a>
+  </nav>
+  <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+</div></header>
+
+<main id="main">
+<div class="hero"><div class="wrap">
+  <div>
+    <h1>Your computers, <em>over the SSH you already have</em></h1>
+    <p class="lead">SSH Remote is a terminal workspace with the remote screen, files and an MCP server for AI agents, all through your existing SSH login: no account, no open port, no relay. For a PC on Wi-Fi without a fixed address, connect by device ID and password through a relay, as with RustDesk.</p>
+    <div class="btns">
+      <a class="btn" href="#download"><span data-i="download"></span>Download</a>
+      <a class="btn alt" href="docs.html"><span data-i="terminal"></span>Get started</a>
+      <a class="btn alt" href="extensions.html"><span data-i="puzzle"></span>Extensions</a>
+    </div>
+    <p class="dim small">Windows and Linux (GNOME on Wayland). Open source, written in Rust.</p>
   </div>
-  <p class="dim">The terminal alone, without remote screens and files (add them later with the Remote desktop extension):
-    <a href="download/sshremote-terminal-windows-x86_64.exe">Windows</a> &middot;
-    <a href="download/sshremote-terminal-linux-x86_64">Linux</a></p>
-  <h2>What it does</h2>
-  <ul>
-    <li>Terminal workspace with tabs and split panes, local shells and SSH hosts.</li>
-    <li>The remote desktop in a window or in the terminal, from low bandwidth to full quality.</li>
-    <li>Files, clipboard, chat, and an MCP server so an agent can see and operate a host.</li>
-    <li>Appearance you can make your own: fonts, colours, animated background layers.</li>
-  </ul>
-  <h2>In the browser</h2>
-  <p>Run <code>sshremote web</code> on a computer to reach its shell and the hosts of its <code>~/.ssh/config</code> from any browser, behind a password. Put it behind HTTPS (nginx, Caddy) when it faces the internet.</p>
-  <h2>Extensions</h2>
-  <p>Install from <b>Tools → Extensions</b> in the app, or with <code>sshremote ext install ID</code>. Update all with <code>sshremote ext update</code>.</p>
-  <div id="exts"><span>Loading the registry…</span></div>
-  <h2>Premium</h2>
-  <p>Premium extensions and services, with a signed license checked offline: <a href="premium.html">details</a>.</p>
-  <footer>Open source. © thinkbigx</footer>
+  <div class="shot" role="img" aria-label="A window with a terminal pane beside the host's screen">
+    <div class="bar"><i></i><i></i><i></i><em class="tab">build-box</em><em class="tab off">office-pc</em><em class="tab off">+</em></div>
+    <div class="body">
+      <div class="pane"><span class="g">you@build-box</span>:<span class="b">~/app</span>$ cargo build
+<span class="d">   Compiling app v1.2.0</span>
+<span class="d">    Finished release in 41s</span>
+<span class="g">you@build-box</span>:<span class="b">~/app</span>$ sshremote ext \
+    install dev.sshremote.ssh-tunnels
+<span class="d">installed SSH tunnels 1.1.0</span>
+<span class="g">you@build-box</span>:<span class="b">~/app</span>$ _</div>
+      <div class="pane"><div class="mini-desk"></div></div>
+    </div>
+  </div>
+</div></div>
+
+<section id="features"><div class="wrap">
+  <div class="section-head">
+    <h2>Everything for working on another computer</h2>
+    <p class="dim">One window holds your shells, the screens of your hosts and their files, side by side.</p>
+  </div>
+  <div class="grid">
+    <div class="card"><div class="ico" data-i="panes"></div><h3>Tabs and panes</h3><p>A workspace like Windows Terminal: tabs per host, panes split beside or below, each switching between terminal, screen and files without connecting again. Tabs drag out into new windows.</p></div>
+    <div class="card"><div class="ico" data-i="screen"></div><h3>Screen sharing</h3><p>The host's screen with keyboard and mouse. Changed rectangles in one zstd stream, H.264 only where things keep moving, quality that adapts to the link. Monitors, single windows, clipboard, sound, chat, view only.</p></div>
+    <div class="card"><div class="ico" data-i="image"></div><h3>Screen in a terminal</h3><p><code>sshremote HOST</code> draws the remote screen with sixel graphics in Windows Terminal, WezTerm, foot or VTE, even through tmux, with presets from 5 fps black and white to 60 fps true colour.</p></div>
+    <div class="card"><div class="ico" data-i="terminal"></div><h3>A better terminal</h3><p>Profiles, find, schemes and mouse reporting, plus two reading views: the whole output as a text document with line numbers, or any output and file rendered as Markdown.</p></div>
+    <div class="card"><div class="ico" data-i="folder"></div><h3>Files</h3><p>Two panes with drag and drop between this computer and the host, never overwriting what is there.</p></div>
+    <div class="card"><div class="ico" data-i="project"></div><h3>Projects and session restore</h3><p>Tabs, splits, folders and views come back at the next start; named projects open with <code>--project NAME</code>. Passwords are never stored with them.</p></div>
+    <div class="card"><div class="ico" data-i="robot"></div><h3>MCP server for AI agents</h3><p><code>sshremote mcp HOST</code> lets an agent read the window in front as text (the accessibility tree) and operate its controls, with screenshots only when needed.</p></div>
+    <div class="card"><div class="ico" data-i="globe"></div><h3>Web gateway</h3><p><code>sshremote web</code> serves this computer's terminals and screens, and its SSH hosts', in a browser.</p></div>
+    <div class="card"><div class="ico" data-i="puzzle"></div><h3>Extensions</h3><p>Style packs, WebAssembly scripts, command-line programs and resident extensions with status bar items, panels and palette commands, each limited to the permissions it names.</p></div>
+    <div class="card"><div class="ico" data-i="key"></div><h3>SSH tools</h3><p>SSH keys, an <code>~/.ssh/config</code> editor, passwords in the system's password store, and encrypted backups of hosts, settings and <code>~/.ssh</code>.</p></div>
+  </div>
+</div></section>
+
+<section class="alt" id="connect"><div class="wrap">
+  <div class="section-head">
+    <h2>Two ways to connect</h2>
+    <p class="dim">Use the SSH login you already have, or reach a PC that has none.</p>
+  </div>
+  <div class="grid two">
+    <div class="card"><div class="ico" data-i="link"></div><h3>SSH, one to one</h3>
+      <p>The viewer runs <code>ssh -T HOST sshremote --agent</code> and everything travels inside that SSH session. Nothing to open, no server in between, your keys and <code>~/.ssh/config</code> as they are.</p>
+      <pre class="cmd"><code>sshremote --gui user@host</code></pre>
+    </div>
+    <div class="card"><div class="ico" data-i="relay"></div><h3>Device ID and password, through a relay</h3>
+      <p>For a PC on Wi-Fi without a fixed address or SSH server. The host waits at the relay with an ID and a one-time password; the relay pairs you and only copies sealed bytes. Install the service for unattended access, including the sign-in screen.</p>
+      <pre class="cmd"><code>sshremote --serve --via sshremote.dev</code></pre>
+      <p class="small">In the app: the <b>Remote access</b> card of the open dialog shows the ID and password and installs the service.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="editions"><div class="wrap">
+  <div class="section-head"><h2>Two editions</h2><p class="dim">The same app, with or without the remote screen built in.</p></div>
+  <div class="grid two">
+    <div class="card"><div class="ico" data-i="screen"></div><h3>SSH Remote</h3><p>Everything built in: the terminal workspace, screen sharing, files, chat, sound and the tools.</p></div>
+    <div class="card"><div class="ico" data-i="terminal"></div><h3>SSH Remote Terminal</h3><p>The core: terminal workspace, projects and tools. Screens, files, chat and sound come as the <a href="extensions.html?q=remote-desktop">Remote desktop</a> extension when you want them.</p></div>
+  </div>
+</div></section>
+
+<section class="alt" id="download"><div class="wrap">
+  <div class="section-head"><h2>Download <span class="badge brand" id="dl-version" hidden></span></h2><p class="dim">One file, nothing to install. Put it on each host as <code>~/.local/bin/sshremote</code> (Windows: anywhere on <code>PATH</code>).</p></div>
+  <div class="grid two" id="downloads">
+    <a class="card dl" href="download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span class="ico" data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 .exe</span></span></a>
+    <a class="card dl" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span class="ico" data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64</span></span></a>
+    <a class="card dl" href="download/sshremote-terminal-windows-x86_64.exe" data-file="sshremote-terminal-windows-x86_64.exe"><span class="ico" data-i="windows"></span><span><b>SSH Remote Terminal for Windows</b><span class="meta">x86_64 .exe</span></span></a>
+    <a class="card dl" href="download/sshremote-terminal-linux-x86_64" data-file="sshremote-terminal-linux-x86_64"><span class="ico" data-i="linux"></span><span><b>SSH Remote Terminal for Linux</b><span class="meta">x86_64</span></span></a>
+  </div>
+  <p class="dim small">Building from source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <div class="section-head"><h2>Quick start</h2></div>
+  <div class="grid two">
+    <div>
+      <h3>On Linux</h3>
+      <pre class="cmd"><code>chmod +x sshremote-linux-x86_64
+mkdir -p ~/.local/bin
+mv sshremote-linux-x86_64 ~/.local/bin/sshremote
+sshremote</code></pre>
+      <h3>Connect to a host</h3>
+      <pre class="cmd"><code>sshremote --gui user@host --open files</code></pre>
+    </div>
+    <div>
+      <h3>The screen in this terminal</h3>
+      <pre class="cmd"><code>sshremote user@host</code></pre>
+      <h3>Add extensions</h3>
+      <pre class="cmd"><code>sshremote ext available
+sshremote ext install dev.sshremote.ssh-tunnels</code></pre>
+      <h3>Windows hosts: sign-in screen too</h3>
+      <pre class="cmd"><code>sshremote --install-service</code></pre>
+    </div>
+  </div>
+</div></section>
 </main>
+
+<footer><div class="wrap">
+  <span>SSH Remote, open source. Icons drawn for this site.</span>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="premium.html">Premium</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+</div></footer>
 <script>
-fetch("registry/v1/index.json").then(r => r.json()).then(i => {
-  const box = document.getElementById("exts");
-  box.textContent = "";
-  for (const e of i.extensions) {
-    const d = document.createElement("div");
-    const b = document.createElement("b"); b.textContent = e.name + " ";
-    const s = document.createElement("span"); s.textContent = e.version + " · " + e.id;
-    const p = document.createElement("div"); p.style.border = "0"; p.style.padding = "0"; p.textContent = e.description;
-    d.append(b, s, p); box.append(d);
+fetch('download/index.json').then((r) => r.ok ? r.json() : null).then((d) => {
+  if (!d) return;
+  if (d.version) { const v = document.getElementById('dl-version'); v.textContent = 'v' + d.version; v.hidden = false; }
+  const mb = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+  for (const f of d.files || []) {
+    const a = document.querySelector('[data-file="' + CSS.escape(f.name) + '"] .meta');
+    if (a) { a.textContent += ' · ' + mb(f.size); a.title = 'SHA-256 ' + f.sha256; a.insertAdjacentHTML('beforeend', '<br>SHA-256 ' + f.sha256.slice(0, 16) + '…'); }
   }
-}).catch(() => { document.getElementById("exts").textContent = "The registry is not reachable right now."; });
+}).catch(() => {});
 </script>
 </body>
 </html>

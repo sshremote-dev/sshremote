@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs: SSH Remote</title>
+<meta name="description" content="Getting started with SSH Remote: SSH and relay connections, projects, extensions, MCP and security.">
+<meta name="theme-color" content="#0a111d">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="./"><span aria-hidden="true" data-i="logo"></span>SSH Remote</a>
+  <button class="icon-btn" id="menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav"><span data-i="menu"></span></button>
+  <nav id="nav" aria-label="Main">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#download">Download</a>
+    <a href="extensions.html">Extensions</a>
+    <a href="docs.html">Docs</a>
+    <a href="premium.html">Premium</a>
+    <a href="https://github.com/thinkbigx/sshremote">GitHub</a>
+  </nav>
+  <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+</div></header>
+
+<main id="main">
+<div class="page-head"><div class="wrap"><h1>Documentation</h1><p class="lead">From the first connection to writing your own extension.</p></div></div>
+<div class="wrap docs">
+<nav aria-label="On this page">
+  <a href="#start">Getting started</a>
+  <a href="#ssh">Connecting by SSH</a>
+  <a href="#relay">Connecting by ID</a>
+  <a href="#projects">Projects</a>
+  <a href="#extensions">Using extensions</a>
+  <a href="#build">Building extensions</a>
+  <a href="#mcp">MCP for AI agents</a>
+  <a href="#faq">Security and FAQ</a>
+</nav>
+<article>
+  <h2 id="start">Getting started</h2>
+  <p>Download the file for your system from the <a href="index.html#download">download section</a>. It is a single program: put it on your own computer and on each host you want to reach, as <code>~/.local/bin/sshremote</code> on Linux or anywhere on <code>PATH</code> on Windows.</p>
+  <pre class="cmd"><code>sshremote</code></pre>
+  <p>With no arguments it opens the open dialog: a new connection, this computer (local shells, its screen and files), your SSH hosts (favorites, recent and <code>~/.ssh/config</code>), the Remote access card and the tools. What you open goes into the workspace as tabs and panes; each pane switches between terminal, screen and files from its mode menu.</p>
+  <table>
+    <tr><th>Keys</th><th>Does</th></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Command palette</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd></td><td>Enter or leave full screen while sharing a screen</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>]</kbd></td><td>Menu of the terminal viewer: presets, colour, zoom, shell, Ctrl+Alt+Del</td></tr>
+  </table>
+
+  <h2 id="ssh">Connecting by SSH</h2>
+  <p>The usual way: the viewer runs <code>ssh -T HOST sshremote --agent</code>, so your keys, agent, jump hosts and <code>~/.ssh/config</code> work unchanged and nothing else needs to be reachable.</p>
+  <pre class="cmd"><code>sshremote --gui user@host                 # the workspace
+sshremote --gui user@host --open files    # straight to the files
+sshremote terminal user@host --split db   # terminal panes, split
+sshremote user@host                       # the screen in this terminal (sixel)
+sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true colour 60 fps</code></pre>
+  <p>A lost connection is tried again in the same mode, keeping the shells; after 30 seconds the pane offers Reconnect or Close.</p>
+  <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or from the tools menu): <code>sshremote --install-service</code>.</div>
+
+  <h2 id="relay">Connecting by ID through the relay</h2>
+  <p>For a PC without SSH or a fixed address, for example a laptop on Wi-Fi. The host registers with the relay and gets a device ID; a viewer connects with that ID and the password, the way RustDesk works.</p>
+  <p>On the host:</p>
+  <pre class="cmd"><code>sshremote --serve --via sshremote.dev</code></pre>
+  <p>On the viewer, with the ID and password the host shows:</p>
+  <pre class="cmd"><code>sshremote sshremote://ID@sshremote.dev --password P</code></pre>
+  <p>In the app you do not need the command line: the <b>Remote access</b> card in the open dialog shows this computer's ID and password, connects to another one by ID, and installs the service so the PC can be reached unattended, even at the sign-in screen. On a local network, <code>sshremote --serve</code> alone waits for viewers directly (<code>sshremote sshremote://HOST --password P</code>), and <code>sshremote --relay</code> runs your own relay.</p>
+
+  <h2 id="projects">Projects</h2>
+  <p>The open tabs, splits, what each pane runs, the folder its shell was in and its view are kept as the last session and come back at the next start. Save them as a named project from the Projects page of the open dialog or the command palette, and open it again with:</p>
+  <pre class="cmd"><code>sshremote --project NAME</code></pre>
+  <p>A project keeps hosts, ports and options, never a password: when a host asks for one, a sign-in dialog names the host, user, port and purpose.</p>
+
+  <h2 id="extensions">Using extensions</h2>
+  <p>Browse the <a href="extensions.html">extension list</a>, or open <b>Tools &rarr; Extensions</b> in the app. From the command line:</p>
+  <pre class="cmd"><code>sshremote ext available          # what the signed registry offers
+sshremote ext install ID         # install or update
+sshremote ext install FILE.sshx  # from a file</code></pre>
+  <p>The kinds: <b>style packs</b> (pictures and animations behind the terminals), <b>scripts</b> (WebAssembly commands on the selected text, with no file or network access), <b>programs</b> (new <code>sshremote</code> commands such as <code>web</code> and <code>mcp</code>) and <b>resident</b> extensions (status bar items, panels, palette commands, keys and settings). Each request is checked against the permissions in the manifest, shown on the Extensions page.</p>
+
+  <h2 id="build">Building extensions</h2>
+  <p>An extension is a folder with an <code>extension.json</code> manifest. Programs speak JSON-RPC 2.0 over stdin and stdout, one message per line, so any language works. Start from the Rust template, which has a status bar item, a command with a key, a panel, a setting and a form:</p>
+  <pre class="cmd"><code>sshremote ext new my-extension
+sshremote ext dev my-extension</code></pre>
+  <p><code>ext dev</code> builds, installs and reloads it in the open app every time a file changes. To share one, pack it with <code>sshremote ext pack DIR OUT.sshx</code>. The manifest, the permissions and the full protocol are in <a href="https://github.com/thinkbigx/sshremote/blob/main/docs/extensions.md">docs/extensions.md</a>.</p>
+
+  <h2 id="mcp">MCP for AI agents</h2>
+  <p><code>sshremote mcp HOST</code> (or <code>sshremote mcp --here</code> for this computer) is an MCP server that reads the window in front as text from the accessibility tree and acts on its controls, taking screenshots only when needed. In your agent's MCP configuration:</p>
+  <pre class="cmd"><code>{"mcpServers": {"remote-pc": {"command": "sshremote", "args": ["mcp", "user@host"]}}}</code></pre>
+
+  <h2 id="faq">Security and FAQ</h2>
+  <div class="faq">
+    <details open><summary>Is anything sent to a server of yours?</summary><p>Not over SSH: the connection is your own SSH session from end to end. Only the ID and password mode uses the relay.</p></details>
+    <details><summary>What can the relay see?</summary><p>Nothing it could read. The viewer and host agree on a key from the password with SPAKE2, so the password never crosses the network, and seal every message with ChaCha20-Poly1305. The relay only pairs the two and copies sealed bytes.</p></details>
+    <details><summary>Are passwords stored?</summary><p>Projects and sessions never hold one. Passwords you choose to save go to the system's password store, and backups of <code>~/.ssh</code> are encrypted under a passphrase.</p></details>
+    <details><summary>How are extensions checked?</summary><p>The registry's index is signed, each package is checked by its SHA-256, and native extensions are packed per platform. At run time every request is held to the manifest's permissions.</p></details>
+    <details><summary>Which systems work?</summary><p>Hosts: Windows and GNOME on Wayland. Viewers: the native window on Windows and Linux, or a sixel terminal such as Windows Terminal, WezTerm, foot or VTE.</p></details>
+  </div>
+</article>
+</div>
+</main>
+
+<footer><div class="wrap">
+  <span>SSH Remote, open source. Icons drawn for this site.</span>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="premium.html">Premium</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+</div></footer>
+</body>
+</html>

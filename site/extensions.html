@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extensions for SSH Remote</title>
+<meta name="description" content="Style packs, scripts, programs and resident extensions from the signed SSH Remote registry.">
+<meta name="theme-color" content="#0a111d">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="./"><span aria-hidden="true" data-i="logo"></span>SSH Remote</a>
+  <button class="icon-btn" id="menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav"><span data-i="menu"></span></button>
+  <nav id="nav" aria-label="Main">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#download">Download</a>
+    <a href="extensions.html">Extensions</a>
+    <a href="docs.html">Docs</a>
+    <a href="premium.html">Premium</a>
+    <a href="https://github.com/thinkbigx/sshremote">GitHub</a>
+  </nav>
+  <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+</div></header>
+
+<main id="main">
+<div class="page-head"><div class="wrap">
+  <h1>Extensions</h1>
+  <p class="lead">Everything in the signed registry, as the app sees it. Install from <b>Tools &rarr; Extensions</b> or with one command; each runs only with the permissions it names.</p>
+</div></div>
+
+<div class="wrap">
+  <div class="tools">
+    <label class="search"><span class="dim" data-i="search"></span><span class="skip">Search</span><input type="search" id="q" placeholder="Search extensions" aria-label="Search extensions"></label>
+    <div class="chips" id="kinds" role="group" aria-label="Kind"></div>
+  </div>
+  <p class="dim small" id="count" aria-live="polite">Loading the registry&hellip;</p>
+  <div class="grid two" id="list"></div>
+  <p class="dim small" style="margin:32px 0 72px">Writing your own? Start with <code>sshremote ext new my-tool</code> and read <a href="docs.html#build">building extensions</a>.</p>
+</div>
+</main>
+
+<footer><div class="wrap">
+  <span>SSH Remote, open source. Icons drawn for this site.</span>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="premium.html">Premium</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+</div></footer>
+<script>
+(function () {
+  const KINDS = { 'style pack': ['Style packs', 'palette'], script: ['Scripts', 'code'], program: ['Programs', 'cpu'], resident: ['Resident', 'bolt'] };
+  const PLATFORMS = { 'windows-x86_64': 'Windows', 'linux-x86_64': 'Linux' };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+  const size = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+  const kindOf = (e) => e.kind || (e.platforms ? 'program' : 'style pack');
+  function iconOf(e) {
+    if (e.icon) return e.icon;
+    const p = (e.provides || [])[0];
+    const byProvide = { mcp: 'robot', web: 'globe', remote: 'screen' };
+    if (byProvide[p]) return byProvide[p];
+    if (/tunnel/.test(e.id)) return 'tunnel';
+    if (/text/.test(e.id)) return 'text';
+    return KINDS[kindOf(e)] ? KINDS[kindOf(e)][1] : 'puzzle';
+  }
+  let all = [], kind = '';
+  const q = document.getElementById('q'), list = document.getElementById('list'), count = document.getElementById('count');
+  q.value = new URLSearchParams(location.search).get('q') || '';
+
+  function card(e) {
+    const k = kindOf(e);
+    const tags = ['<span class="badge brand">' + esc((KINDS[k] || [k])[0].replace(/s$/, '')) + '</span>'];
+    if (e.premium) tags.push('<span class="badge gold">' + sshIcon('star') + 'Premium</span>');
+    for (const p of e.provides || []) tags.push('<span class="badge">sshremote ' + esc(p) + '</span>');
+    const rows = [];
+    const plats = e.platforms ? Object.keys(e.platforms).map((p) => PLATFORMS[p] || p).join(', ') : 'All';
+    rows.push(['Platforms', esc(plats)]);
+    if (e.size) rows.push(['Size', size(e.size)]);
+    if (e.updated) rows.push(['Updated', '<time datetime="' + esc(e.updated) + '">' + esc(e.updated) + '</time>']);
+    if (e.permissions && e.permissions.length) rows.push(['Permissions', e.permissions.map((p) => '<code>' + esc(p) + '</code>').join(' ')]);
+    if (e.commands && e.commands.length) rows.push(['Commands', esc(e.commands.join(', '))]);
+    if (e.homepage && /^https?:\/\//.test(e.homepage)) rows.push(['Homepage', '<a href="' + esc(e.homepage) + '">' + esc(e.homepage.replace(/^https?:\/\//, '')) + '</a>']);
+    const layers = e.layers && e.layers.length ? '<details><summary>' + e.layers.length + ' backgrounds</summary><ul>' + e.layers.map((l) => '<li>' + esc(l) + '</li>').join('') + '</ul></details>' : '';
+    return '<article class="card ext"><div class="row"><span class="ico">' + sshIcon(iconOf(e)) + '</span><div><h3>' + esc(e.name || e.id) +
+      ' <span class="dim small">' + esc(e.version || '') + '</span></h3><div class="dim small">' + esc(e.id) + '</div></div></div>' +
+      '<div class="tags">' + tags.join('') + '</div><p>' + md(e.description || '') + '</p>' +
+      '<dl>' + rows.map((r) => '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>').join('') + '</dl>' + layers +
+      '<pre class="cmd"><code>sshremote ext install ' + esc(e.id) + '</code></pre></article>';
+  }
+
+  function render() {
+    const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const shown = all.filter((e) => (!kind || kindOf(e) === kind) && words.every((w) =>
+      [e.id, e.name, e.description, kindOf(e), (e.provides || []).join(' '), (e.commands || []).join(' ')].join(' ').toLowerCase().includes(w)));
+    list.innerHTML = shown.length ? shown.map(card).join('') : '<p class="empty">No extension matches.</p>';
+    count.textContent = shown.length + ' of ' + all.length + ' extensions';
+    sshCopyable(list);
+  }
+
+  function chips() {
+    const present = [...new Set(all.map(kindOf))];
+    const box = document.getElementById('kinds');
+    box.innerHTML = [['', 'All']].concat(Object.keys(KINDS).filter((k) => present.includes(k)).map((k) => [k, KINDS[k][0]]))
+      .map(([k, l]) => '<button type="button" class="chip" data-k="' + esc(k) + '" aria-pressed="' + (k === kind) + '">' + esc(l) + '</button>').join('');
+    box.addEventListener('click', (ev) => {
+      const b = ev.target.closest('.chip'); if (!b) return;
+      kind = b.dataset.k;
+      box.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', c === b));
+      render();
+    });
+  }
+
+  q.addEventListener('input', render);
+  fetch('registry/v1/index.json', { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((d) => {
+    all = (d.extensions || []).slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+    chips(); render();
+  }).catch(() => { count.textContent = 'The registry could not be loaded. Try again later, or run sshremote ext available.'; });
+})();
+</script>
+</body>
+</html>
