@@ -290,7 +290,7 @@ fn look_for_changes() {
 }
 
 /// A panel's declared list as Markdown: one row for each item, its label, detail and action links.
-fn items_markdown(list: &[Value]) -> String {
+pub(crate) fn items_markdown(list: &[Value]) -> String {
     let cell = |v: Option<&Value>| v.and_then(|x| x.as_str()).unwrap_or("").replace('|', "\\|").replace('\n', " ");
     let mut md = String::from("\n\n| | | |\n|---|---|---|\n");
     for it in list {

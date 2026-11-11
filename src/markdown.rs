@@ -1041,8 +1041,13 @@ fn table(ui: &mut egui::Ui, th: &Theme, align: &[Align], rows: &[Vec<String>], i
                 (0..cols).map(|c| lay(ui, row.get(c).map_or("", |s| s.as_str()), r == 0, widths[c])).collect()
             })
             .collect();
-        let heights: Vec<f32> =
-            galleys.iter().map(|row| row.iter().map(|g| g.0.size().y).fold(0.0, f32::max) + 2.0 * pad.y).collect();
+        // A table without headings (all empty, as extensions' item lists) draws none.
+        let headless = rows.len() > 1 && rows[0].iter().all(|c| c.trim().is_empty());
+        let heights: Vec<f32> = galleys
+            .iter()
+            .enumerate()
+            .map(|(r, row)| if r == 0 && headless { 0.0 } else { row.iter().map(|g| g.0.size().y).fold(0.0, f32::max) + 2.0 * pad.y })
+            .collect();
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(total, heights.iter().sum()), Sense::click());
         let pointer = resp.hover_pos();
         let mut over_link: Option<String> = None;

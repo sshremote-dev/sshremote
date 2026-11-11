@@ -311,3 +311,36 @@ pub(super) fn palette(ctx: &egui::Context, filter: &mut String, at: &mut usize) 
     }
     close.then_some(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Pos2, Rect, Vec2};
+
+    /// A declared list is drawn as a table with its links, below the panel's Markdown.
+    #[test]
+    fn panel_items_are_a_table() {
+        let list = serde_json::json!([
+            { "label": "db", "detail": "5432 > localhost:5432", "bold": true, "actions": [{ "title": "Stop", "action": "stop?host=db" }, { "title": "Shell", "action": "shell?host=db" }] },
+            { "label": "web", "detail": "8080 > localhost:80", "actions": [{ "title": "Start", "action": "start?host=web" }] }
+        ]);
+        let md = format!("Tunnels{}", crate::exthost::items_markdown(list.as_array().unwrap()));
+        let doc = crate::markdown::Doc::new(&md);
+        let ctx = egui::Context::default();
+        super::super::theme::style(&ctx);
+        let size = Vec2::new(420.0, 260.0);
+        let mut snap = super::super::snapshot::Snap::default();
+        for k in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
+            snap.frame(&ctx, input, |ui| {
+                let th = crate::markdown::Theme::terminal(ui.visuals().panel_fill, ui.visuals().text_color());
+                crate::markdown::show(ui, &doc, egui::Id::new("items"), &th);
+            });
+        }
+        for text in ["db", "5432 > localhost:5432", "Stop", "Shell", "web", "Start"] {
+            assert!(!snap.find(text).is_empty(), "{text} is shown");
+        }
+        if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
+            snap.save(&ctx, size, &std::path::Path::new(&dir).join("panel_items.png"));
+        }
+    }
+}
