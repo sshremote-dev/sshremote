@@ -77,5 +77,7 @@
     const here = location.pathname.split('/').pop() || 'index.html';
     document.querySelectorAll('#nav a').forEach((a) => { if (a.getAttribute('href') === here) a.setAttribute('aria-current', 'page'); });
     window.sshCopyable(document);
+    const top = document.querySelector('header.top');
+    if (top) { const f = () => top.classList.toggle('scrolled', scrollY > 8); f(); addEventListener('scroll', f, { passive: true }); }
   });
 })();
