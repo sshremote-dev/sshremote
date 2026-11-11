@@ -48,7 +48,7 @@ pub fn need(id: &str) -> Result<(), String> {
         return Ok(());
     }
     let name = ALL.iter().find(|m| m.0 == id).map_or(id, |m| m.1);
-    Err(format!("{name} is turned off: `sshremote module on {id}`, or Tools > Extensions > Modules"))
+    Err(format!("{name} is turned off: `sshremote module on {id}`, or Extensions > Manage > Modules"))
 }
 
 #[cfg(test)]

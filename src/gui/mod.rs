@@ -106,6 +106,16 @@ pub(crate) mod ic {
     pub const SHIELD: &str = "\u{E40A}";
     pub const SHIELD_CHECK: &str = "\u{E40C}";
     pub const GEAR: &str = "\u{E272}";
+    pub const CHECK_CIRCLE: &str = "\u{E184}";
+    pub const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
+    pub const CODE: &str = "\u{E1BC}";
+    pub const FLOPPY_DISK: &str = "\u{E248}";
+    pub const INFO: &str = "\u{E2CE}";
+    pub const LIGHTNING: &str = "\u{E2DE}";
+    pub const PALETTE: &str = "\u{E6C8}";
+    pub const PUZZLE_PIECE: &str = "\u{E596}";
+    pub const SLIDERS_HORIZONTAL: &str = "\u{E434}";
+    pub const STOREFRONT: &str = "\u{E470}";
     pub const KEYBOARD: &str = "\u{E2D8}";
     pub const SEARCH: &str = "\u{E30C}";
     pub const MONITOR: &str = "\u{E32E}";
@@ -313,6 +323,10 @@ pub struct App {
     service: Option<bool>,
     /// Tabs to open next frame: a project, or the last session at start.
     restore: Option<serde_json::Value>,
+    /// The open dialog stays over tabs restored at start, as it shows at every start.
+    restore_open: bool,
+    /// The project asked to be deleted, waiting for the second click.
+    project_confirm: Option<String>,
     /// The main window's tabs as last kept, and when they were looked at.
     layout: Option<serde_json::Value>,
     layout_at: Option<Instant>,
@@ -367,6 +381,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
             } else {
                 // The tabs open when the window was last closed, as they were.
                 app.restore = project::last();
+                app.restore_open = app.restore.is_some();
             }
             Ok(Box::new(app))
         }),
@@ -631,6 +646,8 @@ impl App {
             sized_for: None,
             queued: Vec::new(),
             restore: None,
+            restore_open: false,
+            project_confirm: None,
             layout: None,
             layout_at: None,
             project_name: String::new(),
@@ -757,7 +774,7 @@ impl eframe::App for App {
                 }
             }
             if let Screen::Work(w) = &mut self.screen {
-                w.picker = None;
+                w.picker = std::mem::take(&mut self.restore_open).then_some(Place::Tab);
                 if w.restore(&v) == 0 {
                     self.error = Some("Nothing in those tabs could be opened again.".into());
                 }
@@ -1157,7 +1174,7 @@ mod tests {
             w.picker = Some(Place::Tab);
             let mut snap = snapshot::Snap::default();
             let size = Vec2::new(w_, h_);
-            for (section, name) in [(home::Section::Ssh, "ssh"), (home::Section::Tools, "tools")] {
+            for (section, name) in [(home::Section::New, "new"), (home::Section::Local, "local"), (home::Section::Ssh, "ssh"), (home::Section::Projects, "projects"), (home::Section::Extensions, "extensions"), (home::Section::Tools, "tools")] {
                 app.section = section;
                 if section == home::Section::Tools {
                     app.config = Some(crate::tools::ConfigTool::new());

@@ -340,7 +340,7 @@ fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Optio
     let (path, play) = if path.starts_with("ext:") {
         if crate::ext::label(path).is_none() {
             let id = path[4..].split('/').next().unwrap_or("");
-            return Err(format!("needs the extension {id}: Tools > Extensions"));
+            return Err(format!("needs the extension {id}: Extensions in the open dialog"));
         }
         resolved = crate::ext::resolve(path);
         (resolved.as_str(), play && !crate::ext::is_still(path))

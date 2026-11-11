@@ -492,7 +492,7 @@ pub fn missing(cmd: &str) -> String {
         "mcp" => ("The MCP server comes", "dev.sshremote.mcp-server"),
         _ => ("Remote screens, files and the agent come", "dev.sshremote.remote-desktop"),
     };
-    format!("{name} with an extension: sshremote ext install {id}, or Tools > Extensions")
+    format!("{name} with an extension: sshremote ext install {id}, or Extensions in the open dialog")
 }
 
 /// Removes an installed extension (its layers in use show nothing from then on).
@@ -858,19 +858,117 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 
 // ----- The Extensions page ------------------------------------------------------------------------
 
-/// The Extensions tool: what is installed, what the registry offers, installing from a file.
+/// Which part of the Extensions page is shown.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[cfg(feature = "gui")]
+pub enum ExtTab {
+    #[default]
+    Installed,
+    Browse,
+    Manage,
+}
+
+/// The Extensions tool: what is installed and how to use it, what the registry offers, and the
+/// rest (a package file, modules, license, registry, the extensions' log).
 #[derive(Default)]
 #[cfg(feature = "gui")]
 pub struct ExtTool {
+    pub tab: ExtTab,
     offers: Option<Result<Vec<Offer>, String>>,
     loading: Option<std::sync::mpsc::Receiver<Result<Vec<Offer>, String>>>,
     file: String,
     status: Option<(bool, String)>,
     registry: String,
     license_file: String,
+    search: String,
+    /// The extensions whose settings are open, and the one asked to be removed.
+    settings_open: std::collections::HashSet<String>,
+    confirm_remove: Option<String>,
     /// Settings being edited, by extension and setting.
     edits: std::collections::HashMap<(String, String), String>,
 }
+
+/// What kind of extension it is, as an icon and a word.
+#[cfg(feature = "gui")]
+fn kind(m: &Manifest) -> (&'static str, &'static str) {
+    if m.activation.is_some() {
+        (ic::LIGHTNING, "Runs beside the app")
+    } else if !m.programs.is_empty() {
+        (ic::TERMINAL, "Program")
+    } else if m.main.is_some() {
+        (ic::CODE, "Script")
+    } else if !m.layers.is_empty() {
+        (ic::PALETTE, "Style pack")
+    } else {
+        (ic::PUZZLE_PIECE, "Extension")
+    }
+}
+
+/// Where to find what an extension adds, one line each.
+#[cfg(feature = "gui")]
+pub fn how_to_use(m: &Manifest) -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, key) in &m.keys {
+        let label = m.commands.iter().find(|(c, _)| c == id).map_or(id.as_str(), |(_, l)| l.as_str());
+        out.push(format!("{key}: {label}"));
+    }
+    if !m.commands.is_empty() {
+        let names: Vec<&str> = m.commands.iter().map(|(_, l)| l.as_str()).collect();
+        let place = if m.main.is_some() { "the command palette (Ctrl+Shift+P) and a terminal's right-click menu" } else { "the command palette (Ctrl+Shift+P)" };
+        out.push(format!("In {place}: {}", names.join(", ")));
+    }
+    if m.activation.is_some() {
+        out.push("Shows what it has in the status bar and the side panel".into());
+    }
+    if !m.provides.is_empty() {
+        let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
+        out.push(format!("Adds {}", cmds.join(", ")));
+    }
+    if !m.layers.is_empty() {
+        out.push("Changes the look while it is installed".into());
+    }
+    out
+}
+
+/// Whether an update replaced a version that can be put back.
+pub fn can_roll_back(id: &str) -> bool {
+    valid_id(id) && root().is_some_and(|r| r.join(format!(".{id}.old")).exists())
+}
+
+/// A rounded box around one extension.
+#[cfg(feature = "gui")]
+fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let v = ui.visuals();
+    egui::Frame::new()
+        .fill(v.faint_bg_color)
+        .stroke(egui::Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
+        .corner_radius(egui::CornerRadius::same(crate::gui::theme::R_LG))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui)
+        })
+        .inner
+}
+
+/// A small word in a tinted box.
+#[cfg(feature = "gui")]
+fn tag(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.15))
+        .corner_radius(egui::CornerRadius::same(crate::gui::theme::R_SM))
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .show(ui, |ui| ui.label(RichText::new(text).size(11.0).color(color)));
+}
+
+#[cfg(feature = "gui")]
+fn matches(search: &str, texts: &[&str]) -> bool {
+    let s = search.trim().to_lowercase();
+    s.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(&s))
+}
+
+#[cfg(feature = "gui")]
+type Act = Option<Box<dyn FnOnce() -> Result<String, String>>>;
 
 #[cfg(feature = "gui")]
 impl ExtTool {
@@ -898,214 +996,408 @@ impl ExtTool {
             self.offers = Some(r);
             self.loading = None;
         }
-        if let Some((ok, text)) = &self.status {
-            ui.colored_label(if *ok { crate::gui::brand() } else { crate::gui::bad() }, text);
-        }
         let installed = installed();
-        ui.label(RichText::new("Installed").strong());
-        if installed.is_empty() {
-            ui.label(RichText::new("None yet.").weak());
-        }
         let offers: Vec<Offer> = self.offers.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
-        let mut act: Option<Box<dyn FnOnce() -> Result<String, String>>> = None;
-        for m in &installed {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&m.name).strong());
-                ui.label(RichText::new(format!("{}  {}", m.version, m.id)).weak().size(12.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(format!("{}  Remove", ic::TRASH)).clicked() {
-                        let id = m.id.clone();
-                        act = Some(Box::new(move || remove(&id).map(|_| "Removed.".to_string())));
-                    }
-                    if let Some(o) = offers.iter().find(|o| o.id == m.id && newer(&o.version, &m.version)) {
-                        let o = o.clone();
-                        if ui.button(format!("{}  Update to {}", ic::DOWNLOAD, o.version)).clicked() {
-                            act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} updated to {}.", m.name, m.version))));
-                        }
-                    }
-                });
-            });
-            if !m.description.is_empty() {
-                ui.label(RichText::new(&m.description).weak().size(12.0));
-            }
-            if !m.commands.is_empty() {
-                let names: Vec<&str> = m.commands.iter().map(|(_, l)| l.as_str()).collect();
-                ui.label(RichText::new(format!("Commands (a terminal's right-click menu): {}", names.join(", "))).weak().size(12.0));
-            }
-            if !m.provides.is_empty() {
-                let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
-                ui.label(RichText::new(format!("Brings: {}", cmds.join(", "))).weak().size(12.0));
-            }
-            if !m.settings.is_empty() {
-                egui::CollapsingHeader::new("Settings").id_salt(("ext-settings", &m.id)).show(ui, |ui| {
-                    let mut save = false;
-                    egui::Grid::new(("ext-settings-grid", &m.id)).num_columns(2).show(ui, |ui| {
-                        for s in &m.settings {
-                            let key = (m.id.clone(), s.id.clone());
-                            let v = self.edits.entry(key).or_insert_with(|| setting(&m.id, s));
-                            ui.label(&s.label);
-                            match s.kind.as_str() {
-                                "bool" => {
-                                    let mut on = v == "true";
-                                    if ui.checkbox(&mut on, "").changed() {
-                                        *v = on.to_string();
-                                        save = true;
-                                    }
-                                }
-                                kind => {
-                                    let r = ui.add(egui::TextEdit::singleline(v).password(kind == "secret").desired_width(240.0));
-                                    save |= r.lost_focus();
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-                    if save {
-                        let mut err = None;
-                        for s in &m.settings {
-                            if let Some(v) = self.edits.get(&(m.id.clone(), s.id.clone()))
-                                && *v != setting(&m.id, s)
-                                && let Err(e) = set_setting(&m.id, s, v)
-                            {
-                                err = Some(e);
-                            }
-                        }
-                        crate::exthost::settings_changed(&m.id);
-                        if let Some(e) = err {
-                            self.status = Some((false, e));
-                        }
-                    }
-                });
-            }
-            if m.activation.is_some() {
-                ui.horizontal(|ui| {
-                    let on = crate::exthost::running(&m.id);
-                    ui.label(RichText::new(if on { "Running beside the app" } else { "Not running" }).weak().size(12.0));
-                    if ui.small_button(if on { "Restart" } else { "Start" }).clicked() {
-                        crate::exthost::reload(&m.id);
-                    }
-                });
-            }
-            for p in &m.permissions {
-                let text = crate::script::PERMISSIONS.iter().find(|(k, _)| k == p).map_or(p.as_str(), |(_, t)| *t);
-                ui.label(RichText::new(format!("May: {text}")).weak().size(12.0));
-            }
-        }
-        ui.add_space(8.0);
+        let updates = installed.iter().filter(|m| offers.iter().any(|o| o.id == m.id && newer(&o.version, &m.version))).count();
+        // The tabs, and a search over the first two.
         ui.horizontal(|ui| {
-            ui.label(RichText::new("From the registry").strong());
-            if ui.small_button(ic::ARROWS_CLOCKWISE).on_hover_text("Look again").clicked() {
-                self.refresh(ui.ctx());
+            crate::gui::menu_look(ui);
+            let installed_name = if updates > 0 { format!("Installed ({})  \u{2022} {updates} update{}", installed.len(), if updates == 1 { "" } else { "s" }) } else { format!("Installed ({})", installed.len()) };
+            for (t, glyph, name) in [(ExtTab::Installed, ic::CHECK_CIRCLE, installed_name), (ExtTab::Browse, ic::STOREFRONT, "Browse".to_string()), (ExtTab::Manage, ic::SLIDERS_HORIZONTAL, "Manage".to_string())] {
+                ui.selectable_value(&mut self.tab, t, format!("{glyph}  {name}"));
+            }
+            if self.tab != ExtTab::Manage {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(format!("{}  Search", ic::SEARCH)).desired_width(170.0));
+                });
             }
         });
-        match &self.offers {
-            None => {
-                ui.label(RichText::new("Looking\u{2026}").weak());
-            }
-            Some(Err(e)) => {
-                ui.label(RichText::new(format!("The registry could not be reached: {e}")).weak());
-            }
-            Some(Ok(list)) if list.is_empty() => {
-                ui.label(RichText::new("It offers nothing yet.").weak());
-            }
-            Some(Ok(list)) => {
-                for o in list {
-                    let have = installed.iter().find(|m| m.id == o.id);
+        ui.add_space(6.0);
+        if let Some((ok, text)) = self.status.clone() {
+            let color = if ok { crate::gui::good() } else { crate::gui::bad() };
+            egui::Frame::new()
+                .fill(color.gamma_multiply(0.12))
+                .corner_radius(egui::CornerRadius::same(crate::gui::theme::R_MD))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&o.name).strong());
-                        ui.label(RichText::new(&o.version).weak().size(12.0));
-                        if o.premium {
-                            ui.label(RichText::new("Premium").color(crate::gui::brand()).size(12.0));
-                        }
+                        ui.label(RichText::new(if ok { ic::CHECK_CIRCLE } else { ic::X_CIRCLE }).color(color));
+                        ui.label(RichText::new(&text).color(color));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let locked = o.premium && !crate::license::premium();
-                            match have {
-                                Some(_) => {
-                                    ui.label(RichText::new("Installed").weak().size(12.0));
-                                }
-                                None if o.built_in() => {
-                                    ui.label(RichText::new("Built in here").weak().size(12.0));
-                                }
-                                None => {
-                                    let b = ui.add_enabled(!locked, egui::Button::new(format!("{}  Install", ic::DOWNLOAD)));
-                                    if b.on_disabled_hover_text("Comes with a premium license").clicked() {
-                                        let o = o.clone();
-                                        act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed.", m.name, m.version))));
-                                    }
-                                }
+                            if ui.add(egui::Button::new(ic::X).frame_when_inactive(false)).on_hover_text("Dismiss").clicked() {
+                                self.status = None;
                             }
                         });
                     });
-                    if !o.description.is_empty() {
-                        ui.label(RichText::new(&o.description).weak().size(12.0));
-                    }
-                }
-            }
-        }
-        ui.add_space(8.0);
-        ui.label(RichText::new("From a file").strong());
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.file).hint_text("A package (.sshx) on this computer").desired_width(320.0));
-            if ui.add_enabled(!self.file.trim().is_empty(), egui::Button::new("Install")).clicked() {
-                let f = self.file.trim().to_string();
-                act = Some(Box::new(move || install_file(Path::new(&f)).map(|m| format!("{} {} installed.", m.name, m.version))));
-            }
-        });
-        ui.add_space(8.0);
-        let log = crate::exthost::log();
-        if !log.is_empty() {
-            egui::CollapsingHeader::new("What extensions reported").show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
-                    for line in log.iter().rev().take(200).rev() {
-                        ui.label(RichText::new(line).monospace().size(11.0));
-                    }
                 });
-            });
-            ui.add_space(8.0);
+            ui.add_space(6.0);
         }
-        ui.label(RichText::new("Modules").strong());
-        ui.label(RichText::new("Parts of the app beyond the terminal; one turned off leaves the menus.").weak().size(12.0));
-        crate::modules::ui(ui);
-        ui.add_space(8.0);
-        ui.label(RichText::new("License").strong());
-        match crate::license::current() {
-            Some(l) => {
-                ui.label(crate::license::describe(&l));
-            }
-            None => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("The free edition.").weak());
-                    ui.hyperlink_to("Premium", "https://sshremote.dev/premium");
-                });
-            }
+        let mut act: Act = None;
+        let mut to_installed = false;
+        match self.tab {
+            ExtTab::Installed => self.installed_tab(ui, &installed, &offers, &mut act),
+            ExtTab::Browse => self.browse_tab(ui, &installed, &mut act, &mut to_installed),
+            ExtTab::Manage => self.manage_tab(ui, &mut act, &mut to_installed),
         }
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.license_file).hint_text("A license file").desired_width(320.0));
-            if ui.add_enabled(!self.license_file.trim().is_empty(), egui::Button::new("Install")).clicked() {
-                let f = self.license_file.trim().to_string();
-                act = Some(Box::new(move || {
-                    let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
-                    crate::license::install(&text).map(|l| format!("License installed: {}", crate::license::describe(&l)))
-                }));
-            }
-        });
-        ui.add_space(8.0);
-        ui.label(RichText::new("Registry").strong());
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.registry).desired_width(320.0));
-            if ui.button("Use").on_hover_text("A company's own mirror, or the default again when empty").clicked() {
-                crate::hosts::set_setting("registry_url", self.registry.trim());
-                self.registry = registry_url();
-                self.refresh(ui.ctx());
-            }
-        });
         if let Some(f) = act {
             self.status = Some(match f() {
-                Ok(t) => (true, t),
+                Ok(t) => {
+                    if to_installed {
+                        self.tab = ExtTab::Installed;
+                        self.search.clear();
+                    }
+                    (true, t)
+                }
                 Err(e) => (false, e),
             });
         }
     }
+
+    fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
+        if installed.is_empty() {
+            card(ui, |ui| {
+                ui.label(RichText::new(format!("{}  No extensions yet", ic::PUZZLE_PIECE)).size(15.0).strong());
+                ui.add_space(4.0);
+                ui.label("Extensions add looks, commands, status bar items and panels, and features this edition leaves out, as the remote screen.");
+                ui.add_space(6.0);
+                if ui.add(crate::gui::theme::primary(format!("{}  Browse extensions", ic::STOREFRONT))).clicked() {
+                    self.tab = ExtTab::Browse;
+                }
+            });
+            return;
+        }
+        if offers.iter().any(|o| installed.iter().any(|m| m.id == o.id && newer(&o.version, &m.version))) {
+            ui.horizontal(|ui| {
+                if ui.button(format!("{}  Update all", ic::DOWNLOAD)).clicked() {
+                    *act = Some(Box::new(|| update_all().map(|d| format!("Updated: {}.", d.join(", ")))));
+                }
+            });
+            ui.add_space(4.0);
+        }
+        let mut shown = 0;
+        for m in installed {
+            if !matches(&self.search, &[&m.name, &m.id, &m.description]) {
+                continue;
+            }
+            shown += 1;
+            let update = offers.iter().find(|o| o.id == m.id && newer(&o.version, &m.version)).cloned();
+            card(ui, |ui| {
+                let (glyph, what) = kind(m);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(glyph).size(20.0).color(crate::gui::brand()));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&m.name).size(15.0).strong());
+                            ui.label(RichText::new(format!("v{}", m.version)).weak().size(12.0));
+                            tag(ui, what, ui.visuals().text_color());
+                            if m.activation.is_some() {
+                                let on = crate::exthost::running(&m.id);
+                                let (c, t) = if on { (crate::gui::good(), "Running") } else { (crate::gui::bad(), "Stopped") };
+                                tag(ui, t, c);
+                            }
+                        });
+                        ui.label(RichText::new(&m.id).weak().size(11.0));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.confirm_remove.as_deref() == Some(m.id.as_str()) {
+                            if ui.button("Keep").clicked() {
+                                self.confirm_remove = None;
+                            }
+                            if ui.add(egui::Button::new(RichText::new(format!("{}  Remove it", ic::TRASH)).color(crate::gui::bad()))).clicked() {
+                                let id = m.id.clone();
+                                let name = m.name.clone();
+                                *act = Some(Box::new(move || remove(&id).map(|_| format!("{name} removed."))));
+                                self.confirm_remove = None;
+                            }
+                        } else {
+                            if crate::gui::icon(ui, ic::TRASH, "Remove", false).clicked() {
+                                self.confirm_remove = Some(m.id.clone());
+                            }
+                            if can_roll_back(&m.id) && crate::gui::icon(ui, ic::CLOCK_COUNTER_CLOCKWISE, "Put the earlier version back", false).clicked() {
+                                let id = m.id.clone();
+                                *act = Some(Box::new(move || roll_back(&id).map(|_| "The earlier version is back.".to_string())));
+                            }
+                            if m.activation.is_some() && crate::gui::icon(ui, ic::ARROW_CLOCKWISE, "Start it again", false).clicked() {
+                                crate::exthost::reload(&m.id);
+                            }
+                            if !m.settings.is_empty() {
+                                let open = self.settings_open.contains(&m.id);
+                                if crate::gui::icon(ui, ic::GEAR, "Settings", open).clicked() && !self.settings_open.remove(&m.id) {
+                                    self.settings_open.insert(m.id.clone());
+                                }
+                            }
+                            if let Some(o) = update.clone()
+                                && ui.add(crate::gui::theme::primary(format!("{}  Update to {}", ic::DOWNLOAD, o.version))).clicked()
+                            {
+                                *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} updated to {}.", m.name, m.version))));
+                            }
+                        }
+                    });
+                });
+                if !m.description.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(&m.description);
+                }
+                let uses = how_to_use(m);
+                if !uses.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("How to use it").strong().size(12.0));
+                    for u in uses {
+                        ui.label(RichText::new(format!("\u{2022}  {u}")).size(12.0));
+                    }
+                }
+                if !m.permissions.is_empty() {
+                    ui.add_space(4.0);
+                    for p in &m.permissions {
+                        let text = crate::script::PERMISSIONS.iter().find(|(k, _)| k == p).map_or(p.as_str(), |(_, t)| *t);
+                        ui.label(RichText::new(format!("{}  May {}", ic::SHIELD, lower_first(text))).weak().size(12.0));
+                    }
+                }
+                if self.settings_open.contains(&m.id) {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    self.settings_ui(ui, m);
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if shown == 0 {
+            ui.label(RichText::new("Nothing installed matches the search.").weak());
+        }
+        ui.add_space(4.0);
+        if ui.link(format!("{}  Find more extensions", ic::STOREFRONT)).clicked() {
+            self.tab = ExtTab::Browse;
+        }
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui, m: &Manifest) {
+        ui.label(RichText::new(format!("{}  Settings", ic::GEAR)).strong().size(12.0));
+        let mut save = false;
+        egui::Grid::new(("ext-settings-grid", &m.id)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for s in &m.settings {
+                let key = (m.id.clone(), s.id.clone());
+                let v = self.edits.entry(key).or_insert_with(|| setting(&m.id, s));
+                ui.label(&s.label);
+                match s.kind.as_str() {
+                    "bool" => {
+                        let mut on = v == "true";
+                        if ui.checkbox(&mut on, "").changed() {
+                            *v = on.to_string();
+                            save = true;
+                        }
+                    }
+                    kind => {
+                        let r = ui.add(egui::TextEdit::singleline(v).password(kind == "secret").desired_width(240.0));
+                        let r = if kind == "secret" { r.on_hover_text("Kept in the system's password store") } else { r };
+                        save |= r.lost_focus();
+                    }
+                }
+                ui.end_row();
+            }
+        });
+        ui.label(RichText::new("Saved when you leave a field; the extension sees the change at once.").weak().size(11.0));
+        if save {
+            let mut err = None;
+            for s in &m.settings {
+                if let Some(v) = self.edits.get(&(m.id.clone(), s.id.clone()))
+                    && *v != setting(&m.id, s)
+                    && let Err(e) = set_setting(&m.id, s, v)
+                {
+                    err = Some(e);
+                }
+            }
+            crate::exthost::settings_changed(&m.id);
+            self.status = Some(match err {
+                Some(e) => (false, e),
+                None => (true, format!("{} settings saved.", m.name)),
+            });
+        }
+    }
+
+    fn browse_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], act: &mut Act, to_installed: &mut bool) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("From the signed registry").weak().size(12.0));
+            if ui.small_button(format!("{}  Look again", ic::ARROWS_CLOCKWISE)).clicked() {
+                self.refresh(ui.ctx());
+            }
+        });
+        ui.add_space(4.0);
+        let list = match &self.offers {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Looking\u{2026}").weak());
+                });
+                return;
+            }
+            Some(Err(e)) => {
+                card(ui, |ui| {
+                    ui.label(RichText::new("The registry could not be reached").strong().color(crate::gui::bad()));
+                    ui.label(RichText::new(e).weak().size(12.0));
+                    ui.label(RichText::new("Check the connection, or install a package file under Manage.").size(12.0));
+                });
+                return;
+            }
+            Some(Ok(list)) => list.clone(),
+        };
+        if list.is_empty() {
+            ui.label(RichText::new("The registry offers nothing yet.").weak());
+        }
+        let mut shown = 0;
+        for o in &list {
+            if !matches(&self.search, &[&o.name, &o.id, &o.description]) {
+                continue;
+            }
+            shown += 1;
+            let have = installed.iter().find(|m| m.id == o.id);
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::PUZZLE_PIECE).size(20.0).color(crate::gui::brand()));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&o.name).size(15.0).strong());
+                            ui.label(RichText::new(format!("v{}", o.version)).weak().size(12.0));
+                            if o.premium {
+                                tag(ui, "Premium", crate::gui::brand());
+                            }
+                        });
+                        ui.label(RichText::new(&o.id).weak().size(11.0));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let locked = o.premium && !crate::license::premium();
+                        match have {
+                            Some(m) if newer(&o.version, &m.version) => {
+                                if ui.add(crate::gui::theme::primary(format!("{}  Update to {}", ic::DOWNLOAD, o.version))).clicked() {
+                                    let o = o.clone();
+                                    *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} updated to {}.", m.name, m.version))));
+                                    *to_installed = true;
+                                }
+                            }
+                            Some(_) => {
+                                ui.label(RichText::new(format!("{}  Installed", ic::CHECK)).color(crate::gui::good()));
+                            }
+                            None if o.built_in() => {
+                                ui.label(RichText::new(format!("{}  Built into this edition", ic::CHECK)).weak()).on_hover_text("This app already has what it brings");
+                            }
+                            None => {
+                                let b = ui.add_enabled(!locked, crate::gui::theme::primary(format!("{}  Install", ic::DOWNLOAD)));
+                                if b.on_disabled_hover_text("Comes with a premium license (Manage > License)").clicked() {
+                                    let o = o.clone();
+                                    *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed. How to use it is shown on its card.", m.name, m.version))));
+                                    *to_installed = true;
+                                }
+                            }
+                        }
+                    });
+                });
+                if !o.description.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(&o.description);
+                }
+                if !o.provides.is_empty() {
+                    let cmds: Vec<String> = o.provides.iter().map(|c| format!("sshremote {c}")).collect();
+                    ui.label(RichText::new(format!("Adds {}", cmds.join(", "))).weak().size(12.0));
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if shown == 0 && !list.is_empty() {
+            ui.label(RichText::new("Nothing in the registry matches the search.").weak());
+        }
+    }
+
+    fn manage_tab(&mut self, ui: &mut egui::Ui, act: &mut Act, to_installed: &mut bool) {
+        card(ui, |ui| {
+            ui.label(RichText::new(format!("{}  Install a package file", ic::UPLOAD)).strong());
+            ui.label(RichText::new("A .sshx file someone gave you, or one you made with sshremote ext pack.").weak().size(12.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.file).hint_text("C:\\path\\to\\extension.sshx").desired_width(320.0));
+                if ui.add_enabled(!self.file.trim().is_empty(), egui::Button::new("Install")).clicked() {
+                    let f = self.file.trim().trim_matches('"').to_string();
+                    *act = Some(Box::new(move || install_file(Path::new(&f)).map(|m| format!("{} {} installed. How to use it is shown on its card.", m.name, m.version))));
+                    *to_installed = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.label(RichText::new(format!("{}  Modules", ic::SQUARES_FOUR)).strong());
+            ui.label(RichText::new("Parts of the app beyond the terminal; one turned off leaves the menus.").weak().size(12.0));
+            crate::modules::ui(ui);
+        });
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.label(RichText::new(format!("{}  License", ic::KEY)).strong());
+            match crate::license::current() {
+                Some(l) => {
+                    ui.label(crate::license::describe(&l));
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("The free edition.").weak());
+                        ui.hyperlink_to("About premium", "https://sshremote.dev/premium");
+                    });
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.license_file).hint_text("A license file").desired_width(320.0));
+                if ui.add_enabled(!self.license_file.trim().is_empty(), egui::Button::new("Install")).clicked() {
+                    let f = self.license_file.trim().trim_matches('"').to_string();
+                    *act = Some(Box::new(move || {
+                        let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
+                        crate::license::install(&text).map(|l| format!("License installed: {}", crate::license::describe(&l)))
+                    }));
+                }
+            });
+        });
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.label(RichText::new(format!("{}  Registry", ic::GLOBE)).strong());
+            ui.label(RichText::new("Where Browse looks: sshremote.dev, or a company's own mirror. Empty puts the default back.").weak().size(12.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.registry).desired_width(320.0));
+                if ui.button("Use").clicked() {
+                    crate::hosts::set_setting("registry_url", self.registry.trim());
+                    self.registry = registry_url();
+                    self.refresh(ui.ctx());
+                }
+            });
+        });
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.label(RichText::new(format!("{}  Make your own", ic::CODE)).strong());
+            ui.label(RichText::new("In a terminal: the first makes a Rust extension to start from, the second builds and installs it on every change while this app shows it.").weak().size(12.0));
+            for line in ["sshremote ext new my-tool", "sshremote ext dev my-tool"] {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(line).monospace());
+                    if crate::gui::icon(ui, ic::COPY, "Copy", false).clicked() {
+                        ui.ctx().copy_text(line.to_string());
+                    }
+                });
+            }
+        });
+        let log = crate::exthost::log();
+        if !log.is_empty() {
+            ui.add_space(6.0);
+            card(ui, |ui| {
+                egui::CollapsingHeader::new(RichText::new(format!("{}  What extensions reported", ic::INFO)).strong()).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
+                        for line in log.iter().rev().take(200).rev() {
+                            ui.label(RichText::new(line).monospace().size(11.0));
+                        }
+                    });
+                });
+            });
+        }
+    }
+}
+
+/// "Run a program" as "run a program", after "May".
+#[cfg(feature = "gui")]
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or(String::new(), |f| f.to_lowercase().chain(c).collect())
 }
 
 #[cfg(test)]
@@ -1230,18 +1522,28 @@ mod tests {
         ])), ..ExtTool::new() };
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
-        let size = Vec2::new(900.0, 1400.0);
-        let mut snap = crate::gui::snapshot::Snap::default();
-        for k in 0..3 {
-            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
-            snap.frame(&ctx, input, |ui| tool.ui(ui));
-        }
-        for text in ["Page gateway", "Brings: sshremote web", "Run its own program", "Sea pack", "Gold pack", "Premium", "Modules", "Web gateway", "License", "Update to 1.3.0", "Installed", "Desk pack"] {
-            assert!(!snap.find(text).is_empty(), "{text} is shown");
-        }
-        assert_eq!(!snap.find("Built in here").is_empty(), cfg!(feature = "remote"), "the extension a build carries itself");
-        if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
-            snap.save(&ctx, size, &std::path::Path::new(&dir).join("extensions_page.png"));
+        let size = Vec2::new(760.0, 900.0);
+        let pages: [(ExtTab, &str, &[&str]); 3] = [
+            (ExtTab::Installed, "installed", &["Installed (1)", "1 update", "Page gateway", "Program", "Adds sshremote web", "run its own program", "Update to 1.3.0", "How to use it"]),
+            (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Premium", "Installed", "Desk pack", "Install"]),
+            (ExtTab::Manage, "manage", &["Install a package file", "Modules", "Web gateway", "License", "Registry", "sshremote ext new my-tool"]),
+        ];
+        for (tab, name, texts) in pages {
+            tool.tab = tab;
+            let mut snap = crate::gui::snapshot::Snap::default();
+            for k in 0..3 {
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
+                snap.frame(&ctx, input, |ui| tool.ui(ui));
+            }
+            for text in texts {
+                assert!(!snap.find(text).is_empty(), "{text} is shown on {name}");
+            }
+            if tab == ExtTab::Browse {
+                assert_eq!(!snap.find("Built into this edition").is_empty(), cfg!(feature = "remote"), "the extension a build carries itself");
+            }
+            if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
+                snap.save(&ctx, size, &std::path::Path::new(&dir).join(format!("extensions_{name}.png")));
+            }
         }
         remove("dev.sshremote.test-page").unwrap();
     }
