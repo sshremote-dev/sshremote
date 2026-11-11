@@ -30,7 +30,7 @@
 <div class="hero"><div class="wrap">
   <div>
     <h1>Your computers, <em>over the SSH you already have</em></h1>
-    <p class="lead">SSH Remote is a terminal workspace with the remote screen, files and an MCP server for AI agents, all through your existing SSH login: no account, no open port, no relay. For a PC on Wi-Fi without a fixed address, connect by device ID and password through a relay, as with RustDesk.</p>
+    <p class="lead">SSH Remote is a terminal workspace with the remote screen, files and an MCP server for AI agents, all through your existing SSH login, with no account, open port or server in between. For a PC on Wi-Fi without a fixed address or SSH, turn on remote access by ID and connect with its ID and password through the relay, as with RustDesk.</p>
     <div class="btns">
       <a class="btn" href="#download"><span data-i="download"></span>Download</a>
       <a class="btn alt" href="docs.html"><span data-i="terminal"></span>Get started</a>
@@ -68,6 +68,8 @@
     <div class="card"><div class="ico" data-i="robot"></div><h3>MCP server for AI agents</h3><p><code>sshremote mcp HOST</code> lets an agent read the window in front as text (the accessibility tree) and operate its controls, with screenshots only when needed.</p></div>
     <div class="card"><div class="ico" data-i="globe"></div><h3>Web gateway</h3><p><code>sshremote web</code> serves this computer's terminals and screens, and its SSH hosts', in a browser.</p></div>
     <div class="card"><div class="ico" data-i="puzzle"></div><h3>Extensions</h3><p>Style packs, WebAssembly scripts, command-line programs and resident extensions with status bar items, panels and palette commands, each limited to the permissions it names.</p></div>
+    <div class="card"><div class="ico" data-i="relay"></div><h3>Remote access by ID</h3><p>A lasting 9-digit ID and a password reach a PC through the relay, with no SSH or fixed address. It can start with the computer and, on Windows, covers the sign-in and lock screens.</p></div>
+    <div class="card"><div class="ico" data-i="bolt"></div><h3>Reconnects by itself</h3><p>A lost connection is tried again in the same mode with the shells kept; after 30 seconds the pane offers Reconnect or Close.</p></div>
     <div class="card"><div class="ico" data-i="key"></div><h3>SSH tools</h3><p>SSH keys, an <code>~/.ssh/config</code> editor, passwords in the system's password store, and encrypted backups of hosts, settings and <code>~/.ssh</code>.</p></div>
   </div>
 </div></section>
@@ -83,9 +85,10 @@
       <pre class="cmd"><code>sshremote --gui user@host</code></pre>
     </div>
     <div class="card"><div class="ico" data-i="relay"></div><h3>Device ID and password, through a relay</h3>
-      <p>For a PC on Wi-Fi without a fixed address or SSH server. The host waits at the relay with an ID and a one-time password; the relay pairs you and only copies sealed bytes. Install the service for unattended access, including the sign-in screen.</p>
-      <pre class="cmd"><code>sshremote --serve --via sshremote.dev</code></pre>
-      <p class="small">In the app: the <b>Remote access</b> card of the open dialog shows the ID and password and installs the service.</p>
+      <p>For a PC on Wi-Fi without a fixed address or SSH server. It keeps a 9-digit ID and a password its owner sets or generates; the relay pairs the two sides and only copies sealed bytes. "Start with the computer" makes it reachable unattended.</p>
+      <pre class="cmd"><code>sshremote remote-access on
+sshremote sshremote://ID@sshremote.dev --password P</code></pre>
+      <p class="small">In the app: <b>This computer &rarr; Remote access by ID</b> in the open dialog on the PC; on the viewer, type the ID in <b>New connection</b>.</p>
     </div>
   </div>
 </div></section>
