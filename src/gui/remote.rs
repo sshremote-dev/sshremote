@@ -1774,10 +1774,12 @@ impl Remote {
                 Ok(())
             }));
         }
+        }
+        // The terminal under the screen, in a pane too, as with the chat.
         let (glyph, tip) = if self.term_inline && self.terms.is_some() {
             (ic::MONITOR, "Back to the remote screen, with the terminal under it")
         } else {
-            (ic::TERMINAL, "Terminal: a shell on the SSH host in a panel under the screen (right click for more)")
+            (ic::TERMINAL, "Terminal: a shell on the host in a panel under the screen (right click for more)")
         };
         let showing = self.terms.is_some() && (self.term_split || self.term_inline || self.term_detached);
         let term = icon(ui, glyph, tip, showing);
@@ -1834,7 +1836,6 @@ impl Remote {
                 ui.close();
             }
         });
-        }
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
         let chat_tip = "Chat with the person at the SSH host's screen";
         let shot_tip = "Screenshot: save the SSH host's screen as a PNG in Pictures";

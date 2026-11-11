@@ -76,7 +76,9 @@ pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Res
     // What stays of the night is drawn once.
     let play = play && !built_in(path).is_some_and(|b| b.still);
     let side = ((px / 64.0).ceil() * 64.0).clamp(64.0, 2048.0) as u32;
-    let key = format!("{path}@{side}");
+    // The brand scene's logo follows the theme, so each theme has its own player.
+    let dark = super::theme::dark();
+    let key = if path == "builtin:brand" { format!("{path}@{side}@{dark}") } else { format!("{path}@{side}") };
     let player = {
         let mut list = PLAYERS.lock().map_err(|e| e.to_string())?;
         match list.iter().find(|p| p.lock().is_ok_and(|p| p.key == key)) {
@@ -85,7 +87,7 @@ pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Res
                 let p = Arc::new(Mutex::new(Player { key: key.clone(), frame: None, count: 0, error: None, used: Instant::now(), play }));
                 list.push(p.clone());
                 let (path, ctx, me) = (path.to_string(), ctx.clone(), p.clone());
-                std::thread::spawn(move || run(&path, side, &ctx, &me));
+                std::thread::spawn(move || run(&path, side, dark, &ctx, &me));
                 p
             }
         }
@@ -130,7 +132,7 @@ fn renderer() -> rasterlottie::Renderer {
     rasterlottie::Renderer::new(p)
 }
 
-fn load(path: &str) -> Result<rasterlottie::Animation, String> {
+fn load(path: &str, dark: bool) -> Result<rasterlottie::Animation, String> {
     let bytes = if let Some(b) = built_in(path) {
         b.bytes.to_vec()    } else {
         std::fs::read(path).map_err(|e| e.to_string())?
@@ -139,6 +141,9 @@ fn load(path: &str) -> Result<rasterlottie::Animation, String> {
     let text = if bytes.starts_with(b"PK") { unpack(&bytes)? } else { String::from_utf8_lossy(&bytes).into_owned() };
     let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     normalize(&mut v);
+    if path == "builtin:brand" {
+        theme_logo(&mut v, dark);
+    }
     rasterlottie::Animation::from_json_str(&v.to_string()).map_err(|e| e.to_string())
 }
 
@@ -179,6 +184,69 @@ fn unpack(bytes: &[u8]) -> Result<String, String> {
         }
     }
     Ok(v.to_string())
+}
+
+/// The logo layer in the colours of the app icon for the theme (`assets/logo.svg`): its plate
+/// and extruded sides from the plate's shades, the chevron and the portal in the icon's blues.
+fn theme_logo(v: &mut serde_json::Value, dark: bool) {
+    use serde_json::Value;
+    let (low, high, chevron, portal): ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) = if dark {
+        ([0x0f as f64, 0x12 as f64, 0x18 as f64], [0x2a as f64, 0x31 as f64, 0x3d as f64], [0x7c as f64, 0xb4 as f64, 255.0], [0x4f as f64, 0x7c as f64, 0xf5 as f64])
+    } else {
+        ([0xb8 as f64, 0xc3 as f64, 0xd6 as f64], [0xf8 as f64, 0xfa as f64, 0xfd as f64], [0x4f as f64, 0x8f as f64, 0xf7 as f64], [0x36 as f64, 0x59 as f64, 0xd9 as f64])
+    };
+    let rgb = |c: [f64; 3]| c.map(|x| x / 255.0);
+    // The exported plate runs from about 0.02 to 0.17 in brightness; keep each shade's place.
+    let plate = |c: &[f64]| {
+        let t = ((c[0] + c[1] + c[2]) / 3.0 - 0.02) / 0.15;
+        let t = t.clamp(0.0, 1.0);
+        [0, 1, 2].map(|i| (low[i] + (high[i] - low[i]) * t) / 255.0)
+    };
+    fn walk(v: &mut Value, f: &mut dyn FnMut(&str, &mut Value)) {
+        match v {
+            Value::Object(m) => {
+                if let Some(ty) = m.get("ty").and_then(|t| t.as_str()).map(str::to_string)
+                    && matches!(ty.as_str(), "fl" | "st" | "gf" | "gs")
+                {
+                    f(&ty, v);
+                    return;
+                }
+                m.values_mut().for_each(|x| walk(x, f));
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, f)),
+            _ => {}
+        }
+    }
+    let set = |arr: &mut Vec<Value>, at: usize, c: [f64; 3]| {
+        for i in 0..3 {
+            arr[at + i] = c[i].into();
+        }
+    };
+    let Some(layers) = v.get_mut("layers").and_then(|l| l.as_array_mut()) else { return };
+    for layer in layers.iter_mut().filter(|l| l.get("nm").and_then(|n| n.as_str()) == Some("logo")) {
+        walk(layer, &mut |ty, item| match ty {
+            "st" | "fl" => {
+                let Some(arr) = item.pointer_mut("/c/k").and_then(|k| k.as_array_mut()).filter(|a| a.len() >= 3) else { return };
+                let c: Vec<f64> = arr.iter().take(3).filter_map(|x| x.as_f64()).collect();
+                if c.len() < 3 {
+                    return;
+                }
+                let new = if ty == "st" { if c[0] + c[1] + c[2] > 1.9 { rgb(chevron) } else { rgb(portal) } } else { plate(&c) };
+                set(arr, 0, new);
+            }
+            _ => {
+                let stops = item.pointer("/g/p").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+                let Some(arr) = item.pointer_mut("/g/k/k").and_then(|k| k.as_array_mut()) else { return };
+                for s in 0..stops {
+                    let at = s * 4 + 1;
+                    let c: Vec<f64> = arr.get(at..at + 3).map(|x| x.iter().filter_map(|y| y.as_f64()).collect()).unwrap_or_default();
+                    if c.len() == 3 {
+                        set(arr, at, plate(&c));
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// What older exporters leave out, filled in as the format reads: a keyframe without its own
@@ -229,14 +297,14 @@ fn normalize(v: &mut serde_json::Value) {
 
 /// The player's thread: frames drawn at the animation's own pace (at most 30 a second) while it
 /// plays, the first one while it does not; gone when nobody asks for it.
-fn run(path: &str, side: u32, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
+fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Player>>) {
     let fail = |e: String| {
         if let Ok(mut p) = me.lock() {
             p.error = Some(e);
         }
         ctx.request_repaint();
     };
-    let anim = match load(path) {
+    let anim = match load(path, dark) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -297,6 +365,19 @@ mod tests {
     /// Lottie files from SSHREMOTE_LOTTIE_DIR drawn halfway through, on a checkered background so
     /// their transparency shows, into SSHREMOTE_SNAP_DIR; which could not be drawn, and why.
     #[test]
+    #[ignore = "writes pictures; set SSHREMOTE_SNAP_DIR"]
+    fn brand_logo_follows_the_theme() {
+        let Some(out) = std::env::var_os("SSHREMOTE_SNAP_DIR") else { return };
+        for dark in [false, true] {
+            let a = load("builtin:brand", dark).unwrap();
+            let p = renderer().prepare(&a).unwrap();
+            let f = p.render_frame(a.in_point + 40.0, rasterlottie::RenderConfig::new(rasterlottie::Rgba8::new(if dark { 14 } else { 245 }, if dark { 14 } else { 245 }, if dark { 16 } else { 247 }, 255), 0.5)).unwrap();
+            let img = image::RgbaImage::from_raw(f.width, f.height, f.pixels).unwrap();
+            img.save(std::path::Path::new(&out).join(format!("brand_{}.png", if dark { "dark" } else { "light" }))).unwrap();
+        }
+    }
+
+    #[test]
     #[ignore]
     fn lottie_files_render() {
         let (Some(src), Some(out)) = (std::env::var_os("SSHREMOTE_LOTTIE_DIR"), std::env::var_os("SSHREMOTE_SNAP_DIR")) else { return };
@@ -308,7 +389,7 @@ mod tests {
             }
             let name = e.path().file_stem().unwrap().to_string_lossy().into_owned();
             let started = Instant::now();
-            let got = load(&path).and_then(|a| {
+            let got = load(&path, true).and_then(|a| {
                 let p = renderer().prepare(&a).map_err(|e| e.to_string())?;
                 let side: f32 = std::env::var("SSHREMOTE_LOTTIE_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(200.0);
                 let at: f32 = std::env::var("SSHREMOTE_LOTTIE_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);

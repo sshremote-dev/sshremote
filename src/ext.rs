@@ -886,6 +886,10 @@ pub struct ExtTool {
     confirm_remove: Option<String>,
     /// Settings being edited, by extension and setting.
     edits: std::collections::HashMap<(String, String), String>,
+    /// The extension a click is about to install or update, and the work running in the
+    /// background: which extension (if one) and where its outcome arrives.
+    pending: Option<String>,
+    working: Option<(Option<String>, std::sync::mpsc::Receiver<Result<String, String>>)>,
 }
 
 /// What kind of extension it is, as an icon and a word.
@@ -968,7 +972,7 @@ fn matches(search: &str, texts: &[&str]) -> bool {
 }
 
 #[cfg(feature = "gui")]
-type Act = Option<Box<dyn FnOnce() -> Result<String, String>>>;
+type Act = Option<Box<dyn FnOnce() -> Result<String, String> + Send>>;
 
 #[cfg(feature = "gui")]
 impl ExtTool {
@@ -1040,17 +1044,29 @@ impl ExtTool {
             ExtTab::Browse => self.browse_tab(ui, &installed, &mut act, &mut to_installed),
             ExtTab::Manage => self.manage_tab(ui, &mut act, &mut to_installed),
         }
+        let _ = to_installed;
+        // Work runs in the background and the list stays where it is, the card showing its state.
         if let Some(f) = act {
-            self.status = Some(match f() {
-                Ok(t) => {
-                    if to_installed {
-                        self.tab = ExtTab::Installed;
-                        self.search.clear();
-                    }
-                    (true, t)
-                }
-                Err(e) => (false, e),
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+                ctx.request_repaint();
             });
+            self.working = Some((self.pending.take(), rx));
+        }
+        if let Some((_, rx)) = &self.working {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.status = Some(match r {
+                        Ok(t) => (true, t),
+                        Err(e) => (false, e),
+                    });
+                    self.working = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.working = None,
+                Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
+            }
         }
     }
 
@@ -1221,7 +1237,7 @@ impl ExtTool {
         }
     }
 
-    fn browse_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], act: &mut Act, to_installed: &mut bool) {
+    fn browse_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], act: &mut Act, _to_installed: &mut bool) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("From the signed registry").weak().size(12.0));
             if ui.small_button(format!("{}  Look again", ic::ARROWS_CLOCKWISE)).clicked() {
@@ -1272,12 +1288,18 @@ impl ExtTool {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let locked = o.premium && !crate::license::premium();
-                        match have {
+                        let busy = self.working.is_some();
+                        if self.working.as_ref().is_some_and(|w| w.0.as_deref() == Some(o.id.as_str())) {
+                            ui.label(RichText::new(if have.is_some() { "Updating\u{2026}" } else { "Installing\u{2026}" }).weak());
+                            ui.spinner();
+                            return;
+                        }
+                        ui.add_enabled_ui(!busy, |ui| match have {
                             Some(m) if newer(&o.version, &m.version) => {
                                 if ui.add(crate::gui::theme::primary(format!("{}  Update to {}", ic::DOWNLOAD, o.version))).clicked() {
                                     let o = o.clone();
+                                    self.pending = Some(o.id.clone());
                                     *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} updated to {}.", m.name, m.version))));
-                                    *to_installed = true;
                                 }
                             }
                             Some(_) => {
@@ -1290,11 +1312,11 @@ impl ExtTool {
                                 let b = ui.add_enabled(!locked, crate::gui::theme::primary(format!("{}  Install", ic::DOWNLOAD)));
                                 if b.on_disabled_hover_text("Comes with a premium license (Manage > License)").clicked() {
                                     let o = o.clone();
-                                    *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed. How to use it is shown on its card.", m.name, m.version))));
-                                    *to_installed = true;
+                                    self.pending = Some(o.id.clone());
+                                    *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed. How to use it is on its card under Installed.", m.name, m.version))));
                                 }
                             }
-                        }
+                        });
                     });
                 });
                 if !o.description.is_empty() {
