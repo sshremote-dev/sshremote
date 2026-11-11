@@ -102,10 +102,25 @@ as text (accessibility tree) and act on its controls, with screenshots only when
 {"mcpServers": {"remote-pc": {"command": "sshremote", "args": ["mcp", "user@host"]}}}
 ```
 
-## Without ssh
+## Remote access by ID (without ssh)
 
-`sshremote --serve` waits for viewers with a one-time password (SPAKE2, ChaCha20-Poly1305);
-`sshremote --relay` pairs hosts and viewers behind NAT.
+For a PC on Wi-Fi or behind NAT with no fixed address: open dialog → This computer → **Remote
+access by ID**. Turn it on; the card shows a lasting 9-digit ID and a password (show, copy, a new
+one, or your own). **Start with the computer** installs the service (Windows, also at the sign-in
+screen) or a systemd user unit (Linux). On the other side, type the ID in New connection, give the
+password and open the screen or files.
+
+```sh
+sshremote remote-access            # this computer's ID, password and state
+sshremote remote-access on|off|install|uninstall|password [NEW]|relay HOST
+sshremote sshremote://ID@sshremote.dev --password P
+sshremote --relay --listen 0.0.0.0:7071 --store ids.json   # your own relay
+```
+
+Both ends dial out to the relay, prove the password to each other with SPAKE2 and seal every byte
+with ChaCha20-Poly1305; the relay sees neither. IDs are held at the relay by a secret token, wrong
+passwords cost more time each, and attempts per address are limited. See
+[docs/architecture.md](docs/architecture.md) for how this, SSH and the extensions fit together.
 
 ## Credits
 
