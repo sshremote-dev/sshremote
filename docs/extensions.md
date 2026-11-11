@@ -1,8 +1,9 @@
 # Extensions
 
-SSH Remote keeps a small core (the terminal workspace, its tabs and splits, the text and Markdown
-views, settings) and lets everything else come as an extension, installed from the
-signed registry at sshremote.dev or from a file.
+SSH Remote builds in what every user needs to reach and work on another computer (the workspace,
+terminals, SSH tools, settings, and in SSH Remote the remote screen and files; full builds also the
+web and MCP gateways) and lets the rest come as extensions, installed from the signed registry at
+sshremote.dev or from a file. [architecture.md](architecture.md) draws the line.
 
 ## Design
 
@@ -23,7 +24,7 @@ an app that must stay safe on machines that hold SSH keys:
 |---|---|---|
 | Style pack | `contributes.layers` | Pictures and Lottie animations behind the terminals |
 | Script | `main` (a `.wasm` file), `contributes.commands` | Commands in the terminal's right-click menu and the command palette that change the selected text |
-| Program | `programs`, `contributes.provides` | Commands of the `sshremote` command line (`sshremote web`, `sshremote mcp`) |
+| Program | `programs`, `contributes.provides` | Commands of the `sshremote` command line (`sshremote web`, `sshremote mcp`, `sshremote remote`) |
 | Host extension | `programs`, `"activation": "startup"`, `contributes.commands` | Runs beside the app for as long as it is open: status bar items, panels, commands, terminals, events |
 
 ## The manifest

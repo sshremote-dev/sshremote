@@ -1,15 +1,16 @@
 //! Extensions: packages (`.sshx`, a zip with `extension.json` and its files) that add to the
 //! program, installed from a file or from the online registry (sshremote.dev), updated and
-//! removed. This first kind are style packs: background layers (Lottie animations and pictures)
-//! that show in Appearance beside the built-in ones.
+//! removed. They contribute background layers (Lottie animations and pictures) to Appearance,
+//! commands and settings, and programs: helpers run beside the app, and commands they provide
+//! (`sshremote web`, `mcp`, `remote`) in builds without them. See docs/extensions.md.
 //!
-//! extension.json:
+//! extension.json (`api` is the extension API it needs, at most [`API`]):
 //!   { "id": "dev.sshremote.ocean", "name": "Ocean", "version": "1.0.0", "api": 1,
 //!     "description": "...", "contributes": { "layers": [
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
 //!
 //! The registry is a static index (registry/build.py writes it):
-//!   { "api": 1, "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size" } ] }
+//!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size", "premium", "provides" } ] }
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -733,6 +734,7 @@ pub fn offers() -> Result<Vec<Offer>, String> {
 /// index names.
 pub fn install_offer(o: &Offer) -> Result<Manifest, String> {
     use sha2::Digest;
+    // A deliberate soft gate: checked here only, the packages themselves are not locked.
     if o.premium && !crate::license::premium() {
         return Err(format!("{} comes with a premium license: see https://sshremote.dev/premium", o.name));
     }

@@ -224,6 +224,8 @@ static LOOK: RwLock<Option<Look>> = RwLock::new(None);
 /// (on, then the text's and the background's RGB), and whether a picture shows.
 static CUSTOM: AtomicU64 = AtomicU64::new(0);
 static PICTURE: AtomicBool = AtomicBool::new(false);
+/// The editor changed the look since it was last saved.
+static UNSAVED: AtomicBool = AtomicBool::new(false);
 
 /// The look now (read from the settings the first time).
 pub(crate) fn get() -> Look {
@@ -241,6 +243,11 @@ pub(crate) fn get() -> Look {
 /// Takes a new look: kept, remembered, and shown by every window from the next frame.
 pub(crate) fn set(l: Look) {
     crate::hosts::set_setting("look", &l.to_json());
+    preview(l);
+}
+
+/// Shows a new look at once without saving it: the editor saves once a drag ends.
+fn preview(l: Look) {
     mirror(&l);
     if let Ok(mut g) = LOOK.write() {
         *g = Some(l);
@@ -988,7 +995,12 @@ fn editor_window(ctx: &egui::Context) {
         l.layers.push(BgLayer { src: path, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
     }
     if l != before {
-        set(l);
+        preview(l);
+        UNSAVED.store(true, Ordering::Relaxed);
+    }
+    // Saved once a slider is let go, not on every frame of the drag.
+    if (!open || !ctx.input(|i| i.pointer.any_down())) && UNSAVED.swap(false, Ordering::Relaxed) {
+        crate::hosts::set_setting("look", &get().to_json());
     }
     if !open {
         *g = None;

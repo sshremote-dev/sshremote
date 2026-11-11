@@ -10,7 +10,7 @@ impl App {
             Start::Files => PaneMode::Files,
             Start::Screen => PaneMode::Screen,
         };
-        let start = (self.start_panels.0, self.start_panels.1, self.start_fullscreen);
+        let start = PaneStart { panel: self.start_panels.0, chat: self.start_panels.1, fullscreen: self.start_fullscreen };
         let launch = if local {
             let capture = if self.form.capture == "auto" { "synthetic".to_string() } else { self.form.capture.clone() };
             Launch::Agent { target: Target::Local { capture }, label: "Test desktop".into(), ssh_cmd: None, mode }
@@ -83,11 +83,7 @@ impl App {
     }
 
     pub(super) fn system_terminal(&mut self, host: &str, port: &str) {
-        let mut cmd = vec!["ssh".to_string()];
-        if !port.trim().is_empty() {
-            cmd.extend(["-p".into(), port.trim().to_string()]);
-        }
-        cmd.push(host.trim().to_string());
+        let (_, cmd) = ssh_command(host, port);
         if let Err(e) = crate::termwin::spawn_system(&cmd) {
             self.error = Some(format!("cannot open the system terminal: {e}"));
         }
@@ -108,12 +104,10 @@ impl App {
 
     /// The host lists again, after a tool changed them.
     fn reload_hosts(&mut self) {
-        {
-            self.ssh_hosts = crate::hosts::ssh_config_hosts();
-            self.recent = crate::hosts::load_recent();
-            self.favorites = crate::hosts::favorites();
-            self.seen = crate::hosts::last_seen();
-        }
+        self.ssh_hosts = crate::hosts::ssh_config_hosts();
+        self.recent = crate::hosts::load_recent();
+        self.favorites = crate::hosts::favorites();
+        self.seen = crate::hosts::last_seen();
     }
 
     /// Administrator or standard user; a click on the latter asks for the rights.
@@ -454,7 +448,7 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.form.port).hint_text("22").desired_width(70.0));
             ui.end_row();
             ui.label(RichText::new("Password").weak()).on_hover_text(
-                "For the remote screen and files. Leave empty to sign in with SSH keys; sshremote:// addresses need the password sshremote --serve shows.",
+                "For the remote screen and files. Leave empty to sign in with SSH keys; sshremote:// addresses need the password of that computer's remote access ID.",
             );
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(220.0));
@@ -614,7 +608,7 @@ impl App {
     /// Opens what was chosen: in a new tab, or beside the active pane.
     pub(super) fn choose(&mut self, (host, port, how): Choice, place: Place) {
         self.error = None;
-        let start = (false, false, false);
+        let start = PaneStart::default();
         let launch = match how {
             How::System => {
                 self.system_terminal(&host, &port);
@@ -666,7 +660,7 @@ impl App {
                 return Err("sshremote:// addresses reach the screen and files only.".into());
             }
             if self.form.password.is_empty() {
-                return Err("Enter the one-time password shown by sshremote --serve".into());
+                return Err("Enter the password set for that computer's remote access ID".into());
             }
             let target = Target::Direct { addr, password: std::mem::take(&mut self.form.password) };
             return Ok(Launch::Agent { target, label: host, ssh_cmd: None, mode });
@@ -678,7 +672,7 @@ impl App {
         // A password typed now wins over a saved one.
         let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
         self.form.password.clear();
-        let port_n: Option<u16> = port.trim().parse().ok();
+        let (port_n, cmd) = ssh_command(&host, port);
         let target = Target::Ssh {
             host: host.clone(),
             port: port_n,
@@ -688,11 +682,6 @@ impl App {
             password,
             unattended: true,
         };
-        let mut cmd = vec!["ssh".to_string()];
-        if let Some(p) = port_n {
-            cmd.extend(["-p".into(), p.to_string()]);
-        }
-        cmd.push(host.clone());
         // A terminal is recorded when opened (it signs in in its tab); the screen and files once
         // the agent is reached, so mistyped hosts do not pile up.
         if mode == PaneMode::Terminal {

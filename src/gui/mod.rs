@@ -17,7 +17,7 @@ use crate::proto::{MOD_SUPER, PRESETS, SUPER_L, ToAgent, ToClient};
 #[cfg(feature = "remote")]
 use crate::session::{Action, Control, Ev, Framebuffer, Session};
 use crate::options::{Options, REMOTE};
-use workspace::{Launch, PaneMode, Place};
+use workspace::{Launch, PaneMode, PaneStart, Place};
 use crate::options::Target;
 
 pub(crate) mod chrome;
@@ -318,7 +318,7 @@ pub struct App {
     windows: Vec<(egui::ViewportId, Box<workspace::Workspace>, Pos2)>,
     windows_made: u64,
     /// What to open next frame: the open view's choices, tools, the command line.
-    queued: Vec<(workspace::Launch, workspace::Place, (bool, bool, bool))>,
+    queued: Vec<(workspace::Launch, workspace::Place, PaneStart)>,
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     exts: Option<crate::ext::ExtTool>,
@@ -352,29 +352,23 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let open = opt.open.clone();
     let size = if auto_start { [1280.0, 800.0] } else { OPEN_SIZE };
     let native = native_options("SSH Remote", size);
-    let r = eframe::run_native(
-        "sshremote",
-        native,
-        Box::new(move |cc| {
-            style(&cc.egui_ctx);
-            #[cfg(windows)]
-            let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
-            #[cfg(not(windows))]
-            let grabbed = None;
-            let mut app = App::new(form, budget, &open, grabbed);
-            std::thread::spawn(crate::backup::auto);
-            let ctx = cc.egui_ctx.clone();
-            crate::exthost::start(move || ctx.request_repaint());
-            // Remote access by ID while this window is open, when it is on and no service runs it.
-            #[cfg(feature = "remote")]
-            crate::access::start_in_app();
-            if auto_start {
-                app.connect(local);
-            }
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| e.to_string());
+    boot(native, move |cc| {
+        let mut app = App::boot(cc, form, budget, &open);
+        std::thread::spawn(crate::backup::auto);
+        // Remote access by ID while this window is open, when it is on and no service runs it.
+        #[cfg(feature = "remote")]
+        crate::access::start_in_app();
+        if auto_start {
+            app.connect(local);
+        }
+        app
+    })
+}
+
+/// Runs the window with the app `make` builds, then stops the extensions' helpers.
+fn boot(native: eframe::NativeOptions, make: impl FnOnce(&eframe::CreationContext<'_>) -> App + 'static) -> Result<(), String> {
+    let r = eframe::run_native("sshremote", native, Box::new(move |cc| Ok(Box::new(make(cc)))))
+        .map_err(|e| e.to_string());
     crate::exthost::stop_all();
     r
 }
@@ -554,7 +548,7 @@ fn friendly(e: &str) -> (String, &'static str) {
     } else if l.contains("could not resolve") || l.contains("name or service not known") || l.contains("no such host") {
         "The host name is unknown. Check the spelling, or use the IP address."
     } else if l.contains("connection refused") || l.contains("actively refused") {
-        "Nothing answered on that port. Is the SSH server (or sshremote --serve) running there?"
+        "Nothing answered on that port. Is the SSH server running there?"
     } else if l.contains("timed out") || l.contains("no route") || l.contains("unreachable") {
         "The host did not answer. Check the address, the network and any firewall."
     } else if l.contains("command not found") || l.contains("not recognized") || l.contains("no such file") {
@@ -597,6 +591,18 @@ enum Source {
 }
 
 impl App {
+    /// The app a new window starts with: the style, the system keys and the extensions' helpers set up.
+    fn boot(cc: &eframe::CreationContext<'_>, form: Form, budget: f64, open: &str) -> App {
+        style(&cc.egui_ctx);
+        #[cfg(windows)]
+        let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
+        #[cfg(not(windows))]
+        let grabbed = None;
+        let ctx = cc.egui_ctx.clone();
+        crate::exthost::start(move || ctx.request_repaint());
+        App::new(form, budget, open, grabbed)
+    }
+
     /// The app on its home screen; `open` as `--open` gives it, `grabbed` the system keys caught.
     fn new(form: Form, budget: f64, open: &str, grabbed: Option<mpsc::Receiver<(u32, bool)>>) -> App {
         App {
@@ -665,7 +671,7 @@ impl TermStart {
                 Launch::Shell { label: name, profile, target: local, ssh_cmd: None }
             }
             TermStart::Host(host, port) => {
-                let port_n: Option<u16> = port.trim().parse().ok();
+                let (port_n, cmd) = ssh_command(&host, &port);
                 let target = Target::Ssh {
                     host: host.clone(),
                     port: port_n,
@@ -675,11 +681,6 @@ impl TermStart {
                     password: crate::vault::get(&host),
                     unattended: true,
                 };
-                let mut cmd = vec!["ssh".to_string()];
-                if let Some(p) = port_n {
-                    cmd.extend(["-p".into(), p.to_string()]);
-                }
-                cmd.push(host.clone());
                 let profile = crate::termwin::ssh_profile(&host, &port);
                 Launch::Shell { label: host, profile, target, ssh_cmd: Some(cmd) }
             }
@@ -687,38 +688,36 @@ impl TermStart {
     }
 }
 
+/// `ssh [-p PORT] HOST`, with the port only when it is one, and that port.
+pub(super) fn ssh_command(host: &str, port: &str) -> (Option<u16>, Vec<String>) {
+    let port_n: Option<u16> = port.trim().parse().ok();
+    let mut cmd = vec!["ssh".to_string()];
+    if let Some(p) = port_n {
+        cmd.extend(["-p".into(), p.to_string()]);
+    }
+    cmd.push(host.trim().to_string());
+    (port_n, cmd)
+}
+
 /// `sshremote terminal`: the workspace with `first` in a tab and `panes` beside (true) or below it.
 pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Option<String>) -> Result<(), String> {
     let opt = crate::parse_client(&["--gui".into()])?;
     let native = native_options("SSH Remote", [960.0, 600.0]);
-    let r = eframe::run_native(
-        "sshremote",
-        native,
-        Box::new(move |cc| {
-            style(&cc.egui_ctx);
-            #[cfg(windows)]
-            let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
-            #[cfg(not(windows))]
-            let grabbed = None;
-            let mut app = App::new(Form::from(&opt), opt.budget, "", grabbed);
-            let ctx = cc.egui_ctx.clone();
-            crate::exthost::start(move || ctx.request_repaint());
-            let mut w = workspace::Workspace::new(app.options());
-            w.add(first.launch(), Place::Tab, (false, false, false));
-            for (p, side) in panes {
-                w.add(p.launch(), Place::Split { below: !side }, (false, false, false));
-            }
-            if let Some(v) = view {
-                w.start_view(&v);
-            }
-            app.screen = Screen::Work(Box::new(w));
-            app.quit_when_empty = true;
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| e.to_string());
-    crate::exthost::stop_all();
-    r
+    boot(native, move |cc| {
+        // No backups or remote access here: the main window runs those, not each terminal window.
+        let mut app = App::boot(cc, Form::from(&opt), opt.budget, "");
+        let mut w = workspace::Workspace::new(app.options());
+        w.add(first.launch(), Place::Tab, PaneStart::default());
+        for (p, side) in panes {
+            w.add(p.launch(), Place::Split { below: !side }, PaneStart::default());
+        }
+        if let Some(v) = view {
+            w.start_view(&v);
+        }
+        app.screen = Screen::Work(Box::new(w));
+        app.quit_when_empty = true;
+        app
+    })
 }
 
 /// The open window's size, about a file dialog's.
@@ -1048,7 +1047,7 @@ mod tests {
         w.add(
             Launch::Shell { label: "torn".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
             Place::Tab,
-            (false, false, false),
+            PaneStart::default(),
         );
         app.tear_off(w, Pos2::new(200.0, 200.0));
         assert_eq!(app.windows.len(), 1);
@@ -1083,12 +1082,12 @@ mod tests {
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
         let mut first = workspace::Workspace::new(app.options());
-        first.add(shell("one"), Place::Tab, (false, false, false));
-        first.add(shell("two"), Place::Tab, (false, false, false));
-        first.add(shell("three"), Place::Tab, (false, false, false));
+        first.add(shell("one"), Place::Tab, PaneStart::default());
+        first.add(shell("two"), Place::Tab, PaneStart::default());
+        first.add(shell("three"), Place::Tab, PaneStart::default());
         app.screen = Screen::Work(Box::new(first));
         let mut other = workspace::Workspace::new(app.options());
-        other.add(shell("four"), Place::Tab, (false, false, false));
+        other.add(shell("four"), Place::Tab, PaneStart::default());
         app.tear_off(other, Pos2::new(300.0, 300.0));
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),

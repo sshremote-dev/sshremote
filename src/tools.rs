@@ -45,8 +45,8 @@ pub struct KeyTool {
     name: String,
     kind: usize,
     comment: String,
-    pass: String,
-    pass2: String,
+    /// Protect the key with a passphrase, typed into ssh-keygen in a terminal tab.
+    protect: bool,
     status: Option<(bool, String)>,
     keys: Vec<KeyPair>,
     host: String,
@@ -71,8 +71,7 @@ impl KeyTool {
             name,
             kind: 0,
             comment: format!("{user}@{host}").to_lowercase(),
-            pass: String::new(),
-            pass2: String::new(),
+            protect: false,
             status: None,
             keys,
             host: String::new(),
@@ -81,14 +80,10 @@ impl KeyTool {
         }
     }
 
-    fn generate(&mut self) {
+    fn generate(&mut self, actions: &mut Vec<ToolAction>) {
         let name = self.name.trim();
         if name.is_empty() || name.contains(['/', '\\']) {
             self.status = Some((false, "Give the key a file name, such as id_ed25519_work.".into()));
-            return;
-        }
-        if self.pass != self.pass2 {
-            self.status = Some((false, "The two passphrases differ.".into()));
             return;
         }
         let dir = ssh_dir();
@@ -98,24 +93,20 @@ impl KeyTool {
             self.status = Some((false, format!("{} exists already; choose another name.", path.display())));
             return;
         }
-        let out = quiet(
-            Command::new("ssh-keygen")
-                .args(KINDS[self.kind].1)
-                .arg("-C")
-                .arg(&self.comment)
-                .arg("-f")
-                .arg(&path)
-                .arg("-N")
-                .arg(&self.pass),
-        )
-        .output();
+        let mut argv: Vec<String> = ["ssh-keygen"].iter().chain(KINDS[self.kind].1).map(|s| s.to_string()).collect();
+        argv.extend(["-C".into(), self.comment.clone(), "-f".into(), path.to_string_lossy().into_owned()]);
+        // A passphrase given with -N shows in the process list: ssh-keygen asks for it in a terminal instead.
+        if self.protect {
+            actions.push(ToolAction::Terminal { title: format!("Create key {name}"), argv });
+            self.status = Some((true, format!("ssh-keygen asks for the passphrase of {} in the terminal.", path.display())));
+            return;
+        }
+        let out = quiet(Command::new(&argv[0]).args(&argv[1..]).arg("-N").arg("")).output();
         self.status = Some(match out {
             Ok(o) if o.status.success() => (true, format!("Created {} and {}.pub", path.display(), path.display())),
             Ok(o) => (false, String::from_utf8_lossy(&o.stderr).trim().to_string()),
             Err(e) => (false, format!("ssh-keygen: {e} (is OpenSSH installed?)")),
         });
-        self.pass.clear();
-        self.pass2.clear();
         self.keys = list_keys();
     }
 
@@ -172,8 +163,6 @@ impl KeyTool {
 
     pub fn back(&mut self) {
         (self.creating, self.installing) = (false, None);
-        self.pass.clear();
-        self.pass2.clear();
         if self.status.as_ref().is_some_and(|s| !s.0) {
             self.status = None;
         }
@@ -199,16 +188,13 @@ impl KeyTool {
                     ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(FIELD_W));
                     ui.end_row();
                     ui.label("Passphrase");
-                    ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).hint_text("optional").desired_width(FIELD_W));
-                    ui.end_row();
-                    ui.label("Again");
-                    ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(FIELD_W));
+                    ui.checkbox(&mut self.protect, "Ask for one in a terminal");
                     ui.end_row();
                 });
             });
             match answer {
                 Some(true) => {
-                    self.generate();
+                    self.generate(actions);
                     if self.status.as_ref().is_some_and(|s| s.0) {
                         self.creating = false;
                         // The next key needs a name of its own.

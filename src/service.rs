@@ -1,7 +1,8 @@
 //! Optional Windows service (LocalSystem) for what a user-level agent cannot do:
 //! start the screen helper in the console session even when nobody is logged
 //! on (the sign-in and lock screens), and raise Ctrl+Alt+Del. Agents ask it
-//! over a named pipe that only Administrators and SYSTEM may open.
+//! over a named pipe that only Administrators and SYSTEM may open. It also runs
+//! remote access by ID, so the computer is reachable before anyone signs in.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -202,7 +203,8 @@ fn send_sas() -> Result<(), String> {
 
 /// Starts `sshremote --agent --pipe BASE` as SYSTEM in the active console session.
 fn spawn_helper(base: &str, capture: &str) -> Result<(), String> {
-    if !base.starts_with(r"\\.\pipe\sshremote-") || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
+    let name = base.strip_prefix(r"\\.\pipe\sshremote-").unwrap_or("");
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("bad request".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

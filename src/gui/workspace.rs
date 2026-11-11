@@ -58,6 +58,14 @@ pub(super) enum Place {
     Split { below: bool },
 }
 
+/// What a new pane opens with (--open): the terminal panel, the chat beside the screen, full screen.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(super) struct PaneStart {
+    pub(super) panel: bool,
+    pub(super) chat: bool,
+    pub(super) fullscreen: bool,
+}
+
 /// The command line that opens `target` in the Remote desktop extension's window.
 #[cfg(not(feature = "remote"))]
 fn remote_args(target: &Target, mode: PaneMode) -> Vec<String> {
@@ -136,7 +144,7 @@ struct Pane {
     /// Shells kept while the connection is made, or made again.
     terms: Option<crate::termwin::TermWindow>,
     /// Asked for at start (--open): the terminal panel and the chat beside the screen, full screen.
-    start: (bool, bool, bool),
+    start: PaneStart,
     state: State,
 }
 
@@ -512,7 +520,7 @@ impl Workspace {
     }
 
     /// Opens what the open view chose, in a new tab or beside the active pane.
-    pub(super) fn add(&mut self, launch: Launch, place: Place, start: (bool, bool, bool)) {
+    pub(super) fn add(&mut self, launch: Launch, place: Place, start: PaneStart) {
         let Some(id) = self.new_pane(launch, start) else { return };
         match place {
             Place::Split { below } if !self.tabs.is_empty() => {
@@ -530,7 +538,7 @@ impl Workspace {
     }
 
     /// A pane for `launch`, not yet in any tab; None when it opens elsewhere.
-    fn new_pane(&mut self, launch: Launch, start: (bool, bool, bool)) -> Option<u64> {
+    fn new_pane(&mut self, launch: Launch, start: PaneStart) -> Option<u64> {
         // Screens and files come from the Remote desktop extension, in a window of its own.
         #[cfg(not(feature = "remote"))]
         if let Launch::Agent { target, mode, .. } = &launch {
@@ -778,7 +786,7 @@ impl Workspace {
             Some(below) if !self.tabs.is_empty() => Place::Split { below },
             _ => Place::Tab,
         };
-        self.add(launch, place, (false, false, false));
+        self.add(launch, place, PaneStart::default());
     }
 
     fn run_entry(&mut self, e: super::extui::Entry, ctx: &egui::Context) {
@@ -851,7 +859,7 @@ impl Workspace {
             r.adopt_terms(t);
         }
         let result = r.set_mode(p.mode);
-        let (panel, chat, full) = std::mem::take(&mut p.start);
+        let PaneStart { panel, chat, fullscreen: full } = std::mem::take(&mut p.start);
         r.open_panels(false, chat);
         self.reached.push(p.label.clone());
         p.state = State::Live(Box::new(r));
@@ -863,7 +871,7 @@ impl Workspace {
             if let Some(t) = tab {
                 self.current = t;
                 self.tabs[t].active = id;
-                self.add(launch, Place::Split { below: true }, (false, false, false));
+                self.add(launch, Place::Split { below: true }, PaneStart::default());
             }
         }
         if full {
@@ -2046,7 +2054,7 @@ mod tests {
     #[ignore]
     fn workspace_full_screen_keys_in_a_shared_screen() {
         let mut h = Harness::new();
-        h.w.add(test_desktop(), Place::Tab, (false, false, false));
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
         h.until("the test desktop connects", |w| live(w, 0));
         let cae = egui::Modifiers::CTRL | egui::Modifiers::ALT;
         let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
@@ -2076,8 +2084,8 @@ mod tests {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         let shell = || Launch::Shell { label: profile.name.clone(), profile: profile.clone(), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
-        h.w.add(shell(), Place::Tab, (false, false, false));
-        h.w.add(shell(), Place::Split { below: false }, (false, false, false));
+        h.w.add(shell(), Place::Tab, PaneStart::default());
+        h.w.add(shell(), Place::Split { below: false }, PaneStart::default());
         let shot = |h: &mut Harness, l: &Look, name: &str| {
             look::set(l.clone());
             for _ in 0..40 {
@@ -2129,9 +2137,9 @@ mod tests {
         let mut h = Harness::new();
         look::set(Look { layers: Vec::new(), ..Look::default() });
         let ssh = Launch::Shell { label: host.clone(), profile: crate::termwin::ssh_profile(&host, ""), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: Some(vec!["ssh".into(), host.clone()]) };
-        h.w.add(ssh, Place::Tab, (false, false, false));
+        h.w.add(ssh, Place::Tab, PaneStart::default());
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
-        h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Split { below: false }, (false, false, false));
+        h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Split { below: false }, PaneStart::default());
         let shown = |h: &mut Harness, what: &str| {
             for _ in 0..160 {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2160,7 +2168,7 @@ mod tests {
     #[ignore]
     fn workspace_modes_splits_and_reconnect() {
         let mut h = Harness::new();
-        h.w.add(test_desktop(), Place::Tab, (false, false, false));
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
         h.until("the test desktop connects", |w| live(w, 0));
 
         // The mode drop-down turns the pane into a terminal and into files, without connecting again.
@@ -2180,7 +2188,7 @@ mod tests {
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         let shell = Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
         h.w.picker = None;
-        h.w.add(shell, Place::Split { below: false }, (false, false, false));
+        h.w.add(shell, Place::Split { below: false }, PaneStart::default());
         h.frame(Vec::new());
         let order = h.w.order(0);
         assert_eq!(order.len(), 2, "two panes side by side");
@@ -2236,7 +2244,7 @@ mod tests {
                 }
                 h.snap.save(&h.ctx, h.size, &dir.join(format!("ws_{name}_{what}.png")));
             };
-            h.w.add(test_desktop(), Place::Tab, (false, false, false));
+            h.w.add(test_desktop(), Place::Tab, PaneStart::default());
             h.until("connected", |w| live(w, 0));
             // One pane: zoom and layout show, greyed.
             save(&mut h, "one_pane");
@@ -2244,7 +2252,7 @@ mod tests {
             h.w.add(
                 Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
                 Place::Split { below: false },
-                (false, false, false),
+                PaneStart::default(),
             );
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2306,7 +2314,7 @@ mod tests {
             h.w.add(
                 Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
                 Place::Tab,
-                (false, false, false),
+                PaneStart::default(),
             );
         }
         let in_bar = |h: &Harness, what: &str| h.snap.find(what).into_iter().filter(|r| r.center().y < super::super::chrome::HEIGHT).collect::<Vec<_>>();
@@ -2346,7 +2354,7 @@ mod tests {
             for i in 0..n {
                 let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
                 profile.name = format!("server-{i}");
-                h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+                h.w.add(Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
             }
             for _ in 0..8 {
                 h.frame(Vec::new());
@@ -2362,7 +2370,7 @@ mod tests {
                 h.w.add(
                     Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
                     Place::Tab,
-                    (false, false, false),
+                    PaneStart::default(),
                 );
             }
             h.w.current = n / 2;
@@ -2383,7 +2391,7 @@ mod tests {
         for name in ["alpha", "beta", "gamma"] {
             let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
             profile.name = name.into();
-            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
         }
         h.frame(Vec::new());
         let a = h.snap.find("alpha")[0].center();
@@ -2422,8 +2430,8 @@ mod tests {
             profile.name = name.into();
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
-        h.w.add(shell("first"), Place::Tab, (false, false, false));
-        h.w.add(shell("second"), Place::Tab, (false, false, false));
+        h.w.add(shell("first"), Place::Tab, PaneStart::default());
+        h.w.add(shell("second"), Place::Tab, PaneStart::default());
         h.frame(Vec::new());
         h.frame(Vec::new());
         let at = |h: &Harness, name: &str| {
@@ -2469,11 +2477,11 @@ mod tests {
             profile.name = name.into();
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
-        h.w.add(shell("a"), Place::Tab, (false, false, false));
-        h.w.add(shell("b"), Place::Tab, (false, false, false));
+        h.w.add(shell("a"), Place::Tab, PaneStart::default());
+        h.w.add(shell("b"), Place::Tab, PaneStart::default());
         let mut other = Workspace::new(h.w.opt.clone());
-        other.add(shell("c"), Place::Tab, (false, false, false));
-        other.add(shell("d"), Place::Split { below: false }, (false, false, false));
+        other.add(shell("c"), Place::Tab, PaneStart::default());
+        other.add(shell("d"), Place::Split { below: false }, PaneStart::default());
         let moved = other.take_tab(0);
         h.w.put_tab(moved, 1);
         h.frame(Vec::new());
@@ -2498,9 +2506,9 @@ mod tests {
             profile.name = name.into();
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
-        h.w.add(shell("a"), Place::Tab, (false, false, false));
-        h.w.add(shell("b"), Place::Tab, (false, false, false));
-        h.w.add(shell("c"), Place::Split { below: false }, (false, false, false));
+        h.w.add(shell("a"), Place::Tab, PaneStart::default());
+        h.w.add(shell("b"), Place::Tab, PaneStart::default());
+        h.w.add(shell("c"), Place::Split { below: false }, PaneStart::default());
         h.frame(Vec::new());
         let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
@@ -2532,8 +2540,8 @@ mod tests {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         let shell = |profile: crate::termwin::Profile| Launch::Shell { label: "s".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
-        h.w.add(shell(profile.clone()), Place::Tab, (false, false, false));
-        h.w.add(shell(profile), Place::Tab, (false, false, false));
+        h.w.add(shell(profile.clone()), Place::Tab, PaneStart::default());
+        h.w.add(shell(profile), Place::Tab, PaneStart::default());
         h.w.current = 1;
         let hidden = h.w.tabs[0].active;
         for _ in 0..60 {
@@ -2558,7 +2566,7 @@ mod tests {
     fn dialogs_keep_the_keys_and_the_window_asks_before_closing() {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
-        h.w.add(Launch::Shell { label: "s".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.w.add(Launch::Shell { label: "s".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
         h.frame(Vec::new());
         let id = h.w.tabs[0].active;
         let keys_on = |h: &Harness| match &h.w.panes[0].state {
@@ -2619,7 +2627,7 @@ mod tests {
         for name in ["a", "b"] {
             let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
             profile.name = name.into();
-            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
         }
         h.frame(Vec::new());
         let a = h.snap.find("a").into_iter().find(|r| r.center().y < super::super::chrome::HEIGHT).unwrap().center();
@@ -2645,9 +2653,9 @@ mod tests {
             profile.name = name.into();
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
-        h.w.add(shell("one"), Place::Tab, (false, false, false));
-        h.w.add(shell("two"), Place::Tab, (false, false, false));
-        h.w.add(shell("three"), Place::Split { below: false }, (false, false, false));
+        h.w.add(shell("one"), Place::Tab, PaneStart::default());
+        h.w.add(shell("two"), Place::Tab, PaneStart::default());
+        h.w.add(shell("three"), Place::Split { below: false }, PaneStart::default());
         h.frame(Vec::new());
         let key = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
         // The pane's own close, last of its controls (the tab's is on the left).
@@ -2679,7 +2687,7 @@ mod tests {
     fn extensions_show_panels_take_commands_and_open_terminals() {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
-        h.w.add(Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.w.add(Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
         let md = "Tunnels
 
 | Host | |
@@ -2765,14 +2773,14 @@ mod tests {
             Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
         // One pane: nothing to zoom; the button shows, greyed, as the layout menu does.
-        h.w.add(shell(), Place::Tab, (false, false, false));
+        h.w.add(shell(), Place::Tab, PaneStart::default());
         for _ in 0..4 {
             h.frame(Vec::new());
         }
         assert!(!h.snap.find(ic::CORNERS_OUT).is_empty(), "the zoom button shows with one pane");
         h.bar(ic::CORNERS_OUT);
         assert_eq!(h.w.zoom, None, "and does nothing");
-        h.w.add(shell(), Place::Split { below: false }, (false, false, false));
+        h.w.add(shell(), Place::Split { below: false }, PaneStart::default());
         for _ in 0..4 {
             h.frame(Vec::new());
         }
@@ -2872,14 +2880,14 @@ mod tests {
             Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }
         };
         for n in ["a", "b", "c"] {
-            h.w.add(shell(n), Place::Tab, (false, false, false));
+            h.w.add(shell(n), Place::Tab, PaneStart::default());
         }
         h.w.current = 1;
         h.frame(Vec::new());
         h.w.close_tab(0);
         assert_eq!(h.w.name(h.w.tabs[h.w.current].active).0, "b", "the current tab stays");
         // A zoomed pane, then closed: the tab is a grid again.
-        h.w.add(shell("d"), Place::Split { below: false }, (false, false, false));
+        h.w.add(shell("d"), Place::Split { below: false }, PaneStart::default());
         let d = h.w.tabs[h.w.current].active;
         let ctx = h.ctx.clone();
         h.w.set_zoom(&ctx, Some(d));
@@ -2910,7 +2918,7 @@ mod tests {
             password: None,
             unattended: true,
         };
-        h.w.add(Launch::Shell { label: "s".into(), profile, target, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.w.add(Launch::Shell { label: "s".into(), profile, target, ssh_cmd: None }, Place::Tab, PaneStart::default());
         h.frame(Vec::new());
         let id = h.w.tabs[0].active;
         h.w.set_mode(id, PaneMode::Screen);
@@ -2929,7 +2937,7 @@ mod tests {
         h.w.add(
             Launch::Shell { label: "shell".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None },
             Place::Tab,
-            (false, false, false),
+            PaneStart::default(),
         );
         h.frame(Vec::new());
         h.bar(ic::ARROWS_OUT);
@@ -2957,7 +2965,7 @@ mod tests {
     #[ignore]
     fn full_screen_pictures_fill_the_window() {
         let mut h = Harness::new();
-        h.w.add(test_desktop(), Place::Tab, (false, false, false));
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
         h.until("connected", |w| live(w, 0));
         h.w.window_full = true;
         let shown_of = |w: &Workspace| match &w.panes[0].state {
@@ -2979,7 +2987,7 @@ mod tests {
     fn a_local_terminal_turns_to_this_computers_screen() {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
-        h.w.add(Launch::Shell { label: "PowerShell".into(), profile, target: Target::Local { capture: "auto".into() }, ssh_cmd: None }, Place::Tab, (false, false, false));
+        h.w.add(Launch::Shell { label: "PowerShell".into(), profile, target: Target::Local { capture: "auto".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
         h.frame(Vec::new());
         let id = h.w.tabs[0].active;
         h.w.set_mode(id, PaneMode::Screen);
@@ -3007,7 +3015,7 @@ mod tests {
             password: None,
             unattended: true,
         };
-        h.w.add(Launch::Agent { target, label: "nowhere".into(), ssh_cmd: None, mode: PaneMode::Screen }, Place::Tab, (false, false, false));
+        h.w.add(Launch::Agent { target, label: "nowhere".into(), ssh_cmd: None, mode: PaneMode::Screen }, Place::Tab, PaneStart::default());
         h.until("it gives up", |w| matches!(&w.panes[0].state, State::Down(d) if d.given_up));
         h.frame(Vec::new());
         assert!(!h.snap.find("Reconnect").is_empty(), "Reconnect is offered");
