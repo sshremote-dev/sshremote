@@ -38,6 +38,9 @@ impl Snap {
         for id in &out.textures_delta.free {
             self.textures.remove(id);
         }
+        // Applied above: cleared, as epaint asserts that none is dropped unapplied.
+        let mut out = out;
+        out.textures_delta.clear();
         self.shapes = out.shapes.clone();
         self.last = Some(out.clone());
         out

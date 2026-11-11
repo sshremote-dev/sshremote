@@ -87,7 +87,7 @@ From the extension to the app:
 |---|---|---|
 | `status.set` | `id`, `text`, `tooltip`, `command` | |
 | `status.remove` | `id` | |
-| `panel.show` | `id`, `title`, `markdown` | |
+| `panel.show` | `id`, `title`, `markdown`, `items` | `items` is a list the app draws as a table under the Markdown: `label`, `detail`, `bold`, `actions` (`title`, `action`, as a `sshremote:` link) |
 | `panel.close` | `id` | |
 | `notify` | `text` | |
 | `input.ask` (a request) | `title`, `prompt`, `value`, `secret` | |

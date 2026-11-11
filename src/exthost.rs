@@ -289,6 +289,29 @@ fn look_for_changes() {
     }
 }
 
+/// A panel's declared list as Markdown: one row for each item, its label, detail and action links.
+fn items_markdown(list: &[Value]) -> String {
+    let cell = |v: Option<&Value>| v.and_then(|x| x.as_str()).unwrap_or("").replace('|', "\\|").replace('\n', " ");
+    let mut md = String::from("\n\n| | | |\n|---|---|---|\n");
+    for it in list {
+        let label = cell(it.get("label"));
+        let label = if it.get("bold").and_then(|b| b.as_bool()) == Some(true) && !label.is_empty() { format!("**{label}**") } else { label };
+        let actions: Vec<String> = it
+            .get("actions")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|a| {
+                let title = cell(a.get("title"));
+                let to = a.get("action")?.as_str()?;
+                (!title.is_empty() && !to.contains([' ', ')', '|'])).then(|| format!("[{title}](sshremote:{to})"))
+            })
+            .collect();
+        md.push_str(&format!("| {label} | {} | {} |\n", cell(it.get("detail")), actions.join(" ")));
+    }
+    md
+}
+
 fn keep_log(s: &mut State, line: String) {
     s.log.push(line);
     let n = s.log.len();
@@ -381,7 +404,11 @@ fn handle(ext: &str, msg: &Value) {
         }),
         "panel.show" => with(|s| {
             s.rev += 1;
-            let panel = Panel { ext: ext.into(), id: str_of("id"), title: str_of("title"), markdown: str_of("markdown"), rev: s.rev };
+            let mut markdown = str_of("markdown");
+            if let Some(list) = p.get("items").and_then(|x| x.as_array()) {
+                markdown.push_str(&items_markdown(list));
+            }
+            let panel = Panel { ext: ext.into(), id: str_of("id"), title: str_of("title"), markdown, rev: s.rev };
             match s.panels.iter_mut().find(|x| x.ext == ext && x.id == panel.id) {
                 Some(x) => *x = panel,
                 None => s.panels.push(panel),
@@ -687,6 +714,11 @@ mod tests {
         assert_eq!(mine[0].text, "4 tunnels");
         handle("x.y", &json!({ "method": "panel.show", "params": { "id": "p", "title": "T", "markdown": "# hi" } }));
         assert!(panels().iter().any(|p| p.ext == "x.y" && p.markdown == "# hi"));
+        handle("x.y", &json!({ "method": "panel.show", "params": { "id": "l", "items": [
+            { "label": "db|1", "detail": "up", "bold": true, "actions": [{ "title": "Stop", "action": "stop?host=db" }, { "title": "Bad", "action": "x y" }] }
+        ] } }));
+        let l = panels().into_iter().find(|p| p.id == "l").unwrap().markdown;
+        assert!(l.contains("| **db\\|1** | up | [Stop](sshremote:stop?host=db) |"), "{l}");
         handle("x.y", &json!({ "method": "exit" }));
         assert!(items().iter().all(|i| i.ext != "x.y") && panels().iter().all(|p| p.ext != "x.y"), "gone with it");
         assert_eq!(unescape("a%20b+c%2Fd"), "a b c/d");
