@@ -14,8 +14,7 @@ import zlib
 from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 256)
-PLATE = (0x25, 0x63, 0xEB)
-MARK = (0x25, 0x63, 0xEB)
+MARK = (0x2B, 0x59, 0xC3)
 CHEVRON = 'M5 8.5 8.5 12 5 15.5'
 FRAME = 'M12 5h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-4'
 

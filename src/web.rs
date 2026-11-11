@@ -17,7 +17,9 @@ const PAGE: &str = include_str!("../web/index.html");
 const XTERM_JS: &str = include_str!("../web/xterm.js");
 const XTERM_CSS: &str = include_str!("../web/xterm.css");
 const FIT_JS: &str = include_str!("../web/addon-fit.js");
-const LOGO: &str = include_str!("../assets/logo.svg");
+// The page's own script, in a file: the page's policy runs no inline script.
+const APP_JS: &str = include_str!("../web/app.js");
+const LOGO: &str = include_str!("../site/favicon.svg");
 
 /// The name the browser picks for a shell on the gateway's own computer.
 const HERE: &str = "This computer";
@@ -132,6 +134,7 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
     let path = path.strip_prefix("/web").unwrap_or(path);
     match path {
         "" | "/" | "/index.html" => respond(&conn, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
+        "/app.js" => respond(&conn, "200 OK", "text/javascript", APP_JS.as_bytes()),
         "/xterm.js" => respond(&conn, "200 OK", "text/javascript", XTERM_JS.as_bytes()),
         "/addon-fit.js" => respond(&conn, "200 OK", "text/javascript", FIT_JS.as_bytes()),
         "/favicon.svg" => respond(&conn, "200 OK", "image/svg+xml", LOGO.as_bytes()),
@@ -422,7 +425,7 @@ fn screen(
     let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
     let (mut sess, _tx, rx) = match Session::open(&target, true) {
         Ok(x) => x,
-        Err(e) => return send_json(&w, serde_json::json!({ "error": e })).map(|_| false),
+        Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
     };
     let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
     sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
@@ -488,6 +491,20 @@ fn screen(
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
     Ok(true)
+}
+
+/// Why a connection failed, in the words of someone who only typed an ID and a password.
+fn plain(e: &str) -> String {
+    let l = e.to_lowercase();
+    if l.contains("offline") || l.contains("no agent with that id") {
+        "That computer is not online: its remote access is off, or it has no network.".into()
+    } else if l.contains("wrong password") || l.contains("permission") {
+        "Wrong password for that computer.".into()
+    } else if l.contains("busy") || l.contains("try again") {
+        "That computer is busy; try again in a moment.".into()
+    } else {
+        e.to_string()
+    }
 }
 
 /// One message of the browser's: {"move":[x,y]}, {"button":[b,down]}, {"wheel":[dx,dy]},
@@ -622,6 +639,15 @@ mod tests {
         let mut body = String::new();
         page.read_to_string(&mut body).unwrap();
         assert!(body.starts_with("HTTP/1.1 200") && body.contains("xterm.js"));
+        // The page's script comes as a file, which the page's policy lets run.
+        let mut script = TcpStream::connect(&addr).unwrap();
+        script.write_all(b"GET /web/app.js HTTP/1.1
+Host: x
+
+").unwrap();
+        let mut js = String::new();
+        script.read_to_string(&mut js).unwrap();
+        assert!(js.starts_with("HTTP/1.1 200") && js.contains("showScreen") && !body.contains("<script>"));
 
         let open = || {
             let mut s = TcpStream::connect(&addr).unwrap();
