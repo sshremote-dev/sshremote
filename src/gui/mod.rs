@@ -1208,6 +1208,30 @@ mod tests {
         }
     }
 
+    /// Digits in New connection are a remote access ID: the page says so and offers the screen
+    /// and files, not a terminal; a relay that has not the ID says why in plain words.
+    #[test]
+    fn an_id_opens_through_the_relay() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let mut w = workspace::Workspace::new(app.options());
+        w.picker = Some(Place::Tab);
+        app.section = home::Section::New;
+        app.form.host = "123 456 789".into();
+        let mut snap = snapshot::Snap::default();
+        for k in 0..4 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), time: Some(k as f64 * 0.05), ..Default::default() };
+            snap.frame(&ctx, input, |ui| {
+                app.open_dialog(ui.ctx(), &mut w);
+            });
+        }
+        assert!(!snap.find("A remote access ID").is_empty());
+        assert!(!snap.find("Screen sharing").is_empty());
+        assert!(friendly("relay: offline").1.contains("not at the relay"));
+    }
+
     fn main(app: &mut App) -> &mut workspace::Workspace {
         match &mut app.screen {
             Screen::Work(w) => w,
