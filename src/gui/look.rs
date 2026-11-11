@@ -240,7 +240,9 @@ pub(crate) fn get() -> Look {
     l
 }
 
-/// Takes a new look: kept, remembered, and shown by every window from the next frame.
+/// Takes a new look: kept, remembered, and shown by every window from the next frame (tests set
+/// one this way; the editor previews and saves on release).
+#[cfg(test)]
 pub(crate) fn set(l: Look) {
     crate::hosts::set_setting("look", &l.to_json());
     preview(l);

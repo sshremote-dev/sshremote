@@ -1,6 +1,7 @@
-//! The web gateway: `sshremote web` serves a terminal page to browsers and, over a WebSocket,
-//! joins it to a shell on this computer or to `ssh HOST` for the hosts this computer knows.
-//! A password guards it; put it behind HTTPS (nginx, Caddy) when it faces the internet.
+//! The web gateway: `sshremote web` serves a page to browsers and, over a WebSocket, joins it to
+//! a shell on this computer or to `ssh HOST` for the hosts this computer knows (behind the
+//! gateway's password), or to any computer's screen by its remote access ID and password, through
+//! the relay. Put it behind HTTPS (nginx, Caddy) when it faces the internet.
 //!
 //! On the socket, text frames carry JSON (sign-in, host list, opening, resizing, the end) and
 //! binary frames carry the terminal's bytes both ways.
@@ -23,6 +24,10 @@ const HERE: &str = "This computer";
 
 struct Gate {
     password: String,
+    /// Only computers by ID: no shells or hosts of the gateway's own (a public gateway).
+    id_only: bool,
+    /// The relay ID connections go through.
+    relay: String,
     /// Failed sign-ins by address: how many, and when the last was.
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
@@ -31,7 +36,7 @@ fn password_file() -> Option<PathBuf> {
     crate::hosts::config_dir().map(|d| d.join("web-password"))
 }
 
-/// `sshremote web [--listen ADDR] [--password-file FILE]`
+/// `sshremote web [--listen ADDR] [--password-file FILE] [--id-only] [--relay HOST[:PORT]]`
 pub fn run(args: &[String]) -> Result<(), String> {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let listen = get("--listen").unwrap_or_else(|| "127.0.0.1:8022".into());
@@ -57,7 +62,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             p
         }
     };
-    let gate = Arc::new(Gate { password, failures: Mutex::new(HashMap::new()) });
+    let id_only = args.iter().any(|a| a == "--id-only");
+    let relay = get("--relay").unwrap_or_else(|| crate::access::DEFAULT_RELAY.into());
+    let gate = Arc::new(Gate { password, id_only, relay, failures: Mutex::new(HashMap::new()) });
     let server = TcpListener::bind(&listen).map_err(|e| format!("{listen}: {e}"))?;
     eprintln!("sshremote web: on http://{listen}/");
     for conn in server.incoming().flatten() {
@@ -272,12 +279,39 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
         .map_err(|e| e.to_string())?
         .get(&who)
         .is_some_and(|(n, at)| *n >= 5 && at.elapsed() < Duration::from_secs(900));
-    if blocked || !equal(v.get("password").and_then(|p| p.as_str()).unwrap_or(""), &gate.password) {
+    let failed = || -> Result<(), String> {
         std::thread::sleep(Duration::from_secs(2));
+        let mut f = gate.failures.lock().map_err(|e| e.to_string())?;
+        let e = f.entry(who).or_insert((0, Instant::now()));
+        *e = (if e.1.elapsed() > Duration::from_secs(900) { 1 } else { e.0 + 1 }, Instant::now());
+        Ok(())
+    };
+    // A computer by its remote access ID: its own password is the sign-in, checked by the computer.
+    if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+        let id: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+        if blocked {
+            return send_json(&w, serde_json::json!({ "error": "Too many failed tries; try again later." }));
+        }
+        if !crate::access::valid_id(&id) {
+            return send_json(&w, serde_json::json!({ "error": "An ID is 9 digits." }));
+        }
+        let password = v.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
+        let target = crate::transport::Target::Direct { addr, password };
+        let size = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(1280).clamp(64, 7680) as u16;
+        if screen(r, w, target, &crate::access::spaced(&id), (size("w"), size("h")))? {
+            gate.failures.lock().map_err(|e| e.to_string())?.remove(&who);
+        } else {
+            failed()?;
+        }
+        return Ok(());
+    }
+    if gate.id_only {
+        return send_json(&w, serde_json::json!({ "error": "This gateway opens computers by ID only." }));
+    }
+    if blocked || !equal(v.get("password").and_then(|p| p.as_str()).unwrap_or(""), &gate.password) {
         if !blocked {
-            let mut f = gate.failures.lock().map_err(|e| e.to_string())?;
-            let e = f.entry(who).or_insert((0, Instant::now()));
-            *e = (if e.1.elapsed() > Duration::from_secs(900) { 1 } else { e.0 + 1 }, Instant::now());
+            failed()?;
         }
         let text = if blocked { "Too many wrong passwords; try again later." } else { "Wrong password." };
         let _ = send_json(&w, serde_json::json!({ "error": text }));
@@ -295,7 +329,20 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     }
     if v.get("screen").and_then(|x| x.as_bool()) == Some(true) {
         let size = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(1280).clamp(64, 7680) as u16;
-        return screen(r, w, host, (size("w"), size("h")));
+        let target = if host == HERE {
+            crate::transport::Target::Local { capture: "auto".into() }
+        } else {
+            crate::transport::Target::Ssh {
+                host: host.to_string(),
+                port: None,
+                args: Vec::new(),
+                remote: crate::options::REMOTE.into(),
+                capture: "auto".into(),
+                password: None,
+                unattended: false,
+            }
+        };
+        return screen(r, w, target, host, (size("w"), size("h"))).map(|_| ());
     }
     let size = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(2, 500) as u16;
     let argv: Vec<String> = if host == HERE { Vec::new() } else { vec!["ssh".into(), "-tt".into(), host.to_string()] };
@@ -362,26 +409,20 @@ enum Input {
 
 /// The host's screen in the browser: the session's frames kept here and sent on as JPEG pictures
 /// (at most 12 a second, only when something changed); pointer, buttons, wheel and keys back.
-fn screen(mut r: BufReader<TcpStream>, w: Arc<Mutex<TcpStream>>, host: &str, view: (u16, u16)) -> Result<(), String> {
+/// False when the connection could not be made.
+fn screen(
+    mut r: BufReader<TcpStream>,
+    w: Arc<Mutex<TcpStream>>,
+    target: crate::transport::Target,
+    host: &str,
+    view: (u16, u16),
+) -> Result<bool, String> {
     use crate::proto::{Settings, ToAgent, ToClient};
     use crate::session::{Ev, Session};
-    let target = if host == HERE {
-        crate::transport::Target::Local { capture: "auto".into() }
-    } else {
-        crate::transport::Target::Ssh {
-            host: host.to_string(),
-            port: None,
-            args: Vec::new(),
-            remote: crate::options::REMOTE.into(),
-            capture: "auto".into(),
-            password: None,
-            unattended: false,
-        }
-    };
     let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
     let (mut sess, _tx, rx) = match Session::open(&target, true) {
         Ok(x) => x,
-        Err(e) => return send_json(&w, serde_json::json!({ "error": e })),
+        Err(e) => return send_json(&w, serde_json::json!({ "error": e })).map(|_| false),
     };
     let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
     sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
@@ -446,7 +487,7 @@ fn screen(mut r: BufReader<TcpStream>, w: Arc<Mutex<TcpStream>>, host: &str, vie
     if let Ok(s) = w.lock() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// One message of the browser's: {"move":[x,y]}, {"button":[b,down]}, {"wheel":[dx,dy]},
@@ -568,7 +609,8 @@ mod tests {
         let pw = dir.join("pw");
         std::fs::write(&pw, "secret-word").unwrap();
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let args: Vec<String> = ["--listen", &format!("127.0.0.1:{port}"), "--password-file", pw.to_str().unwrap()]
+        // A relay nobody listens on: an ID connection fails there and says so.
+        let args: Vec<String> = ["--listen", &format!("127.0.0.1:{port}"), "--password-file", pw.to_str().unwrap(), "--relay", "127.0.0.1:1"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -613,6 +655,17 @@ mod tests {
             r.read_exact(&mut d).unwrap();
             (h[0] & 0x0f, d)
         };
+        // By ID: the computer's own password is the sign-in, no gateway password needed.
+        let (mut s, mut r) = open();
+        put(&mut s, 1, br#"{"id":"12 34","password":"x"}"#);
+        assert!(String::from_utf8(get(&mut r).1).unwrap().contains("9 digits"));
+        let (mut s, mut r) = open();
+        put(&mut s, 1, br#"{"id":"123 456 789","password":"x","w":800,"h":600}"#);
+        let mut said = String::new();
+        while !said.contains("error") {
+            said = String::from_utf8(get(&mut r).1).unwrap();
+        }
+
         let (mut s, mut r) = open();
         put(&mut s, 1, br#"{"password":"wrong"}"#);
         assert!(String::from_utf8(get(&mut r).1).unwrap().contains("Wrong password"));
