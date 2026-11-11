@@ -782,8 +782,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             if stored()?.is_none() {
                 save(&c)?;
             }
-            // systemd sets INVOCATION_ID for what its units start, older units included.
-            let service = args.iter().any(|a| a == "--service") || std::env::var_os("INVOCATION_ID").is_some();
+            // Older units lack `--service`: systemd names the process it started itself (248+).
+            let unit_started = std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|p| p == std::process::id().to_string());
+            let service = args.iter().any(|a| a == "--service") || unit_started;
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", spaced(&c.id), c.relay);
             let keep = || {
