@@ -110,12 +110,11 @@ password and open the screen or files.
 sshremote remote-access            # this computer's ID, password and state
 sshremote remote-access on|off|install|uninstall|password [NEW]|relay HOST
 sshremote sshremote://ID@sshremote.dev --password P
-sshremote --relay --listen 0.0.0.0:7071 --store ids.json   # your own relay
 ```
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
-asks for them at start). The relay is reached on TCP 7071, or on port 80 through a web server when
+asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/thinkbigx/sshremote-relay); it is reached on TCP 7071, or on port 80 through a web server when
 7071 is shut.
 
 Both ends dial out to the relay, prove the password to each other with SPAKE2 and seal every byte
@@ -127,3 +126,11 @@ passwords cost more time each, and attempts per address are limited. See
 
 Icons: [Phosphor Icons](https://phosphoricons.com) (MIT) via egui-phosphor, see
 `assets/fonts/LICENSE-phosphor.txt`.
+
+## Repositories
+
+| Repository | What |
+|---|---|
+| [sshremote](https://github.com/thinkbigx/sshremote) | The app, the web gateway, the site and `scripts/deploy.sh` |
+| [sshremote-relay](https://github.com/thinkbigx/sshremote-relay) | The relay for remote access by ID |
+| [sshremote-extensions](https://github.com/thinkbigx/sshremote-extensions) | The registry's extensions; `scripts/deploy.sh` expects it beside this one |

@@ -106,7 +106,6 @@ usage: sshremote                       open the window: connect screen, recent h
                                   roll-back ID returns to the version before the last update
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --agent [--capture B] remote side, started by the viewer
-       sshremote --relay [--listen ADDR] [--store FILE]  pair agents and viewers behind NAT
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|install|uninstall]
                                        this computer reachable by ID and password through a relay
        sshremote --install-service | --uninstall-service
@@ -392,20 +391,6 @@ fn main() {
     }
 }
 
-#[cfg(feature = "remote")]
-/// Options that take a value, from `args`: only those in `known` are accepted, and each needs its value.
-fn options(args: &[String], known: &[&str]) -> Result<std::collections::HashMap<String, String>, String> {
-    let mut out = std::collections::HashMap::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if !known.contains(&a.as_str()) {
-            return Err(format!("unknown option {a}\n\n{USAGE}"));
-        }
-        out.insert(a.clone(), it.next().cloned().ok_or(format!("{a} needs a value"))?);
-    }
-    Ok(out)
-}
-
 /// Runs what the command line asks for.
 fn run(args: &[String]) -> Result<(), String> {
     match args[0].as_str() {
@@ -418,10 +403,6 @@ fn run(args: &[String]) -> Result<(), String> {
         #[cfg(all(windows, feature = "remote"))]
         "--service" => service::dispatch(),
         #[cfg(feature = "remote")]
-        "--relay" => {
-            let o = options(&args[1..], &["--listen", "--store"])?;
-            net::relay(o.get("--listen").map(String::as_str), o.get("--store").map(String::as_str))
-        }
         // Remote access by ID through a relay: its settings, and the loop a service runs.
         #[cfg(feature = "remote")]
         "remote-access" => access::cli(&args[1..]),
@@ -465,7 +446,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // the terminal viewer; the window itself opens here.
         #[cfg(not(feature = "remote"))]
         _ => {
-            // The agent, the service and --relay go to the extension as they are.
+            // The agent and the service go to the extension as they are.
             if let Some(opt) = parse_client(args).ok().filter(|o| o.gui && o.host.is_none() && !o.local) {
                 return open_window(opt);
             }

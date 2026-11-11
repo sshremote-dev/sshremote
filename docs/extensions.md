@@ -107,7 +107,7 @@ other links open in the browser.
 
 ## Writing one
 
-`registry/packs/ssh-tunnels` is a complete host extension in about 300 lines of Rust: it reads the
+`packs/ssh-tunnels` in the [extensions repository](https://github.com/thinkbigx/sshremote-extensions) is a complete host extension in about 300 lines of Rust: it reads the
 forwards in `~/.ssh/config`, runs `ssh -N` for the ones started from its panel, keeps a count in
 the status bar and opens a shell on a host with `terminal.open`.
 

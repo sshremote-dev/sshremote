@@ -197,11 +197,6 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     Ok(pair)
 }
 
-/// `sshremote --relay`: pairs agents and viewers by ID and copies bytes between them.
-pub fn relay(listen: Option<&str>, store: Option<&str>) -> Result<(), String> {
-    crate::access::relay::serve(listen.unwrap_or("0.0.0.0:7071"), store)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

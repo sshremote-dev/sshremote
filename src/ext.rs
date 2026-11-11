@@ -9,7 +9,7 @@
 //!     "description": "...", "contributes": { "layers": [
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
 //!
-//! The registry is a static index (registry/build.py writes it):
+//! The registry is a static index (build.py in the sshremote-extensions repository writes it):
 //!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size", "provides" } ] }
 
 use std::io::{Read, Write};

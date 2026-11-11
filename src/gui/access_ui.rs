@@ -276,7 +276,7 @@ impl App {
                         }
                     });
                     ui.end_row();
-                    ui.label(RichText::new("Relay").weak()).on_hover_text("sshremote.dev, or your own: sshremote --relay on a server with port 7071 open");
+                    ui.label(RichText::new("Relay").weak()).on_hover_text("sshremote.dev, or your own: sshremote-relay (github.com/thinkbigx/sshremote-relay) on a server");
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.access.relay).desired_width(180.0));
                         if ui.add_enabled(self.access.relay.trim() != cfg.relay, egui::Button::new("Use")).clicked() {

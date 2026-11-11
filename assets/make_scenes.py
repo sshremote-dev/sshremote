@@ -1,6 +1,6 @@
 """Writes the background scenes (Lottie) in the two parts the program draws: NAME_still.json
 (what never moves, drawn once) and NAME_motion.json (what moves, over clear, drawn every frame).
-`night` is built into the app (assets/); the others ship in registry/packs/nature-scenes.
+`night` is built into the app (assets/); the others ship in the extensions repository (packs/nature-scenes).
 
   meadow  a clear day: green rolling hills, round trees, drifting clouds, swaying flowers and
           grass, two butterflies
@@ -495,7 +495,7 @@ if __name__ == "__main__":
     for scene in (meadow, night, aurora, snow):
         name = scene.__name__
         loop, moving, staying = scene()
-        out = "" if name == "night" else "../registry/packs/nature-scenes/"
+        out = "" if name == "night" else "../../sshremote-extensions/packs/nature-scenes/"
         write(f"{out}{name}_still", loop, staying, True)
         write(f"{out}{name}_motion", loop, moving, False)
         print(f"{name}: {len(moving) + len(staying)} layers, {loop / FR:.0f} s")

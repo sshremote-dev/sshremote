@@ -1,14 +1,17 @@
 #!/bin/sh
 # Builds sshremote.dev (page, downloads, signed registry) and uploads it to the web server.
-#   registry/deploy.sh [SSH-HOST] [WEB-ROOT]
+#   scripts/deploy.sh [SSH-HOST] [WEB-ROOT]
+# The registry comes from the extensions repository beside this one ($EXTENSIONS, by default
+# ../sshremote-extensions); its build writes the packages and their index.
 # Downloads are taken from $WINDOWS_BIN and $LINUX_BIN (SSH Remote) and $TERMINAL_WINDOWS_BIN and
 # $TERMINAL_LINUX_BIN (SSH Remote Terminal) when set.
-# The native packs' programs come from $HELPERS (see registry/helper_pack.py).
+# The native packs' programs come from $HELPERS (see helper_pack.py there).
 set -eu
 HOST=${1:-ubuntu}
 ROOT=${2:-/var/www/sshremote.dev}
 KEY=${SIGNING_KEY:-$HOME/.ssh/sshremote_registry_ed25519}
 HERE=$(cd "$(dirname "$0")" && pwd)
+EXT=${EXTENSIONS:-$HERE/../../sshremote-extensions}
 OUT=$(mktemp -d)
 trap 'rm -rf -- "$OUT"' EXIT
 
@@ -17,7 +20,8 @@ set -- "$OUT"
 [ -n "${LINUX_BIN:-}" ] && set -- "$@" --download "sshremote-linux-x86_64=$LINUX_BIN"
 [ -n "${TERMINAL_WINDOWS_BIN:-}" ] && set -- "$@" --download "sshremote-terminal-windows-x86_64.exe=$TERMINAL_WINDOWS_BIN"
 [ -n "${TERMINAL_LINUX_BIN:-}" ] && set -- "$@" --download "sshremote-terminal-linux-x86_64=$TERMINAL_LINUX_BIN"
-python "$HERE/build.py" "$@"
+python "$EXT/build.py" "$OUT"
+python "$HERE/site.py" "$@"
 
 INDEX="$OUT/registry/v1/index.json"
 ssh-keygen -q -Y sign -f "$KEY" -n sshremote-registry "$INDEX"

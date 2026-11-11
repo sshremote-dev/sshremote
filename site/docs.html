@@ -63,6 +63,7 @@ sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true co
   <p>For a PC without SSH or a fixed address, for example a laptop on Wi-Fi, the way RustDesk works. The PC keeps a lasting 9-digit ID, the same across restarts, and a password its owner sets or generates. A viewer connects with both through the relay.</p>
   <h3>On the PC to reach</h3>
   <p>Open dialog &rarr; <b>This computer</b> &rarr; <b>Remote access by ID</b>. The card has an on/off switch, the ID and the password (each with copy, show and new buttons) and a line telling the state. <b>Start with the computer</b> installs the Windows service or a systemd user unit; on Windows the service also covers the sign-in and lock screens. <b>More</b> holds your own password, the relay server and a new ID.</p>
+  <p>From any browser, without installing anything: open <a href="/web/">sshremote.dev/web</a>, type the ID and its password, and the screen opens in the page with keyboard and mouse.</p>
   <h3>On the viewer</h3>
   <p>Type the ID (digits only) in the open dialog's <b>New connection</b> field, then the password, and choose Screen sharing or Files.</p>
   <h3>From the command line</h3>
@@ -73,8 +74,8 @@ sshremote remote-access install      # start with the computer; uninstall
 sshremote remote-access relay HOST   # use another relay
 sshremote sshremote://ID@sshremote.dev --password P</code></pre>
   <h3>Your own relay</h3>
-  <p>The relay listens on TCP 7071. To run your own and keep its IDs in a file:</p>
-  <pre class="cmd"><code>sshremote --relay --listen 0.0.0.0:7071 --store /var/lib/sshremote/ids.json</code></pre>
+  <p>The relay is a small program of its own, <a href="https://github.com/thinkbigx/sshremote-relay">sshremote-relay</a>, listening on TCP 7071. To run your own and keep its IDs in a file:</p>
+  <pre class="cmd"><code>sshremote-relay --listen 0.0.0.0:7071 --store /var/lib/sshremote/ids.json</code></pre>
 
   <h2 id="extensions">Using extensions</h2>
   <p>Browse the <a href="extensions.html">extension list</a>, or open <b>Extensions</b> in the app's open dialog (tabs Installed, Browse and Manage). From the command line:</p>
