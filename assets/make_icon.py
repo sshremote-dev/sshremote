@@ -5,7 +5,7 @@ python make_icon.py svg    logo.svg (the mark in currentColor) and favicon.svg (
 
 The mark is drawn like a toolbar icon: a 24-unit grid, round 2-unit lines. A prompt chevron
 enters an open frame: one SSH connection into the whole machine. The app icon is the same mark
-with no plate, in a blue that reads on light and dark task bars; the favicon puts it on a plate.
+with no plate, in a blue that reads on light and dark task bars; the favicon is the same mark in the site's accent.
 """
 import math
 import struct
@@ -71,25 +71,14 @@ def png(w, h, pixels):
             + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
-def squircle_path():
-    pts = []
-    for i in range(96):
-        a = 2 * math.pi * i / 96
-        c, s = math.cos(a), math.sin(a)
-        pts.append((128 + 112 * math.copysign(abs(c) ** 0.4, c), 128 + 112 * math.copysign(abs(s) ** 0.4, s)))
-    return 'M' + 'L'.join(f'{x:.1f} {y:.1f}' for x, y in pts) + 'Z'
-
-
 def svgs():
     lines = f'<path d="{CHEVRON}"/><path d="{FRAME}"/>'
     logo = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
             f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{lines}</svg>\n')
-    unit = 0.58 * 224 / 14
-    # The browser tab keeps the plate: a tab's background is often neither light nor dark.
-    favicon = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">'
-               f'<path d="{squircle_path()}" fill="#2563eb"/>'
-               f'<g transform="translate(128 128) scale({unit:.4f}) translate(-12 -12)" fill="none" stroke="#fff" '
-               f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{lines}</g></svg>\n')
+    # The browser tab: the same line mark in the site's accent, lighter when the browser is dark.
+    favicon = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2.2" '
+               'stroke-linecap="round" stroke-linejoin="round"><style>path{stroke:#2b59c3}'
+               '@media (prefers-color-scheme:dark){path{stroke:#8fb1ff}}</style>' + lines + '</svg>\n')
     Path('logo.svg').write_text(logo, encoding='utf-8')
     Path('favicon.svg').write_text(favicon, encoding='utf-8')
     print('Wrote logo.svg and favicon.svg')
