@@ -39,6 +39,8 @@ pub(super) struct Remote {
     pan: Vec2,
     fullscreen: bool,
     pinned: bool,
+    /// The full-screen toolbar shows all its buttons; folded, only the state and a button to unfold.
+    bar_open: bool,
     /// Where the toolbar sits along the top edge, 0 left to 1 right; dragged by its grip.
     bar_x: f32,
     /// The toolbar's width last frame, to keep it on screen.
@@ -167,6 +169,7 @@ impl Remote {
             pan: Vec2::ZERO,
             fullscreen: false,
             pinned: true,
+            bar_open: false,
             bar_x: crate::hosts::setting("toolbar_x").and_then(|v| v.parse().ok()).unwrap_or(0.5),
             bar_w: 600.0,
             bar_until: Instant::now(),
@@ -351,7 +354,8 @@ impl Remote {
         let screen = if docked { ui.available_rect_before_wrap() } else { ui.max_rect() };
         let ppp = ctx.pixels_per_point();
         // A pinned dock gets its own strip instead of covering the top of the remote screen.
-        let strip = if docked { 0.0 } else { 42.0 };
+        // Folded it is a small pill over the picture; only the unfolded one takes a strip.
+        let strip = if docked || !self.bar_open { 0.0 } else { 42.0 };
         let area = if self.pinned { screen.with_min_y(screen.top() + strip) } else { screen };
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         // Around the picture (scaled down, or of another shape), the background layers show, as
@@ -404,23 +408,6 @@ impl Remote {
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
             self.pick_at = None;
             self.send(ToAgent::Share(Share::ActiveWindow))?;
-        }
-        if (self.paused || self.view_only) && shown.is_some() {
-            // A badge on the picture: it is a still image until resumed, or input is off.
-            let text = if self.paused {
-                format!("{}  Paused   ·   {} resumes, {} fetches one frame", ic::PAUSE, ic::PLAY, ic::ARROW_CLOCKWISE)
-            } else {
-                format!("{}  View only   ·   turn it off in Options {}", ic::EYE, ic::GEAR)
-            };
-            let painter =
-                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("paused-badge")));
-            let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
-            let r = Rect::from_min_size(
-                Pos2::new(screen.left() + 12.0, screen.bottom() - galley.size().y - 30.0),
-                galley.size() + Vec2::new(24.0, 14.0),
-            );
-            painter.rect_filled(r, CornerRadius::same(crate::gui::theme::R_MD), Color32::from_rgba_unmultiplied(20, 22, 28, 220));
-            painter.galley(r.min + Vec2::new(12.0, 7.0), galley, Color32::WHITE);
         }
         if self.click_pick {
             // A hint over the picture while the next click chooses the window.
@@ -1561,7 +1548,19 @@ impl Remote {
                                     .selectable(false),
                             );
                             grip = Some(g.on_hover_text("Drag to move the toolbar"));
-                            self.toolbar_items(ui, &mut action)
+                            if self.bar_open {
+                                self.toolbar_items(ui, &mut action);
+                            } else {
+                                self.state_chip(ui, true);
+                                if self.view_only {
+                                    ui.label(RichText::new(ic::EYE).size(14.0).weak()).on_hover_text("View only: unfold to turn it off");
+                                }
+                            }
+                            let (glyph, tip) = if self.bar_open { (ic::CARET_UP, "Fold the toolbar") } else { (ic::CARET_DOWN, "Unfold the toolbar") };
+                            let b = egui::Button::new(RichText::new(glyph).size(14.0)).frame_when_inactive(false).min_size(Vec2::splat(24.0));
+                            if ui.add(b).on_hover_text(tip).clicked() {
+                                self.bar_open = !self.bar_open;
+                            }
                         })
                     });
             });
@@ -1582,20 +1581,9 @@ impl Remote {
         Ok(Some(rect))
     }
 
-    pub(super) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
-        // A narrow window keeps every button within reach: the least used go into the options
-        // menu and Close becomes an icon.
-        let compact = !self.in_pane && ui.available_width() < 640.0;
-        let screen = self.screen_controls();
-        // A pane showing its shell: the shell's own controls first.
-        if self.in_pane && self.mode() == super::workspace::PaneMode::Terminal
-            && let Some(t) = self.terms.as_mut()
-        {
-            t.controls(ui);
-            ui.separator();
-        }
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
+    /// Connection quality at a glance: the state's colour, the host and the round trip; details
+    /// on hover.
+    fn state_chip(&mut self, ui: &mut egui::Ui, compact: bool) {
         // Connection quality at a glance; details on hover.
         let (dot, state) = match self.ctl.rtt {
             r if r < 80.0 => (good(), "good"),
@@ -1613,7 +1601,6 @@ impl Remote {
         // One chip: the state's colour, the host and the round trip, the details on hover. A pane's
         // host and round trip are on its tab.
         let host = self.host().to_string();
-        if !self.in_pane {
         let rtt = if self.ctl.rtt >= 999.5 { "999+ ms".to_string() } else { format!("{:.0} ms", self.ctl.rtt) };
         egui::Frame::new()
             .corner_radius(CornerRadius::same(crate::gui::theme::R_LG))
@@ -1629,6 +1616,28 @@ impl Remote {
             })
             .response
             .on_hover_text(&details);
+    }
+
+    pub(super) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
+        // A narrow window keeps every button within reach: the least used go into the options
+        // menu and Close becomes an icon.
+        let compact = !self.in_pane && ui.available_width() < 640.0;
+        let screen = self.screen_controls();
+        // A pane showing its shell: the shell's own controls first.
+        if self.in_pane && self.mode() == super::workspace::PaneMode::Terminal
+            && let Some(t) = self.terms.as_mut()
+        {
+            t.controls(ui);
+            ui.separator();
+        }
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
+        if !self.in_pane {
+            self.state_chip(ui, compact);
+        }
+        // Input off: said here, one click turns it back on.
+        if self.view_only && ui.button(RichText::new(format!("{}  View only  {}", ic::EYE, ic::X)).small()).on_hover_text("Mouse and keyboard do not reach the host. Click to control it again").clicked() {
+            self.view_only = false;
         }
         if screen {
         if self.sharing.0 != 0 {
@@ -2418,6 +2427,24 @@ mod actions {
     }
 
     /// Pictures of the remote screen's menus in both themes, wide and narrow:
+    /// The full-screen toolbar folded to its state and unfolded, with input off:
+    /// SSHREMOTE_EXE=... SSHREMOTE_SNAP_DIR=folder cargo test --release -- --ignored full_screen_toolbar
+    #[test]
+    #[ignore]
+    fn full_screen_toolbar() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        let mut h = Harness::new(Vec2::new(1280.0, 720.0));
+        h.frame(Vec::new()).unwrap();
+        (h.r.fullscreen, h.r.pinned, h.r.view_only) = (true, true, true);
+        for open in [false, true] {
+            h.r.bar_open = open;
+            for _ in 0..8 {
+                h.frame(Vec::new()).unwrap();
+            }
+            h.snap.save(&h.ctx, h.size, &dir.join(format!("full_toolbar_{}.png", if open { "open" } else { "folded" })));
+        }
+    }
+
     /// SSHREMOTE_EXE=... SSHREMOTE_SNAP_DIR=folder cargo test --release -- --ignored --test-threads=1 menus_
     #[test]
     #[ignore]

@@ -19,7 +19,6 @@
     <a href="index.html#features">Features</a>
     <a href="extensions.html">Extensions</a>
     <a href="docs.html">Docs</a>
-    <a href="premium.html">Premium</a>
     <a href="index.html#download">Download</a>
     <a class="gh" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>GitHub</a>
   </nav>
@@ -45,7 +44,7 @@
 
 <footer><div class="wrap">
   <span>SSH Remote · open source · icons by <a href="https://phosphoricons.com">Phosphor</a></span>
-  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="premium.html">Premium</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
 </div></footer>
 <script>
 (function () {
@@ -71,7 +70,6 @@
   function card(e) {
     const k = kindOf(e);
     const tags = ['<span class="badge brand">' + esc((KINDS[k] || [k])[0].replace(/s$/, '')) + '</span>'];
-    if (e.premium) tags.push('<span class="badge gold">' + sshIcon('star') + 'Premium</span>');
     for (const p of e.provides || []) tags.push('<span class="badge">sshremote ' + esc(p) + '</span>');
     const rows = [];
     const plats = e.platforms ? Object.keys(e.platforms).map((p) => PLATFORMS[p] || p).join(', ') : 'All';

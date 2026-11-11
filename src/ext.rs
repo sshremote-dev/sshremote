@@ -10,7 +10,7 @@
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
 //!
 //! The registry is a static index (registry/build.py writes it):
-//!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size", "premium", "provides" } ] }
+//!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size", "provides" } ] }
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -113,8 +113,6 @@ pub struct Offer {
     pub description: String,
     pub url: String,
     pub sha256: String,
-    /// Only with a premium license.
-    pub premium: bool,
     /// Commands its program serves ("remote", "web").
     pub provides: Vec<String>,
 }
@@ -656,7 +654,7 @@ fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
 }
 
 /// Checks `data` against an ssh signature by `key` in `namespace`.
-pub fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
+fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
     // In this user's own settings folder: in the shared temp folder another user could put
     // their own allowed signers in its place.
     let base = crate::hosts::config_dir().ok_or("no settings folder")?;
@@ -721,7 +719,6 @@ pub fn offers() -> Result<Vec<Offer>, String> {
                         // Relative to the index, as the registry lays packages out beside it.
                         url: if url.contains("://") { url } else { format!("{base}/{url}") },
                         sha256: p("sha256")?.to_lowercase(),
-                        premium: e.get("premium").and_then(|x| x.as_bool()).unwrap_or(false),
                         provides: e.get("provides").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                     })
                 })
@@ -735,9 +732,6 @@ pub fn offers() -> Result<Vec<Offer>, String> {
 pub fn install_offer(o: &Offer) -> Result<Manifest, String> {
     use sha2::Digest;
     // A deliberate soft gate: checked here only, the packages themselves are not locked.
-    if o.premium && !crate::license::premium() {
-        return Err(format!("{} comes with a premium license: see https://sshremote.dev/premium", o.name));
-    }
     let bytes = fetch(&o.url)?;
     let hash: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if hash != o.sha256 {
@@ -816,7 +810,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 if now != seen {
                     seen = now;
                     match build(&dir).and_then(|()| pack(&dir, &out)).and_then(|_| install_file(&out)) {
-                        Ok(m) => println!("installed {} {} at {}", m.name, m.version, crate::license::today()),
+                        Ok(m) => println!("installed {} {} at {}", m.name, m.version, crate::sys::today()),
                         Err(e) => println!("not installed: {e}"),
                     }
                 }
@@ -876,7 +870,7 @@ pub enum ExtTab {
 }
 
 /// The Extensions tool: what is installed and how to use it, what the registry offers, and the
-/// rest (a package file, modules, license, registry, the extensions' log).
+/// rest (a package file, modules, registry, the extensions' log).
 #[derive(Default)]
 #[cfg(feature = "gui")]
 pub struct ExtTool {
@@ -886,7 +880,6 @@ pub struct ExtTool {
     file: String,
     status: Option<(bool, String)>,
     registry: String,
-    license_file: String,
     search: String,
     /// The extensions whose settings are open, and the one asked to be removed.
     settings_open: std::collections::HashSet<String>,
@@ -1284,14 +1277,10 @@ impl ExtTool {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&o.name).size(15.0).strong());
                             ui.label(RichText::new(format!("v{}", o.version)).weak().size(12.0));
-                            if o.premium {
-                                tag(ui, "Premium", crate::gui::brand());
-                            }
                         });
                         ui.label(RichText::new(&o.id).weak().size(11.0));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let locked = o.premium && !crate::license::premium();
                         let busy = self.working.is_some();
                         if self.working.as_ref().is_some_and(|w| w.0.as_deref() == Some(o.id.as_str())) {
                             ui.label(RichText::new(if have.is_some() { "Updating\u{2026}" } else { "Installing\u{2026}" }).weak());
@@ -1313,8 +1302,7 @@ impl ExtTool {
                                 ui.label(RichText::new(format!("{}  Built into this edition", ic::CHECK)).weak()).on_hover_text("This app already has what it brings");
                             }
                             None => {
-                                let b = ui.add_enabled(!locked, crate::gui::theme::primary(format!("{}  Install", ic::DOWNLOAD)));
-                                if b.on_disabled_hover_text("Comes with a premium license (Manage > License)").clicked() {
+                                if ui.add(crate::gui::theme::primary(format!("{}  Install", ic::DOWNLOAD))).clicked() {
                                     let o = o.clone();
                                     self.pending = Some(o.id.clone());
                                     *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed. How to use it is on its card under Installed.", m.name, m.version))));
@@ -1390,31 +1378,6 @@ impl ExtTool {
                 if ui.add_enabled(!self.file.trim().is_empty(), egui::Button::new("Install")).clicked() {
                     let f = self.file.trim().trim_matches('"').to_string();
                     *act = Some(Box::new(move || install_file(Path::new(&f)).map(|m| format!("{} {} installed. How to use it is shown on its card.", m.name, m.version))));
-                }
-            });
-        });
-        ui.add_space(6.0);
-        card(ui, |ui| {
-            ui.label(RichText::new(format!("{}  License", ic::KEY)).strong());
-            match crate::license::current() {
-                Some(l) => {
-                    ui.label(crate::license::describe(&l));
-                }
-                None => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("The free edition.").weak());
-                        ui.hyperlink_to("About premium", "https://sshremote.dev/premium");
-                    });
-                }
-            }
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.license_file).hint_text("A license file").desired_width(320.0));
-                if ui.add_enabled(!self.license_file.trim().is_empty(), egui::Button::new("Install")).clicked() {
-                    let f = self.license_file.trim().trim_matches('"').to_string();
-                    *act = Some(Box::new(move || {
-                        let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
-                        crate::license::install(&text).map(|l| format!("License installed: {}", crate::license::describe(&l)))
-                    }));
                 }
             });
         });
@@ -1517,10 +1480,6 @@ mod tests {
         assert_eq!(installed().iter().find(|m| m.id == "dev.sshremote.test-sea").unwrap().version, "1.0.0");
         let bad = Offer { sha256: "00".repeat(32), ..offers[0].clone() };
         assert!(install_offer(&bad).unwrap_err().contains("checksum"));
-        if !crate::license::premium() {
-            let premium = Offer { premium: true, ..offers[0].clone() };
-            assert!(install_offer(&premium).unwrap_err().contains("premium license"));
-        }
         remove("dev.sshremote.test-sea").unwrap();
         assert!(installed().iter().all(|m| m.id != "dev.sshremote.test-sea"));
     }
@@ -1565,7 +1524,7 @@ mod tests {
     }
 
     /// The Extensions page drawn without a window: an installed native extension shows what it
-    /// brings and may do, the registry's offers, the modules and the license.
+    /// brings and may do, the registry's offers and the modules.
     #[test]
     fn extensions_page_shows_what_each_brings() {
         use eframe::egui::{self, Pos2, Rect, Vec2};
@@ -1580,20 +1539,20 @@ mod tests {
         let pkg = d.with_extension("sshx");
         pack(&d, &pkg).unwrap();
         install_file(&pkg).unwrap();
-        let offer = |id: &str, name: &str, premium| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), premium, provides: Vec::new() };
+        let offer = |id: &str, name: &str| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), provides: Vec::new() };
         let mut tool = ExtTool { offers: Some(Ok(vec![
-            offer("dev.sshremote.test-sea", "Sea pack", false),
-            offer("dev.sshremote.test-gold", "Gold pack", true),
-            Offer { version: "1.3.0".into(), ..offer("dev.sshremote.test-page", "Page gateway", false) },
-            Offer { provides: vec!["remote".into()], ..offer("dev.sshremote.test-rd", "Desk pack", false) },
+            offer("dev.sshremote.test-sea", "Sea pack"),
+            offer("dev.sshremote.test-gold", "Gold pack"),
+            Offer { version: "1.3.0".into(), ..offer("dev.sshremote.test-page", "Page gateway") },
+            Offer { provides: vec!["remote".into()], ..offer("dev.sshremote.test-rd", "Desk pack") },
         ])), ..ExtTool::new() };
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
         let size = Vec2::new(760.0, 900.0);
         let pages: [(ExtTab, &str, &[&str]); 3] = [
             (ExtTab::Installed, "installed", &["Parts of this app", "Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "Adds sshremote web", "run its own program", "Update to 1.3.0", "How to use it"]),
-            (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Premium", "Installed", "Desk pack", "Install"]),
-            (ExtTab::Manage, "manage", &["Install a package file", "License", "Registry", "sshremote ext new my-tool"]),
+            (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Installed", "Desk pack", "Install"]),
+            (ExtTab::Manage, "manage", &["Install a package file", "Registry", "sshremote ext new my-tool"]),
         ];
         for (tab, name, texts) in pages {
             tool.tab = tab;

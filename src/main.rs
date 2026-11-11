@@ -36,7 +36,6 @@ mod hosts;
 mod keygrab;
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod keys;
-mod license;
 mod modules;
 mod options;
 #[cfg(feature = "gui")]
@@ -99,7 +98,6 @@ usage: sshremote                       open the window: connect screen, recent h
                                   the workspace with a terminal pane: a local shell, or ssh to HOST;
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
-       sshremote license [show | install FILE | remove]   the premium license
        sshremote module [list | on ID | off ID]   turn parts of the app on or off
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
@@ -436,7 +434,6 @@ fn run(args: &[String]) -> Result<(), String> {
         "--stats" | "terminal" => Err(NO_WINDOWS.into()),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
-        "license" => license::cli(&args[1..]),
         "module" => modules::cli(&args[1..]),
         // The gateway browsers reach terminals through (sshremote.dev/web).
         #[cfg(feature = "web")]

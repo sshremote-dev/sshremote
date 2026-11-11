@@ -4,8 +4,8 @@ python make_icon.py        icon.png (256), icon.ico (16..256), preview.png
 python make_icon.py svg    logo.svg (the mark in currentColor) and favicon.svg (mark on the plate)
 
 The mark is drawn like a toolbar icon: a 24-unit grid, round 2-unit lines. A prompt chevron
-enters an open frame: one SSH connection into the whole machine. The app icon puts it in white
-on a flat blue squircle, the same on light and dark task bars.
+enters an open frame: one SSH connection into the whole machine. The app icon is the same mark
+with no plate, in a blue that reads on light and dark task bars; the favicon puts it on a plate.
 """
 import math
 import struct
@@ -15,7 +15,7 @@ from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 256)
 PLATE = (0x25, 0x63, 0xEB)
-MARK = (0xFF, 0xFF, 0xFF)
+MARK = (0x25, 0x63, 0xEB)
 CHEVRON = 'M5 8.5 8.5 12 5 15.5'
 FRAME = 'M12 5h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-4'
 
@@ -37,15 +37,12 @@ def mark(x, y):
 
 
 def sample(x, y, size):
-    u, v = (x - 128) / 112, (y - 128) / 112
-    if abs(u) ** 5 + abs(v) ** 5 > 1:
-        return (0, 0, 0, 0)
-    # The mark spans 14 of 24 units; small icons give it more of the plate and a heavier line.
-    unit = {16: 0.80, 24: 0.74}.get(size, 0.58) * 224 / 14
+    # The mark fills the icon (14 of 24 units across most of it), with a heavier line when small.
+    unit = {16: 0.94, 24: 0.92}.get(size, 0.88) * 256 / 16
     gx, gy = 12 + (x - 128) / unit, 12 + (y - 128) / unit
-    device = {16: 1.6, 24: 2.2, 32: 2.6, 48: 3.6}.get(size)
-    width = 2.0 if device is None else device * 256 / size / unit
-    return (*MARK, 255) if mark(gx, gy) <= width / 2 else (*PLATE, 255)
+    device = {16: 1.9, 24: 2.6, 32: 3.2, 48: 4.4}.get(size)
+    width = 2.4 if device is None else device * 256 / size / unit
+    return (*MARK, 255) if mark(gx, gy) <= width / 2 else (0, 0, 0, 0)
 
 
 def render(size):
@@ -88,6 +85,7 @@ def svgs():
     logo = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
             f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{lines}</svg>\n')
     unit = 0.58 * 224 / 14
+    # The browser tab keeps the plate: a tab's background is often neither light nor dark.
     favicon = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">'
                f'<path d="{squircle_path()}" fill="#2563eb"/>'
                f'<g transform="translate(128 128) scale({unit:.4f}) translate(-12 -12)" fill="none" stroke="#fff" '
