@@ -29,7 +29,7 @@
 <main id="main">
 <div class="page-head"><div class="wrap">
   <h1>Extensions</h1>
-  <p class="lead">Everything in the signed registry, as the app sees it. Install from <b>Tools &rarr; Extensions</b> or with one command; each runs only with the permissions it names.</p>
+  <p class="lead">Everything in the signed registry, as the app sees it. Install from <b>Extensions</b> in the open dialog (Browse tab) or with one command; each runs only with the permissions it names.</p>
 </div></div>
 
 <div class="wrap">
@@ -54,7 +54,7 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
   const size = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
-  const kindOf = (e) => e.kind || (e.platforms ? 'program' : 'style pack');
+  const kindOf = (e) => e.kind || (e.platforms ? ((e.provides || []).length ? 'program' : 'resident') : (/\.wasm|text-tools/.test(e.url + e.id) ? 'script' : 'style pack'));
   function iconOf(e) {
     if (e.icon) return e.icon;
     const p = (e.provides || [])[0];
