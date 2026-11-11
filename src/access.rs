@@ -511,6 +511,7 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
         cmd.creation_flags(0x0800_0000);
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    crate::sys::tie(&child);
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let mut stdout = child.stdout.take().ok_or("no stdout")?;
     let up = thread::spawn(move || {

@@ -168,6 +168,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         cmd.creation_flags(0x0800_0000);
     }
     let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", file))?;
+    crate::sys::tie(&child);
     let stdout = child.stdout.take().ok_or("no output")?;
     let stderr = child.stderr.take().ok_or("no errors")?;
     let stdin = child.stdin.take().ok_or("no input")?;

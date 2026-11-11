@@ -82,6 +82,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     #[cfg(not(windows))]
     let _ = hidden;
     let mut child = cmd.spawn().map_err(|e| format!("could not start the agent: {e}"))?;
+    crate::sys::tie(&child);
     Ok(Link {
         reader: Box::new(child.stdout.take().unwrap()),
         writer: Box::new(child.stdin.take().unwrap()),

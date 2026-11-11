@@ -169,3 +169,34 @@ pub fn today() -> String {
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}")
 }
+
+/// Ends `child` together with this program, however this program ends (closed, crashed or
+/// killed): on Windows it joins a job whose processes the system ends when its last handle, ours,
+/// closes. Otherwise a helper started from this program could keep running, and keep its file
+/// from being deleted.
+pub fn tie(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+        };
+        static JOB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let job = *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
+            job as usize
+        });
+        if job != 0 {
+            unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}

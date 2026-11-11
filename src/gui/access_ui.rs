@@ -388,6 +388,9 @@ impl App {
                     cmd.creation_flags(0x0800_0000);
                 }
                 *c = cmd.spawn().ok();
+                if let Some(child) = c.as_ref() {
+                    crate::sys::tie(child);
+                }
             }
         }
         let mut result: Option<Result<(), String>> = None;

@@ -75,6 +75,7 @@ impl Window {
             cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn().map_err(|e| format!("chat window: {e}"))?;
+        crate::sys::tie(&child);
         let stdin = child.stdin.take().ok_or("chat window stdin")?;
         let stdout = child.stdout.take().ok_or("chat window stdout")?;
         let (tx, rx) = mpsc::channel();
