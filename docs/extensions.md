@@ -1,7 +1,7 @@
 # Extensions
 
 SSH Remote keeps a small core (the terminal workspace, its tabs and splits, the text and Markdown
-views, projects, settings) and lets everything else come as an extension, installed from the
+views, settings) and lets everything else come as an extension, installed from the
 signed registry at sshremote.dev or from a file.
 
 ## Design
@@ -130,15 +130,3 @@ never held open; the extension's folder is in `initialize` (`extension.folder`) 
 `SSHREMOTE_EXTENSION_DIR` environment variable. The Extensions page shows whether it runs,
 restarts it, and shows its log.
 
-## Projects
-
-The core keeps the open tabs as the last session (reopened at start when that is turned on in Projects) and as named projects (the
-Projects page of the open view, `sshremote --project NAME`, or the command palette). A project
-holds the tabs, the splits, what each pane runs, the folder its shell was in and the view it is
-shown in, and the host, port and options of each connection. It never holds a password: a host
-that refuses the login asks with a dialog that names the host, the user, the port and what the
-connection is for.
-
-Shells say their folder the way terminals expect: OSC 7 (`ESC ] 7 ; file://HOST/PATH`) or OSC 9;9
-(`ESC ] 9 ; 9 ; PATH`, as for Windows Terminal). Local PowerShell and Command Prompt tabs are set up
-to say it; on Linux the folder of a local shell is also read from the system.

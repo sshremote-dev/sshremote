@@ -149,7 +149,6 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
         probe_monitor: None,
         sound: false,
         open: String::new(),
-        project: None,
     };
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
@@ -166,10 +165,6 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
                 here = true;
             }
             "--gui" => o.gui = true,
-            "--project" => {
-                o.project = Some(val()?);
-                o.gui = true;
-            }
             "--term" => {}
             "--preset" => {
                 let v = val()?;

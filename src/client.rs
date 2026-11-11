@@ -1296,10 +1296,17 @@ impl Viewer {
         use std::io::Read;
         let mut budget: usize = 1 << 20;
         let mut finished = Vec::new();
+        let mut failed = Vec::new();
+        let mut buf = vec![0u8; 64 << 10];
         for (id, file, _, sent) in &mut self.uploads {
-            let mut buf = vec![0u8; 64 << 10];
             while budget > 0 {
-                let n = file.read(&mut buf)?;
+                let n = match file.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        failed.push((*id, e.to_string()));
+                        break;
+                    }
+                };
                 if n == 0 {
                     finished.push(*id);
                     break;
@@ -1315,6 +1322,13 @@ impl Viewer {
         for id in finished {
             self.sess.send(ToAgent::FileEnd { id })?;
             self.uploads.retain(|u| u.0 != id);
+        }
+        // A file that cannot be read ends its own upload, not the session.
+        for (id, e) in failed {
+            self.sess.send(ToAgent::FileEnd { id })?;
+            self.uploads.retain(|u| u.0 != id);
+            self.transfers.retain(|t| !(t.upload && t.id == id));
+            self.notify(&format!("Upload stopped: {e}"))?;
         }
         if self.view == View::Files && self.overlay == Overlay::None && self.prompt.is_none() {
             self.status()?;
@@ -1454,7 +1468,8 @@ impl Viewer {
                     let t = if ok { format!("Saved {text}") } else { format!("Download failed: {text}") };
                     self.notify(&t)?
                 }
-                _ => self.notify(&format!("Download failed: {text}"))?,
+                // One that never started was reported when it failed.
+                _ => {}
                 }
             }
             _ => {}
@@ -1801,10 +1816,14 @@ pub fn run(opt: Options) -> Result<(), String> {
         v.push_settings()?;
         if opt.sound {
             match crate::audio::Player::new() {
-                Ok(p) => v.player = Some(p),
+                Ok(p) => {
+                    v.player = Some(p);
+                    v.sess.send(ToAgent::Audio(true))?;
+                }
+                // A probe measures the sound's bytes with nothing to play them.
+                Err(_) if opt.probe.is_some() => v.sess.send(ToAgent::Audio(true))?,
                 Err(e) => eprintln!("sshremote: sound: {e}"),
             }
-            v.sess.send(ToAgent::Audio(true))?;
         }
         if let Some(m) = opt.probe_monitor {
             v.sess.send(ToAgent::SelectMonitor(m))?;

@@ -53,7 +53,6 @@ impl App {
             probe_monitor: None,
             sound: false,
             open: String::new(),
-            project: None,
         }
     }
 
@@ -94,7 +93,7 @@ impl App {
         }
     }
 
-    /// The windows that live beside every screen: the terminal and the SSH tools.
+    /// The terminal windows that live beside every screen: the one docked here and those torn off.
     pub(super) fn side_windows(&mut self, ctx: &egui::Context) {
         if let Some(mut t) = self.terms.take() {
             let cmds = t.show(ctx, "");
@@ -227,7 +226,6 @@ impl App {
             (Section::New, ic::PLUS, "New connection"),
             (Section::Local, ic::DESKTOP, "This computer"),
             (Section::Ssh, ic::GLOBE, "SSH hosts"),
-            (Section::Projects, ic::FOLDER, "Projects"),
             (Section::Extensions, ic::PUZZLE_PIECE, "Extensions"),
             (Section::Tools, ic::WRENCH, "Tools"),
         ] {
@@ -290,7 +288,6 @@ impl App {
                 });
             }
             Section::Ssh => self.ssh_section(ui, &mut go),
-            Section::Projects => self.projects_section(ui),
             Section::Extensions => {
                 ui.label(RichText::new("Extensions").size(16.0).strong());
                 ui.label(RichText::new("Add looks, commands, status bar items, panels and features. Each one can do only what its card says.").weak().size(12.0));
@@ -305,113 +302,6 @@ impl App {
             Section::Tools => self.tools_section(ui),
         }
         go
-    }
-
-    /// Projects: the tabs open now, saved by name; the saved ones to open, replace or delete; and
-    /// whether the last tabs come back at start.
-    fn projects_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Projects").size(16.0).strong());
-        ui.label(
-            RichText::new("A project is a set of tabs kept by name: their splits, hosts, shells and folders. Passwords are never kept; a sign-in asks for them when needed.")
-                .weak()
-                .size(12.0),
-        );
-        ui.add_space(8.0);
-        let open = self.layout.as_ref().filter(|l| l.get("tabs").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty())).cloned();
-        let mut chosen: Option<serde_json::Value> = None;
-        egui::ScrollArea::vertical().id_salt("projects").auto_shrink([false, false]).show(ui, |ui| {
-            ui.set_max_width((ui.available_width() - 14.0).min(720.0));
-            // The tabs open now: what they are, and saving them.
-            section_card(ui, |ui| {
-                ui.label(RichText::new(format!("{}  The tabs open now", ic::APP_WINDOW)).strong());
-                match &open {
-                    Some(l) => {
-                        ui.label(RichText::new(super::project::summary(l)).weak().size(12.0));
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let r = ui.add(egui::TextEdit::singleline(&mut self.project_name).hint_text("A name, as Backend work").desired_width(240.0));
-                            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                            let can = !self.project_name.trim().is_empty();
-                            let b = ui.add_enabled(can, theme::primary(format!("{}  Save as a project", ic::FOLDER_PLUS)));
-                            if b.on_disabled_hover_text("Give it a name first").clicked() || (enter && can) {
-                                match super::project::save(&self.project_name, l) {
-                                    Ok(()) => self.project_name.clear(),
-                                    Err(e) => self.error = Some(e),
-                                }
-                            }
-                        });
-                    }
-                    None => {
-                        ui.label(RichText::new("No tabs are open. Open some (a host under SSH hosts, a shell under This computer), then come back here to save them.").weak().size(12.0));
-                    }
-                }
-                ui.add_space(6.0);
-                let mut reopen = super::project::reopen();
-                if ui.checkbox(&mut reopen, "Open the last tabs again when the app starts").on_hover_text("This dialog still shows over them, to open something else").changed() {
-                    super::project::set_reopen(reopen);
-                }
-            });
-            ui.add_space(10.0);
-            let names = super::project::list();
-            ui.label(RichText::new(format!("Saved projects ({})", names.len())).strong());
-            ui.add_space(4.0);
-            if names.is_empty() {
-                section_card(ui, |ui| {
-                    ui.label(RichText::new("None saved yet. To make one:").weak());
-                    for step in ["1.  Open the tabs and splits you work with", "2.  Name them above and press Save as a project", "3.  Next time, open them here with one click"] {
-                        ui.label(RichText::new(step).size(12.0));
-                    }
-                });
-            }
-            for name in names {
-                let layout = super::project::load(&name);
-                let sub = layout.as_ref().map_or_else(|e| e.clone(), super::project::summary);
-                section_card(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(ic::FOLDER).size(20.0).color(super::brand()));
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(&name).size(15.0).strong());
-                            ui.label(RichText::new(&sub).weak().size(12.0));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.project_confirm.as_deref() == Some(name.as_str()) {
-                                if ui.button("Keep").clicked() {
-                                    self.project_confirm = None;
-                                }
-                                if ui.add(egui::Button::new(RichText::new(format!("{}  Delete it", ic::TRASH)).color(bad()))).clicked() {
-                                    if let Err(e) = super::project::remove(&name) {
-                                        self.error = Some(e);
-                                    }
-                                    self.project_confirm = None;
-                                }
-                                return;
-                            }
-                            if icon(ui, ic::TRASH, "Delete", false).clicked() {
-                                self.project_confirm = Some(name.clone());
-                            }
-                            if let Some(l) = &open
-                                && icon(ui, ic::FLOPPY_DISK, "Replace it with the tabs open now", false).clicked()
-                                && let Err(e) = super::project::save(&name, l)
-                            {
-                                self.error = Some(e);
-                            }
-                            if icon(ui, ic::COPY, &format!("Copy the command that opens it: sshremote --project \"{name}\""), false).clicked() {
-                                ui.ctx().copy_text(format!("sshremote --project \"{name}\""));
-                            }
-                            if ui.add_enabled(layout.is_ok(), theme::primary(format!("{}  Open", ic::PLAY))).on_hover_text("Its tabs open beside the ones open now").clicked()
-                                && let Ok(l) = &layout
-                            {
-                                chosen = Some(l.clone());
-                            }
-                        });
-                    });
-                });
-                ui.add_space(6.0);
-            }
-        });
-        if chosen.is_some() {
-            self.restore = chosen;
-        }
     }
 
     /// The tools: a list of them, or the one open, as a page with a way back.
@@ -432,7 +322,7 @@ impl App {
             if crate::modules::on("backup") && place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
                 self.backup = Some(crate::tools::BackupTool::new());
             }
-            if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, a background picture, the logo and an overlay of the load and time") {
+            if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, background pictures and an overlay of the load and time") {
                 super::look::open(ui.ctx());
             }
             if cfg!(windows) {
@@ -783,7 +673,7 @@ impl App {
         }
         let f = self.form.clone();
         if f.remember && !f.password.is_empty() && let Err(e) = crate::vault::set(&host, &f.password) {
-            self.save_error = Some(format!("The password was not saved: {e}"));
+            self.error = Some(format!("The password was not saved: {e}"));
         }
         // A password typed now wins over a saved one.
         let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
@@ -834,7 +724,6 @@ pub(super) enum Section {
     New,
     Local,
     Ssh,
-    Projects,
     Extensions,
     Tools,
 }
@@ -868,17 +757,3 @@ fn place_row(ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str) -> bool {
     r.clicked()
 }
 
-/// A rounded box around one item of a page.
-fn section_card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let v = ui.visuals();
-    egui::Frame::new()
-        .fill(v.faint_bg_color)
-        .stroke(Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
-        .corner_radius(CornerRadius::same(theme::R_LG))
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            body(ui)
-        })
-        .inner
-}

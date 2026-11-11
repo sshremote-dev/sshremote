@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-pub const RATE: u32 = 48_000;
+const RATE: u32 = 48_000;
 /// Samples per channel in one 20 ms packet.
-pub const FRAME: usize = 960;
+const FRAME: usize = 960;
 const BITRATE: i32 = 64_000;
 
 /// Converts interleaved samples at `from` Hz with `ch` channels to 48 kHz stereo, linearly.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub struct Resampler {
+struct Resampler {
     from: u32,
     ch: usize,
     pos: f64,

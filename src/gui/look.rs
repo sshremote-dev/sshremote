@@ -1,6 +1,5 @@
 //! The windows' look as each user wants it: the fonts and their sizes, the terminal's colours, a
-//! picture behind the terminal panes (each pane's own, or one across the window), the logo's
-//! motion, and an overlay with the system's load and the time. Set in the Appearance window, kept
+//! picture behind the terminal panes (each pane's own, or one across the window), and an overlay with the system's load and the time. Set in the Appearance window, kept
 //! with the other settings, and applied at once to every window.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,17 +28,6 @@ pub(crate) enum Fit {
     /// Repeated at its own size.
     Tile,
     /// At its own size, in the middle.
-    Center,
-}
-
-/// Where the logo shows: in the title bar's logo place, or over the window.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum LogoPlace {
-    TitleBar,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
     Center,
 }
 
@@ -100,17 +88,6 @@ pub(crate) struct Look {
     pub bg: [u8; 3],
     /// What is behind the terminal panes: layers, the first in front.
     pub layers: Vec<BgLayer>,
-    /// The "SSH REMOTE (thinkbigx)" badge in the window's bottom left corner, and how clearly.
-    pub badge: bool,
-    pub badge_opacity: f32,
-    /// The logo moves: the built-in one breathes, a picture of one's own plays its animation.
-    pub logo_motion: bool,
-    /// A logo of one's own (a picture or an animation, transparency kept; "" for the built-in),
-    /// where it goes, its size over the window, and how clearly it shows.
-    pub logo_file: String,
-    pub logo_place: LogoPlace,
-    pub logo_size: f32,
-    pub logo_opacity: f32,
     /// The overlay: whether it shows, what it shows, where, and how strongly.
     pub hud: bool,
     pub hud_cpu: bool,
@@ -141,13 +118,6 @@ impl Default for Look {
                 BgLayer::built_in("builtin:night-motion", 0.6, Fit::Fill),
                 BgLayer::built_in("builtin:night-still", 0.6, Fit::Fill),
             ],
-            badge: false,
-            badge_opacity: 0.6,
-            logo_motion: false,
-            logo_file: String::new(),
-            logo_place: LogoPlace::TitleBar,
-            logo_size: 96.0,
-            logo_opacity: 0.8,
             hud: true,
             hud_cpu: true,
             hud_ram: true,
@@ -165,14 +135,6 @@ impl Default for Look {
 
 const SCOPES: [(Scope, &str); 2] = [(Scope::Pane, "pane"), (Scope::Window, "window")];
 const FITS: [(Fit, &str); 5] = [(Fit::Fill, "fill"), (Fit::Whole, "fit"), (Fit::Stretch, "stretch"), (Fit::Tile, "tile"), (Fit::Center, "center")];
-const LOGO_PLACES: [(LogoPlace, &str); 6] = [
-    (LogoPlace::TitleBar, "title-bar"),
-    (LogoPlace::TopLeft, "top-left"),
-    (LogoPlace::TopRight, "top-right"),
-    (LogoPlace::BottomLeft, "bottom-left"),
-    (LogoPlace::BottomRight, "bottom-right"),
-    (LogoPlace::Center, "center"),
-];
 const CORNERS: [(Corner, &str); 4] = [
     (Corner::TopLeft, "top-left"),
     (Corner::TopRight, "top-right"),
@@ -195,10 +157,6 @@ impl Look {
             "custom_colors": self.custom_colors, "fg": self.fg, "bg": self.bg,
             "layers": self.layers.iter().map(|b| serde_json::json!({"src": b.src, "on": b.on, "strength": b.strength,
                 "fit": name_of(&FITS, b.fit), "scope": name_of(&SCOPES, b.scope)})).collect::<Vec<_>>(),
-            "logo_motion": self.logo_motion,
-            "badge": self.badge, "badge_opacity": self.badge_opacity,
-            "logo_file": self.logo_file, "logo_place": name_of(&LOGO_PLACES, self.logo_place),
-            "logo_size": self.logo_size, "logo_opacity": self.logo_opacity,
             "hud": self.hud, "hud_cpu": self.hud_cpu, "hud_ram": self.hud_ram, "hud_disk": self.hud_disk,
             "hud_clock": self.hud_clock, "hud_corner": name_of(&CORNERS, self.hud_corner),
             "hud_scope": if self.hud_scope == HudScope::Window { "window" } else { "terminals" },
@@ -242,13 +200,6 @@ impl Look {
                     .collect(),
                 None => d.layers.clone(),
             },
-            badge: flag("badge", d.badge),
-            badge_opacity: num("badge_opacity", d.badge_opacity, 0.1, 1.0),
-            logo_motion: flag("logo_motion", d.logo_motion),
-            logo_file: text("logo_file", ""),
-            logo_place: from_name(&LOGO_PLACES, v.get("logo_place").and_then(|x| x.as_str()), d.logo_place),
-            logo_size: num("logo_size", d.logo_size, 16.0, 400.0),
-            logo_opacity: num("logo_opacity", d.logo_opacity, 0.05, 1.0),
             hud: flag("hud", d.hud),
             hud_cpu: flag("hud_cpu", d.hud_cpu),
             hud_ram: flag("hud_ram", d.hud_ram),
@@ -270,9 +221,8 @@ impl Look {
 
 static LOOK: RwLock<Option<Look>> = RwLock::new(None);
 /// What the terminal reads for every cell, kept where it is quick to read: the custom colours
-/// (on, then the text's and the background's RGB), the logo's motion, and whether a picture shows.
+/// (on, then the text's and the background's RGB), and whether a picture shows.
 static CUSTOM: AtomicU64 = AtomicU64::new(0);
-static MOTION: AtomicBool = AtomicBool::new(false);
 static PICTURE: AtomicBool = AtomicBool::new(false);
 
 /// The look now (read from the settings the first time).
@@ -300,7 +250,6 @@ pub(crate) fn set(l: Look) {
 fn mirror(l: &Look) {
     let rgb = |c: [u8; 3]| (c[0] as u64) << 16 | (c[1] as u64) << 8 | c[2] as u64;
     CUSTOM.store(if l.custom_colors { 1 << 48 | rgb(l.fg) << 24 | rgb(l.bg) } else { 0 }, Ordering::Relaxed);
-    MOTION.store(l.logo_motion, Ordering::Relaxed);
     PICTURE.store(l.layers.iter().any(|b| b.on && b.strength > 0.0), Ordering::Relaxed);
 }
 
@@ -312,11 +261,6 @@ pub(crate) fn custom_colors() -> Option<(Color32, Color32)> {
     let v = CUSTOM.load(Ordering::Relaxed);
     let c = |x: u64| Color32::from_rgb((x >> 16) as u8, (x >> 8) as u8, x as u8);
     (v >> 48 == 1).then(|| (c(v >> 24 & 0xFF_FFFF), c(v & 0xFF_FFFF)))
-}
-
-/// Whether the logo breathes.
-pub(crate) fn logo_motion() -> bool {
-    MOTION.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -983,23 +927,7 @@ pub(crate) fn frame(ctx: &egui::Context) {
     if !(PLAIN.load(Ordering::Relaxed) && ctx.viewport_id() == egui::ViewportId::ROOT) {
         overlay(ctx, &l);
     }
-    if l.logo_motion && l.logo_file.is_empty() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(40));
-    }
     editor_window(ctx);
-}
-
-
-
-
-/// The built-in logo's breathing now: its scale and the strength of the glow around it.
-pub(crate) fn logo_pulse(ctx: &egui::Context) -> (f32, f32) {
-    if !logo_motion() || !get().logo_file.is_empty() {
-        return (1.0, 0.0);
-    }
-    let t = ctx.input(|i| i.time) as f32;
-    let s = (t * 1.6).sin() * 0.5 + 0.5;
-    (1.0 + 0.08 * s, 0.35 * s)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1013,9 +941,6 @@ struct Editor {
     ui_filter: String,
     mono_filter: String,
     image_error: Option<String>,
-    /// Where the logo's and the animation's rows were: a file dropped there goes to that one,
-    /// elsewhere to the background picture.
-    logo_row: Option<Rect>,
     /// A file's path to add as a layer.
     new_file: String,
 }
@@ -1057,15 +982,10 @@ fn editor_window(ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| editor(ui, &mut l, ed));
         });
-    // A picture dropped on the logo's row is the logo; anywhere else, the background.
+    // A picture dropped on the window is a new background layer.
     if let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())) {
-        let over = |r: Option<Rect>| ctx.pointer_hover_pos().zip(r).is_some_and(|(at, r)| r.contains(at));
         let path = p.to_string_lossy().into_owned();
-        if over(ed.logo_row) {
-            l.logo_file = path;
-        } else {
-            l.layers.push(BgLayer { src: path, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
-        }
+        l.layers.push(BgLayer { src: path, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
     }
     if l != before {
         set(l);
@@ -1306,7 +1226,7 @@ mod tests {
         assert!(Look::default().layers.iter().all(|b| super::super::lottie::built_in(&b.src).is_some()));
     }
 
-    /// A logo animation (a GIF here) comes as its frames with their times, its transparent parts
+    /// An animation (a GIF here) comes as its frames with their times, its transparent parts
     /// still clear; a still PNG with transparency keeps it too.
     #[test]
     fn pictures_keep_their_frames_and_transparency() {

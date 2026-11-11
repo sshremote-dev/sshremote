@@ -231,10 +231,9 @@ pub(super) enum Run {
     Script(crate::script::Command),
     /// Something the workspace does itself.
     Builtin(&'static str),
-    Project(String),
 }
 
-/// What the palette offers: the workspace's own commands, the projects, the extensions' commands.
+/// What the palette offers: the workspace's own commands and the extensions' commands.
 pub(super) fn entries() -> Vec<Entry> {
     let mut out: Vec<Entry> = [
         ("New tab", "tab"),
@@ -245,7 +244,6 @@ pub(super) fn entries() -> Vec<Entry> {
     .into_iter()
     .map(|(label, id)| Entry { label: label.into(), run: Run::Builtin(id) })
     .collect();
-    out.extend(super::project::list().into_iter().map(|p| Entry { label: format!("Open project: {p}"), run: Run::Project(p) }));
     out.extend(crate::exthost::commands().into_iter().map(|(ext, id, label)| Entry { label, run: Run::Host { ext, id } }));
     let names: std::collections::HashMap<String, String> = crate::ext::installed().into_iter().map(|m| (m.id, m.name)).collect();
     out.extend(crate::script::commands().into_iter().map(|c| Entry {

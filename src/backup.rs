@@ -21,10 +21,6 @@ const MAX_SSH_FILE: u64 = 1 << 20;
 /// PBKDF2 rounds for new backups (OWASP's figure for HMAC-SHA256); a backup names its own count.
 const ROUNDS: u32 = 600_000;
 
-fn ssh_dir() -> Option<PathBuf> {
-    Some(crate::sys::ssh_dir())
-}
-
 /// Where backups made by hand go: Documents/sshremote.
 pub fn folder() -> PathBuf {
     let home = crate::sys::home_dir();
@@ -109,7 +105,9 @@ pub fn create(passphrase: Option<&str>) -> String {
     {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
+            // The crash report is this computer's own, not a setting.
             if name.ends_with(".txt")
+                && name != "crash.txt"
                 && let Ok(text) = std::fs::read_to_string(e.path())
             {
                 files.insert(name, Value::String(text));
@@ -118,7 +116,7 @@ pub fn create(passphrase: Option<&str>) -> String {
     }
     let mut ssh = serde_json::Map::new();
     for name in ["config", "known_hosts"] {
-        if let Some(text) = ssh_dir().and_then(|d| std::fs::read_to_string(d.join(name)).ok()) {
+        if let Ok(text) = std::fs::read_to_string(crate::sys::ssh_dir().join(name)) {
             ssh.insert(name.into(), Value::String(text));
         }
     }
@@ -154,9 +152,7 @@ fn ssh_files() -> Vec<(String, Vec<u8>)> {
         }
     }
     let mut out = Vec::new();
-    if let Some(d) = ssh_dir() {
-        walk(&d, "", 0, &mut out);
-    }
+    walk(&crate::sys::ssh_dir(), "", 0, &mut out);
     out.sort();
     out
 }
@@ -180,11 +176,18 @@ fn put_ssh_file(ssh: &Path, rel: &str, data: &[u8]) -> Result<bool, String> {
         bak.push(".bak");
         std::fs::rename(&path, bak).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Readable by this user only from the start: ssh refuses private keys that others can read.
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(&path).and_then(|mut f| std::io::Write::write_all(&mut f, data)).map_err(|e| format!("{}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // ssh refuses private keys that others can read.
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(true)
@@ -296,7 +299,8 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
         }
         done.push(format!("{} lists", files.len()));
     }
-    if let Some(ssh) = ssh_dir() {
+    {
+        let ssh = crate::sys::ssh_dir();
         let _ = std::fs::create_dir_all(&ssh);
         if let Some(known) = v["ssh"]["known_hosts"].as_str() {
             let here = std::fs::read_to_string(ssh.join("known_hosts")).unwrap_or_default();
@@ -340,7 +344,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
                 done.push(format!("{} passwords", passwords.len()));
                 let files = secrets["ssh"].as_object().cloned().unwrap_or_default();
                 if ssh_files {
-                    let ssh = ssh_dir().ok_or("no home folder")?;
+                    let ssh = crate::sys::ssh_dir();
                     let mut written = 0;
                     let base64 = secrets["encoding"] == "base64";
                     for (rel, data) in &files {

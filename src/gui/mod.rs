@@ -34,7 +34,6 @@ pub(crate) mod look;
 mod lottie;
 #[cfg(test)]
 pub(crate) mod snapshot;
-mod project;
 mod signin;
 mod extui;
 
@@ -110,7 +109,6 @@ pub(crate) mod ic {
     pub const CHECK_CIRCLE: &str = "\u{E184}";
     pub const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
     pub const CODE: &str = "\u{E1BC}";
-    pub const FLOPPY_DISK: &str = "\u{E248}";
     pub const INFO: &str = "\u{E2CE}";
     pub const LIGHTNING: &str = "\u{E2DE}";
     pub const PALETTE: &str = "\u{E6C8}";
@@ -131,71 +129,37 @@ pub(crate) mod ic {
     pub const X: &str = "\u{E4F6}";
 }
 
-/// The logo drawn as vectors in `rect`, crisp at any size, in the colours of `assets/logo.svg`.
-pub(crate) fn paint_logo(painter: &egui::Painter, rect: Rect, dark: bool) {
-    let (top, bottom, chevron, portal, rim) = if dark {
-        (Color32::from_rgb(0x2a, 0x31, 0x3d), Color32::from_rgb(0x17, 0x1b, 0x23), Color32::from_rgb(0x7c, 0xb4, 0xff), Color32::from_rgb(0x4f, 0x7c, 0xf5), Color32::from_white_alpha(30))
-    } else {
-        (Color32::from_rgb(0xf8, 0xfa, 0xfd), Color32::from_rgb(0xe5, 0xeb, 0xf5), Color32::from_rgb(0x4f, 0x8f, 0xf7), Color32::from_rgb(0x36, 0x59, 0xd9), Color32::from_black_alpha(36))
-    };
-    let size = rect.width().min(rect.height());
-    let unit = size / 256.0;
-    let at = |x: f32, y: f32| rect.center() + Vec2::new(x - 128.0, y - 128.0) * unit;
-    // The plate: |u|^5 + |v|^5 = 1, shaded top to bottom.
-    let edge: Vec<Pos2> = (0..64)
-        .map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / 64.0;
-            let f = |c: f32| c.signum() * c.abs().powf(0.4) * 112.0;
-            at(128.0 + f(a.cos()), 128.0 + f(a.sin()))
-        })
-        .collect();
-    let mut mesh = egui::Mesh::default();
-    let shade = |p: Pos2| {
-        let t = ((p.y - rect.center().y) / (224.0 * unit) + 0.5).clamp(0.0, 1.0);
-        top.lerp_to_gamma(bottom, t)
-    };
-    mesh.colored_vertex(rect.center(), shade(rect.center()));
-    for p in &edge {
-        mesh.colored_vertex(*p, shade(*p));
-    }
-    for i in 0..edge.len() as u32 {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % edge.len() as u32);
-    }
-    painter.add(mesh);
-    painter.add(egui::Shape::closed_line(edge, egui::Stroke::new((size / 64.0).max(1.0), rim)));
-    // Small sizes get a larger mark and a heavier line, as the bitmaps do.
-    let k = if size < 40.0 { 0.86 } else { 0.78 };
-    let width = (28.0 * k * unit).max(size / 8.0).min(28.0 * unit);
-    let mark = |x: f32, y: f32| at(128.0 + (x - 128.0) * k, 128.0 + (y - 128.0) * k);
-    let line = |points: Vec<Pos2>, c: Color32| {
-        for p in [points[0], points[points.len() - 1]] {
-            painter.circle_filled(p, width / 2.0, c);
+/// The mark drawn as a line icon in `rect` and `color`, as `assets/logo.svg` draws it on its
+/// 24-unit grid: a prompt chevron entering an open frame.
+pub(crate) fn paint_logo(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let unit = rect.width().min(rect.height()) / 24.0;
+    let at = |x: f32, y: f32| rect.center() + Vec2::new(x - 12.0, y - 12.0) * unit;
+    let stroke = egui::Stroke::new((2.0 * unit).max(1.5), color);
+    let line = |points: Vec<Pos2>| {
+        for p in &points {
+            painter.circle_filled(*p, stroke.width / 2.0, color);
         }
-        painter.add(egui::Shape::line(points, egui::Stroke::new(width, c)));
+        painter.add(egui::Shape::line(points, stroke));
     };
-    let mut frame = vec![mark(104.0, 48.0)];
-    for (cx, cy, from) in [(184.0, 72.0, -90.0f32), (184.0, 184.0, 0.0)] {
+    line(vec![at(5.0, 8.5), at(8.5, 12.0), at(5.0, 15.5)]);
+    let mut frame = vec![at(12.0, 5.0)];
+    for (cx, cy, from) in [(16.0, 8.0, -90.0f32), (16.0, 16.0, 0.0)] {
         frame.extend((0..=8).map(|i| {
             let a = (from + 90.0 * i as f32 / 8.0).to_radians();
-            mark(cx + 24.0 * a.cos(), cy + 24.0 * a.sin())
+            at(cx + 3.0 * a.cos(), cy + 3.0 * a.sin())
         }));
     }
-    frame.push(mark(104.0, 208.0));
-    line(frame, portal);
-    line(vec![mark(48.0, 88.0), mark(88.0, 128.0), mark(48.0, 168.0)], chevron);
-    painter.circle_filled(mark(88.0, 128.0), width / 2.0, chevron);
+    frame.push(at(12.0, 19.0));
+    let (first, last) = (frame[0], frame[frame.len() - 1]);
+    painter.add(egui::Shape::line(frame, stroke));
+    painter.circle_filled(first, stroke.width / 2.0, color);
+    painter.circle_filled(last, stroke.width / 2.0, color);
 }
 
 /// The logo, for the window and the task bar.
 pub(crate) fn app_icon() -> Option<egui::IconData> {
     static ICON: std::sync::OnceLock<Option<egui::IconData>> = std::sync::OnceLock::new();
     ICON.get_or_init(decode_icon).clone()
-}
-
-/// The logo for a light or a dark theme: a light plate, or a dark one with brighter blues.
-pub(crate) fn themed_icon(dark: bool) -> Option<egui::IconData> {
-    static DARK: std::sync::OnceLock<Option<egui::IconData>> = std::sync::OnceLock::new();
-    if dark { DARK.get_or_init(|| decode_png(include_bytes!("../../assets/sshremote-dark.png"))).clone() } else { app_icon() }
 }
 
 fn decode_icon() -> Option<egui::IconData> {
@@ -336,8 +300,6 @@ pub struct App {
     config: Option<crate::tools::ConfigTool>,
     /// What the next connection opens with: its screen, its terminal or its files.
     start_with: Start,
-    /// Why the password typed for this connection was not saved, shown once it starts.
-    save_error: Option<String>,
     /// The first connection opens in full screen (--fullscreen).
     start_fullscreen: bool,
     /// The terminal panel and the chat beside the screen from the start (--open panel, chat).
@@ -365,17 +327,6 @@ pub struct App {
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
     #[cfg_attr(not(windows), allow(dead_code))]
     service: Option<bool>,
-    /// Tabs to open next frame: a project, or the last session at start.
-    restore: Option<serde_json::Value>,
-    /// The open dialog stays over tabs restored at start, as it shows at every start.
-    restore_open: bool,
-    /// The project asked to be deleted, waiting for the second click.
-    project_confirm: Option<String>,
-    /// The main window's tabs as last kept, and when they were looked at.
-    layout: Option<serde_json::Value>,
-    layout_at: Option<Instant>,
-    /// The name typed for saving the open tabs as a project.
-    project_name: String,
 }
 
 impl Form {
@@ -399,8 +350,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let local = opt.local;
     let budget = opt.budget;
     let open = opt.open.clone();
-    let project = opt.project.clone();
-    let size = if auto_start || project.is_some() || project::last().is_some() { [1280.0, 800.0] } else { OPEN_SIZE };
+    let size = if auto_start { [1280.0, 800.0] } else { OPEN_SIZE };
     let native = native_options("SSH Remote", size);
     let r = eframe::run_native(
         "sshremote",
@@ -420,15 +370,6 @@ pub fn run(opt: &Options) -> Result<(), String> {
             crate::access::start_in_app();
             if auto_start {
                 app.connect(local);
-            } else if let Some(name) = &project {
-                match project::load(name) {
-                    Ok(v) => app.restore = Some(v),
-                    Err(e) => app.error = Some(e),
-                }
-            } else {
-                // The tabs open when the window was last closed, as they were.
-                app.restore = project::last();
-                app.restore_open = app.restore.is_some();
             }
             Ok(Box::new(app))
         }),
@@ -673,7 +614,6 @@ impl App {
             torn_terms: Vec::new(),
             keys: None,
             config: None,
-            save_error: None,
             start_with: if open.split_whitespace().any(|w| w == "terminal") {
                 Start::Terminal
             } else if open.split_whitespace().any(|w| w == "files") {
@@ -699,12 +639,6 @@ impl App {
             grab_window: None,
             sized_for: None,
             queued: Vec::new(),
-            restore: None,
-            restore_open: false,
-            project_confirm: None,
-            layout: None,
-            layout_at: None,
-            project_name: String::new(),
         }
     }
 }
@@ -818,22 +752,6 @@ impl eframe::App for App {
                 w.add(launch, place, start);
             }
         }
-        // A project or the last session: its tabs beside any open now.
-        if let Some(v) = self.restore.take() {
-            if !matches!(self.screen, Screen::Work(_)) {
-                self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
-                if !maximized && !fullscreen {
-                    ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
-                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
-                }
-            }
-            if let Screen::Work(w) = &mut self.screen {
-                w.picker = std::mem::take(&mut self.restore_open).then_some(Place::Tab);
-                if w.restore(&v) == 0 {
-                    self.error = Some("Nothing in those tabs could be opened again.".into());
-                }
-            }
-        }
         // System keys caught for a host go to the window whose pane asked for them last frame.
         let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
         let (main_keys, window_keys) = if self.grab_window.is_some() { (Vec::new(), grabbed) } else { (grabbed, Vec::new()) };
@@ -851,15 +769,6 @@ impl eframe::App for App {
                 self.error = Some(e);
             }
             self.open_dialog(&ctx, &mut w);
-            // The tabs are kept as they change, so a crash or a power cut loses nothing.
-            if !self.quit_when_empty && self.layout_at.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
-                self.layout_at = Some(Instant::now());
-                let v = w.to_json();
-                if self.layout.as_ref() != Some(&v) {
-                    project::keep_last(Some(&v));
-                    self.layout = Some(v);
-                }
-            }
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
@@ -1228,7 +1137,7 @@ mod tests {
             w.picker = Some(Place::Tab);
             let mut snap = snapshot::Snap::default();
             let size = Vec2::new(w_, h_);
-            for (section, name) in [(home::Section::New, "new"), (home::Section::Local, "local"), (home::Section::Ssh, "ssh"), (home::Section::Projects, "projects"), (home::Section::Extensions, "extensions"), (home::Section::Tools, "tools")] {
+            for (section, name) in [(home::Section::New, "new"), (home::Section::Local, "local"), (home::Section::Ssh, "ssh"), (home::Section::Extensions, "extensions"), (home::Section::Tools, "tools")] {
                 app.section = section;
                 if section == home::Section::Tools {
                     app.config = Some(crate::tools::ConfigTool::new());
@@ -1265,7 +1174,7 @@ mod tests {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let mut x = 20.0;
                     for s in [16.0, 20.0, 32.0, 48.0, 96.0] {
-                        paint_logo(ui.painter(), Rect::from_min_size(Pos2::new(x, 20.0), Vec2::splat(s)), dark);
+                        paint_logo(ui.painter(), Rect::from_min_size(Pos2::new(x, 20.0), Vec2::splat(s)), ui.visuals().text_color());
                         x += s + 16.0;
                     }
                 });

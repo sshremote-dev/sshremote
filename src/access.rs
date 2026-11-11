@@ -89,7 +89,7 @@ thread_local!(pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const {
 
 /// On Windows the settings are a value under HKLM\SOFTWARE\sshremote: only administrators can
 /// write there, so a standard user cannot plant settings the service (SYSTEM) would trust.
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 mod machine {
     use crate::sys::wide;
     use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegGetValueW};

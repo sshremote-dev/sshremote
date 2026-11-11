@@ -186,15 +186,14 @@ fn unpack(bytes: &[u8]) -> Result<String, String> {
     Ok(v.to_string())
 }
 
-/// The logo layer in the colours of the app icon for the theme (`assets/logo.svg`): its plate
-/// and extruded sides from the plate's shades, the chevron and the portal in the icon's blues.
+/// The logo layer in the colours of the app icon: the plate and its extruded sides in its blue,
+/// the chevron and the frame in white.
 fn theme_logo(v: &mut serde_json::Value, dark: bool) {
     use serde_json::Value;
-    let (low, high, chevron, portal): ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) = if dark {
-        ([0x0f as f64, 0x12 as f64, 0x18 as f64], [0x2a as f64, 0x31 as f64, 0x3d as f64], [0x7c as f64, 0xb4 as f64, 255.0], [0x4f as f64, 0x7c as f64, 0xf5 as f64])
-    } else {
-        ([0xb8 as f64, 0xc3 as f64, 0xd6 as f64], [0xf8 as f64, 0xfa as f64, 0xfd as f64], [0x4f as f64, 0x8f as f64, 0xf7 as f64], [0x36 as f64, 0x59 as f64, 0xd9 as f64])
-    };
+    // The app icon's flat blue for the face, deeper on the sides; the mark in white. A dark
+    // theme takes a slightly brighter blue.
+    let (low, high): ([f64; 3], [f64; 3]) = if dark { ([0x1a as f64, 0x3f as f64, 0xa8 as f64], [0x3b as f64, 0x7b as f64, 0xf6 as f64]) } else { ([0x15 as f64, 0x37 as f64, 0x93 as f64], [0x25 as f64, 0x63 as f64, 0xeb as f64]) };
+    let (chevron, portal) = ([255.0; 3], [255.0; 3]);
     let rgb = |c: [f64; 3]| c.map(|x| x / 255.0);
     // The exported plate runs from about 0.02 to 0.17 in brightness; keep each shade's place.
     let plate = |c: &[f64]| {
@@ -362,8 +361,7 @@ mod tests {
         assert!(built_in("builtin:night-still").is_some() && built_in("builtin:radar-still").is_none());
     }
 
-    /// Lottie files from SSHREMOTE_LOTTIE_DIR drawn halfway through, on a checkered background so
-    /// their transparency shows, into SSHREMOTE_SNAP_DIR; which could not be drawn, and why.
+    /// The built-in title scene on a light and a dark theme, into SSHREMOTE_SNAP_DIR.
     #[test]
     #[ignore = "writes pictures; set SSHREMOTE_SNAP_DIR"]
     fn brand_logo_follows_the_theme() {
@@ -377,6 +375,8 @@ mod tests {
         }
     }
 
+    /// Lottie files from SSHREMOTE_LOTTIE_DIR drawn halfway through, on a checkered background so
+    /// their transparency shows, into SSHREMOTE_SNAP_DIR; which could not be drawn, and why.
     #[test]
     #[ignore]
     fn lottie_files_render() {

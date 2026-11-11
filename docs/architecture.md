@@ -5,7 +5,7 @@ what only some users need, or what can change without the app, is an extension.*
 
 | Layer | Contents | Where it lives |
 |---|---|---|
-| Core | Workspace (tabs, panes, windows), terminal and local shells, SSH hosts and `~/.ssh` tools, saved passwords, projects and session restore, the open dialog, look and themes, the extension host | Built into both editions |
+| Core | Workspace (tabs, panes, windows), terminal and local shells, SSH hosts and `~/.ssh` tools, saved passwords, the open dialog, look and themes, the extension host | Built into both editions |
 | Remote | Agent, screen sharing, files, chat, sound, terminal viewer (`sshremote HOST`), remote access by ID through a relay, the Windows service | Built into **SSH Remote**; the **Remote desktop** extension for **SSH Remote Terminal** |
 | Gateways | Web gateway (`sshremote web`), MCP server (`sshremote mcp`) | Built into full builds with `web`/`mcp`; extensions otherwise |
 | Add-ons | Style packs, WASM scripts, command-line programs, resident extensions (status bar, panels, palette commands, keys, forms, settings) | Always extensions, from the signed registry or a `.sshx` file |

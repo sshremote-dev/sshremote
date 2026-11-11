@@ -1,8 +1,8 @@
 # sshremote
 
 Remote control over the SSH login you already have: a terminal, the host's screen with keyboard and
-mouse, files, and an MCP server for AI agents. No relay, ID server or open port: the viewer runs
-`ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles sent
+mouse, files, and an MCP server for AI agents. Over SSH there is no relay, ID server or open port:
+the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles sent
 in one zstd stream (H.264 only for areas that keep moving).
 
 Hosts: Windows (GDI capture, SendInput) and GNOME on Wayland (Mutter RemoteDesktop, PipeWire).
@@ -53,16 +53,11 @@ What is opened goes into the workspace:
 
 ## Editions
 
-- **SSH Remote** (`--no-default-features --features gui,remote`): everything above built in.
-- **SSH Remote Terminal** (`--features gui`): the terminal and tools; screens, files, chat and
-  sound come as the Remote desktop extension.
-
-## Projects
-
-The open tabs, panes and their folders are kept, and come back at the next start when Projects →
-"Open the last tabs again" is on (off at first, so the app starts on the open dialog alone); named projects
-open with `sshremote --project NAME`. Passwords are never kept with them: a sign-in dialog showing
-the host asks again when one is needed.
+- **SSH Remote** (`--no-default-features --features gui,remote`): everything above built in, except
+  the web gateway and the MCP server, which come as extensions.
+- **SSH Remote Terminal** (`--no-default-features --features gui`): the terminal and tools; screens,
+  files, chat and sound come as the Remote desktop extension.
+- A plain `cargo build` builds everything in (`gui`, `remote`, `web`, `mcp`).
 
 ## Extensions
 

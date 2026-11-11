@@ -39,8 +39,6 @@ pub struct Options {
     pub sound: bool,
     /// Window mode: what the session opens with besides the screen: "terminal" or "files".
     pub open: String,
-    /// Window mode: the saved project whose tabs open.
-    pub project: Option<String>,
 }
 
 /// Where the agent runs.

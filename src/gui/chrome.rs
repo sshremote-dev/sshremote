@@ -52,15 +52,6 @@ pub fn behaviour(ctx: &egui::Context) {
         }
         ctx.data_mut(|d| d.insert_temp(key, seen + 1));
     }
-    // The window's own icon (the task bar's, while it runs) in the theme's variant.
-    let dark = super::theme::dark();
-    let icon_key = egui::Id::unique(("chrome-icon-theme", ctx.viewport_id()));
-    if ctx.data(|d| d.get_temp::<bool>(icon_key)) != Some(dark) {
-        ctx.data_mut(|d| d.insert_temp(icon_key, dark));
-        if let Some(icon) = super::themed_icon(dark) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
-        }
-    }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Space)) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
@@ -140,26 +131,7 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         // The icon opens the system menu, as the system's own title bar does.
         let icon_rect = Rect::from_min_size(bar.min, Vec2::new(40.0, HEIGHT));
         let icon = ui.interact(icon_rect, ui.scope_id().with("chrome-icon"), Sense::click());
-        {
-            // Still, or breathing with a soft glow when the look asks for it.
-            let (scale, glow) = super::look::logo_pulse(&ctx);
-            if glow > 0.0 {
-                let c = super::ACCENT.gamma_multiply(glow);
-                ui.painter().circle_filled(icon_rect.center(), 13.0 * scale, c.gamma_multiply(0.35));
-                ui.painter().circle_stroke(icon_rect.center(), 11.0 * scale, egui::Stroke::new(1.5, c));
-            }
-            let r = Rect::from_center_size(icon_rect.center(), Vec2::splat(20.0 * scale));
-            super::paint_logo(ui.painter(), r, super::theme::dark());
-        }
-        // The window and task bar icon follow the theme too.
-        let dark = super::theme::dark();
-        let seen = egui::Id::unique("chrome-icon-theme");
-        if ctx.data(|d| d.get_temp::<bool>(seen)) != Some(dark) {
-            ctx.data_mut(|d| d.insert_temp(seen, dark));
-            if let Some(i) = super::themed_icon(dark) {
-                ctx.send_viewport_cmd(ViewportCommand::Icon(Some(std::sync::Arc::new(i))));
-            }
-        }
+        super::paint_logo(ui.painter(), Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0)), ui.visuals().text_color());
         if icon.clicked() {
             system_menu(&ctx, Pos2::new(icon_rect.left(), icon_rect.bottom()));
         }

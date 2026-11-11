@@ -5,9 +5,7 @@ use std::io::{BufRead, Write};
 
 /// Concrete `Host` names in ~/.ssh/config (patterns with wildcards or negation are skipped).
 pub fn ssh_config_hosts() -> Vec<String> {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    let Some(path) = home.map(|h| std::path::Path::new(&h).join(".ssh").join("config")) else { return Vec::new() };
-    parse_ssh_hosts(&std::fs::read_to_string(path).unwrap_or_default())
+    parse_ssh_hosts(&std::fs::read_to_string(crate::sys::ssh_dir().join("config")).unwrap_or_default())
 }
 
 fn parse_ssh_hosts(text: &str) -> Vec<String> {

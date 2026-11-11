@@ -172,10 +172,21 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
     let (send, recv) = if viewer { (v2a, a2v) } else { (a2v, v2a) };
     let mut w = SealedWriter { inner: s.try_clone()?, seal: Sealer::new(&send), buf: Vec::new() };
     let mut r = SealedReader { inner: s, seal: Sealer::new(&recv), plain: Vec::new(), at: 0 };
-    w.write_all(CONFIRM)?;
-    w.flush()?;
+    // The viewer proves the password first: the agent answers only a right one, so a guess
+    // cannot be checked against the agent's answer and dropped before it counts as wrong.
     let mut got = [0u8; CONFIRM.len()];
-    r.read_exact(&mut got)?;
+    if viewer {
+        w.write_all(CONFIRM)?;
+        w.flush()?;
+        r.read_exact(&mut got)?;
+    } else {
+        r.read_exact(&mut got)?;
+        if got != CONFIRM {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
+        }
+        w.write_all(CONFIRM)?;
+        w.flush()?;
+    }
     if got != CONFIRM {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
     }
@@ -333,7 +344,9 @@ mod tests {
 
     #[test]
     fn a_wrong_password_is_refused() {
-        let (v, _) = pair("123456789", "987654321");
+        let (v, a) = pair("123456789", "987654321");
         assert!(v.is_err());
+        // The agent sees the wrong proof itself, so the guess counts against the next one.
+        assert_eq!(a.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 }

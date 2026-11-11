@@ -108,7 +108,7 @@ unsafe extern "system" fn collect(hwnd: HWND, list: LPARAM) -> BOOL {
 }
 
 /// Visible windows from the top of the z-order down.
-pub fn z_order() -> Vec<Win> {
+fn z_order() -> Vec<Win> {
     let mut list: Vec<Win> = Vec::new();
     unsafe { EnumWindows(Some(collect), &mut list as *mut Vec<Win> as LPARAM) };
     list

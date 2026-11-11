@@ -656,8 +656,13 @@ fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
 
 /// Checks `data` against an ssh signature by `key` in `namespace`.
 pub fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("sshremote-verify-{}-{:?}", std::process::id(), std::thread::current().id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // In this user's own settings folder: in the shared temp folder another user could put
+    // their own allowed signers in its place.
+    let base = crate::hosts::config_dir().ok_or("no settings folder")?;
+    let dir = base.join(format!("verify-{}-{:?}", std::process::id(), std::thread::current().id()));
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
     let signers = dir.join("allowed_signers");
     let sig_file = dir.join("index.sig");
     let r = (|| {
@@ -1038,13 +1043,11 @@ impl ExtTool {
             ui.add_space(6.0);
         }
         let mut act: Act = None;
-        let mut to_installed = false;
         match self.tab {
             ExtTab::Installed => self.installed_tab(ui, &installed, &offers, &mut act),
-            ExtTab::Browse => self.browse_tab(ui, &installed, &mut act, &mut to_installed),
-            ExtTab::Manage => self.manage_tab(ui, &mut act, &mut to_installed),
+            ExtTab::Browse => self.browse_tab(ui, &installed, &mut act),
+            ExtTab::Manage => self.manage_tab(ui, &mut act),
         }
-        let _ = to_installed;
         // Work runs in the background and the list stays where it is, the card showing its state.
         if let Some(f) = act {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1071,8 +1074,7 @@ impl ExtTool {
     }
 
     fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
-        let mut to_installed = false;
-        self.parts_card(ui, act, &mut to_installed);
+        self.parts_card(ui, act);
         ui.add_space(10.0);
         ui.label(RichText::new(format!("Added extensions ({})", installed.len())).strong());
         ui.label(RichText::new("Installed by you from the registry or a package file; each can be removed.").weak().size(12.0));
@@ -1237,7 +1239,7 @@ impl ExtTool {
         }
     }
 
-    fn browse_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], act: &mut Act, _to_installed: &mut bool) {
+    fn browse_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], act: &mut Act) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("From the signed registry").weak().size(12.0));
             if ui.small_button(format!("{}  Look again", ic::ARROWS_CLOCKWISE)).clicked() {
@@ -1337,7 +1339,7 @@ impl ExtTool {
 
     /// What this app is made of: the core, always here; and each part beyond it, built in or
     /// brought by an extension, which can be turned off.
-    fn parts_card(&mut self, ui: &mut egui::Ui, act: &mut Act, to_installed: &mut bool) {
+    fn parts_card(&mut self, ui: &mut egui::Ui, act: &mut Act) {
         let offers: Vec<Offer> = self.offers.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
         card(ui, |ui| {
             ui.label(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong());
@@ -1349,7 +1351,7 @@ impl ExtTool {
             ui.add_space(4.0);
             egui::Grid::new("parts").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.add_enabled(false, egui::Checkbox::new(&mut true, "Core"));
-                ui.label(RichText::new("Terminals, SSH hosts, projects, the tools, extensions").weak().size(12.0));
+                ui.label(RichText::new("Terminals, SSH hosts, the tools, extensions").weak().size(12.0));
                 tag(ui, "Built in", crate::gui::good());
                 ui.end_row();
                 for (id, name, what) in crate::modules::ALL {
@@ -1367,7 +1369,6 @@ impl ExtTool {
                         if ui.small_button(format!("{}  Get {}", ic::DOWNLOAD, o.name)).clicked() {
                             let o = o.clone();
                             *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed.", m.name, m.version))));
-                            *to_installed = true;
                         }
                     } else {
                         tag(ui, "Needs an extension", crate::gui::bad());
@@ -1378,7 +1379,7 @@ impl ExtTool {
         });
     }
 
-    fn manage_tab(&mut self, ui: &mut egui::Ui, act: &mut Act, to_installed: &mut bool) {
+    fn manage_tab(&mut self, ui: &mut egui::Ui, act: &mut Act) {
         card(ui, |ui| {
             ui.label(RichText::new(format!("{}  Install a package file", ic::UPLOAD)).strong());
             ui.label(RichText::new("A .sshx file someone gave you, or one you made with sshremote ext pack.").weak().size(12.0));
@@ -1387,7 +1388,6 @@ impl ExtTool {
                 if ui.add_enabled(!self.file.trim().is_empty(), egui::Button::new("Install")).clicked() {
                     let f = self.file.trim().trim_matches('"').to_string();
                     *act = Some(Box::new(move || install_file(Path::new(&f)).map(|m| format!("{} {} installed. How to use it is shown on its card.", m.name, m.version))));
-                    *to_installed = true;
                 }
             });
         });

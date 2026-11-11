@@ -36,7 +36,7 @@ pub struct Session {
     link: Link,
     writer: Option<BufWriter<Box<dyn Write + Send>>>,
     errlog: Arc<Mutex<Vec<u8>>>,
-    pub rx_bytes: Arc<AtomicU64>,
+    rx_bytes: Arc<AtomicU64>,
     pub tx_bytes: u64,
     pub desk: (u16, u16),
     pub backend: String,

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Docs: SSH Remote</title>
-<meta name="description" content="Getting started with SSH Remote: SSH and relay connections, projects, extensions, MCP and security.">
+<meta name="description" content="Getting started with SSH Remote: SSH and relay connections, extensions, MCP and security.">
 <meta name="theme-color" content="#0e0e10">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
@@ -33,7 +33,6 @@
   <a href="#start">Getting started</a>
   <a href="#ssh">Connecting by SSH</a>
   <a href="#relay">Connecting by ID</a>
-  <a href="#projects">Projects</a>
   <a href="#extensions">Using extensions</a>
   <a href="#build">Building extensions</a>
   <a href="#mcp">MCP for AI agents</a>
@@ -79,11 +78,6 @@ sshremote sshremote://ID@sshremote.dev --password P</code></pre>
   <pre class="cmd"><code>sshremote --relay --listen 0.0.0.0:7071 --store /var/lib/sshremote/ids.json</code></pre>
   <p class="dim small">The older one-off way, <code>sshremote --serve</code>, still waits for a single viewer with a one-time password.</p>
 
-  <h2 id="projects">Projects</h2>
-  <p>The open tabs, splits, what each pane runs, the folder its shell was in and its view are kept as the last session and come back at the next start. Save them as a named project from the Projects page of the open dialog or the command palette, and open it again with:</p>
-  <pre class="cmd"><code>sshremote --project NAME</code></pre>
-  <p>A project keeps hosts, ports and options, never a password: when a host asks for one, a sign-in dialog names the host, user, port and purpose.</p>
-
   <h2 id="extensions">Using extensions</h2>
   <p>Browse the <a href="extensions.html">extension list</a>, or open <b>Extensions</b> in the app's open dialog (tabs Installed, Browse and Manage). From the command line:</p>
   <pre class="cmd"><code>sshremote ext available          # what the signed registry offers
@@ -106,7 +100,7 @@ sshremote ext dev my-extension</code></pre>
     <details open><summary>Is anything sent to a server of yours?</summary><p>Not over SSH: the connection is your own SSH session from end to end. Only the ID and password mode uses the relay.</p></details>
     <details><summary>What can the relay see?</summary><p>Nothing it could read. The viewer and host agree on a key from the password with SPAKE2, so the password never crosses the network, and seal every message with ChaCha20-Poly1305. The relay only pairs the two and copies sealed bytes.</p></details>
     <details><summary>Can someone take over my ID or guess the password?</summary><p>An ID is held at the relay by a secret token only your computer has. Each wrong password is answered more slowly than the last, and the relay limits the attempts from each address.</p></details>
-    <details><summary>Are passwords stored?</summary><p>Projects and sessions never hold one. Passwords you choose to save go to the system's password store, and backups of <code>~/.ssh</code> are encrypted under a passphrase.</p></details>
+    <details><summary>Are passwords stored?</summary><p>Not unless you choose to. Passwords you choose to save go to the system's password store, and backups of <code>~/.ssh</code> are encrypted under a passphrase.</p></details>
     <details><summary>How are extensions checked?</summary><p>The registry's index is signed, each package is checked by its SHA-256, and native extensions are packed per platform. At run time every request is held to the manifest's permissions.</p></details>
     <details><summary>Which systems work?</summary><p>Hosts: Windows and GNOME on Wayland. Viewers: the native window on Windows and Linux, or a sixel terminal such as Windows Terminal, WezTerm, foot or VTE.</p></details>
   </div>

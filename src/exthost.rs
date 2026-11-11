@@ -228,7 +228,8 @@ fn run_copy(id: &str, program: &std::path::Path) -> Result<std::path::PathBuf, S
     let meta = std::fs::metadata(program).map_err(|e| format!("{}: {e}", program.display()))?;
     let when = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
     let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let dir = std::env::temp_dir().join("sshremote-extensions").join(id);
+    // Under this user's own settings folder, where no other user can put a program to be run.
+    let dir = crate::hosts::config_dir().ok_or("no settings folder")?.join("run").join(id);
     let copy = dir.join(format!("{when}-{}-{name}", meta.len()));
     if !copy.is_file() {
         // Earlier versions' copies go, unless one still runs.
@@ -468,7 +469,12 @@ fn handle(ext: &str, msg: &Value) {
             Ok(Value::Null)
         }),
         "exit" => {
+            // Gone at once; its process is ended and waited for so none is left behind.
+            let r = with(|s| s.running.iter().position(|r| r.id == ext).map(|i| s.running.remove(i)));
             forget(ext);
+            if let Some(r) = r {
+                std::thread::spawn(move || end(r));
+            }
             return;
         }
         other => Err(format!("unknown method {other}")),
@@ -639,16 +645,21 @@ pub fn stop(ext: &str) {
         let i = s.running.iter().position(|r| r.id == ext)?;
         Some(s.running.remove(i))
     });
-    if let Some(mut r) = r {
-        drop(r.stdin);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-        while std::time::Instant::now() < deadline && matches!(r.child.try_wait(), Ok(None)) {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let _ = r.child.kill();
-        let _ = r.child.wait();
+    if let Some(r) = r {
+        end(r);
     }
     forget(ext);
+}
+
+/// Its input closed, a moment to finish, then ended and waited for.
+fn end(mut r: Running) {
+    drop(r.stdin);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    while std::time::Instant::now() < deadline && matches!(r.child.try_wait(), Ok(None)) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = r.child.kill();
+    let _ = r.child.wait();
 }
 
 /// Stops them all (the app is closing).

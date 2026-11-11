@@ -1,5 +1,5 @@
-//! The terminal window: shells on the remote host in tabs, drawn with
-//! Alacritty's terminal emulator. Bytes travel over the session's connection.
+//! The terminal window: shells in tabs, drawn with Alacritty's terminal emulator. A tab runs a
+//! local program (a shell, or `ssh HOST`) or a shell on the host through the agent's connection.
 
 use std::sync::mpsc;
 
@@ -308,65 +308,6 @@ enum View {
     Markdown,
 }
 
-/// Windows shells told to say their folder as they do for Windows Terminal (OSC 9;9), so a project
-/// opens them there again: PowerShell through its prompt, kept as the user has it, and the
-/// Command Prompt through PROMPT.
-fn says_folder(argv: &[String]) -> Vec<String> {
-    let mut v = argv.to_vec();
-    let exe = argv.first().map(|a| a.to_lowercase()).unwrap_or_default();
-    let ps = exe.ends_with("powershell.exe") || exe.ends_with("pwsh.exe");
-    if cfg!(windows) && ps && !argv.iter().any(|a| a.eq_ignore_ascii_case("-command") || a.eq_ignore_ascii_case("-c") || a.eq_ignore_ascii_case("-file")) {
-        let wrap = "$global:__sshremote_prompt = $function:prompt; function global:prompt { $l = $executionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') { [Console]::Write([char]27 + ']9;9;' + $l.ProviderPath + [char]27 + [char]92) }; & $global:__sshremote_prompt }";
-        v.extend(["-NoExit".to_string(), "-Command".to_string(), wrap.to_string()]);
-    }
-    if cfg!(windows) && exe.ends_with("cmd.exe") && argv.len() == 1 {
-        // Read by the Command Prompts started from here; the prompt they show stays as it was.
-        const SAY: &str = "$E]9;9;$P$E\\";
-        let was = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
-        if !was.starts_with(SAY) {
-            unsafe { std::env::set_var("PROMPT", format!("{SAY}{was}")) };
-        }
-    }
-    v
-}
-
-/// The folder a shell last said it is in: OSC 9;9 (`ESC ] 9 ; 9 ; PATH`, as for Windows Terminal)
-/// or OSC 7 (`ESC ] 7 ; file://HOST/PATH`), each ended by BEL or ST.
-fn osc7(data: &[u8]) -> Option<String> {
-    let nine = data.windows(6).rposition(|w| w == b"\x1b]9;9;");
-    let seven = data.windows(4).rposition(|w| w == b"\x1b]7;");
-    if let Some(n) = nine.filter(|n| seven.is_none_or(|s| *n > s)) {
-        let rest = &data[n + 6..];
-        let end = rest.iter().position(|&b| b == 0x07 || b == 0x1b)?;
-        let path = std::str::from_utf8(&rest[..end]).ok()?.trim_matches('"');
-        return (!path.is_empty()).then(|| path.to_string());
-    }
-    let start = seven? + 4;
-    let rest = &data[start..];
-    let end = rest.iter().position(|&b| b == 0x07 || b == 0x1b)?;
-    let uri = std::str::from_utf8(&rest[..end]).ok()?;
-    let path = uri.strip_prefix("file://")?;
-    let path = &path[path.find('/')?..];
-    let mut out = Vec::new();
-    let b = path.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16)
-        {
-            out.push(v);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    let path = String::from_utf8(out).ok()?;
-    // file:///C:/Users/x on Windows is C:/Users/x.
-    let win = path.len() > 2 && path.as_bytes()[2] == b':' && path.starts_with('/');
-    Some(if win { path[1..].replace('/', "\\") } else { path })
-}
-
 /// Find in the scrollback, as Ctrl+Shift+F in Windows Terminal.
 #[derive(Default)]
 struct Search {
@@ -395,11 +336,9 @@ struct Tab {
     dir: Option<bool>,
     /// What it runs, to open the same in a new pane.
     profile: Profile,
-    /// The folder its shell said it is in (OSC 7), kept with a project.
-    cwd: Option<String>,
     /// Bumped by output, so the text and Markdown views rebuild only after a change.
     rev: u64,
-    /// The text view's text and the Markdown view's document, for `rev` and the session choice.
+    /// The text view's text and the Markdown view's document, for `rev` and the rows cleared by hand.
     reading: Option<Reading>,
     /// Text an input method is composing (Korean, Japanese, Chinese), drawn at the cursor.
     preedit: String,
@@ -537,8 +476,6 @@ pub struct TermWindow {
     pub bare: bool,
     /// The view the first tab starts in (`sshremote terminal --view`), once it is there.
     pub start_view: Option<String>,
-    /// The folder the first tab's program starts in (a project opened again).
-    pub start_cwd: Option<String>,
     /// Whether keys typed in this window go to the shell; a window that shows the terminal beside
     /// something else (the remote screen) turns it off while that has the keyboard.
     pub keys_on: bool,
@@ -600,31 +537,6 @@ impl TermWindow {
     }
 
     /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
-    /// What the first tab runs and the view it shows ("terminal", "text", "markdown"), to open
-    /// the same again later.
-    pub fn saved(&self) -> Option<(Profile, &'static str, Option<String>)> {
-        let Some(tab) = self.tabs.first() else {
-            // Not started yet: what it will run, in the view it will start in.
-            let (profile, _) = self.pending.first()?;
-            let view = match self.start_view.as_deref() {
-                Some("text") => "text",
-                Some("markdown") => "markdown",
-                _ => "terminal",
-            };
-            return Some((profile.clone(), view, self.start_cwd.clone()));
-        };
-        let view = match tab.view {
-            View::Terminal => "terminal",
-            View::Text => "text",
-            View::Markdown => "markdown",
-        };
-        let cwd = tab.cwd.clone().or_else(|| match &tab.backend {
-            Backend::Local(l) => l.cwd(),
-            _ => None,
-        });
-        Some((tab.profile.clone(), view, cwd))
-    }
-
     pub fn single(profile: Profile) -> Self {
         let mut w = Self::standalone(profile, Vec::new());
         w.standalone = false;
@@ -643,7 +555,6 @@ impl TermWindow {
         TermWindow {
             bare: false,
             start_view: None,
-            start_cwd: None,
             keys_on: true,
             tabs: Vec::new(),
             active: 0,
@@ -813,9 +724,7 @@ impl TermWindow {
             }
             Launch::Local(argv) => {
                 let waker = ctx.clone();
-                let dir = self.start_cwd.take();
-                let argv = &says_folder(argv);
-                match crate::pty::Local::spawn_in(argv, dir.as_deref(), size.0, size.1, Box::new(move || waker.request_repaint())) {
+                match crate::pty::Local::spawn(argv, size.0, size.1, Box::new(move || waker.request_repaint())) {
                     Ok(l) => (Backend::Local(l), None),
                     Err(e) => (Backend::Agent, Some(format!("cannot start {}: {e}", profile.name))),
                 }
@@ -834,7 +743,6 @@ impl TermWindow {
             view: View::Terminal,
             search: None,
             preedit: String::new(),
-            cwd: None,
             typed_at: 0.0,
             seek: None,
             nav_keys: true,
@@ -999,9 +907,6 @@ impl TermWindow {
             if let Backend::Local(l) = &mut t.backend {
                 let (data, exit) = l.drain();
                 if !data.is_empty() {
-                    if let Some(dir) = osc7(&data) {
-                        t.cwd = Some(dir);
-                    }
                     t.collect.saw(&data);
                     t.parser.advance(&mut t.term, &data);
                     t.rev += 1;
@@ -1675,16 +1580,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shells_say_their_folder() {
-        assert_eq!(osc7(b"x\x1b]7;file://host/home/a/my%20dir\x07$ ").as_deref(), Some("/home/a/my dir"));
-        assert_eq!(osc7(b"\x1b]7;file://pc/C:/Users/x\x1b\\").as_deref(), Some("C:\\Users\\x"));
-        assert_eq!(osc7(b"\x1b]7;file://h/a\x07 \x1b]7;file://h/b\x07").as_deref(), Some("/b"), "the last one");
-        assert_eq!(osc7(b"plain output"), None);
-        assert_eq!(osc7(b"\x1b]9;9;C:\\Program Files\x1b\\C:\\Program Files>").as_deref(), Some("C:\\Program Files"));
-        assert_eq!(osc7(b"\x1b]7;file://h/a\x07\x1b]9;9;\"D:\\x\"\x07").as_deref(), Some("D:\\x"), "the later one");
-    }
-
-    #[test]
     fn tab_titles_are_short() {
         assert_eq!(tab_title(r"Administrator: C:\WINDOWS\System32\WindowsPowerShell1.0\powershell.exe"), "powershell");
         assert_eq!(tab_title("a@server: ~"), "a@server: ~");
@@ -2168,12 +2063,12 @@ mod tests {
             return;
         }
         let prompt = std::env::var("SSHREMOTE_CLAUDE_PROMPT").unwrap_or_else(|_| {
-            "Without using any tools, answer in Markdown: a heading, two paragraphs, a bulleted list of five items,              a table of four rows, and a 40-line Rust example in a code block, then a short summary."
+            "Without using any tools, answer in Markdown: a heading, two paragraphs, a bulleted list of five items, a table of four rows, and a 40-line Rust example in a code block, then a short summary."
                 .into()
         });
-        // Claude Code starts in D:\Projects (the child keeps this directory), the prompt one argument.
-        let _ = std::env::set_current_dir("D:\\Projects");
-        let profile = Profile { name: "claude".into(), icon: ic::TERMINAL, launch: Launch::Local(vec!["cmd".into(), "/c".into(), "cd".into(), "/d".into(), "D:\\Projects".into(), "&".into(), "claude".into(), prompt]) };
+        // Claude Code starts in SSHREMOTE_CLAUDE_DIR (the current folder when unset), the prompt one argument.
+        let dir_arg = std::env::var("SSHREMOTE_CLAUDE_DIR").unwrap_or_else(|_| ".".into());
+        let profile = Profile { name: "claude".into(), icon: ic::TERMINAL, launch: Launch::Local(vec!["cmd".into(), "/c".into(), "cd".into(), "/d".into(), dir_arg, "&".into(), "claude".into(), prompt]) };
         let mut w = TermWindow::single(profile);
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
