@@ -263,25 +263,31 @@ impl App {
         match self.section {
             Section::New => self.new_section(ui, &mut go),
             Section::Local => {
-                ui.label(RichText::new("This computer").size(16.0).strong());
-                ui.add_space(6.0);
-                let row = place_row;
-                for p in crate::termwin::local_profiles() {
-                    if row(ui, p.icon, &p.name, "A terminal here") {
-                        go = Some((String::new(), String::new(), How::Local(p.clone())));
+                egui::ScrollArea::vertical().id_salt("local").auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_max_width((ui.available_width() - 14.0).min(760.0));
+                    ui.label(RichText::new("This computer").size(16.0).strong());
+                    ui.add_space(6.0);
+                    self.access_card(ui);
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Open here").strong());
+                    let row = place_row;
+                    for p in crate::termwin::local_profiles() {
+                        if row(ui, p.icon, &p.name, "A terminal here") {
+                            go = Some((String::new(), String::new(), How::Local(p.clone())));
+                        }
                     }
-                }
-                ui.separator();
-                if PaneMode::Screen.on() && row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
-                    go = Some((String::new(), String::new(), How::This(PaneMode::Screen)));
-                }
-                if PaneMode::Files.on() && row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
-                    go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
-                }
-                // A synthetic screen for trying the viewer, in development builds only.
-                if cfg!(feature = "test-desktop") && row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
-                    go = Some((String::new(), String::new(), How::TestDesktop));
-                }
+                    ui.separator();
+                    if PaneMode::Screen.on() && row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
+                        go = Some((String::new(), String::new(), How::This(PaneMode::Screen)));
+                    }
+                    if PaneMode::Files.on() && row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
+                        go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
+                    }
+                    // A synthetic screen for trying the viewer, in development builds only.
+                    if cfg!(feature = "test-desktop") && row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
+                        go = Some((String::new(), String::new(), How::TestDesktop));
+                    }
+                });
             }
             Section::Ssh => self.ssh_section(ui, &mut go),
             Section::Projects => self.projects_section(ui),
@@ -511,14 +517,30 @@ impl App {
         ui.add_space(6.0);
         let host = ui.add(
             egui::TextEdit::singleline(&mut self.form.host)
-                .hint_text("user@host  or an ~/.ssh/config alias")
+                .hint_text("user@host, an ~/.ssh/config alias, or a remote access ID")
                 .desired_width(ui.available_width())
                 .margin(egui::Margin::symmetric(8, 7)),
         );
         let enter = host.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        // Digits only: an ID that remote access gave another computer, reached through the relay.
+        let digits: String = self.form.host.chars().filter(|c| !c.is_whitespace()).collect();
+        let by_id = (6..=12).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+        #[cfg(feature = "remote")]
+        let target = if by_id { crate::access::address(&digits, &crate::access::load().relay) } else { self.form.host.clone() };
+        #[cfg(not(feature = "remote"))]
+        let target = self.form.host.clone();
+        ui.label(
+            RichText::new(if by_id {
+                "A remote access ID: its screen and files open through the relay, with the password set on that computer."
+            } else {
+                "SSH: one host you reach directly, signed in with your keys or a password."
+            })
+            .weak()
+            .size(12.0),
+        );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            for mode in PaneMode::ALL.into_iter().filter(|m| m.on()) {
+            for mode in PaneMode::ALL.into_iter().filter(|m| m.on() && !(by_id && *m == PaneMode::Terminal)) {
                 let b = theme::primary(format!("{}  {}", mode.glyph(), mode.name())).min_size(Vec2::new(0.0, 32.0));
                 if ui.add(b).clicked() || (enter && mode == PaneMode::Terminal) {
                     let how = match mode {
@@ -526,10 +548,13 @@ impl App {
                         PaneMode::Screen => How::Screen,
                         PaneMode::Files => How::Files,
                     };
-                    *go = Some((self.form.host.clone(), self.form.port.clone(), how));
+                    *go = Some((target.clone(), self.form.port.clone(), how));
                 }
             }
-            if icon(ui, ic::ARROW_SQUARE_OUT, "The system's own terminal (ssh)", false).clicked() {
+            if by_id && enter {
+                *go = Some((target.clone(), self.form.port.clone(), How::Screen));
+            }
+            if !by_id && icon(ui, ic::ARROW_SQUARE_OUT, "The system's own terminal (ssh)", false).clicked() {
                 *go = Some((self.form.host.clone(), self.form.port.clone(), How::System));
             }
         });

@@ -72,13 +72,13 @@ pub fn install() -> Result<(), String> {
             "obj=",
             "LocalSystem",
             "DisplayName=",
-            "sshremote remote desktop",
+            "SSH Remote",
         ],
     )
     .map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run(
         "sc",
-        &["description", NAME, "Starts the sshremote screen helper in the console session and sends Ctrl+Alt+Del"],
+        &["description", NAME, "SSH Remote: remote access by ID, the screen helper at the sign-in screen, and Ctrl+Alt+Del"],
     );
     // SoftwareSASGeneration = 1: services may simulate Ctrl+Alt+Del.
     run("reg", &["add", POLICY_KEY, "/v", "SoftwareSASGeneration", "/t", "REG_DWORD", "/d", "1", "/f"])?;
@@ -122,6 +122,16 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     let name = wide(NAME);
     unsafe { STATUS = RegisterServiceCtrlHandlerExW(name.as_ptr(), Some(control), null_mut()) };
     report(SERVICE_RUNNING);
+    // Remote access by ID, from start-up and at the sign-in screen, while it is turned on.
+    std::thread::spawn(|| {
+        loop {
+            let on = || Some(crate::access::load()).filter(|c| c.enabled);
+            if on().is_some() {
+                crate::access::run(on);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    });
     serve();
     report(SERVICE_STOPPED);
 }

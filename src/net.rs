@@ -8,7 +8,7 @@
 //! and from then on only copies bytes.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -177,6 +177,11 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
     Ok((r, w))
 }
 
+/// The agent's side of the handshake, for remote access by ID.
+pub fn handshake_agent(stream: TcpStream, password: &str) -> io::Result<(SealedReader, SealedWriter)> {
+    handshake(stream, password, false)
+}
+
 fn relay_hello(stream: &mut TcpStream, role: &str, id: &str) -> io::Result<()> {
     writeln!(stream, "{role} {id}")?;
     // Byte by byte: a buffered reader could take in the start of the handshake that follows.
@@ -264,25 +269,54 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
 }
 
 /// `sshremote --relay`: pairs agents and viewers by ID and copies bytes between them.
-pub fn relay(listen: Option<&str>) -> Result<(), String> {
+pub fn relay(listen: Option<&str>, store: Option<&str>) -> Result<(), String> {
     let addr = listen.unwrap_or("0.0.0.0:7071");
     let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
     println!("sshremote relay listening on {addr}");
     let waiting: Arc<Mutex<HashMap<String, (TcpStream, std::time::Instant)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let hub = Arc::new(Mutex::new(crate::access::relay::Hub::new(store.map(std::path::PathBuf::from))));
+    let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for s in listener.incoming().flatten() {
-        let waiting = waiting.clone();
+        // A cap on connections at once, so a flood cannot take the machine's threads.
+        if open.load(std::sync::atomic::Ordering::Relaxed) > 4000 {
+            continue;
+        }
+        let (waiting, hub, open) = (waiting.clone(), hub.clone(), open.clone());
+        open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         thread::spawn(move || {
-            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
-            let mut line = String::new();
-            if BufReader::new(&s).read_line(&mut line).is_err() {
-                return;
+            struct Done(Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
+            let _done = Done(open);
+            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut s = s;
+            // Byte by byte: what follows the line belongs to the handshake.
+            let mut raw = Vec::new();
+            let mut b = [0u8; 1];
+            while raw.len() < 256 {
+                match s.read(&mut b) {
+                    Ok(1) if b[0] == 10 => break,
+                    Ok(1) => raw.push(b[0]),
+                    _ => return,
+                }
+            }
+            let line = String::from_utf8_lossy(&raw).to_string();
             let _ = s.set_read_timeout(None);
             let (role, id) = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
                 [role @ ("agent" | "viewer"), id] if id.len() <= 32 => (role.to_string(), id.to_string()),
-                _ => return,
+                _ => {
+                    crate::access::relay::handle(&hub, s, &line);
+                    return;
+                }
             };
-            let mut s = s;
+            // A viewer for an ID listening the newer way goes to remote access.
+            if role == "viewer" && !waiting.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
+                crate::access::relay::handle(&hub, s, &line);
+                return;
+            }
             if role == "agent" {
                 let mut w = waiting.lock().unwrap_or_else(|e| e.into_inner());
                 // Agents that waited a day without a viewer are gone or will reconnect.

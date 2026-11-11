@@ -22,6 +22,7 @@ use crate::options::Target;
 
 pub(crate) mod chrome;
 mod home;
+mod access_ui;
 #[cfg(feature = "remote")]
 mod remote;
 #[cfg(not(feature = "remote"))]
@@ -318,6 +319,8 @@ pub struct App {
     vault: Option<crate::tools::VaultTool>,
     backup: Option<crate::tools::BackupTool>,
     exts: Option<crate::ext::ExtTool>,
+    /// The Remote access card's state.
+    access: access_ui::AccessUi,
     /// Whether the sshremote service is installed here, looked up when the tools menu opens.
     #[cfg_attr(not(windows), allow(dead_code))]
     service: Option<bool>,
@@ -371,6 +374,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
             std::thread::spawn(crate::backup::auto);
             let ctx = cc.egui_ctx.clone();
             crate::exthost::start(move || ctx.request_repaint());
+            // Remote access by ID while this window is open, when it is on and no service runs it.
+            #[cfg(feature = "remote")]
+            crate::access::start_in_app();
             if auto_start {
                 app.connect(local);
             } else if let Some(name) = &project {
@@ -574,9 +580,15 @@ fn friendly(e: &str) -> (String, &'static str) {
     } else if l.contains("host key verification failed") {
         "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
     } else if l.contains("wrong password") {
-        "The password does not match the one shown by sshremote --serve on the host."
-    } else if l.contains("no agent with that id") {
-        "No sshremote --serve with that ID is waiting at the relay."
+        "The password does not match the one set on that computer (This computer > Remote access by ID)."
+    } else if l.contains("no agent with that id") || l.contains("relay: offline") {
+        "That ID is not at the relay now: the computer is off, offline, or has remote access turned off."
+    } else if l.contains("relay: the computer did not answer") {
+        "The computer is at the relay but did not answer. Try again in a moment."
+    } else if l.contains("too many attempts") {
+        "Too many tries from here in a minute. Wait a minute, then try again."
+    } else if l.contains(":7071") {
+        "The relay could not be reached. Check the network; a firewall may block port 7071."
     } else if l.contains("no frame") || l.contains("no interactive desktop") || l.contains("logged") {
         "Nobody is signed in to the SSH host's desktop, or it is locked."
     } else if l.contains("did not answer within") {
@@ -636,6 +648,7 @@ impl App {
             vault: None,
             backup: None,
             exts: None,
+            access: Default::default(),
             service: None,
             section: home::Section::Ssh,
             windows: Vec::new(),

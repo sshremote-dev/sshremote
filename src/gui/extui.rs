@@ -333,7 +333,7 @@ mod tests {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.1), ..Default::default() };
             snap.frame(&ctx, input, |ui| {
                 let th = crate::markdown::Theme::terminal(ui.visuals().panel_fill, ui.visuals().text_color());
-                crate::markdown::show(ui, &doc, egui::Id::new("items"), &th);
+                crate::markdown::show(ui, &doc, egui::Id::unique("items"), &th);
             });
         }
         for text in ["db", "5432 > localhost:5432", "Stop", "Shell", "web", "Start"] {

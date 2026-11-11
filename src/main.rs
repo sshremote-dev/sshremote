@@ -1,5 +1,7 @@
 // A build with only some parts leaves helpers the others use unused.
 #![cfg_attr(not(all(feature = "gui", feature = "remote")), allow(dead_code, unused_imports))]
+#[cfg(feature = "remote")]
+mod access;
 mod admin;
 #[cfg(feature = "remote")]
 mod agent;
@@ -99,7 +101,9 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
                                   wait for viewers without ssh (prints a one-time password)
-       sshremote --relay [--listen ADDR]  pair agents and viewers behind NAT
+       sshremote --relay [--listen ADDR] [--store FILE]  pair agents and viewers behind NAT
+       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|install|uninstall]
+                                       this computer reachable by ID and password through a relay
        sshremote sshremote://HOST[:PORT] --password P     view a --serve agent directly
        sshremote sshremote://ID@RELAY[:PORT] --password P view one through a relay
 
@@ -416,7 +420,13 @@ fn run(args: &[String]) -> Result<(), String> {
             net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
         }
         #[cfg(feature = "remote")]
-        "--relay" => net::relay(options(&args[1..], &["--listen"])?.get("--listen").map(String::as_str)),
+        "--relay" => {
+            let o = options(&args[1..], &["--listen", "--store"])?;
+            net::relay(o.get("--listen").map(String::as_str), o.get("--store").map(String::as_str))
+        }
+        // Remote access by ID through a relay: its settings, and the loop a service runs.
+        #[cfg(feature = "remote")]
+        "remote-access" => access::cli(&args[1..]),
         #[cfg(all(feature = "gui", feature = "remote"))]
         "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into())),
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
