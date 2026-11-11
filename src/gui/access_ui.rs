@@ -45,9 +45,16 @@ fn in_background<T: Send + 'static>(slot: &Shared<Option<T>>, busy: &'static std
     }
     let (slot, ctx) = (slot.clone(), ctx.clone());
     std::thread::spawn(move || {
+        // Free again even if the lookup panics.
+        struct Free(&'static std::sync::atomic::AtomicBool);
+        impl Drop for Free {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _free = Free(busy);
         let v = look();
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
-        busy.store(false, Ordering::Release);
         ctx.request_repaint();
     });
 }
@@ -217,6 +224,7 @@ impl App {
                     if b.on_hover_text("The installed service runs another copy of sshremote; this one has what it lacks").on_disabled_hover_text("Needs administrator rights").clicked() {
                         self.error = access::install_service().err().map(|e| format!("Service: {e}"));
                         self.access.service_looked = None;
+                        *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         self.service = None;
                     }
                 } else if service {
@@ -224,6 +232,7 @@ impl App {
                     if ui.add_enabled(admin, egui::Button::new("Remove")).on_disabled_hover_text("Needs administrator rights").clicked() {
                         self.error = access::uninstall_service().err().map(|e| format!("Service: {e}"));
                         self.access.service_looked = None;
+                        *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         self.service = None;
                     }
                 } else if admin {
@@ -232,6 +241,7 @@ impl App {
                         let _ = access::save(&cfg);
                         self.error = access::install_service().err().map(|e| format!("Service: {e}"));
                         self.access.service_looked = None;
+                        *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         self.service = None;
                     }
                 } else if ui.add(theme::primary(format!("{}  Restart as administrator to install", ic::SHIELD_CHECK))).clicked() {
@@ -253,8 +263,8 @@ impl App {
             egui::Grid::new("access-more-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label(RichText::new("Your own password").weak());
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.access.new_password).password(true).hint_text("6 characters or more").desired_width(180.0));
-                    if ui.add_enabled(self.access.new_password.trim().len() >= 6, egui::Button::new("Set")).clicked() {
+                    ui.add(egui::TextEdit::singleline(&mut self.access.new_password).password(true).hint_text("8 characters or more").desired_width(180.0));
+                    if ui.add_enabled(self.access.new_password.trim().chars().count() >= 8, egui::Button::new("Set")).clicked() {
                         cfg.password = self.access.new_password.trim().to_string();
                         self.access.new_password.clear();
                         changed = true;
@@ -350,12 +360,26 @@ impl App {
         let v = self.access.by_extension.lock().unwrap_or_else(|e| e.into_inner()).clone().flatten();
         let get = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let on = v.as_ref().and_then(|v| v.get("enabled")).and_then(|x| x.as_bool()).unwrap_or(false);
-        // While on, the extension's program keeps the line to the relay (once per window).
-        static RUNNING: std::sync::Once = std::sync::Once::new();
-        if on {
-            RUNNING.call_once(|| {
-                let _ = crate::ext::spawn_provided("remote", &["remote-access".into(), "run".into()]);
-            });
+        // While on, the extension's program keeps the line to the relay; it ends with this
+        // window (`--parent`), and leaves it to the service when one runs.
+        static CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+        {
+            let mut c = CHILD.lock().unwrap_or_else(|e| e.into_inner());
+            if c.as_mut().is_some_and(|ch| ch.try_wait().ok().flatten().is_some()) {
+                *c = None;
+            }
+            if on && c.is_none()
+                && let Some((program, _)) = crate::ext::provider("remote")
+            {
+                let mut cmd = std::process::Command::new(program);
+                cmd.args(["remote-access", "run", "--parent", &std::process::id().to_string()]);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000);
+                }
+                *c = cmd.spawn().ok();
+            }
         }
         let mut result: Option<Result<(), String>> = None;
         ui.horizontal(|ui| {

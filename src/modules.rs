@@ -73,22 +73,6 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// The modules part of the Extensions page.
-#[cfg(feature = "gui")]
-pub fn ui(ui: &mut eframe::egui::Ui) {
-    for (id, name, what) in ALL {
-        let mut v = on(id);
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut v, *name).on_hover_text(*what).changed() {
-                set(id, v);
-            }
-            if v && !built_in(id) && crate::ext::provider(served_by(id)).is_none() {
-                ui.label(eframe::egui::RichText::new(crate::ext::missing(served_by(id))).weak().size(12.0));
-            }
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

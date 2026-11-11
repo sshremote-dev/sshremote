@@ -92,7 +92,7 @@ thread_local!(pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const {
 #[cfg(windows)]
 mod machine {
     use crate::sys::wide;
-    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegGetValueW, RegSetKeyValueW};
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegGetValueW};
 
     const KEY: &str = r"SOFTWARE\sshremote";
     const VALUE: &str = "RemoteAccess";
@@ -104,6 +104,9 @@ mod machine {
         let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut len) };
         if r == 2 {
             return Ok(None);
+        }
+        if r == 5 {
+            return Err("only administrators can see them (they hold the password)".into());
         }
         if r != 0 {
             return Err(format!("the remote access settings could not be read (error {r})"));
@@ -117,14 +120,37 @@ mod machine {
         Ok(Some(String::from_utf16_lossy(&buf[..n])))
     }
 
+    /// Writes the settings under a key only Administrators and SYSTEM may open: it holds the
+    /// password, which no standard user should read.
     pub fn write(text: &str) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION};
+        use windows_sys::Win32::System::Registry::{HKEY, KEY_ALL_ACCESS, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegSetKeySecurity, RegSetValueExW};
         let (key, value, data) = (wide(KEY), wide(VALUE), wide(text));
-        let r = unsafe { RegSetKeyValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), REG_SZ, data.as_ptr() as _, (data.len() * 2) as u32) };
-        match r {
-            0 => Ok(()),
-            5 => Err("Changing remote access needs administrator rights".into()),
-            e => Err(format!("the remote access settings could not be saved (error {e})")),
+        let sddl = wide("D:P(A;OICI;KA;;;BA)(A;OICI;KA;;;SY)");
+        let mut sd = std::ptr::null_mut();
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } == 0 {
+            return Err("the settings' permissions could not be made".into());
         }
+        let mut h: HKEY = std::ptr::null_mut();
+        let r = unsafe {
+            RegCreateKeyExW(HKEY_LOCAL_MACHINE, key.as_ptr(), 0, std::ptr::null(), REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, std::ptr::null(), &mut h, std::ptr::null_mut())
+        };
+        let result = if r != 0 {
+            Err(r)
+        } else {
+            // Also for a key an earlier version made with the permissions HKLM\SOFTWARE hands down.
+            let r = unsafe { RegSetKeySecurity(h, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd) };
+            let r = if r == 0 { unsafe { RegSetValueExW(h, value.as_ptr(), 0, REG_SZ, data.as_ptr() as _, (data.len() * 2) as u32) } } else { r };
+            unsafe { RegCloseKey(h) };
+            if r == 0 { Ok(()) } else { Err(r) }
+        };
+        unsafe { LocalFree(sd as _) };
+        result.map_err(|e| match e {
+            5 => "Changing remote access needs administrator rights".to_string(),
+            e => format!("the remote access settings could not be saved (error {e})"),
+        })
     }
 }
 
@@ -167,11 +193,18 @@ pub fn save(c: &Config) -> Result<(), String> {
         }
         // Readable by its user only from the start: it holds the password.
         let tmp = f.with_extension("json.new");
+        // A leftover could keep wider permissions: a new file gets the mode.
+        let _ = std::fs::remove_file(&tmp);
         let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true);
+        o.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-        o.open(&tmp).and_then(|mut h| h.write_all(text.as_bytes())).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        o.open(&tmp)
+            .and_then(|mut h| {
+                h.write_all(text.as_bytes())?;
+                h.sync_all()
+            })
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))
     }
 }
@@ -304,7 +337,11 @@ pub fn online(id: &str, relay: &str) -> Result<bool, String> {
     let mut s = dial(relay).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
     writeln!(s, "status {id}").map_err(|e| e.to_string())?;
-    Ok(line(&mut s).map_err(|e| e.to_string())? == "online")
+    match line(&mut s).map_err(|e| e.to_string())?.as_str() {
+        "online" => Ok(true),
+        "offline" => Ok(false),
+        other => Err(other.to_string()),
+    }
 }
 
 /// Wrong passwords seen lately, and one password check at a time: guesses wait their turn and
@@ -314,6 +351,9 @@ pub fn online(id: &str, relay: &str) -> Result<bool, String> {
 struct Guard {
     failures: Mutex<(u32, Option<std::time::Instant>)>,
     turn: Mutex<()>,
+    /// Calls waiting for the turn: past two, more are turned away at once, so a queue of guesses
+    /// cannot keep the owner's own call waiting until it gives up.
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl Guard {
@@ -438,8 +478,13 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
     }
+    if guard.waiting.fetch_add(1, Ordering::AcqRel) >= 2 {
+        guard.waiting.fetch_sub(1, Ordering::AcqRel);
+        return;
+    }
     let checked = {
         let _turn = guard.turn.lock().unwrap_or_else(|e| e.into_inner());
+        guard.waiting.fetch_sub(1, Ordering::AcqRel);
         thread::sleep(guard.delay());
         // A viewer that goes quiet in the middle of the check does not hold the turn.
         let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
@@ -547,6 +592,29 @@ pub fn service_runs_cached() -> bool {
     }
 }
 
+/// Whether a process still runs.
+fn alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = unsafe { GetExitCodeProcess(h, &mut code) };
+        unsafe { CloseHandle(h) };
+        return ok != 0 && code == 259;
+    }
+    #[cfg(unix)]
+    {
+        return unsafe { libc::kill(pid as i32, 0) } == 0;
+    }
+    #[allow(unreachable_code)]
+    true
+}
+
 /// Whether a service (Windows) or a user unit (Linux) keeps remote access on at start.
 pub fn service_installed() -> bool {
     #[cfg(windows)]
@@ -618,7 +686,7 @@ pub fn install_service() -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         std::fs::create_dir_all(f.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
         let unit = format!(
-            "[Unit]\nDescription=SSH Remote: remote access by ID\nAfter=network-online.target graphical-session.target\n\n[Service]\nExecStart=\"{}\" remote-access run\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=SSH Remote: remote access by ID\nAfter=network-online.target graphical-session.target\n\n[Service]\nExecStart=\"{}\" remote-access run --service\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
             exe.display()
         );
         std::fs::write(&f, unit).map_err(|e| e.to_string())?;
@@ -706,13 +774,30 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("uninstall") => uninstall_service(),
+        // `--service`: run by the service or unit itself; otherwise it leaves remote access to a
+        // service that runs it. `--parent PID`: ends with that process (a window that started it).
         Some("run") => {
             if stored()?.is_none() {
                 save(&c)?;
             }
+            let service = args.iter().any(|a| a == "--service");
+            let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", spaced(&c.id), c.relay);
-            run(|| Some(load()).filter(|c| c.enabled));
-            Ok(())
+            let keep = || {
+                if parent.is_some_and(|p| !alive(p)) {
+                    std::process::exit(0);
+                }
+                Some(load()).filter(|c| c.enabled && (service || !service_runs_cached()))
+            };
+            // Until the parent goes, it waits for remote access to be turned on again.
+            loop {
+                run(keep);
+                if parent.is_none() {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_secs(2));
+                let _ = keep();
+            }
         }
         _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | install | uninstall]".into()),
     }
@@ -728,9 +813,18 @@ pub mod relay {
     use std::sync::mpsc;
     use std::time::Instant;
 
-    /// Connections one address (an IPv6 /64) may hold at once, and lines it may send a minute.
+    /// Connections one address (an IPv6 /64) may hold at once once it has said what it wants,
+    /// and before that (a slow first line); lines it may send a minute, and status questions.
     const PER_ADDRESS: usize = 32;
+    const HELLO_PER_ADDRESS: usize = 16;
     const TRIES_A_MINUTE: u32 = 60;
+    const STATUS_A_MINUTE: u32 = 600;
+    /// Calls to one ID a minute, and calls waiting for it at once.
+    const CALLS_A_MINUTE: u32 = 20;
+    const CALLS_WAITING: usize = 4;
+    /// New IDs one address may take a day; an ID is kept only after its agent stayed a minute.
+    const NEW_IDS_A_DAY: u32 = 50;
+    const SETTLE: Duration = Duration::from_secs(60);
     /// Connections in all, so a flood cannot take the machine's threads.
     const ALL: usize = 4000;
     /// The first line (and an HTTP upgrade's headers) must come within this.
@@ -739,8 +833,9 @@ pub mod relay {
     const IDLE: Duration = Duration::from_secs(120);
     /// IDs not seen for this long go back to the pool.
     const KEEP_ID: u64 = 180 * 24 * 3600;
-    /// Agents of the older protocol (`sshremote --serve --via`) waiting at once.
+    /// Agents of the older protocol (`sshremote --serve --via`) waiting at once, in all and by address.
     const OLD_WAITING: usize = 1000;
+    const OLD_PER_ADDRESS: usize = 4;
 
     fn now() -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -763,22 +858,58 @@ pub mod relay {
         hex(&sha2::Sha256::digest(token.as_bytes()))
     }
 
+    /// A count in a window of time: whether one more is within `max`.
+    fn within<K: std::hash::Hash + Eq>(map: &mut HashMap<K, (Instant, u32)>, k: K, window: Duration, max: u32) -> bool {
+        let e = map.entry(k).or_insert((Instant::now(), 0));
+        if e.0.elapsed() > window {
+            *e = (Instant::now(), 0);
+        }
+        e.1 += 1;
+        e.1 <= max
+    }
+
+    fn up(map: &mut HashMap<IpAddr, usize>, k: IpAddr, max: usize) -> bool {
+        let n = map.entry(k).or_insert(0);
+        if *n >= max {
+            return false;
+        }
+        *n += 1;
+        true
+    }
+
+    fn down(map: &mut HashMap<IpAddr, usize>, k: IpAddr) {
+        if let Some(n) = map.get_mut(&k) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&k);
+            }
+        }
+    }
+
     #[derive(Default)]
     pub struct Hub {
         /// ID → the token's hash and when it was last seen, kept on disk so an ID stays its owner's.
         owners: HashMap<String, (String, u64)>,
         dirty: bool,
-        /// ID → its listening line's number and a way to call the agent.
-        agents: HashMap<String, (u64, mpsc::Sender<String>)>,
+        /// ID → its listening line's number, a way to call the agent, and its token's hash (which
+        /// holds the ID while it is not yet kept).
+        agents: HashMap<String, (u64, mpsc::Sender<String>, String)>,
         next: u64,
         /// NONCE → the viewer waiting for that call to be answered.
         calls: HashMap<String, mpsc::Sender<TcpStream>>,
-        /// Lines by address in the current minute, and connections held now.
+        /// Calls by ID in the current minute, and waiting now.
+        calls_by_id: HashMap<String, (Instant, u32)>,
+        waiting_by_id: HashMap<String, usize>,
+        /// Lines and status questions by address in the current minute; new IDs by address today.
         tries: HashMap<IpAddr, (Instant, u32)>,
+        statuses: HashMap<IpAddr, (Instant, u32)>,
+        new_ids: HashMap<IpAddr, (Instant, u32)>,
+        /// Connections held by address: before their first line, and after it.
+        hello: HashMap<IpAddr, usize>,
         held: HashMap<IpAddr, usize>,
         all: usize,
-        /// The older protocol's agents, by ID.
-        old: HashMap<String, (TcpStream, Instant)>,
+        /// The older protocol's agents, by ID, with the address that left each.
+        old: HashMap<String, (TcpStream, Instant, IpAddr)>,
     }
 
     impl Hub {
@@ -806,34 +937,33 @@ pub mod relay {
             Ok(h)
         }
 
-        /// One more line from an address: whether it is within its minute's allowance.
-        pub fn allow(&mut self, ip: IpAddr) -> bool {
-            let e = self.tries.entry(key(ip)).or_insert((Instant::now(), 0));
-            if e.0.elapsed() > Duration::from_secs(60) {
-                *e = (Instant::now(), 0);
+        /// Whether a token may use an ID now: its owner's, or one nobody holds.
+        fn may_use(&self, id: &str, token: &str) -> bool {
+            let h = hash(token);
+            match self.owners.get(id) {
+                Some((o, _)) => *o == h,
+                None => self.agents.get(id).is_none_or(|(_, _, a)| *a == h),
             }
-            e.1 += 1;
-            e.1 <= TRIES_A_MINUTE
         }
 
-        fn claim(&mut self, id: &str, token: &str) -> bool {
-            let h = hash(token);
-            let ok = self.owners.get(id).is_none_or(|(o, _)| *o == h);
-            if ok {
-                self.owners.insert(id.to_string(), (h, now()));
-                self.dirty = true;
-            }
-            ok
+        /// The ID kept as this token's, or its last-seen time brought up to date.
+        fn keep(&mut self, id: &str, token: &str) {
+            self.owners.insert(id.to_string(), (hash(token), now()));
+            self.dirty = true;
         }
 
         /// Forgets what has gone stale: minutes of tries, IDs long unseen.
         fn prune(&mut self) {
-            self.tries.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(60));
+            let minute = Duration::from_secs(60);
+            self.tries.retain(|_, (t, _)| t.elapsed() < minute);
+            self.statuses.retain(|_, (t, _)| t.elapsed() < minute);
+            self.calls_by_id.retain(|_, (t, _)| t.elapsed() < minute);
+            self.new_ids.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(24 * 3600));
             let cut = now().saturating_sub(KEEP_ID);
             let before = self.owners.len();
             self.owners.retain(|_, (_, seen)| *seen >= cut);
             self.dirty |= self.owners.len() != before;
-            self.old.retain(|_, (_, since)| since.elapsed() < Duration::from_secs(24 * 3600));
+            self.old.retain(|_, (_, since, _)| since.elapsed() < Duration::from_secs(24 * 3600));
         }
     }
 
@@ -870,7 +1000,13 @@ pub mod relay {
                             o.write_all(snapshot.as_bytes())?;
                             o.sync_all()
                         });
-                        if done.and_then(|_| std::fs::rename(&tmp, f)).is_err() {
+                        let done = done.and_then(|_| std::fs::rename(&tmp, f));
+                        // The folder too, so the rename itself survives a power cut.
+                        #[cfg(unix)]
+                        if let Some(d) = f.parent().and_then(|d| std::fs::File::open(d).ok()) {
+                            let _ = d.sync_all();
+                        }
+                        if done.is_err() {
                             lock(&hub).dirty = true;
                         }
                     }
@@ -880,31 +1016,23 @@ pub mod relay {
         for s in listener.incoming().flatten() {
             let Ok(peer) = s.peer_addr().map(|a| a.ip()) else { continue };
             {
+                // A web server on this machine speaks for many: its clients are counted once it
+                // names them.
                 let mut h = lock(&hub);
-                let held = h.held.get(&key(peer)).copied().unwrap_or(0);
-                if h.all >= ALL || held >= PER_ADDRESS {
+                if h.all >= ALL || (!peer.is_loopback() && !up(&mut h.hello, key(peer), HELLO_PER_ADDRESS)) {
                     continue;
                 }
                 h.all += 1;
-                *h.held.entry(key(peer)).or_insert(0) += 1;
             }
             let hub = hub.clone();
             thread::spawn(move || {
-                struct Held(Shared, IpAddr);
-                impl Drop for Held {
+                struct All(Shared);
+                impl Drop for All {
                     fn drop(&mut self) {
-                        let mut h = lock(&self.0);
-                        h.all -= 1;
-                        let k = key(self.1);
-                        if let Some(n) = h.held.get_mut(&k) {
-                            *n -= 1;
-                            if *n == 0 {
-                                h.held.remove(&k);
-                            }
-                        }
+                        lock(&self.0).all -= 1;
                     }
                 }
-                let _held = Held(hub.clone(), peer);
+                let _all = All(hub.clone());
                 connection(&hub, s, peer);
             });
         }
@@ -930,16 +1058,17 @@ pub mod relay {
         None
     }
 
-    fn connection(hub: &Shared, mut s: TcpStream, peer: IpAddr) {
+    /// What a connection asks, read within [`HELLO`]: the line and the address it counts for.
+    fn hello(s: &mut TcpStream, peer: IpAddr) -> Option<(String, IpAddr)> {
         let deadline = Instant::now() + HELLO;
-        let Some(mut first) = hello_line(&mut s, deadline) else { return };
+        let mut first = hello_line(s, deadline)?;
         let mut ip = peer;
         // Through a web server: an HTTP upgrade, then the same lines. Only a web server on this
         // machine may say where its client is, and it must.
         if first.starts_with("GET ") {
             let mut real = None;
             for _ in 0..32 {
-                let Some(h) = hello_line(&mut s, deadline) else { return };
+                let h = hello_line(s, deadline)?;
                 if h.trim().is_empty() {
                     break;
                 }
@@ -950,72 +1079,111 @@ pub mod relay {
                 }
             }
             if peer.is_loopback() {
-                let Some(r) = real else { return };
-                ip = r;
+                ip = real?;
             }
-            if s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n").is_err() {
-                return;
-            }
-            let Some(l) = hello_line(&mut s, deadline) else { return };
-            first = l;
+            s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n").ok()?;
+            first = hello_line(s, deadline)?;
         }
         let _ = s.set_read_timeout(None);
+        Some((first, ip))
+    }
+
+    fn connection(hub: &Shared, mut s: TcpStream, peer: IpAddr) {
+        let asked = hello(&mut s, peer);
+        if !peer.is_loopback() {
+            down(&mut lock(hub).hello, key(peer));
+        }
+        let Some((first, ip)) = asked else { return };
         let words: Vec<String> = first.split_whitespace().map(str::to_string).collect();
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        // `accept` answers a call the relay made; it carries an unguessable nonce of its own.
-        if !matches!(words.as_slice(), ["accept", ..]) && !lock(hub).allow(ip) {
-            let _ = writeln!(s, "too many attempts; wait a minute");
-            return;
-        }
         match words.as_slice() {
-            ["listen", id, token] if valid_id(id) && (16..=128).contains(&token.len()) => listen(hub, s, id, token),
+            // `accept` answers a call the relay made, with an unguessable nonce of its own: it
+            // counts against nothing, or a queue of calls could keep the agent from answering.
             ["accept", id, nonce] if valid_id(id) && nonce.len() <= 64 => {
                 let waiting = lock(hub).calls.remove(*nonce);
                 if let Some(v) = waiting {
                     let _ = v.send(s);
                 }
+                return;
             }
+            // Status questions come from every open window every few seconds: a budget of their own.
             ["status", id] if valid_id(id) => {
-                let on = lock(hub).agents.contains_key(*id);
-                let _ = writeln!(s, "{}", if on { "online" } else { "offline" });
+                let (ok, on) = {
+                    let mut h = lock(hub);
+                    (within(&mut h.statuses, key(ip), Duration::from_secs(60), STATUS_A_MINUTE), h.agents.contains_key(*id))
+                };
+                let _ = writeln!(s, "{}", if !ok { "too many attempts; wait a minute" } else if on { "online" } else { "offline" });
+                return;
             }
+            _ => {}
+        }
+        {
+            let mut h = lock(hub);
+            if !within(&mut h.tries, key(ip), Duration::from_secs(60), TRIES_A_MINUTE) || !up(&mut h.held, key(ip), PER_ADDRESS) {
+                drop(h);
+                let _ = writeln!(s, "too many attempts; wait a minute");
+                return;
+            }
+        }
+        struct Held(Shared, IpAddr);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                down(&mut lock(&self.0).held, key(self.1));
+            }
+        }
+        let _held = Held(hub.clone(), ip);
+        match words.as_slice() {
+            ["listen", id, token] if valid_id(id) && (16..=128).contains(&token.len()) => listen(hub, s, id, token, ip),
             ["viewer", id] if id.len() <= 32 => viewer(hub, s, id),
-            // The older one-off protocol of `sshremote --serve --via`: never for an ID that
-            // remote access holds.
+            // The older one-off protocol of `sshremote --serve --via`: never for an ID remote
+            // access holds or another waiter has, and a few waiters an address.
             ["agent", id] if id.len() <= 32 => {
                 let mut h = lock(hub);
-                if h.owners.contains_key(*id) || h.agents.contains_key(*id) || h.old.len() >= OLD_WAITING {
+                let mine = h.old.values().filter(|(_, _, a)| key(*a) == key(ip)).count();
+                if h.owners.contains_key(*id) || h.agents.contains_key(*id) || h.old.contains_key(*id) || h.old.len() >= OLD_WAITING || mine >= OLD_PER_ADDRESS {
                     drop(h);
                     let _ = writeln!(s, "taken");
                     return;
                 }
-                h.old.insert(id.to_string(), (s, Instant::now()));
+                h.old.insert(id.to_string(), (s, Instant::now(), ip));
             }
             _ => {}
         }
     }
 
     /// An agent's line: calls passed on, pings, and the line given up when it goes quiet or a
-    /// newer line for the same ID replaces it.
-    fn listen(hub: &Shared, mut s: TcpStream, id: &str, token: &str) {
+    /// newer line for the same ID replaces it. An ID nobody held becomes this token's once its
+    /// agent has stayed a minute, a few new ones an address a day.
+    fn listen(hub: &Shared, mut s: TcpStream, id: &str, token: &str, ip: IpAddr) {
         let (tx, rx) = mpsc::channel::<String>();
-        let number = {
+        let (number, mut kept) = {
             let mut h = lock(hub);
-            if !h.claim(id, token) {
+            let known = h.owners.contains_key(id);
+            if !h.may_use(id, token) || (!known && !within(&mut h.new_ids, key(ip), Duration::from_secs(24 * 3600), NEW_IDS_A_DAY)) {
                 drop(h);
                 let _ = writeln!(s, "taken");
                 return;
             }
             h.next += 1;
             let n = h.next;
-            h.agents.insert(id.to_string(), (n, tx));
-            n
+            h.agents.insert(id.to_string(), (n, tx, hash(token)));
+            (n, None::<Instant>)
         };
+        let since = Instant::now();
         if writeln!(s, "ok").is_ok() && s.set_read_timeout(Some(Duration::from_millis(200))).is_ok() {
             let mut heard = Instant::now();
             let mut pinged = Instant::now();
             let mut buf = [0u8; 64];
             'line: loop {
+                // Kept (or seen again) after a minute, then every hour while it stays.
+                if since.elapsed() > SETTLE && kept.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
+                    let mut h = lock(hub);
+                    if !h.may_use(id, token) {
+                        break;
+                    }
+                    h.keep(id, token);
+                    kept = Some(Instant::now());
+                }
                 loop {
                     match rx.try_recv() {
                         Ok(nonce) => {
@@ -1047,17 +1215,17 @@ pub mod relay {
             }
         }
         let mut h = lock(hub);
-        if h.agents.get(id).is_some_and(|(n, _)| *n == number) {
+        if h.agents.get(id).is_some_and(|(n, _, _)| *n == number) {
             h.agents.remove(id);
         }
     }
 
     /// A viewer: its call passed to the agent, and the agent's answering connection paired with it.
     fn viewer(hub: &Shared, mut s: TcpStream, id: &str) {
-        let agent = lock(hub).agents.get(id).map(|(_, t)| t.clone());
+        let agent = lock(hub).agents.get(id).map(|(_, t, _)| t.clone());
         let Some(agent) = agent else {
             // An agent of the older protocol, if one waits under that ID.
-            let old = lock(hub).old.remove(id).map(|(a, _)| a);
+            let old = lock(hub).old.remove(id).map(|(a, _, _)| a);
             match old {
                 Some(mut a) => {
                     if writeln!(a, "ok").is_ok() && writeln!(s, "ok").is_ok() {
@@ -1074,21 +1242,27 @@ pub mod relay {
         let (tx, rx) = mpsc::channel();
         {
             let mut h = lock(hub);
-            if h.calls.len() >= 10_000 {
+            let waiting = h.waiting_by_id.get(id).copied().unwrap_or(0);
+            if h.calls.len() >= 10_000 || waiting >= CALLS_WAITING || !within(&mut h.calls_by_id, id.to_string(), Duration::from_secs(60), CALLS_A_MINUTE) {
                 drop(h);
-                let _ = writeln!(s, "the relay is busy; try again");
+                let _ = writeln!(s, "too many attempts; wait a minute");
                 return;
             }
             h.calls.insert(nonce.clone(), tx);
+            *h.waiting_by_id.entry(id.to_string()).or_insert(0) += 1;
         }
-        if agent.send(nonce.clone()).is_err() {
-            lock(hub).calls.remove(&nonce);
-            let _ = writeln!(s, "offline");
-            return;
+        let answered = if agent.send(nonce.clone()).is_ok() { rx.recv_timeout(Duration::from_secs(20)).ok() } else { None };
+        {
+            let mut h = lock(hub);
+            h.calls.remove(&nonce);
+            if let Some(n) = h.waiting_by_id.get_mut(id) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    h.waiting_by_id.remove(id);
+                }
+            }
         }
-        let answered = rx.recv_timeout(Duration::from_secs(20));
-        lock(hub).calls.remove(&nonce);
-        let Ok(mut a) = answered else {
+        let Some(mut a) = answered else {
             let _ = writeln!(s, "the computer did not answer");
             return;
         };
