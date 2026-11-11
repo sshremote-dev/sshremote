@@ -201,11 +201,64 @@ fn line(s: &mut TcpStream) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
+/// The way that last reached each relay: its own port, or HTTP on port 80.
+static WAY: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+
+/// A connection to a relay. A port given is used as it is; without one, the relay's own port
+/// (7071) is tried first and then port 80 with an HTTP upgrade, which networks that let only
+/// web traffic out (and relays behind a web server) still pass.
+pub fn dial(relay: &str) -> io::Result<TcpStream> {
+    let explicit = relay.trim().rsplit_once(':').is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok());
+    let (host, port) = relay_addr(relay);
+    let direct = |port: u16| -> io::Result<TcpStream> {
+        let mut last = io::Error::other("no address");
+        for a in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))? {
+            match TcpStream::connect_timeout(&a, Duration::from_secs(4)) {
+                Ok(s) => return Ok(s),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    };
+    if explicit {
+        return direct(port);
+    }
+    let known = WAY.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(h, _)| *h == host).map(|(_, http)| *http);
+    let http = |host: &str| -> io::Result<TcpStream> {
+        let mut s = direct(80)?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
+        write!(s, "GET /relay HTTP/1.1\r\nHost: {host}\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n")?;
+        let status = line(&mut s)?;
+        // The headers end with an empty line.
+        while !line(&mut s)?.is_empty() {}
+        if !status.contains(" 101") {
+            return Err(io::Error::other(format!("{host}:80 did not pass the relay through: {status}")));
+        }
+        s.set_read_timeout(None)?;
+        Ok(s)
+    };
+    let remember = |via_http: bool| {
+        let mut w = WAY.lock().unwrap_or_else(|e| e.into_inner());
+        w.retain(|(h, _)| *h != host);
+        w.push((host.clone(), via_http));
+    };
+    let order = if known == Some(true) { [true, false] } else { [false, true] };
+    let mut err = io::Error::other("unreachable");
+    for via_http in order {
+        match if via_http { http(&host) } else { direct(port) } {
+            Ok(s) => {
+                remember(via_http);
+                return Ok(s);
+            }
+            Err(e) => err = e,
+        }
+    }
+    Err(io::Error::new(err.kind(), format!("the relay {host} (port {port}, and 80): {err}")))
+}
+
 /// Whether an ID is waiting at a relay now.
 pub fn online(id: &str, relay: &str) -> Result<bool, String> {
-    let (h, p) = relay_addr(relay);
-    let addr = std::net::ToSocketAddrs::to_socket_addrs(&(h.as_str(), p)).map_err(|e| format!("{h}: {e}"))?.next().ok_or("no address")?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| format!("{h}:{p}: {e}"))?;
+    let mut s = dial(relay).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
     writeln!(s, "status {id}").map_err(|e| e.to_string())?;
     Ok(line(&mut s).map_err(|e| e.to_string())? == "online")
@@ -218,11 +271,10 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
     let mut wait = 2;
     while let Some(mut cfg) = keep() {
         set_state(State::Connecting);
-        let (host, port) = relay_addr(&cfg.relay);
-        let mut s = match TcpStream::connect((host.as_str(), port)) {
+        let mut s = match dial(&cfg.relay) {
             Ok(s) => s,
             Err(e) => {
-                set_state(State::Failed(format!("The relay {host}:{port} could not be reached: {e}")));
+                set_state(State::Failed(format!("Could not reach {e}")));
                 sleep_while(&keep, wait);
                 wait = (wait * 2).min(60);
                 continue;
@@ -326,8 +378,7 @@ fn answer_call(cfg: &Config, nonce: &str, failures: &AtomicU32) {
     if f > 0 {
         thread::sleep(Duration::from_secs((2u64 << f.min(6)).min(120)));
     }
-    let (host, port) = relay_addr(&cfg.relay);
-    let Ok(mut s) = TcpStream::connect((host.as_str(), port)) else { return };
+    let Ok(mut s) = dial(&cfg.relay) else { return };
     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
@@ -636,9 +687,9 @@ pub mod relay {
 
     /// Handles one connection whose first line was `first` (the older `agent`/`viewer ID` lines
     /// are handled by the caller).
-    pub fn handle(hub: &Arc<Mutex<Hub>>, mut s: TcpStream, first: &str) {
+    pub fn handle(hub: &Arc<Mutex<Hub>>, mut s: TcpStream, first: &str, forwarded: Option<std::net::IpAddr>) {
         let lock = || hub.lock().unwrap_or_else(|e| e.into_inner());
-        let ip = s.peer_addr().map(|a| a.ip()).ok();
+        let ip = forwarded.or_else(|| s.peer_addr().map(|a| a.ip()).ok());
         let words: Vec<&str> = first.split_whitespace().collect();
         match words.as_slice() {
             ["listen", id, token] if valid_id(id) && token.len() >= 16 && token.len() <= 128 => {
@@ -780,6 +831,13 @@ mod tests {
         assert_eq!(line(&mut agent).unwrap(), "ok");
         assert!(online(id, &addr).unwrap(), "online once listening");
         assert!(!online("111222333", &addr).unwrap());
+        // The same through a web server's HTTP upgrade, as port 80 brings it.
+        let mut up = TcpStream::connect(&addr).unwrap();
+        up.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(up, "GET /relay HTTP/1.1\r\nHost: x\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\nX-Real-IP: 10.1.2.3\r\n\r\nstatus {id}\n").unwrap();
+        assert!(line(&mut up).unwrap().contains(" 101"));
+        while !line(&mut up).unwrap().is_empty() {}
+        assert_eq!(line(&mut up).unwrap(), "online");
         let mut thief = TcpStream::connect(&addr).unwrap();
         thief.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         writeln!(thief, "listen {id} ffffffffffffffffffff").unwrap();

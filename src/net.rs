@@ -200,8 +200,12 @@ fn relay_hello(stream: &mut TcpStream, role: &str, id: &str) -> io::Result<()> {
 
 /// Viewer side: connects directly or through a relay and runs the handshake.
 pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWriter), String> {
-    let mut s =
-        TcpStream::connect((addr.host.as_str(), addr.port)).map_err(|e| format!("{}:{}: {e}", addr.host, addr.port))?;
+    // Through a relay at its own port: dialled as remote access does, port 80 when 7071 is shut.
+    let mut s = if addr.id.is_some() && addr.port == RELAY_PORT {
+        crate::access::dial(&addr.host).map_err(|e| e.to_string())?
+    } else {
+        TcpStream::connect((addr.host.as_str(), addr.port)).map_err(|e| format!("{}:{}: {e}", addr.host, addr.port))?
+    };
     if let Some(id) = &addr.id {
         relay_hello(&mut s, "viewer", id).map_err(|e| e.to_string())?;
     }
@@ -268,6 +272,20 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
     }
 }
 
+/// One line, read byte by byte: what follows it belongs to the handshake.
+fn raw_line(s: &mut TcpStream) -> Option<String> {
+    let mut raw = Vec::new();
+    let mut b = [0u8; 1];
+    while raw.len() < 1024 {
+        match s.read(&mut b) {
+            Ok(1) if b[0] == 10 => return Some(String::from_utf8_lossy(&raw).trim_end_matches('\r').to_string()),
+            Ok(1) => raw.push(b[0]),
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// `sshremote --relay`: pairs agents and viewers by ID and copies bytes between them.
 pub fn relay(listen: Option<&str>, store: Option<&str>) -> Result<(), String> {
     let addr = listen.unwrap_or("0.0.0.0:7071");
@@ -293,28 +311,43 @@ pub fn relay(listen: Option<&str>, store: Option<&str>) -> Result<(), String> {
             let _done = Done(open);
             let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
             let mut s = s;
-            // Byte by byte: what follows the line belongs to the handshake.
-            let mut raw = Vec::new();
-            let mut b = [0u8; 1];
-            while raw.len() < 256 {
-                match s.read(&mut b) {
-                    Ok(1) if b[0] == 10 => break,
-                    Ok(1) => raw.push(b[0]),
-                    _ => return,
+            let Some(mut line) = raw_line(&mut s) else { return };
+            // Through a web server on port 80: an HTTP upgrade first, then the same lines. The
+            // address the web server saw counts for the limits, when it is the one asking.
+            let mut forwarded = None;
+            if line.starts_with("GET ") {
+                let local = s.peer_addr().is_ok_and(|a| a.ip().is_loopback());
+                loop {
+                    let Some(h) = raw_line(&mut s) else { return };
+                    let h = h.trim().to_string();
+                    if h.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':')
+                        && local
+                        && k.trim().eq_ignore_ascii_case("x-real-ip")
+                    {
+                        forwarded = v.trim().parse().ok();
+                    }
                 }
+                if s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n").is_err() {
+                    return;
+                }
+                let Some(l) = raw_line(&mut s) else { return };
+                line = l;
             }
-            let line = String::from_utf8_lossy(&raw).to_string();
+            let line = line.trim().to_string();
             let _ = s.set_read_timeout(None);
             let (role, id) = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
                 [role @ ("agent" | "viewer"), id] if id.len() <= 32 => (role.to_string(), id.to_string()),
                 _ => {
-                    crate::access::relay::handle(&hub, s, &line);
+                    crate::access::relay::handle(&hub, s, &line, forwarded);
                     return;
                 }
             };
             // A viewer for an ID listening the newer way goes to remote access.
             if role == "viewer" && !waiting.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
-                crate::access::relay::handle(&hub, s, &line);
+                crate::access::relay::handle(&hub, s, &line, forwarded);
                 return;
             }
             if role == "agent" {
