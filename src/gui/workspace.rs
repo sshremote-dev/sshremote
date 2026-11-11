@@ -985,7 +985,8 @@ impl Workspace {
             }
         }
         self.extensions(&ctx);
-        let area = super::extui::edges(ui, ui.available_rect_before_wrap(), &mut self.side);
+        // Full screen is the picture alone: the extensions' status bar and panel wait outside it.
+        let area = if self.window_full { ui.available_rect_before_wrap() } else { super::extui::edges(ui, ui.available_rect_before_wrap(), &mut self.side) };
         self.panes_area = area;
         self.shortcuts(&ctx, area);
         let full = self.window_full;
