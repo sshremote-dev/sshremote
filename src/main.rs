@@ -1,5 +1,3 @@
-// A build with only some parts leaves helpers the others use unused.
-#![cfg_attr(not(all(feature = "gui", feature = "remote")), allow(dead_code, unused_imports))]
 #[cfg(feature = "remote")]
 mod access;
 mod admin;
@@ -17,6 +15,8 @@ mod chat;
 mod client;
 #[cfg(feature = "remote")]
 mod clip;
+// What the remote parts use is unused without them.
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod color;
 #[cfg(windows)]
 #[cfg(feature = "remote")]
@@ -28,11 +28,13 @@ mod files;
 #[cfg(all(feature = "gui", feature = "remote"))]
 mod filewin;
 #[cfg(feature = "gui")]
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod gui;
 mod hosts;
 #[cfg(windows)]
 #[cfg(feature = "gui")]
 mod keygrab;
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod keys;
 mod license;
 mod modules;
@@ -43,18 +45,22 @@ mod markdown;
 mod mcp;
 #[cfg(feature = "remote")]
 mod net;
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod proto;
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod pty;
 #[cfg(feature = "remote")]
 mod quant;
 #[cfg(windows)]
 #[cfg(feature = "remote")]
 mod relay;
+#[cfg_attr(not(feature = "remote"), allow(dead_code))]
 mod scroll;
 #[cfg(all(windows, feature = "remote"))]
 mod service;
 #[cfg(feature = "remote")]
 mod session;
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod shared;
 #[cfg(feature = "remote")]
 mod shot;
@@ -63,6 +69,7 @@ mod sixel;
 mod script;
 mod sys;
 #[cfg(feature = "gui")]
+#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod termwin;
 #[cfg(feature = "gui")]
 mod tools;
@@ -76,7 +83,7 @@ mod web;
 // Some keys are only sent on to Windows.
 #[cfg(feature = "remote")]
 mod video;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(all(windows, feature = "remote")), allow(dead_code))]
 mod xk;
 
 use color::Mode;
@@ -96,18 +103,21 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote module [list | on ID | off ID]   turn parts of the app on or off
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
-       sshremote ext list|available|install FILE-OR-ID|update|remove ID|pack DIR OUT.sshx|new DIR|dev DIR
-                                  extensions: style packs from sshremote.dev or a file
+       sshremote ext list|available|install FILE-OR-ID|update|remove ID|roll-back ID|pack DIR OUT.sshx|new DIR|dev DIR
+                                  extensions: style packs from sshremote.dev or a file;
+                                  roll-back ID returns to the version before the last update
+       sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --agent [--capture B] remote side, started by the viewer
-       sshremote --serve [--listen ADDR] [--via RELAY] [--password P]
-                                  wait for viewers without ssh (prints a one-time password)
        sshremote --relay [--listen ADDR] [--store FILE]  pair agents and viewers behind NAT
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|install|uninstall]
                                        this computer reachable by ID and password through a relay
-       sshremote sshremote://HOST[:PORT] --password P     view a --serve agent directly
-       sshremote sshremote://ID@RELAY[:PORT] --password P view one through a relay
+       sshremote --install-service | --uninstall-service
+                                  Windows: add or remove the service alone (remote-access install
+                                  also turns remote access on)
+       sshremote sshremote://ID[@RELAY[:PORT]] --password P  view a computer by its remote access ID
 
 options:
+  --local         no ssh: an agent on this computer (a synthetic desktop unless --capture)
   --preset P      auto (default), or 0 (black and white, 50%, 5 fps) .. 4 (full colour, 60 fps)
   --budget KB/s   traffic auto stays under; default 100
   --mode M        mono gray4 gray16 16c 256c true
@@ -295,7 +305,7 @@ fn note_crashes() {
     std::panic::set_hook(Box::new(move |info| {
         if let Some(dir) = hosts::config_dir() {
             let _ = std::fs::create_dir_all(&dir);
-            let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let when = sys::now_secs();
             let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
             let text = format!(
                 "sshremote {} crashed at {} (unix time {when}), thread {thread}:
@@ -384,6 +394,7 @@ fn main() {
     }
 }
 
+#[cfg(feature = "remote")]
 /// Options that take a value, from `args`: only those in `known` are accepted, and each needs its value.
 fn options(args: &[String], known: &[&str]) -> Result<std::collections::HashMap<String, String>, String> {
     let mut out = std::collections::HashMap::new();
@@ -408,12 +419,6 @@ fn run(args: &[String]) -> Result<(), String> {
         "--uninstall-service" => service::uninstall(),
         #[cfg(all(windows, feature = "remote"))]
         "--service" => service::dispatch(),
-        #[cfg(feature = "remote")]
-        "--serve" => {
-            let o = options(&args[1..], &["--listen", "--via", "--password", "--capture"])?;
-            let get = |k: &str| o.get(k).map(String::as_str);
-            net::serve(get("--listen"), get("--via"), get("--password"), get("--capture").unwrap_or("auto"))
-        }
         #[cfg(feature = "remote")]
         "--relay" => {
             let o = options(&args[1..], &["--listen", "--store"])?;
@@ -458,12 +463,12 @@ fn run(args: &[String]) -> Result<(), String> {
             r
         }
         #[cfg(feature = "remote")]
-        _ => parse_client(args).and_then(client::run),
+        _ => parse_client(args).and_then(|o| if o.gui { open_window(o) } else { client::run(o) }),
         // Without them here, the Remote desktop extension brings screens, files, the agent and
         // the terminal viewer; the window itself opens here.
         #[cfg(not(feature = "remote"))]
         _ => {
-            // The agent, the service and --serve/--relay go to the extension as they are.
+            // The agent, the service and --relay go to the extension as they are.
             if let Some(opt) = parse_client(args).ok().filter(|o| o.gui && o.host.is_none() && !o.local) {
                 return open_window(opt);
             }
@@ -478,11 +483,9 @@ pub const NO_WINDOWS: &str = "this sshremote has no windows (a build for the com
 
 /// The open window: the workspace and its tools.
 fn open_window(opt: options::Options) -> Result<(), String> {
-    #[cfg(feature = "remote")]
-    return client::run(opt);
-    #[cfg(all(feature = "gui", not(feature = "remote")))]
+    #[cfg(feature = "gui")]
     return gui::run(&opt);
-    #[cfg(not(any(feature = "gui", feature = "remote")))]
+    #[cfg(not(feature = "gui"))]
     {
         let _ = opt;
         Err(NO_WINDOWS.into())

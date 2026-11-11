@@ -58,11 +58,6 @@ fn legacy_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     h
 }
 
-#[cfg(test)]
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
@@ -381,7 +376,7 @@ mod tests {
 
     #[test]
     fn pbkdf2_matches_the_published_vectors() {
-        let hex_of = |k: [u8; 32]| hex(&k);
+        let hex_of = |k: [u8; 32]| crate::sys::hex(&k);
         assert_eq!(hex_of(pbkdf2("password", b"salt", 1)), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
         assert_eq!(hex_of(pbkdf2("password", b"salt", 2)), "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43");
         assert_eq!(hex_of(pbkdf2("password", b"salt", 4096)), "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a");
@@ -394,7 +389,7 @@ mod tests {
         let nonce = [9u8; 12];
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&legacy_key("pass", &salt)));
         let data = cipher.encrypt(Nonce::from_slice(&nonce), b"old".as_slice()).unwrap();
-        let sealed = json!({ "salt": hex(&salt), "nonce": hex(&nonce), "data": hex(&data) });
+        let sealed = json!({ "salt": crate::sys::hex(&salt), "nonce": crate::sys::hex(&nonce), "data": crate::sys::hex(&data) });
         assert_eq!(open(&sealed, "pass").unwrap(), b"old");
     }
 

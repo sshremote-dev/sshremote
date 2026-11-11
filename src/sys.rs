@@ -37,6 +37,25 @@ pub fn insert_held() -> bool {
     false
 }
 
+/// Now, in seconds since 1970.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Bytes as lowercase hex.
+#[cfg(any(feature = "remote", test))]
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// `n` bytes from the system's random source.
+#[cfg(feature = "remote")]
+pub fn random(n: usize) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    getrandom::getrandom(&mut b).expect("system random source");
+    b
+}
+
 /// A string as Windows wants it: UTF-16 ending in a zero.
 #[cfg(windows)]
 pub fn wide(s: &str) -> Vec<u16> {
@@ -113,6 +132,7 @@ fn local_parts(secs: u64) -> (i64, u32, u32, u32, u32) {
 }
 
 /// A size for people: 1.5 MB.
+#[cfg_attr(not(feature = "remote"), allow(dead_code))]
 pub fn human(n: u64) -> String {
     match n {
         0..1024 => format!("{n} B"),

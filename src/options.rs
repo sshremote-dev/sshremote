@@ -14,7 +14,7 @@ pub struct Options {
     pub remote: String,
     pub capture: String,
     pub ssh_args: Vec<String>,
-    /// One-time password of a `sshremote --serve` agent.
+    /// Password of a remote access ID, for an `sshremote://` address.
     pub password: Option<String>,
     /// `None` is the auto preset.
     pub preset: Option<usize>,
@@ -43,6 +43,7 @@ pub struct Options {
 
 /// Where the agent runs.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "remote"), allow(dead_code))]
 pub enum Target {
     /// A child process on this machine.
     Local { capture: String },
@@ -62,6 +63,6 @@ pub enum Target {
         unattended: bool,
     },
     #[cfg(feature = "remote")]
-    /// A `sshremote --serve` agent reached directly or through a relay, sealed with a one-time password.
+    /// A computer reached by its remote access ID through a relay, sealed with that ID's password.
     Direct { addr: crate::net::Address, password: String },
 }

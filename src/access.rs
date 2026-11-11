@@ -2,7 +2,7 @@
 //! viewer anywhere reaches it with that ID and the password, as RustDesk does; for PCs on Wi-Fi
 //! or behind NAT with no fixed address. SSH stays the way for one host reached directly.
 //!
-//! Relay lines (beside the older `agent ID` / `viewer ID`):
+//! Relay lines:
 //!   agent:  `listen ID TOKEN` → `ok` | `taken`; then the relay sends `call NONCE` for each viewer
 //!           and the agent answers with a new connection `accept ID NONCE` → `ok`.
 //!   viewer: `viewer ID` → `ok` | `offline` | `busy`; `status ID` → `online` | `offline`.
@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+use crate::sys::{hex, random};
 
 /// The relay used when none is set.
 pub const DEFAULT_RELAY: &str = "sshremote.dev";
@@ -50,12 +52,6 @@ impl Config {
 
 fn default_relay() -> String {
     DEFAULT_RELAY.into()
-}
-
-fn random(n: usize) -> Vec<u8> {
-    let mut b = vec![0u8; n];
-    getrandom::getrandom(&mut b).expect("system random source");
-    b
 }
 
 pub fn new_id() -> String {
@@ -213,10 +209,6 @@ pub fn valid_id(id: &str) -> bool {
     (6..=12).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 /// `relay.example` or `relay.example:7071` as host and port.
 pub fn relay_addr(relay: &str) -> (String, u16) {
     match relay.trim().rsplit_once(':') {
@@ -261,7 +253,7 @@ pub fn state() -> State {
     if n > 0 && s == State::Online { State::InUse(n) } else { s }
 }
 
-fn line(s: &mut TcpStream) -> io::Result<String> {
+pub(crate) fn line(s: &mut TcpStream) -> io::Result<String> {
     // Byte by byte: what follows the line belongs to the handshake.
     let mut out = Vec::new();
     let mut b = [0u8; 1];
@@ -619,8 +611,7 @@ fn alive(pid: u32) -> bool {
 pub fn service_installed() -> bool {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        return Command::new("sc").args(["query", crate::service::NAME]).creation_flags(0x0800_0000).output().is_ok_and(|o| o.status.success());
+        return crate::admin::service_installed();
     }
     #[cfg(unix)]
     {
@@ -838,13 +829,8 @@ pub mod relay {
     const IDLE: Duration = Duration::from_secs(120);
     /// IDs not seen for this long go back to the pool.
     const KEEP_ID: u64 = 180 * 24 * 3600;
-    /// Agents of the older protocol (`sshremote --serve --via`) waiting at once, in all and by address.
-    const OLD_WAITING: usize = 1000;
-    const OLD_PER_ADDRESS: usize = 4;
 
-    fn now() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-    }
+    use crate::sys::now_secs as now;
 
     /// The part of an address that limits count by: all of IPv4, the /64 of IPv6.
     fn key(ip: IpAddr) -> IpAddr {
@@ -914,8 +900,6 @@ pub mod relay {
         hello: HashMap<IpAddr, usize>,
         held: HashMap<IpAddr, usize>,
         all: usize,
-        /// The older protocol's agents, by ID, with the address that left each.
-        old: HashMap<String, (TcpStream, Instant, IpAddr)>,
     }
 
     impl Hub {
@@ -970,7 +954,6 @@ pub mod relay {
             let before = self.owners.len();
             self.owners.retain(|_, (_, seen)| *seen >= cut);
             self.dirty |= self.owners.len() != before;
-            self.old.retain(|_, (_, since, _)| since.elapsed() < Duration::from_secs(24 * 3600));
         }
     }
 
@@ -1153,19 +1136,7 @@ pub mod relay {
         let _held = Held(hub.clone(), ip);
         match words.as_slice() {
             ["listen", id, token] if valid_id(id) && (16..=128).contains(&token.len()) => listen(hub, s, id, token, ip),
-            ["viewer", id] if id.len() <= 32 => viewer(hub, s, id, ip),
-            // The older one-off protocol of `sshremote --serve --via`: never for an ID remote
-            // access holds or another waiter has, and a few waiters an address.
-            ["agent", id] if id.len() <= 32 => {
-                let mut h = lock(hub);
-                let mine = h.old.values().filter(|(_, _, a)| key(*a) == key(ip)).count();
-                if h.owners.contains_key(*id) || h.agents.contains_key(*id) || h.old.contains_key(*id) || h.old.len() >= OLD_WAITING || mine >= OLD_PER_ADDRESS {
-                    drop(h);
-                    let _ = writeln!(s, "taken");
-                    return;
-                }
-                h.old.insert(id.to_string(), (s, Instant::now(), ip));
-            }
+            ["viewer", id] if valid_id(id) => viewer(hub, s, id, ip),
             _ => {}
         }
     }
@@ -1252,18 +1223,7 @@ pub mod relay {
     fn viewer(hub: &Shared, mut s: TcpStream, id: &str, ip: IpAddr) {
         let agent = lock(hub).agents.get(id).map(|(_, t, _)| t.clone());
         let Some(agent) = agent else {
-            // An agent of the older protocol, if one waits under that ID.
-            let old = lock(hub).old.remove(id).map(|(a, _, _)| a);
-            match old {
-                Some(mut a) => {
-                    if writeln!(a, "ok").is_ok() && writeln!(s, "ok").is_ok() {
-                        splice(a, s);
-                    }
-                }
-                None => {
-                    let _ = writeln!(s, "offline");
-                }
-            }
+            let _ = writeln!(s, "offline");
             return;
         };
         let nonce = hex(&random(16));
@@ -1389,11 +1349,11 @@ mod tests {
         assert_eq!(&got, b"ping!");
         a.write_all(b"pong!").unwrap();
         assert_eq!(&viewer.join().unwrap(), b"pong!");
-        // The older protocol cannot take an ID remote access holds.
+        // The retired one-off protocol is answered with nothing.
         let mut old = TcpStream::connect(&addr).unwrap();
         old.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         writeln!(old, "agent {id}").unwrap();
-        assert_eq!(line(&mut old).unwrap(), "taken");
+        assert!(line(&mut old).is_err());
         // Once its line ends the ID is offline again.
         drop(agent);
         thread::sleep(Duration::from_millis(600));

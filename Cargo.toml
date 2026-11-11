@@ -7,15 +7,15 @@ license = "MIT"
 
 [dependencies]
 alacritty_terminal = { version = "0.25", default-features = false }
-arboard = { version = "3", default-features = false }
+arboard = { optional = true, version = "3", default-features = false }
 chacha20poly1305 = "0.10"
-cpal = "0.18.2"
+cpal = { optional = true, version = "0.18.2" }
 crossterm = "0.29.0"
 eframe = { optional = true, version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 getrandom = "0.2"
-hkdf = "0.12"
-openh264 = "0.9"
-opus = "0.3"
+hkdf = { optional = true, version = "0.12" }
+openh264 = { optional = true, version = "0.9" }
+opus = { optional = true, version = "0.3" }
 png = "0.17"
 # Pictures behind the terminal panes, as people have them (JPEG, PNG, WebP, BMP, GIF).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
@@ -28,7 +28,7 @@ sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 unicode-width = "0.2"
-spake2 = "0.4"
+spake2 = { optional = true, version = "0.4" }
 zstd = "0.14.3"
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "auto-dispatch"] }
 
@@ -36,21 +36,21 @@ wasmi = { version = "2", default-features = false, features = ["std", "validate"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gstreamer = "0.25.4"
-gstreamer-app = "0.25.2"
-gstreamer-video = "0.25.4"
-zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+gstreamer = { optional = true, version = "0.25.4" }
+gstreamer-app = { optional = true, version = "0.25.2" }
+gstreamer-video = { optional = true, version = "0.25.4" }
+zbus = { optional = true, version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 
 [target."cfg(windows)".dependencies]
-uiautomation = "0.24"
+uiautomation = { optional = true, version = "0.24" }
 # Already in the tree through uiautomation; its COM interfaces drive Desktop Duplication.
-windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
+windows = { optional = true, version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_Console", "Win32_System_IO", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Services", "Win32_System_Time", "Win32_UI_Shell", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = []
+remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:uiautomation", "dep:windows"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:eframe", "dep:rasterlottie"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

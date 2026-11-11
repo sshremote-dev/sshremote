@@ -142,13 +142,9 @@ pub fn last_seen() -> std::collections::HashMap<String, u64> {
         .collect()
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 pub fn mark_seen(host: &str) {
     let mut seen = last_seen();
-    seen.insert(host.to_string(), now());
+    seen.insert(host.to_string(), crate::sys::now_secs());
     let mut lines: Vec<(String, u64)> = seen.into_iter().collect();
     lines.sort_by_key(|l| std::cmp::Reverse(l.1));
     lines.truncate(64);
@@ -157,7 +153,7 @@ pub fn mark_seen(host: &str) {
 
 /// "just now", "5 min ago", "3 h ago", "2 days ago".
 pub fn ago(when: u64) -> String {
-    let d = now().saturating_sub(when);
+    let d = crate::sys::now_secs().saturating_sub(when);
     match d {
         0..60 => "just now".into(),
         60..3600 => format!("{} min ago", d / 60),

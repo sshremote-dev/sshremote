@@ -287,10 +287,7 @@ impl Peer {
 /// A message: whether the other side wrote it, its text, and when (seconds since 1970; 0 unknown).
 pub type Line = (bool, String, u64);
 
-/// Now, in seconds since 1970.
-pub fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
+pub use crate::sys::now_secs as now;
 
 /// When a message was written: the time today, the date and time before.
 pub(crate) fn when(at: u64) -> String {
