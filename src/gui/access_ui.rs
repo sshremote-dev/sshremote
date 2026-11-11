@@ -49,7 +49,17 @@ impl App {
     fn access_body(&mut self, ui: &mut egui::Ui) {
         use crate::access;
         let a = &mut self.access;
-        let mut cfg = a.cfg.get_or_insert_with(access::load).clone();
+        let mut cfg = a
+            .cfg
+            .get_or_insert_with(|| {
+                // Kept at once, so the ID shown is the one others will use.
+                let c = access::load();
+                if access::file().is_some_and(|f| !f.exists()) {
+                    let _ = access::save(&c);
+                }
+                c
+            })
+            .clone();
         if a.relay.is_empty() {
             a.relay = cfg.relay.clone();
         }

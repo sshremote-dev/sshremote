@@ -253,31 +253,61 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         }
         wait = 2;
         set_state(State::Online);
-        // The relay pings every 30 s; nothing for 75 s means the line is gone.
-        let _ = s.set_read_timeout(Some(Duration::from_secs(75)));
+        // The relay pings every 30 s; nothing for 75 s means the line is gone. Short reads so a
+        // change of the settings (off, a new password) takes effect within a second or two.
+        let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut heard = std::time::Instant::now();
+        let mut pending = Vec::new();
         loop {
             if keep().as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
                 break;
             }
-            let l = match line(&mut s) {
-                Ok(l) => l,
-                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => break,
+            let mut b = [0u8; 256];
+            let l = match s.read(&mut b) {
+                Ok(0) => break,
+                Ok(n) => {
+                    heard = std::time::Instant::now();
+                    pending.extend_from_slice(&b[..n]);
+                    let Some(at) = pending.iter().position(|c| *c == 10) else {
+                        if pending.len() > 1024 {
+                            break;
+                        }
+                        continue;
+                    };
+                    let l: Vec<u8> = pending.drain(..=at).collect();
+                    String::from_utf8_lossy(&l).trim().to_string()
+                }
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    if heard.elapsed() > Duration::from_secs(75) {
+                        break;
+                    }
+                    continue;
+                }
                 Err(_) => break,
             };
-            if l == "ping" {
-                let _ = writeln!(s, "pong");
-                continue;
+            // Further whole lines already read wait for the next turn.
+            while let Some(at) = pending.iter().position(|c| *c == 10) {
+                let more: Vec<u8> = pending.drain(..=at).collect();
+                handle_line(&String::from_utf8_lossy(&more), &mut s, &cfg, &failures);
             }
-            if let Some(nonce) = l.strip_prefix("call ") {
-                let (cfg, nonce, failures) = (cfg.clone(), nonce.to_string(), failures.clone());
-                thread::spawn(move || answer_call(&cfg, &nonce, &failures));
-            }
+            handle_line(&l, &mut s, &cfg, &failures);
         }
         set_state(State::Connecting);
         sleep_while(&keep, 1);
     }
     set_state(State::Off);
+}
+
+/// One line from the relay: a ping to answer, or a viewer's call.
+fn handle_line(l: &str, s: &mut TcpStream, cfg: &Config, failures: &Arc<AtomicU32>) {
+    let l = l.trim();
+    if l == "ping" {
+        let _ = writeln!(s, "pong");
+    } else if let Some(nonce) = l.strip_prefix("call ") {
+        let (cfg, nonce, failures) = (cfg.clone(), nonce.to_string(), failures.clone());
+        thread::spawn(move || answer_call(&cfg, &nonce, &failures));
+    }
 }
 
 fn sleep_while(keep: &impl Fn() -> Option<Config>, secs: u64) {
@@ -731,6 +761,55 @@ mod tests {
         assert_eq!(relay_addr("r.example:9000"), ("r.example".into(), 9000));
         assert_eq!(address("123 456 789", "r.example"), "sshremote://123456789@r.example");
         assert!(!valid_id("12a456789") && !valid_id("123"));
+    }
+
+    /// The relay's side: an ID claimed by its token, its status, a viewer's call answered by a
+    /// new connection, bytes both ways, and the ID refused to another token.
+    #[test]
+    fn the_relay_pairs_by_id() {
+        let port = 20000 + (std::process::id() % 20000) as u16;
+        let addr = format!("127.0.0.1:{port}");
+        let a2 = addr.clone();
+        thread::spawn(move || crate::net::relay(Some(&a2), None));
+        thread::sleep(Duration::from_millis(300));
+        let id = "987654321";
+        let token = "0123456789abcdef0123";
+        let mut agent = TcpStream::connect(&addr).unwrap();
+        agent.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        writeln!(agent, "listen {id} {token}").unwrap();
+        assert_eq!(line(&mut agent).unwrap(), "ok");
+        assert!(online(id, &addr).unwrap(), "online once listening");
+        assert!(!online("111222333", &addr).unwrap());
+        let mut thief = TcpStream::connect(&addr).unwrap();
+        thief.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        writeln!(thief, "listen {id} ffffffffffffffffffff").unwrap();
+        assert_eq!(line(&mut thief).unwrap(), "taken");
+        let a3 = addr.clone();
+        let viewer = thread::spawn(move || {
+            let mut v = TcpStream::connect(&a3).unwrap();
+            v.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            writeln!(v, "viewer {id}").unwrap();
+            assert_eq!(line(&mut v).unwrap(), "ok");
+            v.write_all(b"ping!").unwrap();
+            let mut got = [0u8; 5];
+            v.read_exact(&mut got).unwrap();
+            got
+        });
+        let call = line(&mut agent).unwrap();
+        let nonce = call.strip_prefix("call ").expect("a call").to_string();
+        let mut a = TcpStream::connect(&addr).unwrap();
+        a.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        writeln!(a, "accept {id} {nonce}").unwrap();
+        assert_eq!(line(&mut a).unwrap(), "ok");
+        let mut got = [0u8; 5];
+        a.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping!");
+        a.write_all(b"pong!").unwrap();
+        assert_eq!(&viewer.join().unwrap(), b"pong!");
+        // Once its line ends the ID is offline again.
+        drop(agent);
+        thread::sleep(Duration::from_millis(600));
+        assert!(!online(id, &addr).unwrap());
     }
 
     #[test]
