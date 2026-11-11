@@ -117,6 +117,11 @@ sshremote sshremote://ID@sshremote.dev --password P
 sshremote --relay --listen 0.0.0.0:7071 --store ids.json   # your own relay
 ```
 
+On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
+SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
+asks for them at start). The relay is reached on TCP 7071, or on port 80 through a web server when
+7071 is shut.
+
 Both ends dial out to the relay, prove the password to each other with SPAKE2 and seal every byte
 with ChaCha20-Poly1305; the relay sees neither. IDs are held at the relay by a secret token, wrong
 passwords cost more time each, and attempts per address are limited. See
