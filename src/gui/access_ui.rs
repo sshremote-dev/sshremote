@@ -13,11 +13,49 @@ pub(super) struct AccessUi {
     show_password: bool,
     new_password: String,
     relay: String,
-    /// Whether the relay sees this ID now, looked up in the background every few seconds.
-    online: std::sync::Arc<std::sync::Mutex<Option<Result<bool, String>>>>,
+    /// Whether the relay sees this ID now (for which ID and relay), looked up in the background
+    /// every few seconds, one lookup at a time.
+    online: Shared<Option<(String, String, Result<bool, String>)>>,
     looked: Option<std::time::Instant>,
-    service: Option<bool>,
+    /// The service: installed, running, and running this program file; looked up in the background.
+    service: Shared<Option<Service>>,
+    service_looked: Option<std::time::Instant>,
+    /// Why the stored settings could not be read or kept, shown instead of an ID.
+    #[cfg(feature = "remote")]
+    problem: Option<String>,
+    /// What the Remote desktop extension's program says of remote access (the Terminal edition).
+    #[cfg(not(feature = "remote"))]
+    by_extension: Shared<Option<Option<serde_json::Value>>>,
 }
+
+type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+#[derive(Clone, Copy, Default)]
+struct Service {
+    installed: bool,
+    runs: bool,
+    this: bool,
+}
+
+/// Runs `look` on a thread of its own unless one still runs for `slot`, then repaints.
+fn in_background<T: Send + 'static>(slot: &Shared<Option<T>>, busy: &'static std::sync::atomic::AtomicBool, ctx: &egui::Context, look: impl FnOnce() -> T + Send + 'static) {
+    use std::sync::atomic::Ordering;
+    if busy.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (slot, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let v = look();
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+        busy.store(false, Ordering::Release);
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(feature = "remote")]
+static ONLINE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "remote")]
+static SERVICE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl App {
     /// The Remote access card.
@@ -33,7 +71,9 @@ impl App {
                 #[cfg(feature = "remote")]
                 self.access_body(ui);
                 #[cfg(not(feature = "remote"))]
-                {
+                if crate::ext::provider("remote").is_some() {
+                    self.access_by_extension(ui);
+                } else {
                     ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
                     ui.label(RichText::new("Lets others reach this computer's screen with an ID and a password, through a relay: for computers on Wi-Fi or without a fixed address. It comes with the Remote desktop extension.").weak().size(12.0));
                     if ui.add(theme::primary(format!("{}  Get the Remote desktop extension", ic::PUZZLE_PIECE))).clicked() {
@@ -49,29 +89,54 @@ impl App {
     fn access_body(&mut self, ui: &mut egui::Ui) {
         use crate::access;
         let a = &mut self.access;
-        let mut cfg = a
-            .cfg
-            .get_or_insert_with(|| {
-                // Kept at once, so the ID shown is the one others will use.
-                let c = access::load();
-                if access::file().is_some_and(|f| !f.exists()) {
-                    let _ = access::save(&c);
+        if a.cfg.is_none() && a.problem.is_none() {
+            // Kept at once, so the ID shown is the one others will use; settings that cannot be
+            // read or kept are said so, never shown as made-up ones.
+            match access::stored() {
+                Ok(Some(c)) => a.cfg = Some(c),
+                Ok(None) => {
+                    let c = access::fresh();
+                    match access::save(&c) {
+                        Ok(()) => a.cfg = Some(c),
+                        Err(e) => a.problem = Some(e),
+                    }
                 }
-                c
-            })
-            .clone();
+                Err(e) => a.problem = Some(e),
+            }
+        }
+        let Some(mut cfg) = a.cfg.clone() else {
+            ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
+            ui.label(RichText::new("Lets others reach this computer with an ID and a password through the relay, for computers on Wi-Fi or without a fixed address.").weak().size(12.0));
+            ui.add_space(6.0);
+            let why = a.problem.clone().unwrap_or_default();
+            ui.label(RichText::new(format!("Not set up yet: {why}")).color(bad()));
+            ui.horizontal(|ui| {
+                if cfg!(windows) && !crate::admin::elevated() && ui.add(theme::primary(format!("{}  Restart as administrator to set it up", ic::SHIELD_CHECK))).clicked() {
+                    self.restart_elevated(ui.ctx());
+                }
+                if ui.button("Try again").clicked() {
+                    self.access.problem = None;
+                }
+            });
+            return;
+        };
         if a.relay.is_empty() {
             a.relay = cfg.relay.clone();
         }
-        let service = *a.service.get_or_insert_with(access::service_installed);
+        let ctx = ui.ctx().clone();
+        if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
+            a.service_looked = Some(std::time::Instant::now());
+            in_background(&a.service, &SERVICE_BUSY, &ctx, || Service { installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
+        }
+        let svc = a.service.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
+        let service = svc.installed;
         // The relay's view of this ID, asked again every 5 s while the card shows.
         if cfg.enabled && a.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
             a.looked = Some(std::time::Instant::now());
-            let (id, relay, slot, ctx) = (cfg.id.clone(), cfg.relay.clone(), a.online.clone(), ui.ctx().clone());
-            std::thread::spawn(move || {
+            let (id, relay) = (cfg.id.clone(), cfg.relay.clone());
+            in_background(&a.online, &ONLINE_BUSY, &ctx, move || {
                 let r = access::online(&id, &relay);
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-                ctx.request_repaint();
+                (id, relay, r)
             });
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
@@ -117,8 +182,10 @@ impl App {
             });
             ui.end_row();
             ui.label(RichText::new("State").weak());
-            let online = self.access.online.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let local = access::state();
+            // Only an answer about this ID at this relay counts.
+            let online = self.access.online.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|(id, relay, _)| *id == cfg.id && *relay == cfg.relay).map(|(_, _, r)| r);
+            // When the service runs remote access, this window's own loop is off: the relay says.
+            let local = if svc.runs { access::State::Off } else { access::state() };
             let (color, text) = if !cfg.enabled {
                 (ui.visuals().weak_text_color(), "Off: nobody can connect by ID".to_string())
             } else {
@@ -126,7 +193,7 @@ impl App {
                     (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
                     (access::State::Failed(e), _) => (bad(), e.clone()),
                     (_, Some(Ok(true))) => (good(), format!("Ready: waiting at {}", cfg.relay)),
-                    (_, Some(Ok(false))) => (bad(), if service || access::service_runs() { "Not at the relay yet: the service connects in a moment".into() } else { "Connecting to the relay\u{2026}".into() }),
+                    (_, Some(Ok(false))) => (bad(), if svc.runs { "Not at the relay yet: the service connects in a moment".into() } else { "Connecting to the relay\u{2026}".into() }),
                     (_, Some(Err(e))) => (bad(), format!("The relay could not be reached: {e}")),
                     (_, None) => (ui.visuals().weak_text_color(), "Connecting\u{2026}".into()),
                 }
@@ -145,18 +212,18 @@ impl App {
             ui.label(RichText::new(format!("{}  Start with the computer", ic::SHIELD_CHECK)).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let admin = !cfg!(windows) || crate::admin::elevated();
-                if service && !access::service_is_this() {
+                if service && !svc.this {
                     let b = ui.add_enabled(admin, theme::primary(format!("{}  Update the service", ic::DOWNLOAD)));
                     if b.on_hover_text("The installed service runs another copy of sshremote; this one has what it lacks").on_disabled_hover_text("Needs administrator rights").clicked() {
                         self.error = access::install_service().err().map(|e| format!("Service: {e}"));
-                        self.access.service = None;
+                        self.access.service_looked = None;
                         self.service = None;
                     }
                 } else if service {
                     ui.label(RichText::new(format!("{}  Installed", ic::CHECK)).color(good()));
                     if ui.add_enabled(admin, egui::Button::new("Remove")).on_disabled_hover_text("Needs administrator rights").clicked() {
                         self.error = access::uninstall_service().err().map(|e| format!("Service: {e}"));
-                        self.access.service = None;
+                        self.access.service_looked = None;
                         self.service = None;
                     }
                 } else if admin {
@@ -164,7 +231,7 @@ impl App {
                         cfg.enabled = true;
                         let _ = access::save(&cfg);
                         self.error = access::install_service().err().map(|e| format!("Service: {e}"));
-                        self.access.service = None;
+                        self.access.service_looked = None;
                         self.service = None;
                     }
                 } else if ui.add(theme::primary(format!("{}  Restart as administrator to install", ic::SHIELD_CHECK))).clicked() {
@@ -243,4 +310,111 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
     ui.painter().circle_filled(egui::pos2(x, rect.center().y), 7.0, egui::Color32::WHITE);
     r
+}
+
+/// What the Remote desktop extension's program says of remote access, as JSON.
+#[cfg(not(feature = "remote"))]
+fn ext_settings() -> Option<serde_json::Value> {
+    let (program, _) = crate::ext::provider("remote")?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["remote-access", "json"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+#[cfg(not(feature = "remote"))]
+static EXT_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(not(feature = "remote"))]
+impl App {
+    /// The card when the Remote desktop extension brings remote access: its program changes the
+    /// settings and keeps the line to the relay while this window is open.
+    fn access_by_extension(&mut self, ui: &mut egui::Ui) {
+        let call = |args: &[&str]| crate::ext::call_provided("remote", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        if self.access.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
+            self.access.looked = Some(std::time::Instant::now());
+            in_background(&self.access.by_extension, &EXT_BUSY, ui.ctx(), || {
+                // The first time, `status` makes the settings.
+                ext_settings().or_else(|| {
+                    let _ = crate::ext::call_provided("remote", &["remote-access".into(), "status".into()]);
+                    ext_settings()
+                })
+            });
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
+        let v = self.access.by_extension.lock().unwrap_or_else(|e| e.into_inner()).clone().flatten();
+        let get = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let on = v.as_ref().and_then(|v| v.get("enabled")).and_then(|x| x.as_bool()).unwrap_or(false);
+        // While on, the extension's program keeps the line to the relay (once per window).
+        static RUNNING: std::sync::Once = std::sync::Once::new();
+        if on {
+            RUNNING.call_once(|| {
+                let _ = crate::ext::spawn_provided("remote", &["remote-access".into(), "run".into()]);
+            });
+        }
+        let mut result: Option<Result<(), String>> = None;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut want = on;
+                if toggle(ui, &mut want).clicked() {
+                    result = Some(call(&["remote-access", if want { "on" } else { "off" }]));
+                }
+            });
+        });
+        ui.label(RichText::new("Anyone with this ID and password can see and control this computer through the relay. Brought by the Remote desktop extension.").weak().size(12.0));
+        ui.add_space(6.0);
+        let id = get("id");
+        let spaced: String = id.as_bytes().chunks(3).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" ");
+        egui::Grid::new("access-ext").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+            ui.label(RichText::new("ID").weak());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(spaced).size(22.0).strong().monospace());
+                if icon(ui, ic::COPY, "Copy the ID", false).clicked() {
+                    ui.ctx().copy_text(id.clone());
+                }
+            });
+            ui.end_row();
+            ui.label(RichText::new("Password").weak());
+            ui.horizontal(|ui| {
+                let pw = get("password");
+                let shown = if self.access.show_password { pw.clone() } else { "\u{2022}".repeat(pw.chars().count()) };
+                ui.label(RichText::new(shown).size(18.0).monospace());
+                if icon(ui, if self.access.show_password { ic::EYE_SLASH } else { ic::EYE }, "Show or hide", false).clicked() {
+                    self.access.show_password = !self.access.show_password;
+                }
+                if icon(ui, ic::COPY, "Copy the password", false).clicked() {
+                    ui.ctx().copy_text(pw);
+                }
+                if icon(ui, ic::ARROWS_CLOCKWISE, "A new random password", false).clicked() {
+                    result = Some(call(&["remote-access", "password"]));
+                }
+            });
+            ui.end_row();
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}  Start with the computer", ic::SHIELD_CHECK)).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let admin = !cfg!(windows) || crate::admin::elevated();
+                if ui.add_enabled(admin, egui::Button::new("Remove")).on_disabled_hover_text("Needs administrator rights").clicked() {
+                    result = Some(call(&["remote-access", "uninstall"]));
+                }
+                if ui.add_enabled(admin, theme::primary(format!("{}  Install", ic::DOWNLOAD))).on_disabled_hover_text("Needs administrator rights").clicked() {
+                    result = Some(call(&["remote-access", "install"]));
+                }
+            });
+        });
+        if let Some(r) = result {
+            self.access.looked = None;
+            if let Err(e) = r {
+                self.error = Some(format!("Remote access: {e}"));
+            }
+        }
+    }
 }

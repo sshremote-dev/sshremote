@@ -7,10 +7,8 @@
 //! line, `agent ID` or `viewer ID`; the relay answers `ok` once both are there
 //! and from then on only copies bytes.
 
-use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -87,6 +85,13 @@ impl SealedWriter {
         self.buf.clear();
         self.inner.write_all(&(ct.len() as u32).to_le_bytes())?;
         self.inner.write_all(&ct)
+    }
+}
+
+impl SealedWriter {
+    /// The connection underneath, to set its timeouts or end it.
+    pub fn stream(&self) -> io::Result<TcpStream> {
+        self.inner.try_clone()
     }
 }
 
@@ -209,7 +214,13 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     if let Some(id) = &addr.id {
         relay_hello(&mut s, "viewer", id).map_err(|e| e.to_string())?;
     }
-    handshake(s, password, true).map_err(|e| e.to_string())
+    // The agent may make a wrong guess wait its turn, but not forever.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(60)));
+    let pair = handshake(s, password, true).map_err(|e| e.to_string())?;
+    if let Ok(t) = pair.1.stream() {
+        let _ = t.set_read_timeout(None);
+    }
+    Ok(pair)
 }
 
 /// Agent side of `sshremote --serve`: waits for viewers, one at a time, and serves each.
@@ -272,109 +283,9 @@ pub fn serve(listen: Option<&str>, via: Option<&str>, password: Option<&str>, ba
     }
 }
 
-/// One line, read byte by byte: what follows it belongs to the handshake.
-fn raw_line(s: &mut TcpStream) -> Option<String> {
-    let mut raw = Vec::new();
-    let mut b = [0u8; 1];
-    while raw.len() < 1024 {
-        match s.read(&mut b) {
-            Ok(1) if b[0] == 10 => return Some(String::from_utf8_lossy(&raw).trim_end_matches('\r').to_string()),
-            Ok(1) => raw.push(b[0]),
-            _ => return None,
-        }
-    }
-    None
-}
-
 /// `sshremote --relay`: pairs agents and viewers by ID and copies bytes between them.
 pub fn relay(listen: Option<&str>, store: Option<&str>) -> Result<(), String> {
-    let addr = listen.unwrap_or("0.0.0.0:7071");
-    let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
-    println!("sshremote relay listening on {addr}");
-    let waiting: Arc<Mutex<HashMap<String, (TcpStream, std::time::Instant)>>> = Arc::new(Mutex::new(HashMap::new()));
-    let hub = Arc::new(Mutex::new(crate::access::relay::Hub::new(store.map(std::path::PathBuf::from))));
-    let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for s in listener.incoming().flatten() {
-        // A cap on connections at once, so a flood cannot take the machine's threads.
-        if open.load(std::sync::atomic::Ordering::Relaxed) > 4000 {
-            continue;
-        }
-        let (waiting, hub, open) = (waiting.clone(), hub.clone(), open.clone());
-        open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        thread::spawn(move || {
-            struct Done(Arc<std::sync::atomic::AtomicUsize>);
-            impl Drop for Done {
-                fn drop(&mut self) {
-                    self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            let _done = Done(open);
-            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
-            let mut s = s;
-            let Some(mut line) = raw_line(&mut s) else { return };
-            // Through a web server on port 80: an HTTP upgrade first, then the same lines. The
-            // address the web server saw counts for the limits, when it is the one asking.
-            let mut forwarded = None;
-            if line.starts_with("GET ") {
-                let local = s.peer_addr().is_ok_and(|a| a.ip().is_loopback());
-                loop {
-                    let Some(h) = raw_line(&mut s) else { return };
-                    let h = h.trim().to_string();
-                    if h.is_empty() {
-                        break;
-                    }
-                    if let Some((k, v)) = h.split_once(':')
-                        && local
-                        && k.trim().eq_ignore_ascii_case("x-real-ip")
-                    {
-                        forwarded = v.trim().parse().ok();
-                    }
-                }
-                if s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\n\r\n").is_err() {
-                    return;
-                }
-                let Some(l) = raw_line(&mut s) else { return };
-                line = l;
-            }
-            let line = line.trim().to_string();
-            let _ = s.set_read_timeout(None);
-            let (role, id) = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
-                [role @ ("agent" | "viewer"), id] if id.len() <= 32 => (role.to_string(), id.to_string()),
-                _ => {
-                    crate::access::relay::handle(&hub, s, &line, forwarded);
-                    return;
-                }
-            };
-            // A viewer for an ID listening the newer way goes to remote access.
-            if role == "viewer" && !waiting.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
-                crate::access::relay::handle(&hub, s, &line, forwarded);
-                return;
-            }
-            if role == "agent" {
-                let mut w = waiting.lock().unwrap_or_else(|e| e.into_inner());
-                // Agents that waited a day without a viewer are gone or will reconnect.
-                w.retain(|_, (_, since)| since.elapsed() < Duration::from_secs(24 * 3600));
-                w.insert(id, (s, std::time::Instant::now()));
-                return;
-            }
-            let found = waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).map(|(s, _)| s);
-            let Some(mut agent) = found else {
-                let _ = writeln!(s, "no agent with that ID");
-                return;
-            };
-            if writeln!(agent, "ok").is_err() || writeln!(s, "ok").is_err() {
-                return;
-            }
-            let (Ok(mut a2), Ok(mut s2)) = (agent.try_clone(), s.try_clone()) else { return };
-            thread::spawn(move || {
-                let _ = io::copy(&mut a2, &mut s2);
-                let _ = s2.shutdown(std::net::Shutdown::Both);
-            });
-            let _ = io::copy(&mut s, &mut agent);
-            let _ = agent.shutdown(std::net::Shutdown::Both);
-        });
-    }
-    Ok(())
+    crate::access::relay::serve(listen.unwrap_or("0.0.0.0:7071"), store)
 }
 
 #[cfg(test)]
