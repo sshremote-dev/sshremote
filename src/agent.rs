@@ -428,12 +428,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
                 },
                 ToAgent::InstallHelper => {
-                    // Older viewers show the result as the window list's message, so it travels there.
-                    let error = match cap.install_helper() {
-                        Ok(text) => text,
-                        Err(e) => format!("Could not install the helper: {e}"),
+                    let reply = match cap.install_helper() {
+                        Ok(text) => ToClient::HelperInstalled { ok: true, text },
+                        Err(e) => ToClient::HelperInstalled { ok: false, text: format!("Could not install the helper: {e}") },
                     };
-                    send(enc, &ToClient::WindowList { list: Vec::new(), error }).map_err(io_err)?;
+                    send(enc, &reply).map_err(io_err)?;
                 }
                 ToAgent::Share(scope) => {
                     let kind = scope.to_wire().0;

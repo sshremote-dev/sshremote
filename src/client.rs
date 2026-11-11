@@ -1384,6 +1384,12 @@ impl Viewer {
                     self.draw_share_list()?;
                 }
             }
+            ToClient::HelperInstalled { ok, text } => {
+                self.notify(&text)?;
+                if ok {
+                    self.sess.send(ToAgent::ListWindows)?;
+                }
+            }
             ToClient::TermOutput { id, data } if self.shell == Some(id) => {
                 self.shell_modes.follow(&data);
                 if self.view == View::Terminal && self.overlay == Overlay::None {

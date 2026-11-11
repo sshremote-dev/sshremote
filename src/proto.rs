@@ -338,10 +338,15 @@ pub enum ToClient {
         id: u32,
         text: String,
     },
-    /// The shareable windows, or why there is no list; also carries InstallHelper's result text, success or not.
+    /// The shareable windows, or why there is no list.
     WindowList {
         list: Vec<crate::shared::WindowInfo>,
         error: String,
+    },
+    /// What InstallHelper did: whether the helper is in place, and what to tell the user.
+    HelperInstalled {
+        ok: bool,
+        text: String,
     },
     /// What is shared now; `kind` is `Share`'s number on the wire (0: the whole screen).
     Sharing {
@@ -809,6 +814,11 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 117
             }
+            ToClient::HelperInstalled { ok, text } => {
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                125
+            }
             ToClient::TermOutput { id, data } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(data);
@@ -961,6 +971,7 @@ impl ToClient {
             115 => ToClient::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             116 => ToClient::Snapshot(c.rest().to_vec()),
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            125 => ToClient::HelperInstalled { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             119 => ToClient::TermOutput { id: c.u32()?, data: c.rest().to_vec() },
             121 => {
                 let error = c.str()?;
@@ -1090,6 +1101,7 @@ mod tests {
             ToClient::FetchData { id: 2, data: vec![1] },
             ToClient::FetchEnd { id: 2, ok: true, text: String::new() },
             ToClient::OpDone { ok: false, text: "denied".into() },
+            ToClient::HelperInstalled { ok: true, text: "installed; sign out and in".into() },
             ToClient::FetchStart { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },

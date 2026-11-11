@@ -525,6 +525,16 @@ impl Remote {
                         p.0 = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                     }
                 }
+                // The chooser shows what happened; a helper in place may list the windows already.
+                Ok(Ev::Net(ToClient::HelperInstalled { ok, text })) => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.0 = Some(Err(text.clone()));
+                    }
+                    self.notify(&text);
+                    if ok {
+                        let _ = self.send(ToAgent::ListWindows);
+                    }
+                }
                 Ok(Ev::Net(ToClient::Sharing { kind, text })) => {
                     if kind != self.sharing.0 || text != self.sharing.1 {
                         self.notify(&format!("Now sharing {text}"));
@@ -1027,7 +1037,7 @@ impl Remote {
             }
         }
         if let Some(m) = pick {
-            // The install answer comes back as the list's message, so the chooser stays open for it.
+            // The chooser stays open for the install's answer.
             let installing = m == ToAgent::InstallHelper;
             self.send(m)?;
             close = !installing;
