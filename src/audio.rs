@@ -13,10 +13,11 @@ const RATE: u32 = 48_000;
 const FRAME: usize = 960;
 const BITRATE: i32 = 64_000;
 
-/// Converts interleaved samples at `from` Hz with `ch` channels to 48 kHz stereo, linearly.
+/// Converts interleaved samples at `from` Hz with `ch` channels to stereo at `to` Hz, linearly.
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Resampler {
     from: u32,
+    to: u32,
     ch: usize,
     pos: f64,
     last: [f32; 2],
@@ -24,20 +25,20 @@ struct Resampler {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Resampler {
-    pub fn new(from: u32, ch: usize) -> Resampler {
-        Resampler { from, ch: ch.max(1), pos: 0.0, last: [0.0; 2] }
+    pub fn new(from: u32, to: u32, ch: usize) -> Resampler {
+        Resampler { from, to, ch: ch.max(1), pos: 0.0, last: [0.0; 2] }
     }
 
     pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
         let frames: Vec<[f32; 2]> =
             input.chunks(self.ch).map(|f| if f.len() >= 2 { [f[0], f[1]] } else { [f[0], f[0]] }).collect();
-        if self.from == RATE {
+        if self.from == self.to {
             for f in &frames {
                 out.extend_from_slice(f);
             }
             return;
         }
-        let step = self.from as f64 / RATE as f64;
+        let step = self.from as f64 / self.to as f64;
         while self.pos < frames.len() as f64 {
             let i = self.pos.floor() as usize;
             let t = (self.pos - i as f64) as f32;
@@ -78,7 +79,7 @@ pub fn capture() -> Result<Capture, String> {
     }
     let (tx, rx) = mpsc::channel();
     let mut enc = encoder()?;
-    let mut rs = Resampler::new(config.sample_rate(), config.channels() as usize);
+    let mut rs = Resampler::new(config.sample_rate(), RATE, config.channels() as usize);
     let mut pcm: Vec<f32> = Vec::new();
     let stream = device
         .build_input_stream::<f32, _, _>(
@@ -178,8 +179,7 @@ impl Player {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
         let dec = opus::Decoder::new(RATE, opus::Channels::Stereo).map_err(|e| e.to_string())?;
-        // The decoder's 48 kHz output is converted to the device rate by running the resampler backwards.
-        let rs = Resampler { from: RATE, ch: 2, pos: 0.0, last: [0.0; 2] };
+        let rs = Resampler::new(RATE, device_rate, 2);
         Ok(Player { dec, queue, rs, device_rate, device_ch, _stream: stream })
     }
 
@@ -187,28 +187,8 @@ impl Player {
         let mut pcm = vec![0f32; FRAME * 2 * 3];
         let Ok(n) = self.dec.decode_float(packet, &mut pcm, false) else { return };
         pcm.truncate(n * 2);
-        let stereo = if self.device_rate == RATE {
-            pcm
-        } else {
-            let mut out = Vec::with_capacity(pcm.len());
-            self.rs.from = RATE;
-            let step = RATE as f64 / self.device_rate as f64;
-            let frames: Vec<[f32; 2]> = pcm.chunks(2).map(|f| [f[0], f[1]]).collect();
-            while self.rs.pos < frames.len() as f64 {
-                let i = self.rs.pos.floor() as usize;
-                let t = (self.rs.pos - i as f64) as f32;
-                let a = if i == 0 { self.rs.last } else { frames[i - 1] };
-                let b = frames[i];
-                out.push(a[0] + (b[0] - a[0]) * t);
-                out.push(a[1] + (b[1] - a[1]) * t);
-                self.rs.pos += step;
-            }
-            self.rs.pos -= frames.len() as f64;
-            if let Some(l) = frames.last() {
-                self.rs.last = *l;
-            }
-            out
-        };
+        let mut stereo = Vec::with_capacity(pcm.len());
+        self.rs.push(&pcm, &mut stereo);
         let mut q = self.queue.lock().unwrap();
         for f in stereo.chunks(2) {
             // Left and right, then silence for any further channels of the device.
@@ -228,7 +208,7 @@ mod tests {
 
     #[test]
     fn resampling_keeps_duration() {
-        let mut rs = Resampler::new(44_100, 2);
+        let mut rs = Resampler::new(44_100, RATE, 2);
         let mut out = Vec::new();
         for _ in 0..10 {
             rs.push(&vec![0.5f32; 4410 * 2], &mut out);

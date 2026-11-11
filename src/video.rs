@@ -81,10 +81,6 @@ impl Video {
         for (heat, &c) in self.heat.iter_mut().zip(&changed) {
             *heat = (*heat << 1) | c as u8;
         }
-        let hot: Vec<(usize, usize)> = (0..self.heat.len())
-            .filter(|&i| self.heat[i].count_ones() >= HOT)
-            .map(|i| (i % self.cols, i / self.cols))
-            .collect();
         if let Some(reg) = self.region {
             if self.last_change.elapsed() > QUIET {
                 self.region = None;
@@ -99,6 +95,10 @@ impl Video {
             }
             return Event::None;
         }
+        let hot: Vec<(usize, usize)> = (0..self.heat.len())
+            .filter(|&i| self.heat[i].count_ones() >= HOT)
+            .map(|i| (i % self.cols, i / self.cols))
+            .collect();
         if hot.len() < MIN_TILES {
             return Event::None;
         }

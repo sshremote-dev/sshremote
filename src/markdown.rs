@@ -233,7 +233,7 @@ fn box_table(lines: &[&str]) -> (Vec<Vec<String>>, usize) {
 }
 
 /// Removes the indentation all non-blank lines share.
-pub fn dedent(text: &str) -> String {
+fn dedent(text: &str) -> String {
     let indent = |l: &str| l.chars().take_while(|c| c.is_whitespace()).count();
     let n = text.lines().filter(|l| !l.trim().is_empty()).map(indent).min().unwrap_or(0);
     text.lines().map(|l| l.chars().skip(n).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
@@ -305,7 +305,7 @@ fn gaps(line: &str) -> Vec<usize> {
 
 /// Lines laid out in columns (`ls`, `ps`, aligned settings): a line with several columns, or
 /// columns that start at the same place on two lines. A sentence with one double space is not.
-pub fn columned_block(lines: &[&str]) -> bool {
+fn columned_block(lines: &[&str]) -> bool {
     if lines.iter().any(|l| columned(l)) {
         return true;
     }
@@ -694,10 +694,16 @@ thread_local!(static ACTIONS: std::cell::RefCell<Option<Vec<String>>> = const { 
 
 /// A link clicked: an extension panel's own links go back to the extension as actions, others open.
 fn follow(url: &str) {
-    let caught = url.starts_with("sshremote:") && ACTIONS.with(|a| a.borrow_mut().as_mut().map(|v| v.push(url.to_string())).is_some());
-    if !caught {
+    if !url.starts_with("sshremote:") {
         crate::termwin::open_url(url);
+        return;
     }
+    // Outside an extension panel nothing takes the action, and the OS has no handler for it.
+    ACTIONS.with(|a| {
+        if let Some(v) = a.borrow_mut().as_mut() {
+            v.push(url.to_string());
+        }
+    });
 }
 
 /// Runs `f` (drawing a document) and returns the `sshremote:` links clicked in it meanwhile.

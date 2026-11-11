@@ -165,6 +165,15 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let (mut paused, mut one_shot) = (false, false);
     let mut prev: Option<Plane> = None;
     let mut vid = video::Video::new();
+    // The picture's size changed: tell the viewer and start the stream over.
+    macro_rules! resized {
+        () => {
+            desk = cap.desktop_size();
+            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+            (prev, last) = (None, None);
+            vid.reset();
+        };
+    }
     let mut clip = crate::clip::Clip::new();
     let mut inbox = crate::files::Inbox::default();
     let mut terms = crate::pty::Terms::default();
@@ -253,13 +262,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         }
                         // The shared window closed or changed size: fit the capture first, then grab again.
                         if cap.desktop_size() != desk {
-                            desk = cap.desktop_size();
-                            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
-                            (prev, last) = (None, None);
-                            vid.reset();
+                            resized!();
                             continue;
                         }
-                        if last.as_ref().is_some_and(|i| (i.w, i.h) == size) {
+                        // Before the first settings no size is known, so any picture will do.
+                        if last.as_ref().is_some_and(|i| settings.is_none() || (i.w, i.h) == size) {
                             break;
                         }
                         thread::sleep(Duration::from_millis(50));
@@ -364,10 +371,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     if let Ok(text) = cap.share(crate::capture::Share::Screen) {
                         send(enc, &ToClient::Sharing { kind: 0, text }).map_err(io_err)?;
                     }
-                    desk = cap.desktop_size();
-                    announce(enc, cap.as_mut(), desk, settings, &mut size)?;
-                    (prev, last) = (None, None);
-                    vid.reset();
+                    resized!();
                 }
                 ToAgent::ListWindows => {
                     let m = match cap.windows() {
@@ -418,15 +422,13 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 ToAgent::PickOnRemote => match cap.pick() {
                     Ok(text) => {
                         send(enc, &ToClient::Sharing { kind: 0, text: "the whole screen".into() }).map_err(io_err)?;
-                        desk = cap.desktop_size();
-                        announce(enc, cap.as_mut(), desk, settings, &mut size)?;
-                        (prev, last) = (None, None);
-                        vid.reset();
+                        resized!();
                         send(enc, &ToClient::Notice(text)).map_err(io_err)?;
                     }
                     Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
                 },
                 ToAgent::InstallHelper => {
+                    // Older viewers show the result as the window list's message, so it travels there.
                     let error = match cap.install_helper() {
                         Ok(text) => text,
                         Err(e) => format!("Could not install the helper: {e}"),
@@ -439,10 +441,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                         Ok(text) => {
                             send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
                             ui.pin(kind);
-                            desk = cap.desktop_size();
-                            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
-                            (prev, last) = (None, None);
-                            vid.reset();
+                            resized!();
                         }
                         Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
                     }
@@ -492,10 +491,7 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
         // A shared window was resized or moved to where its size changed.
         if cap.desktop_size() != desk {
-            desk = cap.desktop_size();
-            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
-            (prev, last) = (None, None);
-            vid.reset();
+            resized!();
             continue;
         }
         let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else {

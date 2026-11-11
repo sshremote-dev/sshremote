@@ -36,12 +36,12 @@ impl Clip {
             // Text put there only to be pasted, and what to put back afterwards.
             let mut restore: Option<(String, String, std::time::Instant)> = None;
             loop {
+                // Requests fall through too, so a steady stream of them cannot hold off the restore.
                 match incoming.recv_timeout(POLL) {
                     Ok(Req::Set(text)) => {
                         if board.set_text(text.clone()).is_ok() {
                             last = Some(text);
                         }
-                        continue;
                     }
                     Ok(Req::Paste(text, done)) => {
                         // A paste right after another keeps the text from before the first one.
@@ -53,7 +53,6 @@ impl Clip {
                         last = Some(text.clone());
                         restore = Some((old, text, std::time::Instant::now()));
                         let _ = done.send(ok);
-                        continue;
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return,

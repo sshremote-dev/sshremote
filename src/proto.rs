@@ -338,7 +338,7 @@ pub enum ToClient {
         id: u32,
         text: String,
     },
-    /// The shareable windows, or why there is no list.
+    /// The shareable windows, or why there is no list; also carries InstallHelper's result text, success or not.
     WindowList {
         list: Vec<crate::shared::WindowInfo>,
         error: String,
@@ -428,12 +428,18 @@ pub fn write_msg(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()>
     w.write_all(payload)
 }
 
-/// Returns `None` on a clean end of stream.
+/// Returns `None` on a clean end of stream; a cut inside a header is an error.
 pub fn read_msg(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut head = [0u8; 5];
-    match r.read_exact(&mut head) {
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        r => r?,
+    let mut got = 0;
+    while got < head.len() {
+        match r.read(&mut head[got..]) {
+            Ok(0) if got == 0 => return Ok(None),
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
     let len = u32::from_le_bytes(head[1..].try_into().unwrap()) as usize;
     // Frames, snapshots and file chunks stay far below this; anything bigger is a broken peer.
@@ -1140,5 +1146,12 @@ mod tests {
         write_msg(&mut wire, k, &p).unwrap();
         let (k, p) = read_msg(&mut wire.as_slice()).unwrap().unwrap();
         assert_eq!(ToClient::decode(k, &p).unwrap(), f);
+    }
+
+    #[test]
+    fn cut_header_is_an_error() {
+        assert!(read_msg(&mut [].as_slice()).unwrap().is_none());
+        let e = read_msg(&mut [7u8, 1].as_slice()).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

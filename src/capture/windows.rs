@@ -319,6 +319,7 @@ impl Gdi {
     }
 
     /// Greys out what is not part of the shared windows.
+    // In place on the scaled duplication buffer, unlike region::crop_masked, which crops a full-size frame.
     fn mask(&self, data: &mut [u8]) {
         let (tw, th) = self.target;
         let (dw, dh) = (self.desk.0.max(1), self.desk.1.max(1));
@@ -445,6 +446,8 @@ impl Capture for Gdi {
         (self.current, self.origin, self.desk) = (index, (s.left, s.top), (s.info.w, s.info.h));
         self.monitor = (self.origin, self.desk);
         self.scope = Scope::Screen;
+        self.shown.clear();
+        (self.pointer_inside, self.ended) = (true, false);
         (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
         self.dup_retry = std::time::Instant::now();
         Ok(())
@@ -463,7 +466,8 @@ impl Capture for Gdi {
             Share::Screen => {
                 self.scope = Scope::Screen;
                 (self.origin, self.desk) = self.monitor;
-                self.pointer_inside = true;
+                self.shown.clear();
+                (self.pointer_inside, self.ended) = (true, false);
                 self.force = true;
                 return Ok("the whole screen".into());
             }

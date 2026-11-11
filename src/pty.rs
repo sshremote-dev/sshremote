@@ -33,7 +33,7 @@ impl Terms {
             Ok((input, output, handle)) => {
                 // Bounded, so a flood of output waits for the reader instead of filling memory.
                 let (tx, rx) = mpsc::sync_channel(64);
-                std::thread::spawn(move || read_loop(output, tx));
+                std::thread::spawn(move || read_loop(output, tx, Box::new(|| {})));
                 self.open.insert(id, Shell { input, out: rx, sys: handle });
                 None
             }
@@ -89,11 +89,7 @@ impl Terms {
     }
 }
 
-fn read_loop(output: File, tx: mpsc::SyncSender<Out>) {
-    read_loop_waking(output, tx, Box::new(|| {}));
-}
-
-fn read_loop_waking(mut output: File, tx: mpsc::SyncSender<Out>, wake: Box<dyn Fn() + Send>) {
+fn read_loop(mut output: File, tx: mpsc::SyncSender<Out>, wake: Box<dyn Fn() + Send>) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
         match output.read(&mut buf) {
@@ -124,7 +120,7 @@ impl Local {
     pub fn spawn(argv: &[String], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
         let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv))?;
         let (tx, out) = mpsc::sync_channel(64);
-        std::thread::spawn(move || read_loop_waking(output, tx, wake));
+        std::thread::spawn(move || read_loop(output, tx, wake));
         Ok(Local { input, out, sys })
     }
 
