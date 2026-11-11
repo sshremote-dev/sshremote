@@ -131,18 +131,59 @@ pub(crate) mod ic {
     pub const X: &str = "\u{E4F6}";
 }
 
-/// The logo as a texture for title bars, in the variant of the theme shown, loaded once each.
-pub(crate) fn logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
-    let dark = theme::dark();
-    let id = egui::Id::unique(("sshremote-logo-texture", dark));
-    if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(id)) {
-        return Some(t);
+/// The logo drawn as vectors in `rect`, crisp at any size, in the colours of `assets/logo.svg`.
+pub(crate) fn paint_logo(painter: &egui::Painter, rect: Rect, dark: bool) {
+    let (top, bottom, chevron, portal, rim) = if dark {
+        (Color32::from_rgb(0x2a, 0x31, 0x3d), Color32::from_rgb(0x17, 0x1b, 0x23), Color32::from_rgb(0x7c, 0xb4, 0xff), Color32::from_rgb(0x4f, 0x7c, 0xf5), Color32::from_white_alpha(30))
+    } else {
+        (Color32::from_rgb(0xf8, 0xfa, 0xfd), Color32::from_rgb(0xe5, 0xeb, 0xf5), Color32::from_rgb(0x4f, 0x8f, 0xf7), Color32::from_rgb(0x36, 0x59, 0xd9), Color32::from_black_alpha(36))
+    };
+    let size = rect.width().min(rect.height());
+    let unit = size / 256.0;
+    let at = |x: f32, y: f32| rect.center() + Vec2::new(x - 128.0, y - 128.0) * unit;
+    // The plate: |u|^5 + |v|^5 = 1, shaded top to bottom.
+    let edge: Vec<Pos2> = (0..64)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / 64.0;
+            let f = |c: f32| c.signum() * c.abs().powf(0.4) * 112.0;
+            at(128.0 + f(a.cos()), 128.0 + f(a.sin()))
+        })
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    let shade = |p: Pos2| {
+        let t = ((p.y - rect.center().y) / (224.0 * unit) + 0.5).clamp(0.0, 1.0);
+        top.lerp_to_gamma(bottom, t)
+    };
+    mesh.colored_vertex(rect.center(), shade(rect.center()));
+    for p in &edge {
+        mesh.colored_vertex(*p, shade(*p));
     }
-    let i = themed_icon(dark)?;
-    let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
-    let t = ctx.load_texture("sshremote-logo", img, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
-    Some(t)
+    for i in 0..edge.len() as u32 {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % edge.len() as u32);
+    }
+    painter.add(mesh);
+    painter.add(egui::Shape::closed_line(edge, egui::Stroke::new((size / 64.0).max(1.0), rim)));
+    // Small sizes get a larger mark and a heavier line, as the bitmaps do.
+    let k = if size < 40.0 { 0.86 } else { 0.78 };
+    let width = (28.0 * k * unit).max(size / 8.0).min(28.0 * unit);
+    let mark = |x: f32, y: f32| at(128.0 + (x - 128.0) * k, 128.0 + (y - 128.0) * k);
+    let line = |points: Vec<Pos2>, c: Color32| {
+        for p in [points[0], points[points.len() - 1]] {
+            painter.circle_filled(p, width / 2.0, c);
+        }
+        painter.add(egui::Shape::line(points, egui::Stroke::new(width, c)));
+    };
+    let mut frame = vec![mark(104.0, 48.0)];
+    for (cx, cy, from) in [(184.0, 72.0, -90.0f32), (184.0, 184.0, 0.0)] {
+        frame.extend((0..=8).map(|i| {
+            let a = (from + 90.0 * i as f32 / 8.0).to_radians();
+            mark(cx + 24.0 * a.cos(), cy + 24.0 * a.sin())
+        }));
+    }
+    frame.push(mark(104.0, 208.0));
+    line(frame, portal);
+    line(vec![mark(48.0, 88.0), mark(88.0, 128.0), mark(48.0, 168.0)], chevron);
+    painter.circle_filled(mark(88.0, 128.0), width / 2.0, chevron);
 }
 
 /// The logo, for the window and the task bar.
@@ -1205,6 +1246,31 @@ mod tests {
                 }
                 snap.save(&ctx, size, &dir.join(format!("open_dialog_{name}_{w_}.png")));
             }
+        }
+    }
+
+    /// The vector logo at title bar and larger sizes on both themes:
+    /// SSHREMOTE_SNAP_DIR=folder cargo test --release logo_pictures
+    #[test]
+    fn logo_pictures() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            theme::style(&ctx);
+            theme::apply_theme(&ctx, dark);
+            let size = Vec2::new(360.0, 140.0);
+            let mut snap = snapshot::Snap::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), ..Default::default() };
+            snap.frame(&ctx, input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut x = 20.0;
+                    for s in [16.0, 20.0, 32.0, 48.0, 96.0] {
+                        paint_logo(ui.painter(), Rect::from_min_size(Pos2::new(x, 20.0), Vec2::splat(s)), dark);
+                        x += s + 16.0;
+                    }
+                });
+            });
+            snap.save(&ctx, size, &dir.join(format!("logo_{}.png", if dark { "dark" } else { "light" })));
         }
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SSH Remote icon. Python 3 standard library only; run: python make_icon.py [dark].
+"""SSH Remote icon. Python 3 standard library only; run: python make_icon.py [dark | svg].
 `dark` draws the variant for dark themes (a dark plate, brighter blues) as icon-dark.*.
 Independent optical masters, SDF geometry, 4x/8x area supersampling.
 Outputs go to the current working directory, not the script directory.
@@ -15,6 +15,7 @@ PLATE_TOP = (0xF8, 0xFA, 0xFD)
 PLATE_BOTTOM = (0xE5, 0xEB, 0xF5)
 LIGHT = (0x4F, 0x8F, 0xF7)
 DEEP = (0x36, 0x59, 0xD9)
+RIM = 0.9
 
 
 def rounded_box(x, y, left, top, right, bottom, radius):
@@ -63,10 +64,13 @@ def sample(x, y, size):
         return (0, 0, 0, 0)
     t = min(max((y - 16) / 224, 0), 1)
     plate = tuple(round(a + (b - a) * t) for a, b in zip(PLATE_TOP, PLATE_BOTTOM))
+    # A hairline rim, about one device pixel, so the plate holds its shape on any background.
+    if abs(u) ** 5 + abs(v) ** 5 > (1 - 1.1 * 256 / size / 112) ** 5:
+        plate = tuple(round(c * RIM) for c in plate)
     # The mark at 0.78 of the plate, with a stroke set per size so small icons stay crisp.
-    k = 0.78
+    k = {16: 0.86, 24: 0.84}.get(size, 0.78)
     mx, my = 128 + (x - 128) / k, 128 + (y - 128) / k
-    device = {16: 2.0, 24: 3.0, 32: 3.5, 48: 5.25}.get(size)
+    device = {16: 2.25, 24: 3.0, 32: 3.5, 48: 5.0}.get(size)
     w = 28 if device is None else device * 256 / size / k
     if chevron(mx, my) <= w / 2:
         return (*LIGHT, 255)
@@ -104,13 +108,41 @@ def png(size, pixels):
             + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
+def squircle_path():
+    """The plate outline as an SVG path: the same |u|^5 + |v|^5 = 1 curve the bitmaps use."""
+    points = []
+    for i in range(96):
+        a = 2 * math.pi * i / 96
+        c, s = math.cos(a), math.sin(a)
+        points.append((128 + 112 * math.copysign(abs(c) ** 0.4, c), 128 + 112 * math.copysign(abs(s) ** 0.4, s)))
+    return 'M' + 'L'.join(f'{x:.1f} {y:.1f}' for x, y in points) + 'Z'
+
+
+def svg():
+    """One SVG for every theme: light colours, and dark ones when the page or system is dark."""
+    css = ('.t{stop-color:#f8fafd}.b{stop-color:#e5ebf5}.c{stroke:#4f8ff7}.p{stroke:#3659d9}.r{stroke:#000;stroke-opacity:.1}'
+           '@media (prefers-color-scheme:dark){.t{stop-color:#2a313d}.b{stop-color:#171b23}.c{stroke:#7cb4ff}.p{stroke:#4f7cf5}.r{stroke:#fff;stroke-opacity:.12}}')
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><style>' + css + '</style>'
+            '<defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="t"/><stop offset="1" class="b"/></linearGradient></defs>'
+            f'<path d="{squircle_path()}" fill="url(#lg)" class="r" stroke-width="3"/>' + MARK + '</svg>\n')
+
+
+MARK = ('<g transform="translate(128 128) scale(.78) translate(-128 -128)" fill="none" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">'
+        '<path class="p" d="M104 48H184A24 24 0 0 1 208 72V184A24 24 0 0 1 184 208H104"/><path class="c" d="M48 88L88 128L48 168"/></g>')
+
+
 def main():
-    global PLATE_TOP, PLATE_BOTTOM, LIGHT, DEEP
+    if 'svg' in sys.argv[1:]:
+        Path('logo.svg').write_text(svg(), encoding='utf-8')
+        print('Wrote logo.svg; site/favicon.svg is a copy, site/site.js takes the plate path')
+        return
+    global PLATE_TOP, PLATE_BOTTOM, LIGHT, DEEP, RIM
     suffix = ''
     if 'dark' in sys.argv[1:]:
         # The same mark for dark themes: a dark plate, and blues bright enough on it.
         PLATE_TOP, PLATE_BOTTOM = (0x2A, 0x31, 0x3D), (0x17, 0x1B, 0x23)
         LIGHT, DEEP = (0x7C, 0xB4, 0xFF), (0x4F, 0x7C, 0xF5)
+        RIM = 1.35
         suffix = '-dark'
     masters = {size: render(size) for size in SIZES}
     images = [(size, png(size, masters[size])) for size in SIZES]

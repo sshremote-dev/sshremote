@@ -16,6 +16,7 @@ const PAGE: &str = include_str!("../web/index.html");
 const XTERM_JS: &str = include_str!("../web/xterm.js");
 const XTERM_CSS: &str = include_str!("../web/xterm.css");
 const FIT_JS: &str = include_str!("../web/addon-fit.js");
+const LOGO: &str = include_str!("../assets/logo.svg");
 
 /// The name the browser picks for a shell on the gateway's own computer.
 const HERE: &str = "This computer";
@@ -126,6 +127,7 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
         "" | "/" | "/index.html" => respond(&conn, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
         "/xterm.js" => respond(&conn, "200 OK", "text/javascript", XTERM_JS.as_bytes()),
         "/addon-fit.js" => respond(&conn, "200 OK", "text/javascript", FIT_JS.as_bytes()),
+        "/favicon.svg" => respond(&conn, "200 OK", "image/svg+xml", LOGO.as_bytes()),
         "/xterm.css" => respond(&conn, "200 OK", "text/css", XTERM_CSS.as_bytes()),
         "/ws" => {
             let key = req.headers.get("sec-websocket-key").ok_or("not a WebSocket")?;
