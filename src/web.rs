@@ -4,7 +4,9 @@
 //! the relay. Put it behind HTTPS (nginx, Caddy) when it faces the internet.
 //!
 //! On the socket, text frames carry JSON (sign-in, host list, opening, resizing, the end) and
-//! binary frames carry the terminal's bytes both ways.
+//! binary frames carry the terminal's bytes both ways. A computer opened by ID is a whole client
+//! (terminal, screen, files) on one session; its binary frames start with a type byte: 1 terminal
+//! bytes, 2 a JPEG picture, 3 a download chunk and 4 an upload chunk (both after a u32 LE id).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -30,6 +32,8 @@ struct Gate {
     id_only: bool,
     /// The relay ID connections go through.
     relay: String,
+    /// For trying the page: ID connections open an agent on this computer with this capture.
+    local: Option<String>,
     /// Failed sign-ins by address: how many, and when the last was.
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
@@ -66,7 +70,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     let id_only = args.iter().any(|a| a == "--id-only");
     let relay = get("--relay").unwrap_or_else(|| crate::access::DEFAULT_RELAY.into());
-    let gate = Arc::new(Gate { password, id_only, relay, failures: Mutex::new(HashMap::new()) });
+    // Hidden, for testing: never on an address other computers can reach.
+    let local = get("--local-agent");
+    if local.is_some() && !listen.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) {
+        return Err("--local-agent only listens on 127.0.0.1".into());
+    }
+    let gate = Arc::new(Gate { password, id_only, relay, local, failures: Mutex::new(HashMap::new()) });
     let server = TcpListener::bind(&listen).map_err(|e| format!("{listen}: {e}"))?;
     eprintln!("sshremote web: on http://{listen}/");
     for conn in server.incoming().flatten() {
@@ -197,6 +206,12 @@ fn read_frame(r: &mut impl Read, w: &Mutex<TcpStream>) -> Result<Frame, String> 
         if !masked {
             return Err("unmasked frame from a browser".into());
         }
+        if op >= 8 && (len > 125 || !fin) {
+            return Err("bad control frame".into());
+        }
+        if (op == 0) != (kind != 0) && op < 8 {
+            return Err("unexpected continuation".into());
+        }
         let mut mask = [0u8; 4];
         r.read_exact(&mut mask).map_err(|e| e.to_string())?;
         let mut data = vec![0u8; len as usize];
@@ -299,10 +314,17 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
             return send_json(&w, serde_json::json!({ "error": "An ID is 9 digits." }));
         }
         let password = v.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string();
-        let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
-        let target = crate::transport::Target::Direct { addr, password };
-        let size = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(1280).clamp(64, 7680) as u16;
-        if screen(r, w, target, &crate::access::spaced(&id), (size("w"), size("h")))? {
+        let target = match &gate.local {
+            Some(capture) => crate::transport::Target::Local { capture: capture.clone() },
+            None => {
+                let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
+                crate::transport::Target::Direct { addr, password }
+            }
+        };
+        let size = |k: &str, d: u64, lo: u64, hi: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(lo, hi) as u16;
+        let view = (size("w", 1280, 64, 7680), size("h", 720, 64, 4320));
+        let term = (size("cols", 80, 2, 500), size("rows", 24, 1, 500));
+        if remote(r, w, target, &crate::access::spaced(&id), view, term)? {
             gate.failures.lock().map_err(|e| e.to_string())?.remove(&who);
         } else {
             failed()?;
@@ -474,6 +496,261 @@ fn screen(
         }
         if dirty && fb.w > 0 && sent.elapsed() >= Duration::from_millis(80) {
             let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 82)
+                .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
+                .map_err(|e| e.to_string())?;
+            if send(&w, 0x2, &jpeg).is_err() {
+                break String::new();
+            }
+            (dirty, sent) = (false, Instant::now());
+        }
+    };
+    sess.close();
+    if !end.is_empty() {
+        let _ = send_json(&w, serde_json::json!({ "end": end }));
+    }
+    if let Ok(s) = w.lock() {
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
+    Ok(true)
+}
+
+/// A download or an upload as large as a browser is let to take (it holds a download whole).
+const MAX_TRANSFER: u64 = 2 << 30;
+
+/// What the browser sends to a computer opened by ID.
+enum Ask {
+    Agent(crate::proto::ToAgent),
+    View(u16, u16),
+    /// Which view shows: the picture is only made while it is the screen.
+    Show(bool),
+    /// A new shell, after the last one ended.
+    Shell(u16, u16),
+    Upload { id: u32, size: u64, dir: String, name: String },
+    Chunk(u32, Vec<u8>),
+    UploadEnd(u32),
+    Gone,
+}
+
+/// One message of a browser's ID session: JSON in text frames, typed bytes in binary ones.
+fn ask(frame: Frame) -> Option<Ask> {
+    use crate::proto::ToAgent;
+    let v: serde_json::Value = match frame {
+        Frame::Close => return Some(Ask::Gone),
+        Frame::Binary(b) => {
+            return match b.split_first() {
+                Some((1, data)) => Some(Ask::Agent(ToAgent::TermInput { id: 0, data: data.to_vec() })),
+                Some((4, rest)) if rest.len() >= 4 => {
+                    Some(Ask::Chunk(u32::from_le_bytes(rest[..4].try_into().ok()?), rest[4..].to_vec()))
+                }
+                _ => None,
+            };
+        }
+        Frame::Text(t) => serde_json::from_str(&t).ok()?,
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64());
+    let pair = |k: &str| -> Option<(u64, u64)> {
+        let a = v.get(k)?.as_array()?;
+        Some((a.first()?.as_u64()?, a.get(1)?.as_u64()?))
+    };
+    if let Some(view) = s("show") {
+        return Some(Ask::Show(view == "screen"));
+    }
+    if let Some((c, r)) = pair("resize") {
+        return Some(Ask::Agent(ToAgent::TermResize { id: 0, cols: c.clamp(2, 500) as u16, rows: r.clamp(1, 500) as u16 }));
+    }
+    if let Some((c, r)) = pair("shell") {
+        return Some(Ask::Shell(c.clamp(2, 500) as u16, r.clamp(1, 500) as u16));
+    }
+    if let Some(path) = s("list") {
+        return Some(Ask::Agent(ToAgent::ListDir { path }));
+    }
+    if let Some(path) = s("download") {
+        return Some(Ask::Agent(ToAgent::Fetch { tag: 0, path }));
+    }
+    if let Some(id) = n("cancel") {
+        return Some(Ask::Agent(ToAgent::FetchCancel { id: id as u32, tag: 0 }));
+    }
+    if let Some(u) = v.get("upload") {
+        let id = u.get("id")?.as_u64()? as u32;
+        let size = u.get("size")?.as_u64()?;
+        let text = |k: &str| u.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        return Some(Ask::Upload { id, size, dir: text("dir"), name: text("name") });
+    }
+    if let Some(id) = n("uploadEnd") {
+        return Some(Ask::UploadEnd(id as u32));
+    }
+    match browser_input(&v)? {
+        Input::Agent(a) => Some(Ask::Agent(a)),
+        Input::View(w, h) => Some(Ask::View(w, h)),
+        Input::Gone => Some(Ask::Gone),
+    }
+}
+
+/// A computer in the browser as in the app, on one session: a shell first, its screen (made only
+/// while shown) and its files. False when the connection could not be made.
+fn remote(
+    mut r: BufReader<TcpStream>,
+    w: Arc<Mutex<TcpStream>>,
+    target: crate::transport::Target,
+    host: &str,
+    view: (u16, u16),
+    (cols, rows): (u16, u16),
+) -> Result<bool, String> {
+    use crate::proto::{Settings, ToAgent, ToClient};
+    use crate::session::{Ev, Session};
+    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
+    let (mut sess, _tx, rx) = match Session::open(&target, true) {
+        Ok(x) => x,
+        Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
+    };
+    let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
+    let io = |e: std::io::Error| e.to_string();
+    // No picture until the screen shows.
+    sess.send(ToAgent::Pause(true)).map_err(io)?;
+    sess.send(ToAgent::Settings(settings(view))).map_err(io)?;
+    let mut shell = 1u32;
+    sess.send(ToAgent::TermOpen { id: shell, cols, rows }).map_err(io)?;
+    send_json(&w, serde_json::json!({ "ready": { "host": host, "screen": [sess.desk.0, sess.desk.1], "backend": sess.backend } }))?;
+    // The browser's messages on their own thread; a bounded queue so a fast sender waits.
+    let (in_tx, input) = mpsc::sync_channel(32);
+    let w_in = w.clone();
+    std::thread::spawn(move || {
+        loop {
+            let msg = match read_frame(&mut r, &w_in) {
+                Ok(f) => ask(f),
+                Err(_) => Some(Ask::Gone),
+            };
+            if let Some(m) = msg {
+                let gone = matches!(m, Ask::Gone);
+                if in_tx.send(m).is_err() || gone {
+                    return;
+                }
+            }
+        }
+    });
+    let mut fb = crate::session::Framebuffer::default();
+    let (mut dirty, mut sent, mut shown) = (false, Instant::now() - Duration::from_secs(1), false);
+    // Downloads under way: bytes passed on to the browser and bytes acknowledged to the agent.
+    let mut downloads: HashMap<u32, (u64, u64)> = HashMap::new();
+    // Uploads under way: declared size and bytes passed on.
+    let mut uploads: HashMap<u32, (u64, u64)> = HashMap::new();
+    let end = 'run: loop {
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Ev::Net(m)) => match m {
+                ToClient::Frame(f) => {
+                    fb.apply(&f).map_err(io)?;
+                    sess.send(ToAgent::Ack(f.id)).map_err(io)?;
+                    dirty = true;
+                }
+                ToClient::Error(e) => break plain(&e),
+                ToClient::TermOutput { id, data } if id == shell => {
+                    if send(&w, 0x2, &[&[1u8][..], &data].concat()).is_err() {
+                        break String::new();
+                    }
+                }
+                ToClient::TermExit { id, text } if id == shell => {
+                    let _ = send_json(&w, serde_json::json!({ "exit": text }));
+                }
+                ToClient::DirList { path, entries, error } => {
+                    let list: Vec<_> = entries
+                        .iter()
+                        .map(|e| serde_json::json!({ "name": e.name, "dir": e.dir, "size": e.size, "mtime": e.mtime }))
+                        .collect();
+                    let _ = send_json(&w, serde_json::json!({ "dir": { "path": path, "entries": list, "error": error } }));
+                }
+                ToClient::FetchStart { id, size, name, .. } => {
+                    if size > MAX_TRANSFER {
+                        sess.send(ToAgent::FetchCancel { id, tag: 0 }).map_err(io)?;
+                        let text = "Larger than 2 GB: too large for a browser download.";
+                        let _ = send_json(&w, serde_json::json!({ "fetched": { "id": id, "ok": false, "name": name, "text": text } }));
+                    } else {
+                        downloads.insert(id, (0, 0));
+                        let _ = send_json(&w, serde_json::json!({ "fetch": { "id": id, "size": size, "name": name } }));
+                    }
+                }
+                ToClient::FetchData { id, data } => {
+                    let Some(d) = downloads.get_mut(&id) else { continue };
+                    // Passed on before acknowledged: the browser's pace limits the agent's.
+                    if send(&w, 0x2, &[&[3u8][..], &id.to_le_bytes(), &data].concat()).is_err() {
+                        break String::new();
+                    }
+                    d.0 += data.len() as u64;
+                    if d.0 - d.1 >= crate::files::REPORT {
+                        d.1 = d.0;
+                        sess.send(ToAgent::FetchAck { id, received: d.0 }).map_err(io)?;
+                    }
+                }
+                ToClient::FetchEnd { id, ok, text } => {
+                    downloads.remove(&id);
+                    let _ = send_json(&w, serde_json::json!({ "fetched": { "id": id, "ok": ok, "text": text } }));
+                }
+                ToClient::FileProgress { id, received } => {
+                    let _ = send_json(&w, serde_json::json!({ "progress": [id, received] }));
+                }
+                ToClient::FileDone { id, ok, text } => {
+                    uploads.remove(&id);
+                    let _ = send_json(&w, serde_json::json!({ "uploaded": { "id": id, "ok": ok, "text": text } }));
+                }
+                ToClient::Notice(t) => {
+                    let _ = send_json(&w, serde_json::json!({ "notice": t }));
+                }
+                _ => {}
+            },
+            Ok(Ev::Closed(e)) => break plain(&e),
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break "the session ended".into(),
+        }
+        while let Ok(m) = input.try_recv() {
+            match m {
+                Ask::Agent(ToAgent::TermInput { data, .. }) => sess.send(ToAgent::TermInput { id: shell, data }),
+                Ask::Agent(ToAgent::TermResize { cols, rows, .. }) => sess.send(ToAgent::TermResize { id: shell, cols, rows }),
+                // Pointer and keys reach the screen only while it shows.
+                Ask::Agent(
+                    ToAgent::Pointer { .. }
+                    | ToAgent::Button { .. }
+                    | ToAgent::Scroll { .. }
+                    | ToAgent::HScroll { .. }
+                    | ToAgent::KeyState { .. },
+                ) if !shown => Ok(()),
+                Ask::Agent(a) => sess.send(a),
+                Ask::View(vw, vh) => sess.send(ToAgent::Settings(settings((vw, vh)))),
+                Ask::Show(on) if on == shown => Ok(()),
+                Ask::Show(on) => {
+                    (shown, dirty) = (on, on && fb.w > 0);
+                    sess.send(ToAgent::Pause(!on)).and_then(|_| if on { sess.send(ToAgent::Refresh) } else { Ok(()) })
+                }
+                Ask::Shell(c, r) => {
+                    let _ = sess.send(ToAgent::TermClose { id: shell });
+                    shell += 1;
+                    sess.send(ToAgent::TermOpen { id: shell, cols: c, rows: r })
+                }
+                Ask::Upload { id, size, dir, name } => {
+                    if size > MAX_TRANSFER || uploads.len() >= 8 || uploads.contains_key(&id) {
+                        let text = if size > MAX_TRANSFER { "Larger than 2 GB: too large to send from a browser." } else { "Too many uploads at once." };
+                        let _ = send_json(&w, serde_json::json!({ "uploaded": { "id": id, "ok": false, "text": text } }));
+                        continue;
+                    }
+                    uploads.insert(id, (size, 0));
+                    sess.send(ToAgent::FileStart { id, size, dir, name })
+                }
+                // Never more than the size it announced.
+                Ask::Chunk(id, data) => match uploads.get_mut(&id) {
+                    Some(u) if u.1 + data.len() as u64 <= u.0 => {
+                        u.1 += data.len() as u64;
+                        sess.send(ToAgent::FileData { id, data })
+                    }
+                    _ => Ok(()),
+                },
+                Ask::UploadEnd(id) if uploads.contains_key(&id) => sess.send(ToAgent::FileEnd { id }),
+                Ask::UploadEnd(_) => Ok(()),
+                Ask::Gone => break 'run String::new(),
+            }
+            .map_err(io)?;
+        }
+        if shown && dirty && fb.w > 0 && sent.elapsed() >= Duration::from_millis(80) {
+            let mut jpeg = vec![2u8];
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 82)
                 .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
                 .map_err(|e| e.to_string())?;
@@ -713,5 +990,188 @@ Host: x
         // Typed, then printed.
         assert!(String::from_utf8_lossy(&seen).matches("web-42").count() >= 2, "{}", String::from_utf8_lossy(&seen));
         put(&mut s, 8, b"");
+    }
+
+    /// A browser frame, masked, with whichever length field its size needs.
+    fn masked(fin: bool, op: u8, data: &[u8]) -> Vec<u8> {
+        let mut f = vec![if fin { 0x80 } else { 0 } | op];
+        match data.len() {
+            n if n < 126 => f.push(0x80 | n as u8),
+            n if n < 65536 => {
+                f.push(0x80 | 126);
+                f.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                f.push(0x80 | 127);
+                f.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        f.extend_from_slice(&[9, 8, 7, 6]);
+        f.extend(data.iter().enumerate().map(|(i, b)| b ^ [9, 8, 7, 6][i % 4]));
+        f
+    }
+
+    #[test]
+    fn frames_of_every_length_and_in_pieces() {
+        let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+        let w = Mutex::new(TcpStream::connect(sink.local_addr().unwrap()).unwrap());
+        let big: Vec<u8> = (0..70_000u32).map(|i| i as u8).collect();
+        let mut wire = masked(true, 2, &big[..300]);
+        wire.extend(masked(true, 2, &big));
+        wire.extend(masked(false, 1, b"{\"a\":"));
+        wire.extend(masked(true, 9, b"ping"));
+        wire.extend(masked(true, 0, b"1}"));
+        let mut r = &wire[..];
+        assert!(matches!(read_frame(&mut r, &w), Ok(Frame::Binary(b)) if b == big[..300]));
+        assert!(matches!(read_frame(&mut r, &w), Ok(Frame::Binary(b)) if b == big));
+        assert!(matches!(read_frame(&mut r, &w), Ok(Frame::Text(t)) if t == "{\"a\":1}"));
+        // Unmasked, a stray continuation and a long control frame are refused.
+        assert!(read_frame(&mut &[0x82u8, 1, 0][..], &w).is_err());
+        assert!(read_frame(&mut &masked(true, 0, b"x")[..], &w).is_err());
+        assert!(read_frame(&mut &masked(true, 9, &[0; 200])[..], &w).is_err());
+    }
+
+    #[test]
+    fn id_session_messages() {
+        use crate::proto::ToAgent;
+        let a = |t: &str| ask(Frame::Text(t.into()));
+        assert!(matches!(a(r#"{"show":"screen"}"#), Some(Ask::Show(true))));
+        assert!(matches!(a(r#"{"show":"files"}"#), Some(Ask::Show(false))));
+        assert!(matches!(a(r#"{"list":""}"#), Some(Ask::Agent(ToAgent::ListDir { .. }))));
+        assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
+        assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));
+        assert!(matches!(a(r#"{"move":[1,2]}"#), Some(Ask::Agent(ToAgent::Pointer { x: 1, y: 2 }))));
+        assert!(matches!(ask(Frame::Binary(vec![1, b'l', b's'])), Some(Ask::Agent(ToAgent::TermInput { data, .. })) if data == b"ls"));
+        assert!(matches!(ask(Frame::Binary(vec![4, 7, 0, 0, 0, 1])), Some(Ask::Chunk(7, d)) if d == [1]));
+        assert!(ask(Frame::Binary(vec![4, 7])).is_none() && ask(Frame::Binary(vec![9])).is_none());
+    }
+
+    /// A computer opened by ID, end to end over the socket: shell, screen, folder, download and
+    /// upload, with an agent on this computer instead of the relay. Needs the built program:
+    /// `cargo build --release` then `SSHREMOTE_EXE=$PWD/target/release/sshremote.exe cargo test
+    /// --release id_client -- --ignored`.
+    #[test]
+    #[ignore]
+    fn id_client_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("sshremote-web-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let dir_s = dir.display().to_string();
+        let dir_s = dir_s.strip_prefix(r"\\?\").unwrap_or(&dir_s).to_string();
+        std::fs::write(dir.join("pw"), "secret-word").unwrap();
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(dir.join("down.bin"), &payload).unwrap();
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let addr = format!("127.0.0.1:{port}");
+        let args: Vec<String> =
+            ["--listen", &addr, "--password-file", dir.join("pw").to_str().unwrap(), "--local-agent", "synthetic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        std::thread::spawn(move || run(&args));
+        std::thread::sleep(Duration::from_millis(300));
+
+        let mut s = TcpStream::connect(&addr).unwrap();
+        s.write_all(format!("GET /ws HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let mut line = String::new();
+        while line != "\r\n" {
+            line.clear();
+            r.read_line(&mut line).unwrap();
+        }
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let get = |r: &mut BufReader<TcpStream>| -> (u8, Vec<u8>) {
+            let mut h = [0u8; 2];
+            r.read_exact(&mut h).unwrap();
+            let mut len = (h[1] & 0x7f) as u64;
+            if len == 126 {
+                let mut b = [0u8; 2];
+                r.read_exact(&mut b).unwrap();
+                len = u16::from_be_bytes(b) as u64;
+            } else if len == 127 {
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b).unwrap();
+                len = u64::from_be_bytes(b);
+            }
+            let mut d = vec![0u8; len as usize];
+            r.read_exact(&mut d).unwrap();
+            (h[0] & 0x0f, d)
+        };
+        let json = |s: &mut TcpStream, v: serde_json::Value| s.write_all(&masked(true, 1, v.to_string().as_bytes())).unwrap();
+        // Reads until `want` takes a frame; terminal bytes seen on the way are kept.
+        let mut shell = Vec::new();
+        let mut until = |r: &mut BufReader<TcpStream>, what: &str, want: &mut dyn FnMut(u8, &[u8]) -> bool| {
+            let start = Instant::now();
+            loop {
+                assert!(start.elapsed() < Duration::from_secs(30), "no {what}; terminal: {}", String::from_utf8_lossy(&shell));
+                let (op, d) = get(r);
+                if op == 2 && d.first() == Some(&1) {
+                    shell.extend_from_slice(&d[1..]);
+                }
+                if want(op, &d) {
+                    return d;
+                }
+            }
+        };
+        let text = |op: u8, d: &[u8], key: &str| op == 1 && serde_json::from_slice::<serde_json::Value>(d).is_ok_and(|v| v.get(key).is_some());
+
+        json(&mut s, serde_json::json!({ "id": "123 456 789", "password": "x", "w": 640, "h": 480, "cols": 80, "rows": 24 }));
+        until(&mut r, "ready", &mut |op, d| text(op, d, "ready"));
+
+        // The shell: typed, then printed.
+        s.write_all(&masked(true, 2, b"\x01echo e2e-77\r")).unwrap();
+        let mut seen = Vec::new();
+        until(&mut r, "echo", &mut |op, d| {
+            if op == 2 && d.first() == Some(&1) {
+                seen.extend_from_slice(&d[1..]);
+            }
+            String::from_utf8_lossy(&seen).matches("e2e-77").count() >= 2
+        });
+
+        // The screen: a JPEG once it shows.
+        json(&mut s, serde_json::json!({ "show": "screen" }));
+        let jpeg = until(&mut r, "picture", &mut |op, d| op == 2 && d.first() == Some(&2));
+        assert_eq!(&jpeg[1..3], &[0xFF, 0xD8]);
+        json(&mut s, serde_json::json!({ "show": "files" }));
+
+        // The home folder, then the test's own.
+        json(&mut s, serde_json::json!({ "list": "" }));
+        let home = until(&mut r, "home folder", &mut |op, d| text(op, d, "dir"));
+        let home: serde_json::Value = serde_json::from_slice(&home).unwrap();
+        assert!(!home["dir"]["entries"].as_array().unwrap().is_empty(), "{home}");
+        json(&mut s, serde_json::json!({ "list": dir_s }));
+        let list = until(&mut r, "test folder", &mut |op, d| text(op, d, "dir"));
+        assert!(String::from_utf8_lossy(&list).contains("down.bin"));
+
+        // A download, byte for byte.
+        let path = dir.join("down.bin").display().to_string();
+        json(&mut s, serde_json::json!({ "download": path.strip_prefix(r"\\?\").unwrap_or(&path) }));
+        let mut got = Vec::new();
+        let end = until(&mut r, "download", &mut |op, d| {
+            if op == 2 && d.first() == Some(&3) {
+                got.extend_from_slice(&d[5..]);
+            }
+            text(op, d, "fetched")
+        });
+        assert!(String::from_utf8_lossy(&end).contains("\"ok\":true"), "{}", String::from_utf8_lossy(&end));
+        assert!(got == payload, "downloaded {} bytes of {}", got.len(), payload.len());
+
+        // An upload in chunks, byte for byte on disk.
+        let up: Vec<u8> = payload.iter().rev().copied().collect();
+        json(&mut s, serde_json::json!({ "upload": { "id": 7, "size": up.len(), "dir": dir_s, "name": "up.bin" } }));
+        for c in up.chunks(64 << 10) {
+            let mut f = vec![4u8];
+            f.extend_from_slice(&7u32.to_le_bytes());
+            f.extend_from_slice(c);
+            s.write_all(&masked(true, 2, &f)).unwrap();
+        }
+        json(&mut s, serde_json::json!({ "uploadEnd": 7 }));
+        let done = until(&mut r, "upload", &mut |op, d| text(op, d, "uploaded"));
+        assert!(String::from_utf8_lossy(&done).contains("\"ok\":true"), "{}", String::from_utf8_lossy(&done));
+        assert!(std::fs::read(dir.join("up.bin")).unwrap() == up);
+
+        s.write_all(&masked(true, 8, b"")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

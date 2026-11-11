@@ -26,12 +26,60 @@
   #screen { display: none; position: absolute; top: 35px; left: 0; right: 0; bottom: 0; background: #000; }
   #screen canvas { width: 100%; height: 100%; object-fit: contain; cursor: default; outline: none; }
   #term { display: none; position: absolute; top: 35px; left: 0; right: 0; bottom: 0; padding: 4px; }
+  /* A computer by ID: toolbar and three views on one connection. */
+  #client { display: none; position: fixed; inset: 0; --top: 42px; }
+  #client.folded { --top: 0px; }
+  #tools { position: absolute; top: 0; left: 0; right: 0; height: 41px; display: flex; align-items: center; gap: 4px;
+           padding: 0 8px; background: #0f1828; border-bottom: 1px solid #22314d; z-index: 3; }
+  #client.folded #tools { display: none; }
+  #tools button, #pill, .fbar button { width: auto; margin: 0; padding: 5px 10px; display: inline-flex; align-items: center; gap: 6px;
+           background: transparent; color: var(--dim); border: 1px solid transparent; border-radius: 7px; font-weight: 500; font-size: 13px; }
+  #tools button:hover, .fbar button:hover { background: #17233a; color: var(--fg); }
+  #tools button.on { background: #1b2d4d; color: var(--fg); border-color: #2d4570; }
+  #tools svg, #pill svg, .fbar svg, #list svg { width: 16px; height: 16px; fill: currentColor; flex: none; }
+  #tools .sep { width: 1px; height: 20px; background: #22314d; margin: 0 6px; }
+  #who { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: var(--dim);
+         overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #who b { color: var(--fg); font: 600 13px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 1px; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #e3b341; flex: none; }
+  #dot.up { background: #3fb950; box-shadow: 0 0 6px #3fb95099; } #dot.down { background: var(--bad); }
+  #tools button.bye:hover { background: #3a1820; color: var(--bad); }
+  #pill { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); z-index: 4; display: none;
+          background: #0f1828e6; border: 1px solid #2d3d58; border-radius: 999px; padding: 3px 12px; color: var(--fg); }
+  #client.folded #pill { display: inline-flex; }
+  .view { display: none; position: absolute; top: var(--top); left: 0; right: 0; bottom: 0; }
+  .view.on { display: block; }
+  #cterm { padding: 4px 6px; box-sizing: border-box; background: #0b1220; }
+  #cscreen { background: #000; }
+  #cscreen canvas { width: 100%; height: 100%; object-fit: contain; outline: none; }
+  #cfiles.on { display: flex; flex-direction: column; }
+  .fbar { display: flex; gap: 4px; align-items: center; padding: 8px; border-bottom: 1px solid #22314d; }
+  .fbar input { margin: 0; flex: 1; padding: 5px 10px; font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  .fbar button.go { background: var(--brand); color: #04101f; font-weight: 600; }
+  #list { flex: 1; overflow: auto; font-size: 14px; }
+  #list .row { display: flex; align-items: center; gap: 10px; padding: 6px 14px; cursor: pointer; border-bottom: 1px solid #111b2d; }
+  #list .row:hover { background: #121d31; }
+  #list .row span:first-of-type { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list .row .meta { color: var(--dim); font-size: 12px; min-width: 90px; text-align: right; }
+  #list .row.dir svg { color: var(--brand); }
+  #list .note { padding: 16px; color: var(--dim); }
+  #list .note.bad { color: var(--bad); }
+  #transfers { max-height: 30%; overflow: auto; border-top: 1px solid #22314d; }
+  #transfers:empty { display: none; }
+  .xfer { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 6px 14px; font-size: 13px; }
+  .xfer progress { grid-column: 1 / -1; width: 100%; height: 4px; accent-color: var(--brand); }
+  .xfer .state { color: var(--dim); } .xfer.bad .state { color: var(--bad); }
+  #drop { display: none; position: absolute; inset: 10px; border: 2px dashed var(--brand); border-radius: 12px; background: #0b1220d9;
+          align-items: center; justify-content: center; font-size: 18px; color: var(--fg); pointer-events: none; }
+  #cfiles.dragging #drop { display: flex; }
+  #toast { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: #1b2d4d; border: 1px solid #2d4570;
+           padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 5; display: none; }
 </style>
 </head>
 <body>
 <div id="card">
   <h1>SSH Remote <small>web</small></h1>
-  <p>Another computer's screen in this browser: its remote access ID and password.</p>
+  <p>Another computer in this browser, its terminal, screen and files: its remote access ID and password.</p>
   <form id="byid">
     <input id="id" inputmode="numeric" placeholder="123 456 789" autocomplete="off" autofocus>
     <input id="idpw" type="password" placeholder="Its password" autocomplete="off">
@@ -52,6 +100,35 @@
 <div id="bar"><b id="title"></b><button id="leave">Close</button></div>
 <div id="term"></div>
 <div id="screen"><canvas id="canvas" tabindex="0"></canvas></div>
+<div id="client">
+  <div id="tools">
+    <button data-view="term" class="on" title="A shell on that computer"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M216 40H40a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V56a16 16 0 0 0-16-16Zm0 160H40V56h176ZM77 117a8 8 0 0 1 1-11l40-32a8 8 0 0 1 10 12L95 112l33 26a8 8 0 1 1-10 12l-40-32a8 8 0 0 1-1-1Zm59 35h48a8 8 0 0 1 0 16h-48a8 8 0 0 1 0-16Z"/></svg>Terminal</button>
+    <button data-view="screen" title="Its screen"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M208 40H48a24 24 0 0 0-24 24v112a24 24 0 0 0 24 24h160a24 24 0 0 0 24-24V64a24 24 0 0 0-24-24Zm8 136a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8V64a8 8 0 0 1 8-8h160a8 8 0 0 1 8 8Zm-48 48a8 8 0 0 1-8 8H96a8 8 0 0 1 0-16h64a8 8 0 0 1 8 8Z"/></svg>Screen</button>
+    <button data-view="files" title="Its files"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M216 72h-85.3l-27.7-27.7A16 16 0 0 0 91.7 40H40a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h176.9a15.1 15.1 0 0 0 15.1-15.1V88a16 16 0 0 0-16-16Zm0 128H40V56h51.7l27.7 27.7a8 8 0 0 0 5.6 2.3h91Z"/></svg>Files</button>
+    <div id="who"><i id="dot"></i><b id="name"></b><span id="state">Connecting…</span></div>
+    <button id="full" title="Full screen"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M216 48v48a8 8 0 0 1-16 0V67.3l-34.3 34.4a8 8 0 0 1-11.4-11.4L188.7 56H160a8 8 0 0 1 0-16h48a8 8 0 0 1 8 8ZM90.3 154.3 56 188.7V160a8 8 0 0 0-16 0v48a8 8 0 0 0 8 8h48a8 8 0 0 0 0-16H67.3l34.4-34.3a8 8 0 0 0-11.4-11.4ZM208 152a8 8 0 0 0-8 8v28.7l-34.3-34.4a8 8 0 0 0-11.4 11.4l34.4 34.3H160a8 8 0 0 0 0 16h48a8 8 0 0 0 8-8v-48a8 8 0 0 0-8-8ZM67.3 56H96a8 8 0 0 0 0-16H48a8 8 0 0 0-8 8v48a8 8 0 0 0 16 0V67.3l34.3 34.4a8 8 0 0 0 11.4-11.4Z"/></svg></button>
+    <button id="fold" title="Hide the toolbar"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M213.7 165.7a8 8 0 0 1-11.4 0L128 91.3l-74.3 74.4a8 8 0 0 1-11.4-11.4l80-80a8 8 0 0 1 11.4 0l80 80a8 8 0 0 1 0 11.4Z"/></svg></button>
+    <span class="sep"></span>
+    <button id="bye" class="bye" title="Disconnect"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M120 216a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8V40a8 8 0 0 1 8-8h64a8 8 0 0 1 0 16H56v160h56a8 8 0 0 1 8 8Zm109.7-93.7-40-40a8 8 0 0 0-11.4 11.4l26.4 26.3H112a8 8 0 0 0 0 16h92.7l-26.4 26.3a8 8 0 0 0 11.4 11.4l40-40a8 8 0 0 0 0-11.4Z"/></svg>Disconnect</button>
+  </div>
+  <button id="pill" title="Show the toolbar"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="m213.7 101.7-80 80a8 8 0 0 1-11.4 0l-80-80a8 8 0 0 1 11.4-11.4l74.3 74.4 74.3-74.4a8 8 0 0 1 11.4 11.4Z"/></svg><span id="pillname"></span></button>
+  <div id="cterm" class="view on"></div>
+  <div id="cscreen" class="view"><canvas id="ccanvas" tabindex="0"></canvas></div>
+  <div id="cfiles" class="view">
+    <div class="fbar">
+      <button id="fup" title="Up one folder"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M213.7 165.7a8 8 0 0 1-11.4 0L128 91.3l-74.3 74.4a8 8 0 0 1-11.4-11.4l80-80a8 8 0 0 1 11.4 0l80 80a8 8 0 0 1 0 11.4Z"/></svg></button>
+      <button id="fhome" title="Home folder"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="m219.3 108.7-80-80a16 16 0 0 0-22.6 0l-80 80A15.9 15.9 0 0 0 32 120v96a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-56h32v56a8 8 0 0 0 8 8h64a8 8 0 0 0 8-8v-96a15.9 15.9 0 0 0-4.7-11.3ZM208 208h-48v-56a8 8 0 0 0-8-8h-48a8 8 0 0 0-8 8v56H48v-88l80-80 80 80Z"/></svg></button>
+      <button id="freload" title="Reload"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M197.7 186.1a96 96 0 1 1 0-116.2V48a8 8 0 0 1 16 0v40a8 8 0 0 1-8 8h-40a8 8 0 0 1 0-16h22.7a80 80 0 1 0 0 96.2 8 8 0 1 1 13.3 10Z"/></svg></button>
+      <input id="path" spellcheck="false" autocomplete="off">
+      <button id="fsend" class="go" title="Upload files to this folder"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M224 144v64a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8v-64a8 8 0 0 1 16 0v56h160v-56a8 8 0 0 1 16 0ZM93.7 85.7 120 59.3V152a8 8 0 0 0 16 0V59.3l26.3 26.4a8 8 0 0 0 11.4-11.4l-40-40a8 8 0 0 0-11.4 0l-40 40a8 8 0 0 0 11.4 11.4Z"/></svg>Upload</button>
+      <input id="fpick" type="file" multiple hidden>
+    </div>
+    <div id="list"></div>
+    <div id="transfers"></div>
+    <div id="drop">Drop files to upload them here</div>
+  </div>
+  <div id="toast"></div>
+</div>
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
 <script src="app.js"></script>
