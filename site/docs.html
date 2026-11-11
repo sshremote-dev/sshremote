@@ -59,7 +59,7 @@ sshremote terminal user@host --split db   # terminal panes, split
 sshremote user@host                       # the screen in this terminal (sixel)
 sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true colour 60 fps</code></pre>
   <p>A lost connection is tried again in the same mode, keeping the shells; after 30 seconds the pane offers Reconnect or Close.</p>
-  <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or from the tools menu): <code>sshremote --install-service</code>.</div>
+  <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or with Start with the computer under This computer): <code>sshremote --install-service</code>.</div>
 
   <h2 id="relay">Connecting by ID through the relay</h2>
   <p>For a PC without SSH or a fixed address, for example a laptop on Wi-Fi, the way RustDesk works. The PC keeps a lasting 9-digit ID, the same across restarts, and a password its owner sets or generates. A viewer connects with both through the relay.</p>
