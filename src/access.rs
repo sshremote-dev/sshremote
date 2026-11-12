@@ -264,6 +264,11 @@ pub fn state() -> State {
 /// change of those settings (off, a new password, ID or relay) ends them too.
 static SESSIONS: Mutex<Vec<(u64, String, TcpStream)>> = Mutex::new(Vec::new());
 
+/// How many viewers this program serves by ID now (remote access run inside the app).
+pub fn viewers_here() -> usize {
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
 /// What a viewer had to know to come in: the ID and password at that relay.
 fn credentials(c: &Config) -> String {
     format!("{}\n{}\n{}", c.id, c.password, c.relay)

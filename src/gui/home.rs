@@ -139,7 +139,8 @@ impl App {
             });
         });
         if bar.close {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            // Asked first when other windows or people connected by ID would go with it.
+            self.close_clicked = true;
         }
         let mut chosen = None;
         egui::CentralPanel::default().show(ui, |ui| chosen = self.open_view(ui));

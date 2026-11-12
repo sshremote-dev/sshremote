@@ -311,6 +311,10 @@ pub struct App {
     section: home::Section,
     /// `sshremote terminal`: the program ends with its last pane, as a terminal does.
     quit_when_empty: bool,
+    /// The open window's close button was clicked; whether closing was asked about, and agreed.
+    close_clicked: bool,
+    quit_asked: bool,
+    quitting: bool,
     /// Hosts being reached for the screen or files, with their ports: recent once reached.
     pending_ports: std::collections::HashMap<String, String>,
     /// Passwords to keep in the password store once their connection works, by host.
@@ -660,6 +664,9 @@ impl App {
             windows: Vec::new(),
             windows_made: 0,
             quit_when_empty: false,
+            close_clicked: false,
+            quit_asked: false,
+            quitting: false,
             pending_ports: Default::default(),
             pending_passwords: Default::default(),
             grab_window: None,
@@ -867,6 +874,7 @@ impl eframe::App for App {
         }
         if open {
             self.connect_screen(ui);
+            self.ask_before_quitting(&ctx);
         }
         #[cfg(feature = "drive")]
         drive::end_of_frame(&ctx);
@@ -896,7 +904,8 @@ impl App {
             ui.separator();
             (close, self.open_view(ui))
         });
-        let shut = modal.should_close() || modal.inner.0 || ctx.input(|i| i.key_pressed(Key::Escape));
+        // The modal closes on Esc itself, only when no drop-down of its own is open to take it.
+        let shut = modal.should_close() || modal.inner.0;
         if let Some(c) = modal.inner.1 {
             self.choose(c, place);
         }
@@ -907,6 +916,54 @@ impl App {
         }
         if shut {
             w.picker = None;
+        }
+    }
+
+    /// Closing the open window ends the other windows and anyone connected by this computer's ID:
+    /// that is asked first. With neither, it just closes.
+    fn ask_before_quitting(&mut self, ctx: &egui::Context) {
+        let requested = ctx.input(|i| i.viewport().close_requested()) || std::mem::take(&mut self.close_clicked);
+        if requested && !self.quitting {
+            let others = self.windows.len();
+            #[cfg(feature = "remote")]
+            let viewers = crate::access::viewers_here();
+            #[cfg(not(feature = "remote"))]
+            let viewers = 0;
+            if others + viewers > 0 {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.quit_asked = true;
+            } else {
+                self.quitting = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
+        if !self.quit_asked {
+            return;
+        }
+        let others = self.windows.len();
+        #[cfg(feature = "remote")]
+        let viewers = crate::access::viewers_here();
+        #[cfg(not(feature = "remote"))]
+        let viewers = 0;
+        let mut body = Vec::new();
+        if others > 0 {
+            body.push(match others {
+                1 => "The other window closes, and its connections and shells end.".to_string(),
+                n => format!("The {n} other windows close, and their connections and shells end."),
+            });
+        }
+        if viewers > 0 {
+            body.push(match viewers {
+                1 => "The person connected to this computer by its ID is disconnected.".to_string(),
+                n => format!("The {n} people connected to this computer by its ID are disconnected."),
+            });
+        }
+        if let Some(yes) = workspace::ask(ctx, "Close SSH Remote?", &body.join(" "), "Close") {
+            self.quit_asked = false;
+            if yes {
+                self.quitting = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
         }
     }
 
@@ -1105,6 +1162,30 @@ pub(crate) use crate::sys::human;
 mod tests {
     use crate::gui::snapshot::RunTest;
     use super::*;
+
+    /// The open window closes at once when nothing goes with it, and asks first when another
+    /// window would.
+    #[test]
+    fn closing_the_open_window_asks_when_other_windows_would_go() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+            ..Default::default()
+        };
+        let mut alone = App::new(Form::from(&opt), None, "", None);
+        alone.close_clicked = true;
+        ctx.run_test(input(), |ui| alone.ask_before_quitting(ui.ctx()));
+        assert!(alone.quitting && !alone.quit_asked, "nothing else open: it closes");
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        let w = workspace::Workspace::new(app.options());
+        app.windows.push((egui::ViewportId::from_hash_of("other"), Box::new(w), Pos2::ZERO));
+        app.close_clicked = true;
+        ctx.run_test(input(), |ui| app.ask_before_quitting(ui.ctx()));
+        assert!(app.quit_asked && !app.quitting, "another window open: asked first");
+        app.windows.clear();
+    }
 
     /// A tab dragged out lives in a window of its own, which goes when its last tab closes.
     #[test]
