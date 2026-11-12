@@ -80,6 +80,18 @@ pub fn mod_bits(m: KeyModifiers) -> u8 {
     bits
 }
 
+/// The modifier a key is, as the bit the host holds it by (AltGr and the like are none of them).
+pub fn modifier_bit(code: &KeyCode) -> Option<u8> {
+    use crossterm::event::ModifierKeyCode as M;
+    match code {
+        KeyCode::Modifier(M::LeftShift | M::RightShift) => Some(MOD_SHIFT),
+        KeyCode::Modifier(M::LeftControl | M::RightControl) => Some(MOD_CTRL),
+        KeyCode::Modifier(M::LeftAlt | M::RightAlt) => Some(MOD_ALT),
+        KeyCode::Modifier(M::LeftSuper | M::RightSuper) => Some(MOD_SUPER),
+        _ => None,
+    }
+}
+
 /// The same key whatever the Shift state, so its press and release match: letters in lower case.
 pub fn base(keysym: u32) -> u32 {
     match char::from_u32(keysym) {
@@ -91,6 +103,15 @@ pub fn base(keysym: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_keys_name_their_bit() {
+        use crossterm::event::ModifierKeyCode as M;
+        assert_eq!(modifier_bit(&KeyCode::Modifier(M::RightControl)), Some(MOD_CTRL));
+        assert_eq!(modifier_bit(&KeyCode::Modifier(M::LeftSuper)), Some(MOD_SUPER));
+        assert_eq!(modifier_bit(&KeyCode::Modifier(M::IsoLevel3Shift)), None);
+        assert_eq!(modifier_bit(&KeyCode::Char('a')), None);
+    }
 
     #[test]
     fn shifted_letters_keep_their_key() {

@@ -16,10 +16,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use crate::xk;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HC_ACTION,
-    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_UP, MSG, SetWindowsHookExW, WH_KEYBOARD_LL,
+    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_INJECTED, LLKHF_UP, MSG, SetWindowsHookExW, WH_KEYBOARD_LL,
 };
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Keys whose press was taken: their release is taken too, whatever changed meanwhile (Alt let
+/// go before Tab, another window in front), or the host would keep them down.
+static TAKEN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 static SINK: Mutex<Option<Sender<(u32, bool)>>> = Mutex::new(None);
 /// The window to wake for a key taken: Windows never tells it of the key, so without a
 /// frame the key would wait, and Tab would reach the host after Alt was let go.
@@ -31,30 +34,52 @@ fn ours_in_front() -> bool {
     pid == unsafe { GetCurrentProcessId() }
 }
 
+/// The key a taken virtual key is at the host.
+fn keysym_of(vk: u16) -> Option<u32> {
+    match vk {
+        VK_LWIN => Some(xk::SUPER_L),
+        VK_RWIN => Some(xk::SUPER_R),
+        VK_TAB => Some(xk::TAB),
+        VK_ESCAPE => Some(xk::ESCAPE),
+        VK_SNAPSHOT => Some(xk::PRINT),
+        _ => None,
+    }
+}
+
+/// Hands a key to the session; false if there is none to take it.
+fn forward(sym: u32, down: bool) -> bool {
+    let sent = SINK.lock().unwrap().as_ref().is_some_and(|tx| tx.send((sym, down)).is_ok());
+    if sent && let Some(ctx) = WAKE.lock().unwrap().as_ref() {
+        ctx.request_repaint();
+    }
+    sent
+}
+
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && ACTIVE.load(Ordering::Relaxed) && ours_in_front() {
-        let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+    let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+    // Keys a program typed (this computer's own agent among them, which would come straight
+    // back) are Windows', never taken.
+    if code == HC_ACTION as i32 && k.flags & LLKHF_INJECTED == 0 {
         let down = k.flags & LLKHF_UP == 0;
-        let alt = k.flags & LLKHF_ALTDOWN != 0;
-        let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } < 0;
         let vk = k.vkCode as u16;
-        let keysym = match vk {
-            VK_LWIN => Some(xk::SUPER_L),
-            VK_RWIN => Some(xk::SUPER_R),
-            VK_TAB if alt => Some(xk::TAB),
-            VK_ESCAPE if alt || ctrl => Some(xk::ESCAPE),
-            VK_SNAPSHOT => Some(xk::PRINT),
-            _ => None,
-        };
-        if let Some(sym) = keysym
-            && let Some(tx) = SINK.lock().unwrap().as_ref()
-            && tx.send((sym, down)).is_ok()
-        {
-            if let Some(ctx) = WAKE.lock().unwrap().as_ref() {
-                ctx.request_repaint();
-            }
-            // Swallowed: Windows never sees it, the remote host does.
+        let taken = &TAKEN[(vk & 0xff) as usize];
+        if !down && taken.swap(false, Ordering::Relaxed) && keysym_of(vk).is_some_and(|sym| forward(sym, false)) {
             return 1;
+        }
+        if down && ACTIVE.load(Ordering::Relaxed) && ours_in_front() {
+            let alt = k.flags & LLKHF_ALTDOWN != 0;
+            let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } < 0;
+            let wanted = match vk {
+                VK_LWIN | VK_RWIN | VK_SNAPSHOT => true,
+                VK_TAB => alt,
+                VK_ESCAPE => alt || ctrl,
+                _ => false,
+            };
+            if wanted && keysym_of(vk).is_some_and(|sym| forward(sym, true)) {
+                // Swallowed: Windows never sees it, the remote host does.
+                taken.store(true, Ordering::Relaxed);
+                return 1;
+            }
         }
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }

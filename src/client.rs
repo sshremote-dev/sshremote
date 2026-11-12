@@ -491,17 +491,13 @@ impl Viewer {
             self.held.insert(keysym);
             return self.sess.send(ToAgent::KeyState { keysym, down: true });
         }
-        // A release reported as another symbol (Shift let go first, say) ends the key that is down.
-        let keysym = if self.held.contains(&keysym) {
-            keysym
-        } else {
-            match self.held.iter().copied().collect::<Vec<_>>()[..] {
-                [only] => only,
-                _ => return Ok(()),
-            }
-        };
-        self.held.remove(&keysym);
-        self.sess.send(ToAgent::KeyState { keysym, down: false })?;
+        // A release reported as another symbol (Shift let go first: '1' for the '!' pressed) matches
+        // no key held: every key held is let go, as one let go early does no harm and one left
+        // down repeats at the host.
+        let up: Vec<u32> = if self.held.remove(&keysym) { vec![keysym] } else { std::mem::take(&mut self.held).into_iter().collect() };
+        for keysym in up {
+            self.sess.send(ToAgent::KeyState { keysym, down: false })?;
+        }
         self.sync_mods(mods)
     }
 
@@ -1504,7 +1500,23 @@ impl Viewer {
 
     fn on_term(&mut self, e: Event) -> io::Result<()> {
         let screen_input = self.view == View::Screen && self.overlay == Overlay::None && self.prompt.is_none();
+        let modifier = match &e {
+            Event::Key(k) => keys::modifier_bit(&k.code),
+            _ => None,
+        };
         match e {
+            // Keys held at the host are let go when this terminal goes to the back: their releases
+            // would reach whatever is in front.
+            Event::FocusLost => self.release_all()?,
+            // A modifier the host holds is let go there as here, whatever is shown now (the menu
+            // was opened with Ctrl held, say).
+            Event::Key(k) if k.kind == KeyEventKind::Release && modifier.is_some_and(|b| self.held_mods & b != 0) => {
+                self.sync_mods(self.held_mods & !modifier.unwrap_or(0))?;
+            }
+            // With presses and releases, a modifier goes down at the host as it does here.
+            Event::Key(k) if k.kind != KeyEventKind::Release && screen_input && self.key_states && modifier.is_some() => {
+                self.sync_mods(self.held_mods | modifier.unwrap_or(0))?;
+            }
             Event::Key(k) if k.kind == KeyEventKind::Release && !(screen_input && self.key_states) => {}
             // Shift, Ctrl or Alt alone only matter for keys held at the host.
             Event::Key(k) if matches!(k.code, event::KeyCode::Modifier(_)) && !(screen_input && self.key_states) => {}
@@ -1791,7 +1803,8 @@ pub fn run(opt: Options) -> Result<(), String> {
             terminal::EnterAlternateScreen,
             cursor::Hide,
             event::EnableMouseCapture,
-            event::EnableBracketedPaste
+            event::EnableBracketedPaste,
+            event::EnableFocusChange
         );
         // Key releases: the Windows console always reports them; elsewhere the kitty keyboard protocol
         // (kitty, WezTerm, Ghostty, foot) is asked for.
@@ -1910,6 +1923,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         }
         let _ = execute!(
             v.out,
+            event::DisableFocusChange,
             event::DisableBracketedPaste,
             event::DisableMouseCapture,
             cursor::Show,
@@ -2076,6 +2090,53 @@ mod tests {
         fn take(&self) -> String {
             String::from_utf8_lossy(&std::mem::take(&mut *self.0.lock().unwrap())).into_owned()
         }
+    }
+
+    /// Keys held at the host are let go: a modifier let go here (also with the menu open), a
+    /// release that matches no key held (Shift let go first), and all of them when this terminal
+    /// goes to the back.
+    #[test]
+    #[ignore]
+    fn keys_held_at_the_host_are_let_go() {
+        use crate::proto::{MOD_CTRL, MOD_SHIFT};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind as K, KeyModifiers as Mods, ModifierKeyCode as M};
+        use super::*;
+        static SCRATCH: std::sync::Once = std::sync::Once::new();
+        SCRATCH.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("sshremote-cli-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for var in ["APPDATA", "XDG_CONFIG_HOME"] {
+                unsafe { std::env::set_var(var, &dir) };
+            }
+        });
+        let opt = crate::parse_client(&["--local".into()]).unwrap();
+        let (sess, _tx, _rx) = Session::connect(&opt).expect("a local agent (SSHREMOTE_EXE)");
+        let mut v = Viewer::new(&opt, sess, Box::new(std::io::sink()));
+        (v.cols, v.rows) = (100, 30);
+        v.key_states = true;
+        let ev = |code: KeyCode, mods: Mods, kind: K| Event::Key(KeyEvent::new_with_kind(code, mods, kind));
+        let ctrl = KeyCode::Modifier(M::LeftControl);
+        v.on_term(ev(ctrl, Mods::CONTROL, K::Press)).unwrap();
+        assert_eq!(v.held_mods, MOD_CTRL, "Ctrl goes down with its press");
+        v.on_term(ev(ctrl, Mods::NONE, K::Release)).unwrap();
+        assert_eq!(v.held_mods, 0, "and up with its release");
+        v.on_term(ev(ctrl, Mods::CONTROL, K::Press)).unwrap();
+        v.on_term(ev(KeyCode::Char(']'), Mods::CONTROL, K::Press)).unwrap();
+        assert!(v.overlay != Overlay::None, "the menu is open");
+        v.on_term(ev(ctrl, Mods::NONE, K::Release)).unwrap();
+        assert_eq!(v.held_mods, 0, "Ctrl let go with the menu open is let go at the host");
+        v.overlay = Overlay::None;
+        v.on_term(ev(KeyCode::Modifier(M::LeftShift), Mods::SHIFT, K::Press)).unwrap();
+        v.on_term(ev(KeyCode::Char('!'), Mods::SHIFT, K::Press)).unwrap();
+        v.on_term(ev(KeyCode::Modifier(M::LeftShift), Mods::NONE, K::Release)).unwrap();
+        v.on_term(ev(KeyCode::Char('a'), Mods::NONE, K::Press)).unwrap();
+        assert_eq!((v.held.len(), v.held_mods & MOD_SHIFT), (2, 0));
+        v.on_term(ev(KeyCode::Char('1'), Mods::NONE, K::Release)).unwrap();
+        assert!(v.held.is_empty(), "a release that matches no key lets every key go: {:?}", v.held);
+        v.on_term(ev(KeyCode::Char('x'), Mods::NONE, K::Press)).unwrap();
+        v.on_term(ev(ctrl, Mods::CONTROL, K::Press)).unwrap();
+        v.on_term(Event::FocusLost).unwrap();
+        assert!(v.held.is_empty() && v.held_mods == 0, "all let go when the terminal goes to the back");
     }
 
     /// The terminal viewer goes between the screen, a shell kept open, the files and the chat on
