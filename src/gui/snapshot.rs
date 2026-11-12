@@ -313,16 +313,19 @@ mod pictures {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
             let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);
             let mut s = Shot::new("open", Vec2::new(900.0, 600.0), dark, |ui| app.connect_screen(ui));
-            s.save("ssh");
-            s.click(ic::DOTS, 0, PointerButton::Primary);
-            s.save("row_menu");
-            s.escape();
-            for (place, what) in [("New connection", "new"), ("This computer", "local"), ("Tools", "tools")] {
+            s.save("connect");
+            // A host's menu, when there is a host (from ~/.ssh/config or used before).
+            if !s.snap.find(ic::DOTS).is_empty() {
+                s.click(ic::DOTS, 0, PointerButton::Primary);
+                s.save("row_menu");
+                s.escape();
+            }
+            for (place, what) in [("This computer", "local"), ("Extensions", "extensions"), ("Settings", "settings")] {
                 s.click(place, 0, PointerButton::Primary);
                 s.save(what);
             }
-            // Each tool is a page of the open view, with a way back.
-            for (tool, what) in [("SSH keys", "tool_keys"), ("SSH hosts", "tool_hosts"), ("Saved passwords", "tool_vault"), ("Backup and restore", "tool_backup")] {
+            // Each tool is a page of the settings, with a way back.
+            for (tool, what) in [("SSH keys", "tool_keys"), ("SSH config file", "tool_hosts"), ("Saved passwords", "tool_vault"), ("Backup and restore", "tool_backup")] {
                 s.click(tool, 0, PointerButton::Primary);
                 s.save(what);
                 // Adding opens a page of its own; back returns to the list, then to the tools.
