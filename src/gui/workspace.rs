@@ -118,6 +118,16 @@ fn pane_info(p: &Pane) -> serde_json::Value {
     serde_json::json!({ "pane": p.id, "label": p.label, "mode": mode.name(), "host": host })
 }
 
+/// What the open window knows a reached connection by: an ID's address, or the host as typed
+/// (which is the pane's label).
+fn reached_as(target: &Target, label: &str) -> String {
+    match target {
+        #[cfg(feature = "remote")]
+        Target::Direct { addr, .. } => crate::access::address(&addr.id, &addr.relay),
+        _ => label.to_string(),
+    }
+}
+
 /// Seconds a lost connection is tried again before the pane asks.
 const GIVE_UP: f64 = 30.0;
 
@@ -160,6 +170,8 @@ struct Pane {
     start: PaneStart,
     /// What the user chose in the connection that dropped, for the next one.
     prefs: Option<remote::Prefs>,
+    /// A password typed in the sign-in dialog, kept in the password store once it works.
+    keep: Option<(String, String)>,
     state: State,
 }
 
@@ -575,6 +587,7 @@ impl Workspace {
                 terms: None,
                 start,
                 prefs: None,
+                keep: None,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
             Launch::Agent { target, label, ssh_cmd, mode } => Pane {
@@ -586,6 +599,7 @@ impl Workspace {
                 terms: None,
                 start,
                 prefs: None,
+                keep: None,
                 state: State::Down(Down::new(false, String::new())),
             },
         };
@@ -869,7 +883,9 @@ impl Workspace {
         let Some(s) = &mut self.signin else { return };
         match s.show(ctx, &target) {
             Some(super::signin::Answer::Connect(t)) => {
+                let keep = s.keep(&t);
                 let p = &mut self.panes[i];
+                p.keep = keep;
                 p.target = t;
                 p.state = State::Down(Down::new(false, String::new()));
                 self.signin = None;
@@ -903,9 +919,15 @@ impl Workspace {
         if again {
             r.notify("Connected again");
         }
+        // The password typed to sign in worked: kept now, so it is not asked again.
+        if let Some((name, password)) = p.keep.take()
+            && let Err(e) = crate::vault::set(&name, &password)
+        {
+            r.notify(&format!("The password was not saved: {e}"));
+        }
         let PaneStart { panel, chat, fullscreen: full } = std::mem::take(&mut p.start);
         r.open_panels(false, chat);
-        self.reached.push(p.label.clone());
+        self.reached.push(reached_as(&p.target, &p.label));
         p.state = State::Live(Box::new(r));
         let id = p.id;
         // The terminal asked for beside the screen is a pane of its own below it, as every pane

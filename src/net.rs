@@ -179,6 +179,7 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
         }
     }
     let _done = Done(done);
+    let started = std::time::Instant::now();
     s.write_all(&(msg.len() as u16).to_le_bytes())?;
     s.write_all(&msg)?;
     let mut len = [0u8; 2];
@@ -203,7 +204,18 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
     if viewer {
         w.write_all(CONFIRM)?;
         w.flush()?;
-        r.read_exact(&mut got)?;
+        // A computer that did not take the password closes the connection without a word.
+        if let Err(e) = r.read_exact(&mut got) {
+            return Err(match e.kind() {
+                _ if started.elapsed() >= HANDSHAKE_LIMIT => {
+                    io::Error::new(io::ErrorKind::TimedOut, "the computer did not answer the password in time")
+                }
+                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
+                    io::Error::new(io::ErrorKind::PermissionDenied, "wrong password")
+                }
+                _ => e,
+            });
+        }
     } else {
         r.read_exact(&mut got)?;
         if got != CONFIRM {
@@ -332,7 +344,10 @@ mod tests {
     #[test]
     fn a_wrong_password_is_refused() {
         let (v, a) = pair("123456789", "987654321");
-        assert!(v.is_err());
+        // The viewer hears only that the connection closed: it says why in words that lead to
+        // asking the password again.
+        let v = v.unwrap_err();
+        assert_eq!((v.kind(), v.to_string().as_str()), (io::ErrorKind::PermissionDenied, "wrong password"));
         // The agent sees the wrong proof itself, so the guess counts against the next one.
         assert_eq!(a.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }

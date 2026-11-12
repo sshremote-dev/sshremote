@@ -313,6 +313,8 @@ pub struct App {
     quit_when_empty: bool,
     /// Hosts being reached for the screen or files, with their ports: recent once reached.
     pending_ports: std::collections::HashMap<String, String>,
+    /// Passwords to keep in the password store once their connection works, by host.
+    pending_passwords: std::collections::HashMap<String, String>,
     /// The window whose active pane last asked for the system keys (None: the main one).
     grab_window: Option<egui::ViewportId>,
     /// Whether the window was last sized as the open window (true) or a working one.
@@ -340,7 +342,8 @@ impl Form {
             host: opt.host.clone().unwrap_or_default(),
             port: String::new(),
             password: String::new(),
-            remember: false,
+            // On unless the user turned it off: a password typed once is not asked again.
+            remember: crate::hosts::setting("remember_password").is_none_or(|v| v != "no"),
             preset: opt.preset,
             remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
             capture: opt.capture.clone(),
@@ -658,6 +661,7 @@ impl App {
             windows_made: 0,
             quit_when_empty: false,
             pending_ports: Default::default(),
+            pending_passwords: Default::default(),
             grab_window: None,
             sized_for: None,
             queued: Vec::new(),
@@ -989,6 +993,13 @@ impl App {
     /// Hosts reached: the recent list (screen and files are recorded once reached) and when.
     fn reached(&mut self, reached: Vec<String>) {
         for h in reached {
+            // The password worked: kept now, so a wrong one is never saved.
+            if let Some(pw) = self.pending_passwords.remove(&h)
+                && let Err(e) = crate::vault::set(&h, &pw)
+                && let Screen::Work(w) = &mut self.screen
+            {
+                w.failed = Some(format!("The password was not saved: {e}"));
+            }
             if let Some(port) = self.pending_ports.remove(&h) {
                 self.remember_host(&h, &port);
             } else if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {

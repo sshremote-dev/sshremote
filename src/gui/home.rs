@@ -298,8 +298,11 @@ impl App {
                         .margin(egui::Margin::symmetric(8, 6)),
                 );
                 enter |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
-                    .on_hover_text("Keep it in the system's password store for this ID");
+                let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
+                    .on_hover_text("Keep it in the system's password store for this ID, so it is not asked again");
+                if r.changed() {
+                    crate::hosts::set_setting("remember_password", if self.form.remember { "yes" } else { "no" });
+                }
             });
         }
         ui.add_space(6.0);
@@ -335,8 +338,11 @@ impl App {
                 ui.label(RichText::new("Password").weak()).on_hover_text("Leave it empty to sign in with your SSH keys.");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(220.0));
-                    ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
-                        .on_hover_text("Keep it in the system's password store for this host");
+                    let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
+                        .on_hover_text("Keep it in the system's password store for this host, so it is not asked again");
+                    if r.changed() {
+                        crate::hosts::set_setting("remember_password", if self.form.remember { "yes" } else { "no" });
+                    }
                 });
                 ui.end_row();
             }
@@ -708,8 +714,14 @@ impl App {
             field == host || (!digits.is_empty() && host.contains(&format!("//{digits}")))
         };
         let typed = if typed_here { std::mem::take(&mut self.form.password) } else { String::new() };
-        if !typed.is_empty() && self.form.remember && let Err(e) = crate::vault::set(&host, &typed) {
-            self.error = Some(format!("The password was not saved: {e}"));
+        // Kept once the connection works (a terminal signs in inside itself: kept at once).
+        let by_agent = mode != PaneMode::Terminal || host.starts_with("sshremote://");
+        if !typed.is_empty() && self.form.remember {
+            if by_agent {
+                self.pending_passwords.insert(host.clone(), typed.clone());
+            } else if let Err(e) = crate::vault::set(&host, &typed) {
+                self.error = Some(format!("The password was not saved: {e}"));
+            }
         }
         // A password typed now wins over a saved one.
         let password = Some(typed).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
@@ -723,8 +735,10 @@ impl App {
             };
             // Recent once reached, as other hosts are.
             self.pending_ports.insert(host.clone(), String::new());
+            // Named as people read it; the recent list and the password store keep the address.
+            let label = format!("ID {}", crate::access::spaced(&addr.id));
             let target = Target::Direct { addr, password };
-            return Ok(Launch::Agent { target, label: host, ssh_cmd: None, mode });
+            return Ok(Launch::Agent { target, label, ssh_cmd: None, mode });
         }
         let (port_n, cmd) = ssh_command(&host, port);
         let target = Target::Ssh {

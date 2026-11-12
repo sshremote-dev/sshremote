@@ -1,6 +1,6 @@
 //! Signing in when a host refused the login: which host, user, port and for what, then a
-//! password, or a key file and its passphrase. What is typed is used for this connection only,
-//! unless it is to be remembered in the system's password store.
+//! password, or a key file and its passphrase; for a computer reached by its ID, its password.
+//! What is typed is remembered in the system's password store unless that is unticked.
 
 use eframe::egui::{self, RichText};
 
@@ -18,6 +18,11 @@ pub(super) struct SignIn {
     password: String,
     key: String,
     remember: bool,
+    /// A computer reached by its remote access ID: a password and nothing else; the name its
+    /// password is kept under.
+    by_id: Option<String>,
+    /// The password field has had the keyboard once (later the user puts it where they like).
+    focused: bool,
 }
 
 pub(super) enum Answer {
@@ -34,6 +39,25 @@ pub(super) fn refused(why: &str) -> bool {
 
 impl SignIn {
     pub fn new(pane: u64, target: &Target, purpose: &str, why: &str) -> Option<SignIn> {
+        let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or(why).trim().to_string();
+        let remember = crate::vault::backend().is_some();
+        #[cfg(feature = "remote")]
+        if let Target::Direct { addr, .. } = target {
+            let why = if why.contains("wrong password") { "That password was not accepted.".to_string() } else { why };
+            return Some(SignIn {
+                pane,
+                host: format!("ID {}", crate::access::spaced(&addr.id)),
+                user: String::new(),
+                port: String::new(),
+                purpose: purpose.to_string(),
+                why,
+                password: String::new(),
+                key: String::new(),
+                remember,
+                by_id: Some(crate::access::address(&addr.id, &addr.relay)),
+                focused: false,
+            });
+        }
         let Target::Ssh { host, port, args, .. } = target else { return None };
         let (user, name) = match host.split_once('@') {
             Some((u, h)) => (u.to_string(), h.to_string()),
@@ -47,16 +71,19 @@ impl SignIn {
             user,
             port: port.map_or_else(String::new, |p| p.to_string()),
             purpose: purpose.to_string(),
-            why: why.lines().find(|l| !l.trim().is_empty()).unwrap_or(why).trim().to_string(),
+            why,
             password: String::new(),
             key,
-            remember: false,
+            remember,
+            by_id: None,
+            focused: false,
         })
     }
 
     /// The dialog; an answer once one of its buttons is used.
     pub fn show(&mut self, ctx: &egui::Context, target: &Target) -> Option<Answer> {
-        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, 330.0));
+        let by_id = self.by_id.is_some();
+        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, if by_id { 240.0 } else { 330.0 }));
         let mut answer = None;
         let r = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
@@ -68,19 +95,26 @@ impl SignIn {
                     ui.label(v);
                     ui.end_row();
                 };
-                row(ui, "Host", &self.host);
-                row(ui, "User", if self.user.is_empty() { "from ~/.ssh/config, or yours here" } else { &self.user });
-                row(ui, "Port", if self.port.is_empty() { "22, or from ~/.ssh/config" } else { &self.port });
+                if by_id {
+                    row(ui, "Computer", &self.host);
+                } else {
+                    row(ui, "Host", &self.host);
+                    row(ui, "User", if self.user.is_empty() { "from ~/.ssh/config, or yours here" } else { &self.user });
+                    row(ui, "Port", if self.port.is_empty() { "22, or from ~/.ssh/config" } else { &self.port });
+                }
                 row(ui, "For", &self.purpose);
             });
             ui.add_space(4.0);
             ui.label(RichText::new(&self.why).small().weak());
             ui.add_space(8.0);
-            ui.label("Password, or the key's passphrase");
+            ui.label(if by_id { "The password set on that computer" } else { "Password, or the key's passphrase" });
             let pw = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(fit.x));
-            if self.password.is_empty() && self.key.is_empty() {
+            // The keyboard starts here, once; after that it stays where the user puts it.
+            if !self.focused {
                 pw.request_focus();
+                self.focused = true;
             }
+            if !by_id {
             ui.add_space(4.0);
             ui.label("Key file (optional)");
             ui.horizontal(|ui| {
@@ -98,9 +132,10 @@ impl SignIn {
                     }
                 });
             });
+            }
             ui.add_space(4.0);
-            ui.checkbox(&mut self.remember, "Remember the password in the system's password store")
-                .on_hover_text("Otherwise it is used for this connection only and never written anywhere");
+            ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.remember, "Remember the password in the system's password store"))
+                .on_hover_text("So it is not asked again; unticked, it is used for this connection only and never written anywhere");
             ui.add_space(8.0);
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
@@ -116,19 +151,29 @@ impl SignIn {
         if r.should_close() && answer.is_none() {
             answer = Some(Answer::Cancel);
         }
-        if let Some(Answer::Connect(Target::Ssh { host, .. })) = &answer
-            && self.remember
-            && !self.password.is_empty()
-            && let Err(e) = crate::vault::set(host, &self.password)
-        {
-            self.why = format!("The password was not saved: {e}");
-        }
         answer
+    }
+
+    /// What to keep in the password store once the connection made with `target` works: the
+    /// name the open window looks it up by (the host, or the ID's address) and the password.
+    pub fn keep(&self, target: &Target) -> Option<(String, String)> {
+        if !self.remember || self.password.is_empty() {
+            return None;
+        }
+        let name = match target {
+            Target::Ssh { host, .. } => host.clone(),
+            _ => self.by_id.clone()?,
+        };
+        Some((name, self.password.clone()))
     }
 
     /// The target with what was typed: the password (or passphrase) and the key.
     fn target(&self, t: &Target) -> Target {
         let mut t = t.clone();
+        #[cfg(feature = "remote")]
+        if let Target::Direct { password, .. } = &mut t {
+            *password = self.password.clone();
+        }
         if let Target::Ssh { args, password, .. } = &mut t {
             if !self.password.is_empty() {
                 *password = Some(self.password.clone());
@@ -160,6 +205,22 @@ mod tests {
         let Target::Ssh { args, password, .. } = s.target(&t) else { panic!() };
         assert_eq!((args, password), (vec!["-A".to_string(), "-i".into(), "/k/new".into()], Some("pw".to_string())));
         assert!(SignIn::new(1, &Target::Local { capture: String::new() }, "x", "").is_none());
+    }
+
+    /// A computer reached by its ID that refused the password is asked for it again, and the
+    /// answer goes to that connection.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn a_wrong_id_password_is_asked_again() {
+        let addr = crate::net::Address { id: "123456789".into(), relay: "relay.example".into() };
+        let t = Target::Direct { addr, password: "old".into() };
+        let mut s = SignIn::new(3, &t, "Screen sharing", "wrong password").unwrap();
+        assert_eq!(s.host, "ID 123 456 789");
+        assert_eq!(s.by_id.as_deref(), Some("sshremote://123456789@relay.example"));
+        assert!(refused("wrong password"));
+        s.password = "new".into();
+        let Target::Direct { password, .. } = s.target(&t) else { panic!() };
+        assert_eq!(password, "new");
     }
 
     /// The dialog shows the host, user, port and purpose before anything is typed.
