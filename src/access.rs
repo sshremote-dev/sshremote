@@ -628,14 +628,18 @@ pub fn service_installed() -> bool {
     false
 }
 
-/// Whether the installed service runs this very program file (an older copy lacks what this has).
+/// Whether the installed service runs this very program (an older copy lacks what this has). On
+/// Windows it runs its own copy under Program Files, the same as this one when size and time match.
 pub fn service_is_this() -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let Ok(o) = Command::new("sc").args(["qc", crate::service::NAME]).creation_flags(0x0800_0000).output() else { return true };
-        let text = String::from_utf8_lossy(&o.stdout).to_lowercase();
-        return std::env::current_exe().is_ok_and(|e| text.contains(&e.display().to_string().to_lowercase()));
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        // BINARY_PATH_NAME   : "C:\Program Files\SSH Remote\sshremote.exe" --service
+        let Some(path) = text.lines().find(|l| l.contains("BINARY_PATH_NAME")).and_then(|l| l.split('"').nth(1)) else { return false };
+        let stamp = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+        return std::env::current_exe().ok().and_then(|e| stamp(&e)).is_some_and(|here| stamp(std::path::Path::new(path)) == Some(here));
     }
     #[cfg(unix)]
     {

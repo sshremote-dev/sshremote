@@ -22,7 +22,7 @@ use windows_sys::Win32::Security::{
     TokenSessionId,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
@@ -55,12 +55,52 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Installs and starts the service, and lets services raise Ctrl+Alt+Del. Needs an elevated prompt.
+/// The service's own copy of the program: under Program Files, which only administrators can
+/// change, so nobody else can swap the program that SYSTEM runs (as they could in a folder of
+/// their own, or Downloads).
+pub fn installed_exe() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("ProgramFiles")?;
+    Some(std::path::PathBuf::from(base).join("SSH Remote").join("sshremote.exe"))
+}
+
+/// Whether the service is stopped (or not installed).
+fn stopped() -> bool {
+    use std::os::windows::process::CommandExt;
+    Command::new("sc")
+        .args(["query", NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).contains("_PENDING") && !String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
+}
+
+/// Installs and starts the service, and lets services raise Ctrl+Alt+Del. Needs an elevated
+/// prompt. The service runs a copy of this program kept under Program Files.
 pub fn install() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bin = format!("\"{}\" --service", exe.display());
+    let here = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = installed_exe().ok_or("Program Files was not found")?;
     let _ = run("sc", &["stop", NAME]);
+    // Its program file is free once it has stopped.
+    for _ in 0..100 {
+        if stopped() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let _ = run("sc", &["delete", NAME]);
+    let same = std::fs::canonicalize(&here).ok().zip(std::fs::canonicalize(&exe).ok()).is_some_and(|(a, b)| a == b);
+    if !same {
+        std::fs::create_dir_all(exe.parent().ok_or("bad path")?).map_err(|e| format!("{}: {e}", exe.display()))?;
+        let mut copied = std::fs::copy(&here, &exe);
+        for _ in 0..30 {
+            if copied.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            copied = std::fs::copy(&here, &exe);
+        }
+        copied.map_err(|e| format!("{}: {e}", exe.display()))?;
+    }
+    let bin = format!("\"{}\" --service", exe.display());
     run(
         "sc",
         &[
@@ -92,6 +132,18 @@ pub fn uninstall() -> Result<(), String> {
     let _ = run("sc", &["stop", NAME]);
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
+    // Its copy goes too, once its process has let go of it.
+    if let Some(exe) = installed_exe() {
+        for _ in 0..50 {
+            if !exe.exists() || std::fs::remove_file(&exe).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if let Some(dir) = exe.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
     println!("sshremote service removed");
     Ok(())
 }
@@ -193,7 +245,8 @@ fn serve() {
 fn send_sas() -> Result<(), String> {
     let lib = wide("sas.dll");
     unsafe {
-        let m = LoadLibraryW(lib.as_ptr());
+        // From System32 only: never a sas.dll put beside the program.
+        let m = LoadLibraryExW(lib.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
         let f = GetProcAddress(m, c"SendSAS".as_ptr() as *const u8).ok_or("SendSAS is not available")?;
         let send: extern "system" fn(i32) = std::mem::transmute(f);
         send(0);
