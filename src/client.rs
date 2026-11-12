@@ -712,8 +712,10 @@ impl Viewer {
                 // Shift+click and Ctrl+drag: the modifiers held here are held on the host too.
                 self.sync_mods(keys::mod_bits(m.modifiers))?;
                 let (dw, dh) = self.display();
-                let dx = m.column as usize * self.cw + self.cw / 2;
-                let dy = m.row as usize * self.ch + self.ch / 2;
+                let (ox, oy) = self.origin();
+                let (Some(dx), Some(dy)) = ((m.column as usize * self.cw + self.cw / 2).checked_sub(ox), (m.row as usize * self.ch + self.ch / 2).checked_sub(oy)) else {
+                    return Ok(());
+                };
                 if dw == 0 || dx >= dw || dy >= dh {
                     return Ok(());
                 }

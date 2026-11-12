@@ -36,6 +36,17 @@ impl Viewer {
         self.fb.fit((self.ctl.s.view_w as usize, self.ctl.s.view_h as usize), self.stretch)
     }
 
+    /// Where the picture starts, in pixels: centred in the terminal on whole cells, so a screen
+    /// of another shape leaves even bands on both sides, not one band at the bottom or right.
+    pub(crate) fn origin(&self) -> (usize, usize) {
+        let (dw, dh) = self.display();
+        let (vw, vh) = (self.ctl.s.view_w as usize, self.ctl.s.view_h as usize);
+        let (cw, ch) = (self.cw.max(1), self.ch.max(1));
+        // Half the band, to the nearest cell: the two bands differ by a cell at most.
+        let at = |band: usize, cell: usize| (band / 2 + cell / 2) / cell * cell;
+        (at(vw.saturating_sub(dw), cw), at(vh.saturating_sub(dh), ch))
+    }
+
     pub(super) fn apply(&mut self, f: Frame) -> io::Result<()> {
         let result = self.show_frame(f);
         // A video stream the decoder could not join: the agent starts it over.
@@ -71,13 +82,14 @@ impl Viewer {
         }
         let (w, h) = (self.fb.w, self.fb.h);
         let (dw, dh) = self.display();
+        let (ox, oy) = self.origin();
         let img_rows = self.rows - 1;
         self.dirty.resize(self.cols * img_rows, false);
         for (tx, ty, tw, th) in f.damage() {
-            let x0 = tx * dw / w;
-            let x1 = ((tx + tw) * dw).div_ceil(w);
-            let y0 = ty * dh / h;
-            let y1 = ((ty + th) * dh).div_ceil(h);
+            let x0 = ox + tx * dw / w;
+            let x1 = ox + ((tx + tw) * dw).div_ceil(w);
+            let y0 = oy + ty * dh / h;
+            let y1 = oy + ((ty + th) * dh).div_ceil(h);
             for r in y0 / self.ch..y1.div_ceil(self.ch).min(img_rows) {
                 for c in x0 / self.cw..x1.div_ceil(self.cw).min(self.cols) {
                     self.dirty[r * self.cols + c] = true;
@@ -98,6 +110,7 @@ impl Viewer {
     pub(super) fn paint(&mut self, out: &mut Vec<u8>, dw: usize, dh: usize) {
         let (cols, img_rows) = (self.cols, self.rows - 1);
         let (fw, fh) = (self.fb.w, self.fb.h);
+        let (ox, oy) = self.origin();
         let adaptive = self.fb.mode == Some(Mode::True);
         for r in 0..img_rows {
             let mut c = 0;
@@ -123,14 +136,12 @@ impl Viewer {
                 self.px.resize(w * h, [0; 3]);
                 if dw > 0 {
                     for py in 0..h {
-                        let dy = y0 + py;
-                        if dy >= dh {
-                            break;
-                        }
+                        // Outside the picture (the bands beside it) stays black.
+                        let Some(dy) = (y0 + py).checked_sub(oy).filter(|&d| d < dh) else { continue };
                         let frow = (dy * fh / dh) * fw;
                         let line = &mut self.px[py * w..(py + 1) * w];
                         for (px, slot) in line.iter_mut().enumerate() {
-                            let dx = x0 + px;
+                            let Some(dx) = (x0 + px).checked_sub(ox) else { continue };
                             if dx >= dw {
                                 break;
                             }

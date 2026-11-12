@@ -27,6 +27,25 @@ impl Screen {
     }
 }
 
+/// A picture of another shape is centred on whole cells: even bands above and below, not one
+/// band at the bottom.
+#[test]
+#[ignore]
+fn the_picture_is_centred_on_whole_cells() {
+    use super::*;
+    let opt = crate::parse_client(&["--local".into()]).unwrap();
+    let (sess, _tx, _rx) = Session::connect(&opt).expect("a local agent (SSHREMOTE_EXE)");
+    let mut v = Viewer::new(&opt, sess, Box::new(std::io::sink()));
+    (v.cols, v.rows, v.cw, v.ch) = (100, 41, 10, 20);
+    (v.ctl.s.view_w, v.ctl.s.view_h) = (1000, 800);
+    (v.fb.w, v.fb.h, v.stretch) = (1600, 900, true);
+    assert_eq!(v.display(), (1000, 562));
+    let (ox, oy) = v.origin();
+    assert_eq!((ox, oy % v.ch), (0, 0), "on whole cells");
+    let below = 800 - (oy + 562);
+    assert!(oy.abs_diff(below) <= v.ch, "even bands: {oy} above, {below} below");
+}
+
 /// Keys held at the host are let go: a modifier let go here (also with the menu open), a
 /// release that matches no key held (Shift let go first), and all of them when this terminal
 /// goes to the back.
