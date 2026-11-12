@@ -441,9 +441,11 @@ function keysym(e) {
   const f = /^F(\d{1,2})$/.exec(e.key);
   if (f && +f[1] >= 1 && +f[1] <= 24) return 0xffbe + Number(f[1]) - 1;
   if ([...e.key].length === 1) {
-    // With Ctrl or Alt the key's own letter, not what the layout made of it.
+    // With Ctrl or Alt the key's own letter, not what the layout made of it; AltGr (which
+    // Windows reports as Ctrl+Alt) makes a character of its own, "@" or "€", sent as it is.
     let c = e.key.codePointAt(0);
-    if ((e.ctrlKey || e.altKey) && /^Key[A-Z]$/.test(e.code)) c = e.code.charCodeAt(3) + (e.shiftKey ? 0 : 32);
+    const altGr = e.getModifierState && e.getModifierState("AltGraph");
+    if ((e.ctrlKey || e.altKey) && !altGr && /^Key[A-Z]$/.test(e.code)) c = e.code.charCodeAt(3) + (e.shiftKey ? 0 : 32);
     return c < 0x100 ? c : 0x01000000 + c;
   }
   return 0;
@@ -820,15 +822,28 @@ class Client {
       return x >= 0 && y >= 0 && x < canvas.width && y < canvas.height ? [x, y] : null;
     };
     const BUTTON = [1, 2, 3, 8, 9];
+    // The button pressed here is let go there however the press ends: released, or taken by the
+    // browser (a finger's drag turned into scrolling or zooming).
+    let down = null;
+    canvas.style.touchAction = "none";
     canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
     canvas.onpointerdown = e => {
       canvas.focus();
       const p = point(e); if (!p) return;
       canvas.setPointerCapture(e.pointerId);
-      send({ move: p }); send({ button: [BUTTON[e.button] || 1, 1] });
+      down = BUTTON[e.button] || 1;
+      send({ move: p }); send({ button: [down, 1] });
       e.preventDefault();
     };
-    canvas.onpointerup = e => send({ button: [BUTTON[e.button] || 1, 0] });
+    canvas.onpointerup = e => {
+      const b = BUTTON[e.button] || 1;
+      if (b === down) down = null;
+      send({ button: [b, 0] });
+    };
+    canvas.onpointercancel = () => {
+      if (down !== null) send({ button: [down, 0] });
+      down = null;
+    };
     canvas.oncontextmenu = e => e.preventDefault();
     let wheel = [0, 0];
     canvas.onwheel = e => {
