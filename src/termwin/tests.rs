@@ -51,6 +51,29 @@ fn the_emulator_answers_cursor_queries() {
     assert_eq!(replies, ["\x1b[1;3R"]);
 }
 
+/// A right click goes to a program that took the mouse, without the terminal's menu opening
+/// over it as well; without such a program it opens the menu.
+#[test]
+fn a_program_with_the_mouse_gets_the_right_click_alone() {
+    for program_mouse in [true, false] {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        let id = w.tabs[0].id;
+        if program_mouse {
+            w.output(id, b"\x1b[?1000h");
+        }
+        frame(&ctx, &mut w, Vec::new());
+        let at = Pos2::new(400.0, 300.0);
+        let press = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+        let mut sent = typed(&frame(&ctx, &mut w, vec![Event::PointerMoved(at), press(true)]));
+        sent += &typed(&frame(&ctx, &mut w, vec![press(false)]));
+        frame(&ctx, &mut w, Vec::new());
+        let menu = egui::Popup::is_any_open(&ctx);
+        assert_eq!((sent.starts_with("\x1b[M"), menu), (program_mouse, !program_mouse), "program has the mouse: {program_mouse}, sent {sent:?}");
+    }
+}
+
 /// Marks combined with a character (an accent written after its letter, Korean from macOS in
 /// letters) stay with it in what the views read.
 #[test]

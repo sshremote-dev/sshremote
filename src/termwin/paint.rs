@@ -238,10 +238,12 @@ pub(super) fn screen(
             let row = (((p.y - origin.y) / ch).floor().max(0.0) as usize).min(rows as usize - 1);
             (col, row)
         };
+        // Only where the terminal is on top: a click on a menu or a dialog over it is theirs.
+        let mine = |p: Pos2| area.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id());
         for e in ui.ctx().input(|i| i.events.clone()) {
             match e {
                 Event::PointerButton { pos, button, pressed, .. }
-                    if area.contains(pos) || (!pressed && t.mouse_held.is_some()) =>
+                    if mine(pos) || (!pressed && t.mouse_held.is_some()) =>
                 {
                     let b = match button {
                         egui::PointerButton::Primary => 0,
@@ -254,7 +256,7 @@ pub(super) fn screen(
                     t.mouse_held = pressed.then_some(b);
                 }
                 Event::PointerMoved(pos)
-                    if area.contains(pos) && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
+                    if mine(pos) && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
                 {
                     if let Some(b) = t.mouse_held {
                         let (col, row) = at(pos);
@@ -445,65 +447,69 @@ pub(super) fn screen(
     let mut find = false;
     let mut view = None;
     let mut script: Option<crate::script::Command> = None;
-    resp.context_menu(|ui| {
-        crate::gui::menu_look(ui);
-        if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
-            copy_now = true;
-            ui.close();
-        }
-        if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V, Shift+Insert")).clicked() {
-            paste_now = true;
-            ui.close();
-        }
-        if ui.button("Select all").clicked() {
-            select_all = true;
-            ui.close();
-        }
-        ui.separator();
-        if ui.add(egui::Button::new("Find").shortcut_text("Ctrl+Shift+F")).clicked() {
-            find = true;
-            ui.close();
-        }
-        if ui.button("Read as text").clicked() {
-            view = Some(View::Text);
-            ui.close();
-        }
-        if ui.button("Read as Markdown").clicked() {
-            view = Some(View::Markdown);
-            ui.close();
-        }
-        ui.separator();
-        if ui.add(egui::Button::new("Split right").shortcut_text("Alt+Shift+=")).clicked() {
-            ask.split = Some(true);
-            ui.close();
-        }
-        if ui.add(egui::Button::new("Split down").shortcut_text("Alt+Shift+-")).clicked() {
-            ask.split = Some(false);
-            ui.close();
-        }
-        if ui.add(egui::Button::new("Close pane").shortcut_text("Ctrl+Shift+W")).clicked() {
-            ask.close = true;
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("Clear scrollback").clicked() {
-            clear = true;
-            ui.close();
-        }
-        // Commands of installed script extensions.
-        let commands = crate::script::commands();
-        if !commands.is_empty() {
+    // A program that takes the mouse has the right button too: the menu opens on Shift+right-click
+    // (Shift leaves the mouse here); one open already stays.
+    if !app_mouse || resp.context_menu_opened() {
+        resp.context_menu(|ui| {
+            crate::gui::menu_look(ui);
+            if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
+                copy_now = true;
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V, Shift+Insert")).clicked() {
+                paste_now = true;
+                ui.close();
+            }
+            if ui.button("Select all").clicked() {
+                select_all = true;
+                ui.close();
+            }
             ui.separator();
-            ui.menu_button("Extensions", |ui| {
-                for c in commands {
-                    if ui.button(&c.label).clicked() {
-                        script = Some(c);
-                        ui.close();
+            if ui.add(egui::Button::new("Find").shortcut_text("Ctrl+Shift+F")).clicked() {
+                find = true;
+                ui.close();
+            }
+            if ui.button("Read as text").clicked() {
+                view = Some(View::Text);
+                ui.close();
+            }
+            if ui.button("Read as Markdown").clicked() {
+                view = Some(View::Markdown);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add(egui::Button::new("Split right").shortcut_text("Alt+Shift+=")).clicked() {
+                ask.split = Some(true);
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Split down").shortcut_text("Alt+Shift+-")).clicked() {
+                ask.split = Some(false);
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Close pane").shortcut_text("Ctrl+Shift+W")).clicked() {
+                ask.close = true;
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Clear scrollback").clicked() {
+                clear = true;
+                ui.close();
+            }
+            // Commands of installed script extensions.
+            let commands = crate::script::commands();
+            if !commands.is_empty() {
+                ui.separator();
+                ui.menu_button("Extensions", |ui| {
+                    for c in commands {
+                        if ui.button(&c.label).clicked() {
+                            script = Some(c);
+                            ui.close();
+                        }
                     }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
     if let Some(c) = script {
         let selection = t.term.selection_to_string().unwrap_or_default();
         match crate::script::run_command(&c, &selection, "") {
