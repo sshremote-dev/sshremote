@@ -103,6 +103,8 @@ pub struct Gdi {
     dup_retry: std::time::Instant,
     /// The next grab returns a picture even if the screen did not change (new size or scope).
     force: bool,
+    /// When the monitors were last looked at for a change of mode or layout; None: look now.
+    layout_at: Option<std::time::Instant>,
 }
 
 /// A device-independent bitmap selected into its own memory DC.
@@ -192,6 +194,7 @@ impl Gdi {
                 dup_ready: false,
                 dup_retry: std::time::Instant::now(),
                 force: true,
+                layout_at: Some(std::time::Instant::now()),
             };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
@@ -271,11 +274,38 @@ impl Gdi {
                 Some(true)
             }
             Err(super::dxgi::Lost) => {
-                // A desktop switch or mode change: open again on the next frame, GDI meanwhile.
+                // A desktop switch or mode change: open again on the next frame, GDI meanwhile,
+                // and look at the monitors at once.
                 (self.dup, self.base, self.dup_ready) = (None, None, false);
+                self.layout_at = None;
                 None
             }
         }
+    }
+
+    /// Follows a change of the monitors (a new mode, a monitor docked, rotated or moved), at
+    /// most once a second: the monitor shared is found again by name and takes its new place and
+    /// size, which the agent then announces to the viewer.
+    fn follow_monitors(&mut self) {
+        if self.layout_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return;
+        }
+        self.layout_at = Some(std::time::Instant::now());
+        let now = screens();
+        let name = self.screens.get(self.current).map(|s| s.info.name.clone());
+        let at = name.and_then(|n| now.iter().position(|s| s.info.name == n)).unwrap_or(0);
+        let Some(s) = now.get(at) else { return };
+        let monitor = ((s.left, s.top), (s.info.w, s.info.h));
+        (self.screens, self.current) = (now, at);
+        if monitor == self.monitor {
+            return;
+        }
+        self.monitor = monitor;
+        if self.scope == Scope::Screen {
+            (self.origin, self.desk) = monitor;
+        }
+        (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
+        self.dup_retry = std::time::Instant::now();
     }
 
     /// Follows the shared windows: the captured area and the parts that show them.
@@ -449,7 +479,7 @@ impl Capture for Gdi {
         self.shown.clear();
         (self.pointer_inside, self.ended) = (true, false);
         (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
-        self.dup_retry = std::time::Instant::now();
+        (self.dup_retry, self.layout_at) = (std::time::Instant::now(), Some(std::time::Instant::now()));
         Ok(())
     }
 
@@ -521,6 +551,7 @@ impl Capture for Gdi {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        self.follow_monitors();
         self.update_layout();
         let force = std::mem::take(&mut self.force) || self.scope != Scope::Screen;
         match self.poll_dup() {

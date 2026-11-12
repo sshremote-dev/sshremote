@@ -722,7 +722,8 @@ impl Capture for Gnome {
         }
         if self.app.is_some() {
             self.refresh_app(false);
-            let a = self.app.as_ref().unwrap();
+            // Its last window closed: the whole monitor comes next, the pipeline already restarted.
+            let Some(a) = self.app.as_ref() else { return Ok(None) };
             let img = region::crop_masked(&img, a.area, &a.shown);
             if (img.w, img.h) != self.desk {
                 self.desk = (img.w, img.h);
