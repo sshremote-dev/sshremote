@@ -40,8 +40,8 @@
   </ul>
   <div class="stage">
     <div class="window">
-      <img class="th-dark" src="img/new-dark.png" width="900" height="600" alt="The open dialog: a new connection to user@host with terminal, screen sharing and files">
-      <img class="th-light" src="img/new-light.png" width="900" height="600" alt="The open dialog: a new connection to user@host with terminal, screen sharing and files">
+      <img class="th-dark" src="img/new-dark.png" width="900" height="600" alt="The home window: this computer on the left, the address field and the computers on the right">
+      <img class="th-light" src="img/new-light.png" width="900" height="600" alt="The home window: this computer on the left, the address field and the computers on the right">
     </div>
   </div>
 </div></div>
@@ -49,17 +49,18 @@
 <section id="features"><div class="wrap">
   <div class="feature">
     <div>
-      <span class="eyebrow">01 · Workspace</span>
-      <h3>Tabs and panes that switch between shell, screen and files</h3>
-      <p>Each tab is a host. Split it beside or below and turn any pane into a terminal, the host's screen or its files without connecting again. Lost connections come back by themselves, with the shells kept.</p>
+      <span class="eyebrow">01 · Computers</span>
+      <h3>One field for every computer, and tabs that switch between shell, screen and files</h3>
+      <p>Type <code>user@host</code>, an alias, an IP or a remote access ID and open its terminal, its screen or its files. Each computer keeps its name, key, saved password and SSH tunnels; aliases stay in <code>~/.ssh/config</code>. In the workspace each tab is a computer, split beside or below, and lost connections come back by themselves.</p>
       <ul class="points">
         <li><b>Screen</b><span>Keyboard and mouse, monitors, one window, clipboard, sound, chat</span></li>
         <li><b>Files</b><span>Two panes, drag and drop, never overwriting</span></li>
+        <li><b>Tunnels</b><span>Here to there, there to here and SOCKS, opened when needed or with the app</span></li>
       </ul>
     </div>
     <div class="window">
-      <img class="th-dark" src="img/ssh-dark.png" width="900" height="600" alt="SSH hosts from favorites, recent and ~/.ssh/config" loading="lazy">
-      <img class="th-light" src="img/ssh-light.png" width="900" height="600" alt="SSH hosts from favorites, recent and ~/.ssh/config" loading="lazy">
+      <img class="th-dark" src="img/ssh-dark.png" width="900" height="600" alt="A computer's sheet: its ~/.ssh/config block, saved password and tunnels" loading="lazy">
+      <img class="th-light" src="img/ssh-light.png" width="900" height="600" alt="A computer's sheet: its ~/.ssh/config block, saved password and tunnels" loading="lazy">
     </div>
   </div>
 
@@ -75,20 +76,20 @@
       </ul>
     </div>
     <div class="window">
-      <img class="th-dark" src="img/local-dark.png" width="900" height="600" alt="The Remote access by ID card" loading="lazy">
-      <img class="th-light" src="img/local-light.png" width="900" height="600" alt="The Remote access by ID card" loading="lazy">
+      <img class="th-dark" src="img/local-dark.png" width="900" height="600" alt="Remote access by ID on the left of the home window, with its settings" loading="lazy">
+      <img class="th-light" src="img/local-light.png" width="900" height="600" alt="Remote access by ID on the left of the home window, with its settings" loading="lazy">
     </div>
   </div>
 
   <div class="feature">
     <div>
-      <span class="eyebrow">03 · Tools</span>
+      <span class="eyebrow">03 · Settings</span>
       <h3>The SSH chores, done properly</h3>
-      <p>Make and copy keys, edit <code>~/.ssh/config</code> with a form, keep passwords in the system's password store, and back up hosts, settings and all of <code>~/.ssh</code> under a passphrase.</p>
+      <p>Make, copy and install keys, keep passwords in the system's password store, and back up your computers, settings and all of <code>~/.ssh</code> under a passphrase.</p>
     </div>
     <div class="window">
-      <img class="th-dark" src="img/tools-dark.png" width="900" height="600" alt="Tools: SSH keys, hosts, saved passwords and backups" loading="lazy">
-      <img class="th-light" src="img/tools-light.png" width="900" height="600" alt="Tools: SSH keys, hosts, saved passwords and backups" loading="lazy">
+      <img class="th-dark" src="img/tools-dark.png" width="900" height="600" alt="Settings: SSH keys, passwords, backup, extensions and more" loading="lazy">
+      <img class="th-light" src="img/tools-light.png" width="900" height="600" alt="Settings: SSH keys, passwords, backup, extensions and more" loading="lazy">
     </div>
   </div>
 </div></section>
@@ -136,8 +137,6 @@
   <div class="files">
     <a class="file" href="download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 · .exe</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
     <a class="file" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · GNOME on Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
-    <a class="file" href="download/sshremote-terminal-windows-x86_64.exe" data-file="sshremote-terminal-windows-x86_64.exe"><span data-i="windows"></span><span><b>Terminal edition for Windows</b><span class="meta">without the screen; add it as an extension</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
-    <a class="file" href="download/sshremote-terminal-linux-x86_64" data-file="sshremote-terminal-linux-x86_64"><span data-i="linux"></span><span><b>Terminal edition for Linux</b><span class="meta">without the screen; add it as an extension</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
   </div>
   <p class="dim small" style="margin-top:20px">From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
 </div></section>

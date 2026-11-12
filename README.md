@@ -83,13 +83,11 @@ What is opened goes into the workspace:
   backups of hosts and settings, with all of `~/.ssh` encrypted under a passphrase.
 - On Windows the window asks for administrator rights at start and works without them.
 
-## Editions
+## Building
 
-- **SSH Remote** (`--no-default-features --features gui,remote`): everything above built in, except
-  the web gateway and the MCP server, which come as extensions.
-- **SSH Remote Terminal** (`--no-default-features --features gui`): the terminal and tools; screens,
-  files, chat and sound come as the Remote desktop extension.
-- A plain `cargo build` builds everything in (`gui`, `remote`, `web`, `mcp`).
+`cargo build --release` builds the one program with every part in. Packagers can leave parts out
+with `--no-default-features` and a choice of the features `gui`, `remote`, `web` and `mcp` (a
+headless server: `--features web,mcp`); what is left out says so when asked for.
 
 ## Extensions
 
