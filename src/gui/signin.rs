@@ -137,7 +137,8 @@ impl SignIn {
             ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.remember, "Remember the password in the system's password store"))
                 .on_hover_text("So it is not asked again; unticked, it is used for this connection only and never written anywhere");
             ui.add_space(8.0);
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // Taken, so it does not also press whatever else is on the screen.
+            let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             ui.horizontal(|ui| {
                 let ready = !self.password.is_empty() || !self.key.trim().is_empty();
                 if ui.add_enabled(ready, super::theme::primary(format!("{}  Connect", ic::ARROW_CLOCKWISE))).clicked() || (enter && ready) {

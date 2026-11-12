@@ -653,6 +653,10 @@ impl Workspace {
             self.signin = None;
             return;
         };
+        // Under another dialog it waits: drawn there, it would take the keys typed into that one.
+        if self.picker.is_some() || self.palette.is_some() || self.confirm.is_some() {
+            return;
+        }
         let target = self.panes[i].target.clone();
         let Some(s) = &mut self.signin else { return };
         match s.show(ctx, &target) {
@@ -1293,7 +1297,7 @@ fn window_origin(ctx: &egui::Context) -> (Vec2, f32) {
 
 /// A question before something that cannot be undone: Cancel, or the red action. Enter says
 /// yes (unless a button has the keyboard), Escape no; None while unanswered.
-fn ask(ctx: &egui::Context, title: &str, body: &str, yes: &str) -> Option<bool> {
+pub(super) fn ask(ctx: &egui::Context, title: &str, body: &str, yes: &str) -> Option<bool> {
     let (modal, fit) = super::modal(ctx, "confirm-close", Vec2::new(420.0, 0.0));
     let mut answer = None;
     modal.show(ctx, |ui| {
