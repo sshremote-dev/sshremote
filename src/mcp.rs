@@ -29,8 +29,9 @@ struct View {
 }
 
 struct Server {
-    sess: Session,
-    rx: mpsc::Receiver<Ev>,
+    /// Where the host is; it is reached on the first tool call, and again after the link is lost.
+    target: crate::transport::Target,
+    link: Option<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>)>,
     screen: (u32, u32),
     view: View,
     clipboard: String,
@@ -245,23 +246,46 @@ impl Server {
         s
     }
 
+    /// The link to the host: made when first needed, and made again after it was lost.
+    fn link(&mut self) -> Result<&mut (Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
+        if self.link.is_none() {
+            let (mut sess, tx, rx) = Session::open(&self.target, true)?;
+            let desk = sess.desk;
+            // Full resolution in true colour, but no stream: screenshots are taken on request.
+            let s = Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5 };
+            sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
+            sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
+            self.screen = (desk.0 as u32, desk.1 as u32);
+            self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
+            self.link = Some((sess, tx, rx));
+        }
+        Ok(self.link.as_mut().expect("made above"))
+    }
+
     fn send(&mut self, m: ToAgent) -> Result<(), String> {
-        self.sess.send(m).map_err(|e| format!("connection lost: {e}"))
+        let r = self.link()?.0.send(m);
+        r.map_err(|e| {
+            self.link = None;
+            format!("connection lost (it is made again on the next call): {e}")
+        })
     }
 
     /// Handles queued messages; frames are only acknowledged, the stream being paused.
     fn drain(&mut self, until: Option<Instant>) -> Result<Option<Vec<u8>>, String> {
         loop {
-            let ev = match until {
-                Some(t) => match self.rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
-                    Ok(e) => e,
-                    Err(mpsc::RecvTimeoutError::Timeout) => return Ok(None),
-                    Err(_) => return Err("connection closed".into()),
-                },
-                None => match self.rx.try_recv() {
-                    Ok(e) => e,
-                    Err(_) => return Ok(None),
-                },
+            let rx = &self.link()?.2;
+            let got = match until {
+                Some(t) => rx.recv_timeout(t.saturating_duration_since(Instant::now())).map_err(|e| e == mpsc::RecvTimeoutError::Disconnected),
+                None => rx.try_recv().map_err(|e| e == mpsc::TryRecvError::Disconnected),
+            };
+            let ev = match got {
+                Ok(e) => e,
+                Err(false) => return Ok(None),
+                // A lost link is said so, not taken for "nothing new"; the next call makes it again.
+                Err(true) => {
+                    self.link = None;
+                    return Err("connection closed (it is made again on the next call)".into());
+                }
             };
             match ev {
                 Ev::Net(ToClient::Frame(f)) => self.send(ToAgent::Ack(f.id))?,
@@ -275,7 +299,10 @@ impl Server {
                 Ev::Net(m @ (ToClient::UiTree { .. } | ToClient::UiDone { .. })) => self.ui = Some(m),
                 Ev::Net(ToClient::Hello { w, h, .. }) => self.screen = (w as u32, h as u32),
                 Ev::Net(ToClient::Notice(t)) if until.is_some() => return Err(t),
-                Ev::Net(ToClient::Error(e)) | Ev::Closed(e) => return Err(e),
+                Ev::Net(ToClient::Error(e)) | Ev::Closed(e) => {
+                    self.link = None;
+                    return Err(e);
+                }
                 _ => {}
             }
         }
@@ -331,6 +358,8 @@ impl Server {
     }
 
     fn call(&mut self, name: &str, args: &Value) -> Result<Value, String> {
+        // Every tool works on the host: reached first, so its screen size is known.
+        self.link()?;
         let short = Duration::from_millis(60);
         match name {
             "screenshot" => self.screenshot(args),
@@ -449,6 +478,7 @@ impl Server {
             }
             "click_element" | "type_into" | "focus_window" => {
                 let id = args.get("id").and_then(Value::as_u64).ok_or("missing id")?;
+                let enter = name == "type_into" && args.get("enter").and_then(Value::as_bool).unwrap_or(false);
                 let (act, text) = match name {
                     "focus_window" => {
                         let target = self.ui_windows.get((id as usize).wrapping_sub(1)).copied().unwrap_or(id);
@@ -457,8 +487,6 @@ impl Server {
                     "type_into" => {
                         let text = args.get("text").and_then(Value::as_str).ok_or("missing text")?.to_string();
                         let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
-                        let enter = args.get("enter").and_then(Value::as_bool).unwrap_or(false);
-                        let text = if enter { format!("{text}\n") } else { text };
                         (if append { UiAction::Type } else { UiAction::SetText }, text)
                     }
                     _ => {
@@ -474,7 +502,14 @@ impl Server {
                         (act, String::new())
                     }
                 };
-                self.ui_act(id, act, text)
+                let done = self.ui_act(id, act, text)?;
+                // Enter is a key pressed in the field, not a line break put in its text (setting
+                // a field's value would only add one).
+                if enter && done.get("isError").and_then(Value::as_bool) != Some(true) {
+                    let _ = self.ui_request(ToAgent::UiAct { target: id, act: UiAction::Focus, text: String::new() });
+                    self.send(ToAgent::Key { keysym: crate::xk::RETURN, mods: 0 })?;
+                }
+                Ok(done)
             }
             "windows" => {
                 self.windows = None;
@@ -540,16 +575,12 @@ impl Server {
 
 /// Runs the server until stdin closes.
 pub fn run(opt: &Options) -> Result<(), String> {
-    let (mut sess, _tx, rx) = Session::open(&opt.target()?, true)?;
-    let desk = sess.desk;
-    // Full resolution in true colour, but no stream: screenshots are taken on request.
-    let s = Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5 };
-    sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
-    sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
+    // The host is reached on the first tool call: the client gets its answer to initialize at once,
+    // even when the host is away.
     let mut srv = Server {
-        sess,
-        rx,
-        screen: (desk.0 as u32, desk.1 as u32),
+        target: opt.target()?,
+        link: None,
+        screen: (0, 0),
         view: View { ox: 0.0, oy: 0.0, scale: 1.0 },
         clipboard: String::new(),
         monitors: Vec::new(),
@@ -596,7 +627,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
         };
         writeln!(stdout, "{reply}").and_then(|_| stdout.flush()).map_err(|e| e.to_string())?;
     }
-    srv.sess.close();
+    if let Some((mut sess, _, _)) = srv.link.take() {
+        sess.close();
+    }
     Ok(())
 }
 
