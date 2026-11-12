@@ -299,6 +299,7 @@ pub struct App {
     /// This computer's names and addresses, looked up in the background, and when.
     here: std::sync::Arc<std::sync::Mutex<Option<crate::here::Here>>>,
     here_at: Option<Instant>,
+    here_ssh_at: Option<Instant>,
     /// What opens over the home window: a computer's sheet, remote access's settings, Settings.
     sheet: Option<home::Sheet>,
     access_sheet_open: bool,
@@ -657,6 +658,7 @@ impl App {
             ssh_password: false,
             here: Default::default(),
             here_at: None,
+            here_ssh_at: None,
             sheet: None,
             access_sheet_open: false,
             settings: None,
@@ -1331,7 +1333,7 @@ mod tests {
                     dns: String::new(),
                     ips: vec![ip],
                     user: "alex".into(),
-                    ssh: true,
+                    ssh_port: Some(22),
                 })));
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]

@@ -1,6 +1,7 @@
 //! This computer as others reach it: its name, its addresses, the user signed in here, and whether
 //! an SSH server answers here.
 
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
 
@@ -14,12 +15,70 @@ pub struct Here {
     pub ips: Vec<IpAddr>,
     /// Who is signed in here, for `user@address`.
     pub user: String,
-    /// An SSH server answers on port 22 here.
-    pub ssh: bool,
+    /// The port an SSH server answers on here, if one does.
+    pub ssh_port: Option<u16>,
 }
 
-/// Looks it all up: a few system calls and a short local connection, so not on a window's thread.
+impl Here {
+    /// How SSH reaches it, as the address field takes it: `user@IP`, with `:PORT` when not 22.
+    pub fn ssh_address(&self) -> Option<String> {
+        let (port, ip) = (self.ssh_port?, self.ips.first()?);
+        let user = if self.user.is_empty() { String::new() } else { format!("{}@", self.user) };
+        let host = if ip.is_ipv6() && port != 22 { format!("[{ip}]") } else { ip.to_string() };
+        Some(if port == 22 { format!("{user}{host}") } else { format!("{user}{host}:{port}") })
+    }
+}
+
+/// Looks it all up: a few system calls and short local connections, so not on a window's thread.
 pub fn look() -> Here {
+    let mut h = addresses();
+    h.ssh_port = ssh_port();
+    h
+}
+
+/// The ports the SSH server is set to listen on, from its settings when they can be read.
+fn sshd_ports() -> Vec<u16> {
+    let file = if cfg!(windows) {
+        std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("ssh").join("sshd_config")
+    } else {
+        "/etc/ssh/sshd_config".into()
+    };
+    let mut texts = vec![std::fs::read_to_string(&file).unwrap_or_default()];
+    if let Ok(d) = std::fs::read_dir(file.with_file_name("sshd_config.d")) {
+        texts.extend(d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "conf")).filter_map(|e| std::fs::read_to_string(e.path()).ok()));
+    }
+    let mut ports: Vec<u16> = Vec::new();
+    for l in texts.iter().flat_map(|t| t.lines()) {
+        let mut w = l.split_whitespace();
+        if w.next().is_some_and(|k| k.eq_ignore_ascii_case("port"))
+            && let Some(p) = w.next().and_then(|p| p.parse().ok())
+            && !ports.contains(&p)
+        {
+            ports.push(p);
+        }
+    }
+    ports
+}
+
+/// The port an SSH server answers on here: the one its settings name, else 22, else 2222 when
+/// what answers there says it is SSH. Each look shows in the server's log, so look seldom.
+pub fn ssh_port() -> Option<u16> {
+    let open = |p: u16| TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], p)), Duration::from_millis(200));
+    let named = sshd_ports();
+    if !named.is_empty() {
+        return named.into_iter().find(|p| open(*p).is_ok());
+    }
+    if open(22).is_ok() {
+        return Some(22);
+    }
+    let mut s = open(2222).ok()?;
+    let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+    let mut first = [0u8; 4];
+    (s.read_exact(&mut first).is_ok() && &first == b"SSH-").then_some(2222)
+}
+
+/// Its names and addresses, without asking for an SSH server.
+pub fn addresses() -> Here {
     let (name, dns) = names();
     let mut ips: Vec<IpAddr> = Vec::new();
     // The address traffic leaves from: a socket aimed out (nothing is sent) says which.
@@ -38,8 +97,7 @@ pub fn look() -> Here {
     }
     ips.retain(|ip| !ip.is_loopback() && !link_local(ip));
     let user = std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).unwrap_or_default();
-    let ssh = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], 22)), Duration::from_millis(200)).is_ok();
-    Here { name, dns, ips, user, ssh }
+    Here { name, dns, ips, user, ssh_port: None }
 }
 
 fn link_local(ip: &IpAddr) -> bool {
@@ -133,6 +191,25 @@ fn interfaces() -> Vec<IpAddr> {
     Vec::new()
 }
 
+/// `sshremote here`: the same, in a terminal, with the remote access ID when it is on.
+pub fn cli() -> Result<(), String> {
+    let h = look();
+    println!("{}", if h.dns.is_empty() { h.name.clone() } else { format!("{} ({})", h.name, h.dns) });
+    for ip in &h.ips {
+        println!("IP    {ip}");
+    }
+    if let Some(at) = h.ssh_address() {
+        println!("SSH   {at}");
+    }
+    #[cfg(feature = "remote")]
+    if let Ok(Some(c)) = crate::access::stored()
+        && c.enabled
+    {
+        println!("ID    {}  (through {})", crate::computers::spaced(&c.id), c.relay);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -141,5 +218,11 @@ mod tests {
         assert!(!h.name.is_empty());
         assert!(h.ips.iter().all(|ip| !ip.is_loopback()));
         println!("{h:?}");
+        let mut at = super::Here { user: "alex".into(), ips: vec![[10, 0, 0, 5].into()], ssh_port: Some(22), ..Default::default() };
+        assert_eq!(at.ssh_address().as_deref(), Some("alex@10.0.0.5"));
+        at.ssh_port = Some(2222);
+        assert_eq!(at.ssh_address().as_deref(), Some("alex@10.0.0.5:2222"));
+        at.ips = vec!["2001:db8::5".parse().unwrap()];
+        assert_eq!(at.ssh_address().as_deref(), Some("alex@[2001:db8::5]:2222"));
     }
 }

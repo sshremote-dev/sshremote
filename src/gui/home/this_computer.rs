@@ -29,10 +29,7 @@ impl App {
         if !here.dns.is_empty() {
             address_row(ui, "Name", &here.dns, &here.dns, "full name");
         }
-        if here.ssh
-            && let Some(ip) = here.ips.first()
-        {
-            let at = if here.user.is_empty() { ip.to_string() } else { format!("{}@{ip}", here.user) };
+        if let Some(at) = here.ssh_address() {
             address_row(ui, "SSH", &at, &at, "SSH address");
         }
         if here.ips.is_empty() && here.name.is_empty() {
@@ -45,15 +42,22 @@ impl App {
         }
     }
 
-    /// This computer's names and addresses, looked up off the window's thread now and then.
+    /// This computer's names and addresses, looked up off the window's thread every half
+    /// minute; its SSH server every ten (each look shows in that server's log).
     fn look_here(&mut self, ctx: &egui::Context) {
-        if self.here_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30)) {
+        let now = std::time::Instant::now();
+        if self.here_at.is_some_and(|t| now - t < std::time::Duration::from_secs(30)) {
             return;
         }
-        self.here_at = Some(std::time::Instant::now());
+        self.here_at = Some(now);
+        let ssh = self.here_ssh_at.is_none_or(|t| now - t > std::time::Duration::from_secs(600));
+        if ssh {
+            self.here_ssh_at = Some(now);
+        }
         let (slot, ctx) = (self.here.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let h = crate::here::look();
+            let mut h = crate::here::addresses();
+            h.ssh_port = if ssh { crate::here::ssh_port() } else { slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|o| o.ssh_port) };
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
             ctx.request_repaint();
         });

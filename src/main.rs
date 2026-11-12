@@ -106,6 +106,7 @@ usage: sshremote                       open the window: connect screen, recent h
                                   --split adds panes beside or below (HOST local: a shell here);
                                   --view text or markdown starts the first in that view; -- runs CMD
        sshremote module [list | on ID | off ID]   turn parts of the app on or off
+       sshremote here                  how others reach this computer: its name, addresses and ID
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|roll-back ID|pack DIR OUT.sshx|new DIR|dev DIR
@@ -442,6 +443,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
         "module" => modules::cli(&args[1..]),
+        "here" => here::cli(),
         // The gateway browsers reach terminals through (sshremote.dev/web).
         #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
