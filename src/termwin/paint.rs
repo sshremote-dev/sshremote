@@ -588,7 +588,13 @@ pub(super) fn url_at(line: &str, col: usize) -> Option<String> {
     (word.starts_with("http://") || word.starts_with("https://")).then(|| word.to_string())
 }
 
+/// Opens a web or mail link in the system's handler. Any other kind (file:, a UNC path, a
+/// program's own scheme) could start a program from text a host printed, so it is not opened.
 pub(crate) fn open_url(url: &str) {
+    let lower = url.trim_start().to_ascii_lowercase();
+    if !["http://", "https://", "mailto:"].iter().any(|s| lower.starts_with(s)) {
+        return;
+    }
     if cfg!(windows) {
         let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     } else {
