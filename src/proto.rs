@@ -374,6 +374,10 @@ pub enum ToClient {
     },
 }
 
+/// The largest picture a viewer takes: 16384 a side (four 4K screens in a row) and 64 megapixels.
+pub const MAX_SIDE: usize = 16384;
+pub const MAX_PIXELS: usize = 64 << 20;
+
 fn bad() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "malformed message")
 }
@@ -910,6 +914,10 @@ impl ToClient {
             }
             102 => {
                 let (id, w, h, mode) = (c.u32()?, c.u16()?, c.u16()?, c.mode()?);
+                // The viewer keeps a picture this big: one no screen sends is refused, not allocated.
+                if w as usize > MAX_SIDE || h as usize > MAX_SIDE || w as usize * h as usize > MAX_PIXELS {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a {w}x{h} picture is too big")));
+                }
                 let mut moves = Vec::new();
                 for _ in 0..c.u16()? {
                     let (x, y, mw, mh) = (c.u16()? as usize, c.u16()? as usize, c.u16()? as usize, c.u16()? as usize);
@@ -1155,6 +1163,13 @@ mod tests {
             let (k, p) = m.encode();
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);
         }
+        // A picture no screen sends is refused before anything is allocated for it.
+        let huge = ToClient::Frame(Frame { id: 1, w: 65535, h: 65535, mode: Mode::Mono, moves: vec![], tiles: vec![], video: None });
+        let (k, p) = huge.encode();
+        assert!(ToClient::decode(k, &p).is_err());
+        let wide = ToClient::Frame(Frame { id: 1, w: 15360, h: 2160, mode: Mode::Mono, moves: vec![], tiles: vec![], video: None });
+        let (k, p) = wide.encode();
+        assert!(ToClient::decode(k, &p).is_ok(), "four 4K screens side by side");
         let f = ToClient::Frame(Frame {
             id: 9,
             w: 64,

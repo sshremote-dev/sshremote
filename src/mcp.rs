@@ -284,8 +284,9 @@ impl Server {
     fn point(&self, args: &Value, kx: &str, ky: &str) -> Result<(u16, u16), String> {
         let get = |k: &str| args.get(k).and_then(Value::as_f64).ok_or(format!("missing {k}"));
         let (x, y) = (get(kx)?, get(ky)?);
-        let sx = (self.view.ox + x / self.view.scale).clamp(0.0, self.screen.0 as f64 - 1.0);
-        let sy = (self.view.oy + y / self.view.scale).clamp(0.0, self.screen.1 as f64 - 1.0);
+        // Inside the screen; one not known yet (0x0) gives the corner rather than a panic.
+        let sx = (self.view.ox + x / self.view.scale).min(self.screen.0 as f64 - 1.0).max(0.0);
+        let sy = (self.view.oy + y / self.view.scale).min(self.screen.1 as f64 - 1.0).max(0.0);
         Ok((sx.round() as u16, sy.round() as u16))
     }
 

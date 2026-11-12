@@ -36,17 +36,27 @@ pub fn png_from_rgb(w: usize, h: usize, rgb: &[u8], grey: bool) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Decodes a PNG made by `png_from_rgb` (RGB or grey) into RGB.
+/// Decodes a PNG into RGB: the host's screenshot, which comes from the other end and may be any
+/// PNG at all (palette, 1 to 16 bits), so it is checked before anything is allocated for it.
 #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
 pub fn rgb_from_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
-    let mut dec = png::Decoder::new(data).read_info().map_err(|e| e.to_string())?;
+    let mut d = png::Decoder::new(data);
+    // Every kind as 8-bit grey, grey and alpha, RGB or RGBA.
+    d.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut dec = d.read_info().map_err(|e| e.to_string())?;
+    let (w, h) = (dec.info().width as usize, dec.info().height as usize);
+    if w > crate::proto::MAX_SIDE || h > crate::proto::MAX_SIDE || w * h > crate::proto::MAX_PIXELS {
+        return Err(format!("a {w}x{h} screenshot is too big"));
+    }
     let mut buf = vec![0; dec.output_buffer_size()];
     let info = dec.next_frame(&mut buf).map_err(|e| e.to_string())?;
-    let (w, h) = (info.width as usize, info.height as usize);
+    let (w, h, line) = (info.width as usize, info.height as usize, info.line_size);
+    let px = |n: usize| -> Vec<&[u8]> { (0..h).flat_map(|y| buf[y * line..y * line + w * n].chunks(n)).collect() };
     let rgb = match info.color_type {
-        png::ColorType::Rgb => buf[..w * h * 3].to_vec(),
-        png::ColorType::Rgba => buf[..w * h * 4].as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
-        png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&g| [g, g, g]).collect(),
+        png::ColorType::Rgb => px(3).concat(),
+        png::ColorType::Rgba => px(4).iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
+        png::ColorType::Grayscale => px(1).iter().flat_map(|p| [p[0], p[0], p[0]]).collect(),
+        png::ColorType::GrayscaleAlpha => px(2).iter().flat_map(|p| [p[0], p[0], p[0]]).collect(),
         c => return Err(format!("unsupported PNG colour type {c:?}")),
     };
     Ok((w, h, rgb))
@@ -55,6 +65,9 @@ pub fn rgb_from_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
 /// The rectangle `(x, y, w, h)` of an RGB image, clamped to it.
 #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
 pub fn crop(w: usize, h: usize, rgb: &[u8], r: (usize, usize, usize, usize)) -> (usize, usize, Vec<u8>) {
+    if w == 0 || h == 0 {
+        return (0, 0, Vec::new());
+    }
     let (x, y) = (r.0.min(w.saturating_sub(1)), r.1.min(h.saturating_sub(1)));
     let (cw, ch) = (r.2.clamp(1, w - x), r.3.clamp(1, h - y));
     let mut out = Vec::with_capacity(cw * ch * 3);
@@ -122,6 +135,33 @@ pub fn save_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Any PNG a host sends decodes, whatever its kind, or is refused; none panics.
+    #[test]
+    fn screenshots_of_every_kind_decode() {
+        let encode = |w: u32, h: u32, colour: png::ColorType, depth: png::BitDepth, palette: Option<Vec<u8>>, data: &[u8]| {
+            let mut out = Vec::new();
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(colour);
+            e.set_depth(depth);
+            if let Some(p) = palette {
+                e.set_palette(p);
+            }
+            e.write_header().unwrap().write_image_data(data).unwrap();
+            out
+        };
+        // 1-bit grey, 10 pixels a row: two bytes per row.
+        let one_bit = encode(10, 2, png::ColorType::Grayscale, png::BitDepth::One, None, &[0b1010_0000, 0, 0xff, 0xc0]);
+        let (w, h, rgb) = rgb_from_png(&one_bit).unwrap();
+        assert_eq!((w, h, rgb.len()), (10, 2, 60));
+        assert_eq!((&rgb[0..3], &rgb[3..6], &rgb[30..33]), (&[255u8; 3][..], &[0u8; 3][..], &[255u8; 3][..]));
+        let palette = encode(2, 1, png::ColorType::Indexed, png::BitDepth::Eight, Some(vec![10, 20, 30, 40, 50, 60]), &[1, 0]);
+        assert_eq!(rgb_from_png(&palette).unwrap().2, vec![40, 50, 60, 10, 20, 30]);
+        let deep = encode(1, 1, png::ColorType::Rgb, png::BitDepth::Sixteen, None, &[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+        assert_eq!(rgb_from_png(&deep).unwrap().2, vec![0x12, 0x56, 0x9a]);
+        assert!(rgb_from_png(b"not a png").is_err());
+        assert_eq!(crop(0, 0, &[], (0, 0, 5, 5)), (0, 0, Vec::new()));
+    }
 
     #[test]
     fn png_round_trip_and_shrink() {
