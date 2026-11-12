@@ -737,53 +737,76 @@ const CODE: char = '\u{E000}';
 const TINT: char = '\u{E001}';
 const SPLIT: char = '\u{E002}';
 
+/// What decides whether a row joins the code beside it, read once per row: none for a row that
+/// is code already, blank, or prose that never is (a heading, a list item, a table, a status line).
+struct Row {
+    raw: String,
+    tint: bool,
+    sentence: bool,
+    comment: bool,
+    codelike: bool,
+    /// Code even alone (the rest of its block off the screen): "use x;", "#[test]".
+    alone: bool,
+}
+
+impl Row {
+    fn read(l: &str) -> Option<Row> {
+        if l.starts_with(CODE) || l.trim().is_empty() {
+            return None;
+        }
+        let tint = l.starts_with(TINT);
+        let (raw, md) = match l.strip_prefix(TINT) {
+            Some(rest) => rest.split_once(SPLIT).unwrap_or((rest, rest)),
+            None => (l, l),
+        };
+        let (r, m) = (raw.trim(), md.trim_start());
+        let comment = r.starts_with('#') || r.starts_with("//") || r.starts_with("--");
+        // A heading the program drew in bold, a list item, a status line, an agent's marker,
+        // a table: never code.
+        let numbered = m.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        let prose = (m.starts_with('#') && (!tint || !r.starts_with('#')))
+            || m.starts_with("- ")
+            || m.starts_with("* ")
+            || m.starts_with('|')
+            || numbered
+            || m.contains(['\u{B7}', '\u{2026}'])
+            || r.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c))
+            || LINE_MARKERS.iter().any(|mk| m.starts_with(mk));
+        if prose {
+            return None;
+        }
+        // Prose: a sentence, bold words, or a row of mostly plain words (a wrapped paragraph).
+        let words: Vec<&str> = r.split_whitespace().collect();
+        let plain = words
+            .iter()
+            .filter(|w| w.trim_end_matches([',', '.', ':', ';', '!', '?']).chars().all(|c| c.is_alphabetic() || c == '\''))
+            .count();
+        let sentence = !comment
+            && ((r.ends_with(['.', '!', '?', ':']) && words.len() >= 4 && r.chars().next().is_some_and(char::is_uppercase))
+                || m.contains("**")
+                || (words.len() >= 8 && plain * 10 >= words.len() * 7));
+        let alone = tint && r.ends_with([';', '{']) || r.starts_with("#[");
+        Some(Row { raw: raw.to_string(), tint, sentence, comment, codelike: codelike(raw), alone })
+    }
+}
+
 /// Runs of code rows become fenced blocks with their indentation kept: blank rows inside a run
 /// and lines of only closing brackets after one belong to it.
 fn fence_code(mut lines: Vec<String>) -> Vec<String> {
     // Rows next to code join it: one with a single colour ("else:", "}" in a keyword colour, a
     // comment), or a plain one that is not a sentence ("Empty,", "Ok(x)", "id"). Across up to
-    // two blank lines (between functions) when the row reads as code.
-    let mut grew = true;
+    // two blank lines (between functions) when the row reads as code. Each row is read once; the
+    // marks then spread down and up in turn, so a long run takes a pass or two, not one a row.
+    let rows: Vec<Option<Row>> = lines.iter().map(|l| Row::read(l)).collect();
+    let mut code: Vec<bool> = lines.iter().map(|l| l.starts_with(CODE)).collect();
+    let blank: Vec<bool> = lines.iter().map(|l| l.trim().is_empty()).collect();
+    let (mut grew, mut down) = (true, true);
     while grew {
         grew = false;
-        for i in 0..lines.len() {
-            let l = &lines[i];
-            if l.starts_with(CODE) || l.trim().is_empty() {
-                continue;
-            }
-            let tint = l.starts_with(TINT);
-            let (raw, md) = match l.strip_prefix(TINT) {
-                Some(rest) => rest.split_once(SPLIT).unwrap_or((rest, rest)),
-                None => (l.as_str(), l.as_str()),
-            };
-            let (r, m) = (raw.trim(), md.trim_start());
-            let comment = r.starts_with('#') || r.starts_with("//") || r.starts_with("--");
-            // A heading the program drew in bold, a list item, a status line, an agent's marker,
-            // a table: never code.
-            let numbered = m.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-            let prose = (m.starts_with('#') && (!tint || !r.starts_with('#')))
-                || m.starts_with("- ")
-                || m.starts_with("* ")
-                || m.starts_with('|')
-                || numbered
-                || m.contains(['\u{B7}', '\u{2026}'])
-                || r.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c))
-                || LINE_MARKERS.iter().any(|mk| m.starts_with(mk));
-            if prose {
-                continue;
-            }
-            // Prose: a sentence, bold words, or a row of mostly plain words (a wrapped paragraph).
-            let words: Vec<&str> = r.split_whitespace().collect();
-            let plain = words
-                .iter()
-                .filter(|w| w.trim_end_matches([',', '.', ':', ';', '!', '?']).chars().all(|c| c.is_alphabetic() || c == '\''))
-                .count();
-            let sentence = !comment
-                && ((r.ends_with(['.', '!', '?', ':']) && words.len() >= 4 && r.chars().next().is_some_and(char::is_uppercase))
-                    || m.contains("**")
-                    || (words.len() >= 8 && plain * 10 >= words.len() * 7));
-            let code_at = |j: Option<usize>| j.and_then(|j| lines.get(j)).is_some_and(|l| l.starts_with(CODE));
-            let next = code_at(i.checked_sub(1)) || code_at(Some(i + 1));
+        let order: Box<dyn Iterator<Item = usize>> = if down { Box::new(0..lines.len()) } else { Box::new((0..lines.len()).rev()) };
+        for i in order {
+            let Some(r) = rows[i].as_ref().filter(|_| !code[i]) else { continue };
+            let next = i.checked_sub(1).is_some_and(|j| code[j]) || code.get(i + 1).copied().unwrap_or(false);
             let reach = |up: bool| {
                 let mut j = i;
                 for _ in 0..3 {
@@ -791,23 +814,26 @@ fn fence_code(mut lines: Vec<String>) -> Vec<String> {
                         Some(j) if j < lines.len() => j,
                         _ => return false,
                     };
-                    if lines[j].starts_with(CODE) {
+                    if code[j] {
                         return true;
                     }
-                    if !lines[j].trim().is_empty() {
+                    if !blank[j] {
                         return false;
                     }
                 }
                 false
             };
-            let apart = !sentence && (reach(true) || reach(false)) && (tint || codelike(raw) || comment);
-            // Alone (the rest of its block off the screen) when it can only be code ("use x;").
-            let alone = tint && r.ends_with([';', '{']) || r.starts_with("#[");
-            if (next && (tint || !sentence)) || apart || alone {
-                let code = format!("{CODE}{raw}");
-                lines[i] = code;
+            let apart = !r.sentence && (r.tint || r.codelike || r.comment) && (reach(true) || reach(false));
+            if (next && (r.tint || !r.sentence)) || apart || r.alone {
+                code[i] = true;
                 grew = true;
             }
+        }
+        down = !down;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(r) = r.as_ref().filter(|_| code[i] && !lines[i].starts_with(CODE)) {
+            lines[i] = format!("{CODE}{}", r.raw);
         }
     }
     for l in lines.iter_mut().filter(|l| l.starts_with(TINT)) {
@@ -1007,3 +1033,18 @@ fn row_markdown_styled(cells: &[(char, bool, bool, bool)], plain: &str, wrapped:
     (out, wrapped)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Code marks spread a long way up in a pass or two: 3000 rows above the code, not 3000 passes.
+    #[test]
+    fn long_runs_of_code_are_found_quickly() {
+        let mut lines: Vec<String> = (0..3000).map(|i| format!("{TINT}x{i} = {i};{SPLIT}x{i} = {i};")).collect();
+        lines.push(format!("{CODE}fn main() {{"));
+        let started = std::time::Instant::now();
+        let out = fence_code(lines);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!((out.first().map(String::as_str), out.len()), (Some("```"), 3003));
+    }
+}
