@@ -3,8 +3,9 @@
 //! settings open over it. Each fact is shown once, and no field hides in a drop-down.
 
 use super::*;
+use crate::gui::kit;
 
-mod connect;
+pub(super) mod connect;
 pub(super) mod quick;
 mod sheet;
 mod this_computer;
@@ -12,7 +13,7 @@ mod this_computer;
 pub(super) use sheet::Sheet;
 
 /// The left column's width.
-const LEFT_W: f32 = 290.0;
+const LEFT_W: f32 = 320.0;
 
 impl App {
     /// The home window: its title bar, then the two columns, and what opens over them.
@@ -40,12 +41,12 @@ impl App {
             self.settings = Some(super::settings::Settings::new());
         }
         let mut go: Option<Choice> = None;
-        egui::CentralPanel::default().show(ui, |ui| {
+        let page = kit::PAGE;
+        let frame = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: page, right: page, top: 20, bottom: 16 });
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
-            let left = Rect::from_min_size(full.min, Vec2::new(LEFT_W.min(full.width() * 0.4), full.height()));
+            let left = Rect::from_min_size(full.min, Vec2::new(LEFT_W.min(full.width() * 0.42), full.height()));
             let right = full.with_min_x(left.right() + 24.0);
-            let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
-            ui.painter().vline(left.right() + 12.0, full.y_range(), Stroke::new(1.0, line));
             let mut l = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
             egui::ScrollArea::vertical().id_salt("this-computer").auto_shrink([false, false]).show(&mut l, |ui| self.this_computer(ui));
             let mut r = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -330,8 +331,3 @@ fn with_port(host: &str, port: &str) -> String {
     if at.contains(':') { format!("{user}[{at}]:{port}") } else { format!("{user}{at}:{port}") }
 }
 
-/// A heading over a group of things in a column.
-fn heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text.to_uppercase()).size(11.0).strong().color(ui.visuals().weak_text_color()));
-    ui.add_space(4.0);
-}

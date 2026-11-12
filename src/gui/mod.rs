@@ -22,6 +22,7 @@ use crate::options::Target;
 
 pub(crate) mod chrome;
 mod home;
+pub(crate) mod kit;
 mod settings;
 mod access_ui;
 #[cfg(feature = "remote")]
@@ -583,15 +584,6 @@ fn menu_open(ctx: &egui::Context) -> bool {
 /// A preset's real settings, e.g. "256 colours, 100%, 20 fps".
 fn preset_text(p: &crate::proto::Preset) -> String {
     format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps)
-}
-
-/// A host's mark in a list: a plain line icon, as the toolbar's are (a direct sshremote://
-/// address a link, a host over ssh a server).
-fn badge(ui: &mut egui::Ui, name: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-    let glyph = if name.starts_with("sshremote://") { ic::GLOBE } else { ic::HARD_DRIVES };
-    let fg = ui.visuals().text_color();
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(20.0), fg);
 }
 
 /// The cause of a failed connection in plain words, with what to try.
@@ -1346,7 +1338,7 @@ mod tests {
                 {
                     let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
-                    *app.access.service.lock().unwrap() = Some(Default::default());
+                    *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
                     app.access.cfg = Some(cfg);
                     app.access.looked = Some(Instant::now());
@@ -1355,7 +1347,7 @@ mod tests {
                 match name {
                     "ssh" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
                     "local" => app.access_sheet_open = true,
-                    "tools" => app.settings = Some(settings::Settings::keys()),
+                    "tools" => app.settings = Some(settings::Settings::at("keys")),
                     _ => {}
                 }
                 let size = Vec2::new(900.0, 600.0);
@@ -1365,6 +1357,82 @@ mod tests {
                     snap.frame(&ctx, input, |ui| app.home(ui));
                 }
                 snap.save(&ctx, size, &dir.join(format!("{name}-{}.png", if dark { "dark" } else { "light" })));
+            }
+        }
+    }
+
+    /// Every state of the home window and what opens over it, to look over:
+    /// SSHREMOTE_REVIEW_DIR=folder cargo test review_pictures
+    #[test]
+    fn review_pictures() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_REVIEW_DIR").map(std::path::PathBuf::from) else { return };
+        let states = [
+            "home", "home_off", "home_loading", "typed_ssh", "typed_id", "typed_words", "row_hover", "add_ssh", "add_id", "edit_config",
+            "access_settings", "settings_appearance", "settings_connections", "settings_keys", "settings_passwords", "settings_backup",
+            "settings_extensions", "settings_parts", "settings_about", "quick", "narrow",
+        ];
+        for dark in [true, false] {
+            for name in states {
+                let ctx = egui::Context::default();
+                theme::style(&ctx);
+                theme::apply_theme(&ctx, dark);
+                let opt = crate::parse_client(&["--gui".into()]).unwrap();
+                let mut app = App::new(Form::from(&opt), None, "", None);
+                if name != "home_loading" {
+                    app.here = std::sync::Arc::new(std::sync::Mutex::new(Some(crate::here::Here {
+                        name: "office-pc".into(),
+                        dns: "office-pc.corp.example".into(),
+                        ips: vec![std::net::IpAddr::from([192, 168, 1, 40])],
+                        user: "alex".into(),
+                        ssh_port: Some(22),
+                    })));
+                }
+                app.here_at = Some(Instant::now());
+                app.here_ssh_at = Some(Instant::now());
+                #[cfg(feature = "remote")]
+                if name != "home_loading" {
+                    let on = name != "home_off";
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on };
+                    *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
+                    *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
+                    app.access.relay = cfg.relay.clone();
+                    app.access.cfg = Some(cfg);
+                    app.access.looked = Some(Instant::now());
+                    app.access.service_looked = Some(Instant::now());
+                }
+                let mut w = workspace::Workspace::new(app.options());
+                match name {
+                    "typed_ssh" => app.form.host = "dev@192.168.1.20:2222".into(),
+                    "typed_id" => app.form.host = "123 456 789".into(),
+                    "typed_words" => app.form.host = "my build".into(),
+                    "add_ssh" => app.sheet = Some(home::Sheet::new(&home::connect::typed("dev@192.168.1.20"))),
+                    "add_id" => app.sheet = Some(home::Sheet::new(&home::connect::typed("123456789"))),
+                    "edit_config" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
+                    "access_settings" => app.access_sheet_open = true,
+                    "quick" => w.picker = Some(Place::Tab),
+                    n if n.starts_with("settings_") => app.settings = Some(settings::Settings::at(&n["settings_".len()..])),
+                    _ => {}
+                }
+                let size = if name == "narrow" { Vec2::new(760.0, 520.0) } else { Vec2::new(1100.0, 700.0) };
+                let mut snap = snapshot::Snap::default();
+                for k in 0..12 {
+                    let mut events = Vec::new();
+                    if name == "row_hover" && k > 3 {
+                        if let Some(r) = snap.find("Build box").first() {
+                            events.push(egui::Event::PointerMoved(r.center()));
+                        }
+                    }
+                    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.05), events, ..Default::default() };
+                    snap.frame(&ctx, input, |ui| {
+                        if name == "quick" {
+                            egui::Panel::top("bar").exact_size(chrome::HEIGHT).show(ui, |_| {});
+                            app.quick_open(ui.ctx(), &mut w);
+                        } else {
+                            app.home(ui);
+                        }
+                    });
+                }
+                snap.save(&ctx, size, &dir.join(format!("{name}_{}.png", if dark { "dark" } else { "light" })));
             }
         }
     }

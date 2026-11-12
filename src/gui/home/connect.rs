@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::computers::Computer;
+use crate::gui::kit;
 
 /// What the address field holds.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,7 +109,7 @@ impl App {
                 .hint_text(format!("{}  user@host, an alias, an IP or an ID", ic::SEARCH))
                 .desired_width(f32::INFINITY)
                 .font(FontId::proportional(15.0))
-                .margin(egui::Margin::symmetric(10, 9)),
+                .margin(egui::Margin::symmetric(12, 11)),
         );
         if std::mem::take(&mut self.focus_host) {
             r.request_focus();
@@ -155,9 +156,9 @@ impl App {
                 self.focus_host = true;
             }
         }
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         self.what_is_typed(ui, &what, enter && self.picked.is_none(), go);
-        ui.add_space(16.0);
+        ui.add_space(kit::GAP);
         let picked = self.picked.filter(|p| *p < entries.len());
         if enter && let Some(p) = picked {
             *go = self.default_open(&entries[p]);
@@ -188,11 +189,11 @@ impl App {
         let weak = ui.visuals().weak_text_color();
         let (address, port, by_id) = match what {
             Typed::Empty => {
-                ui.label(RichText::new("Type where to go, or pick a computer below.").color(weak).size(12.5));
+                ui.label(RichText::new("Type where to go, or pick a computer below. Enter opens it; the arrow keys pick one in the list.").color(weak).size(12.5));
                 return;
             }
             Typed::Words => {
-                ui.label(RichText::new("Not an address: finding computers by these words.").color(weak).size(12.5));
+                ui.label(RichText::new(format!("{}  Finding computers by these words.", ic::SEARCH)).color(weak).size(12.5));
                 return;
             }
             Typed::Id { address, .. } => (address.clone(), String::new(), true),
@@ -202,17 +203,10 @@ impl App {
         // A computer in the list opens on its own port unless another is typed.
         let port = if port.is_empty() { known.as_ref().and_then(|c| c.port).map(|p| p.to_string()).unwrap_or_default() } else { port };
         let mut open: Option<PaneMode> = None;
-        let v = ui.visuals().clone();
-        egui::Frame::new()
-            .fill(v.faint_bg_color)
-            .stroke(Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
-            .corner_radius(CornerRadius::same(theme::R_MD))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+        kit::card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let chip = if by_id { "ID" } else { "SSH" };
-                    egui::Frame::new().fill(super::super::brand().gamma_multiply(0.18)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                    egui::Frame::new().fill(super::super::brand().gamma_multiply(0.16)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(7, 3)).show(ui, |ui| {
                         ui.label(RichText::new(chip).size(11.0).strong().color(super::super::brand()));
                     });
                     let shown = match what {
@@ -243,14 +237,15 @@ impl App {
                         }
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     let default = self.default_mode(by_id);
                     for m in PaneMode::ALL.into_iter().filter(|m| m.on() && !(by_id && *m == PaneMode::Terminal)) {
                         let text = format!("{}  {}", m.glyph(), m.name());
-                        let b = if m == default { theme::primary(text) } else { egui::Button::new(text) };
+                        let b = if m == default { theme::primary(text) } else { kit::secondary(text) };
                         let tip = if m == default { format!("Open {} on it (Enter)", m.name().to_lowercase()) } else { format!("Open {} on it", m.name().to_lowercase()) };
-                        if ui.add(b.min_size(Vec2::new(96.0, 30.0))).on_hover_text(tip).clicked() {
+                        if ui.add(b.min_size(Vec2::new(104.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
                             open = Some(m);
                         }
                     }
@@ -260,7 +255,7 @@ impl App {
                 let saved = crate::vault::has(&address);
                 let refused = self.error.as_deref().is_some_and(|e| e.to_lowercase().contains("permission denied"));
                 if by_id || self.ssh_password || refused {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let hint = match (by_id, saved) {
                             (true, true) => "Password saved; type another to replace it",
@@ -268,7 +263,7 @@ impl App {
                             (false, true) => "Password saved for it",
                             (false, false) => "Password on that computer",
                         };
-                        let r = ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text(hint).desired_width(260.0).margin(egui::Margin::symmetric(8, 6)));
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text(hint).desired_width(260.0).margin(egui::Margin::symmetric(8, 7)));
                         if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             open = Some(self.default_mode(by_id));
                         }
@@ -280,7 +275,7 @@ impl App {
                         }
                     });
                 }
-            });
+        });
         if enter {
             open = Some(self.default_mode(by_id));
         }
@@ -312,9 +307,10 @@ impl App {
     /// The computers: a heading with a way to add one, then a row each.
     fn computer_list(&mut self, ui: &mut egui::Ui, what: &Typed, entries: &[Entry], picked: Option<usize>, go: &mut Option<Choice>) {
         ui.horizontal(|ui| {
-            heading(ui, "Computers");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if ui.add(egui::Button::new(RichText::new(format!("{}  Add", ic::PLUS)).size(12.5)).frame_when_inactive(false)).on_hover_text("Add a computer: by SSH or by its ID").clicked() {
+            let count = entries.iter().filter(|e| matches!(e, Entry::Computer(_))).count();
+            kit::heading(ui, &format!("Computers  {count}"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(kit::ghost(format!("{}  Add a computer", ic::PLUS))).on_hover_text("By SSH or by its ID, with a name, a key, a password and tunnels").clicked() {
                     self.sheet = Some(Sheet::new(what));
                 }
             });
@@ -322,7 +318,12 @@ impl App {
         let searching = !matches!(what, Typed::Empty);
         let mut act: Option<(Entry, RowAct)> = None;
         egui::ScrollArea::vertical().id_salt("computers").auto_shrink([false, false]).show(ui, |ui| {
+          kit::list(ui, |ui| {
+            let line = ui.visuals().widgets.noninteractive.bg_stroke;
             for (i, e) in entries.iter().enumerate() {
+                if i > 0 {
+                    ui.painter().hline(ui.max_rect().x_range().shrink(14.0), ui.cursor().top(), line);
+                }
                 let a = match e {
                     Entry::Here => self.here_row(ui, picked == Some(i)),
                     Entry::Computer(c) => self.computer_row(ui, c, picked == Some(i)),
@@ -334,13 +335,19 @@ impl App {
                     }
                 }
             }
-            if self.computers.is_empty() && !searching {
-                ui.add_space(10.0);
-                ui.add(egui::Label::new(RichText::new("The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first.").weak()).wrap());
+            let note = if self.computers.is_empty() && !searching {
+                "The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first."
             } else if searching && entries.iter().all(|e| matches!(e, Entry::Here)) {
-                ui.add_space(10.0);
-                ui.label(RichText::new("No computer in the list matches.").weak());
+                "No computer in the list matches."
+            } else {
+                ""
+            };
+            if !note.is_empty() {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(note).weak().size(12.5)).wrap());
+                });
             }
+          });
         });
         let Some((e, a)) = act else { return };
         let Entry::Computer(c) = e else {
@@ -384,7 +391,7 @@ impl App {
     /// A row: where it is drawn, its look when picked or under the mouse, and the
     /// space for its buttons on the right. Returns the row's response and its inner ui.
     fn row_frame(&mut self, ui: &mut egui::Ui, picked: bool, key: &str) -> (egui::Response, egui::Ui, bool) {
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), egui::Sense::click());
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), egui::Sense::click());
         // Its menu open keeps its buttons there, the pointer gone over to the menu.
         let picked = picked || self.row_menu.as_deref() == Some(key);
         // Brought into view when the arrow keys reach it, not while the wheel scrolls past it.
@@ -406,9 +413,7 @@ impl App {
     fn here_row(&mut self, ui: &mut egui::Ui, picked: bool) -> Option<RowAct> {
         let mut act = None;
         let (r, mut row, lit) = self.row_frame(ui, picked, "");
-        let (rect, _) = row.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-        row.painter().circle_filled(rect.center(), 16.0, super::super::brand().gamma_multiply(0.18));
-        row.painter().text(rect.center(), Align2::CENTER_CENTER, ic::HOUSE, FontId::proportional(16.0), super::super::brand());
+        kit::mark(&mut row, ic::HOUSE, super::super::brand());
         let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
         right.spacing_mut().item_spacing.x = 2.0;
         let profiles = crate::termwin::local_profiles();
@@ -462,8 +467,9 @@ impl App {
     fn computer_row(&mut self, ui: &mut egui::Ui, c: &Computer, picked: bool) -> Option<RowAct> {
         let mut act = None;
         let (r, mut row, lit) = self.row_frame(ui, picked, &c.address);
-        badge(&mut row, &c.label());
         let by_id = c.id().is_some();
+        let weak = row.visuals().weak_text_color();
+        kit::mark(&mut row, if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, weak);
         let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
         right.spacing_mut().item_spacing.x = 2.0;
         if lit {

@@ -945,32 +945,38 @@ fn tag(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 /// What this app is made of (Settings > Parts): the core, always here; and each part beyond
 /// it, which can be turned off.
 pub fn parts_page(ui: &mut egui::Ui) {
-    card(ui, |ui| {
-        ui.label(
-            RichText::new("Every part is inside the program you downloaded. Untick a part to hide it from the menus and the command line.")
-                .weak()
-                .size(12.0),
-        );
-        ui.add_space(4.0);
-        egui::Grid::new("parts").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.add_enabled(false, egui::Checkbox::new(&mut true, "Core"));
-            ui.label(RichText::new("Terminals, SSH hosts, the tools, extensions").weak().size(12.0));
-            tag(ui, "Built in", crate::gui::good());
-            ui.end_row();
-            for (id, name, what) in crate::modules::ALL {
-                let mut on = crate::modules::on(id);
-                if ui.checkbox(&mut on, *name).on_hover_text(*what).changed() {
-                    crate::modules::set(id, on);
-                }
-                ui.label(RichText::new(what.replace('`', "")).weak().size(12.0));
-                if crate::modules::built_in(id) {
-                    tag(ui, "Built in", crate::gui::good());
-                } else {
-                    tag(ui, "Not in this build", crate::gui::bad());
-                }
-                ui.end_row();
+    use crate::gui::kit;
+    ui.add(egui::Label::new(RichText::new("Every part is inside the program you downloaded. Untick one to take it out of the menus and the command line; tick it to have it back.").weak().size(12.5)).wrap());
+    ui.add_space(10.0);
+    kit::list(ui, |ui| {
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let mut first = true;
+        let rows = std::iter::once(("", "Core", "Terminals, your computers, the SSH tools and extensions"))
+            .chain(crate::modules::ALL.iter().map(|(id, name, what)| (*id, *name, *what)));
+        for (id, name, what) in rows {
+            if !first {
+                ui.painter().hline(ui.max_rect().x_range().shrink(12.0), ui.cursor().top(), line);
             }
-        });
+            first = false;
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let mut on = id.is_empty() || crate::modules::on(id);
+                    let r = ui.add_enabled(!id.is_empty() && crate::modules::built_in(id), egui::Checkbox::without_text(&mut on));
+                    if r.changed() {
+                        crate::modules::set(id, on);
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(RichText::new(name).strong());
+                        ui.add(egui::Label::new(RichText::new(what.replace('`', "")).weak().size(12.5)).wrap());
+                    });
+                    if !id.is_empty() && !crate::modules::built_in(id) {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| tag(ui, "Not in this build", crate::gui::bad()));
+                    }
+                });
+            });
+        }
     });
 }
 
@@ -1095,7 +1101,7 @@ impl ExtTool {
             card(ui, |ui| {
                 ui.label(RichText::new(format!("{}  No extensions yet", ic::PUZZLE_PIECE)).size(15.0).strong());
                 ui.add_space(4.0);
-                ui.label("Extensions add looks, commands, status bar items and panels, and features this edition leaves out, as the remote screen.");
+                ui.label("Extensions add looks, commands, status bar items and panels.");
                 ui.add_space(6.0);
                 if ui.add(crate::gui::theme::primary(format!("{}  Browse extensions", ic::STOREFRONT))).clicked() {
                     self.tab = ExtTab::Browse;

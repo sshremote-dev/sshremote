@@ -617,7 +617,7 @@ impl BackupTool {
         }
         ui.label(
             RichText::new(
-                "Recent and favorite hosts, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
+                "Your computers, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
             )
             .weak(),
         );

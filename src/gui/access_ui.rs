@@ -32,6 +32,8 @@ type Online = (String, String, Result<bool, String>);
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Service {
+    /// It has been looked up (until then the rest is not known).
+    pub(super) known: bool,
     pub(super) installed: bool,
     /// It runs now (and so serves the viewers, not this window).
     pub(super) runs: bool,
@@ -92,7 +94,7 @@ impl App {
         let cfg = a.cfg.clone()?;
         if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
             a.service_looked = Some(std::time::Instant::now());
-            in_background(&a.service, &SERVICE_BUSY, ctx, || Service { installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
+            in_background(&a.service, &SERVICE_BUSY, ctx, || Service { known: true, installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
         }
         // The relay's view of this ID, asked again every 5 s while it is shown.
         if cfg.enabled && a.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
