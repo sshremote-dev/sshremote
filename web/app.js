@@ -850,6 +850,12 @@ class Client {
     // Keys still down when the page loses focus come up, so none sticks on the host.
     this.releaseKeys = () => { for (const k of held) this.send({ key: [k, 0] }); held.clear(); };
     canvas.onblur = () => this.releaseKeys();
+    // The tools as buttons or as one menu, by the window's width.
+    const narrow = matchMedia("(max-width: 760px)");
+    const retool = () => this.screenTools();
+    narrow.addEventListener("change", retool);
+    const old = this.unbind;
+    this.unbind = () => { old?.(); narrow.removeEventListener("change", retool); };
     // What was copied here goes to the host as the screen takes the keyboard, once the browser
     // lets the page read the clipboard (asked the first time "Paste my clipboard" is used).
     canvas.onfocus = async () => {
@@ -873,8 +879,8 @@ class Client {
     const bar = $("stools");
     bar.textContent = "";
     bar.append(h("span", { class: "sep" }));
-    const keys = button("keyboard", "Keys", { title: "Keys this browser keeps for itself" });
-    keys.onclick = () => menu([
+    // The menus, each opened under `at`.
+    const keysMenu = at => menu([
       ["Ctrl+Alt+Del", () => { if (!this.viewOnly) this.send({ sas: 1 }); }],
       ["Lock the screen", () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
       ["Start menu", () => this.combo([K.win]), { kbd: "Win" }],
@@ -884,9 +890,8 @@ class Client {
       ["Run", () => this.combo([K.win, 0x72]), { kbd: "Win+R" }],
       ["File Explorer", () => this.combo([K.win, 0x65]), { kbd: "Win+E" }],
       ["Print Screen", () => this.combo([K.prt]), { kbd: "PrtSc" }],
-    ], keys);
-    const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
-    clip.onclick = () => menu([
+    ], at);
+    const clipMenu = at => menu([
       ["Paste my clipboard into the host", () => this.pasteHere()],
       ["Type or paste text for the host…", async () => {
         const text = await ask({ title: "Send text to the host", text: "It goes on the host's clipboard; paste it there.", area: "Text", ok: "Send" });
@@ -894,37 +899,63 @@ class Client {
       }],
       null,
       ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
-    ], clip);
-    const quality = button("sliders", null, { title: "Picture quality" });
+    ], at);
     const q = store.get("quality", "balanced");
     const setQ = v => { store.set("quality", v); this.send({ quality: v }); };
-    quality.onclick = () => menu(["Picture",
+    const qualityMenu = at => menu(["Picture",
       ["Best (sharpest, more data)", () => setQ("best"), { on: store.get("quality", "balanced") === "best" }],
       ["Balanced", () => setQ("balanced"), { on: store.get("quality", "balanced") === "balanced" }],
       ["Fast (for slow links)", () => setQ("fast"), { on: store.get("quality", "balanced") === "fast" }],
       null,
       ["Repaint the whole screen", () => this.send({ refresh: 1 })],
-    ], quality);
+    ], at);
     if (q !== "balanced") setTimeout(() => this.send({ quality: q }), 0);
+    const several = this.monitors && this.monitors.list.length > 1;
+    const monitorMenu = at => menu(this.monitors.list.map((m, i) =>
+      [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), at);
+    const viewOnly = () => {
+      this.viewOnly = !this.viewOnly;
+      if (this.viewOnly) this.releaseKeys();
+      $("vscreen").classList.toggle("viewonly", this.viewOnly);
+      toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
+      this.screenTools();
+    };
+    const shot = () => $("canvas").toBlob(b => b && saveBlob(b, "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png"));
+    // A narrow screen (a phone): one button for all of it, so the bar keeps its right end.
+    if (matchMedia("(max-width: 760px)").matches) {
+      const more = button("dots", null, { title: "The screen's tools" });
+      more.classList.toggle("on", this.viewOnly);
+      more.onclick = () => {
+        const items = [
+          ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
+          ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
+          ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
+        ];
+        if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
+        items.push(null, ["View only", viewOnly, { icon: "eye", on: this.viewOnly }], ["Save a picture of the screen", shot, { icon: "camera" }]);
+        menu(items, more);
+      };
+      bar.append(more);
+      return;
+    }
+    const keys = button("keyboard", "Keys", { title: "Keys this browser keeps for itself" });
+    keys.onclick = () => keysMenu(keys);
+    const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
+    clip.onclick = () => clipMenu(clip);
+    const quality = button("sliders", null, { title: "Picture quality" });
+    quality.onclick = () => qualityMenu(quality);
     bar.append(keys, clip, quality);
-    if (this.monitors && this.monitors.list.length > 1) {
+    if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
-      mon.onclick = () => menu(this.monitors.list.map((m, i) =>
-        [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), mon);
+      mon.onclick = () => monitorMenu(mon);
       bar.append(mon);
     }
     const eye = button("eye", null, { title: "View only: watch without sending keys or clicks" });
     eye.classList.toggle("on", this.viewOnly);
-    eye.onclick = () => {
-      this.viewOnly = !this.viewOnly;
-      if (this.viewOnly) this.releaseKeys();
-      eye.classList.toggle("on", this.viewOnly);
-      $("vscreen").classList.toggle("viewonly", this.viewOnly);
-      toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
-    };
-    const shot = button("camera", null, { title: "Save a picture of the screen" });
-    shot.onclick = () => $("canvas").toBlob(b => b && saveBlob(b, "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png"));
-    bar.append(eye, shot);
+    eye.onclick = viewOnly;
+    const cam = button("camera", null, { title: "Save a picture of the screen" });
+    cam.onclick = shot;
+    bar.append(eye, cam);
   }
   async pasteHere() {
     if (!navigator.clipboard?.readText) { toast("This browser does not let the page read the clipboard; use “Type or paste text”.", { bad: true }); return; }

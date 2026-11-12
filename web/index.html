@@ -163,9 +163,17 @@
            border-left: 3px solid var(--accent); border-radius: var(--r-sm); font-size: 13px; box-shadow: 0 8px 24px #0008; }
   .toast.bad { border-left-color: var(--warn); }
   .toast .btn { padding: 3px 8px; }
-  @media (max-width: 640px) {
-    #who span, .seg .btn span, #bar .tx { display: none; }
+  @media (max-width: 760px) {
+    /* Icons only, the name as its dot, and the bar scrolls sideways if it must: nothing falls off. */
+    #who span, #who b, .seg .btn span, #bar .tx, #stools .btn span, .ftools .btn span { display: none; }
+    #bar { overflow-x: auto; scrollbar-width: none; }
+    #bar > * { flex-shrink: 0; }
+    .seg { margin: 0 4px; }
+    /* The folder's path on a line of its own. */
+    .ftools { flex-wrap: wrap; }
+    #path { order: 10; flex-basis: 100%; }
     #ftable .head, #ftable .f { grid-template-columns: minmax(0, 1fr) 80px; } #ftable .when { display: none; }
+    #fsel .btn span { display: none; }
   }
 </style>
 </head>
