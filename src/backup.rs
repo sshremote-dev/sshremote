@@ -37,6 +37,58 @@ fn stamp() -> String {
     crate::sys::local_time(secs).replace([' ', ':'], "-")
 }
 
+/// Files of ~/.ssh a backup's sealed part leaves alone: config and known_hosts travel in the
+/// plain part and are restored on their own terms, and earlier copies are not worth keeping.
+fn ssh_file_kept_apart(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name == "config"
+        || name.starts_with("known_hosts")
+        || name.ends_with(".old")
+        || name.rsplit_once(".bak").is_some_and(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Writes a file only this user may read, as ssh insists on for its configuration and keys.
+fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path).and_then(|mut f| std::io::Write::write_all(&mut f, data)).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Makes a folder of ~/.ssh (and those above it) that only this user may enter.
+fn private_dir(dir: &Path) -> Result<(), String> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// `path` with ".bak" added, or ".bak2", ".bak3"... so an earlier copy is never overwritten.
+fn free_bak(path: &Path) -> PathBuf {
+    (1..)
+        .map(|n| {
+            let mut p = path.as_os_str().to_owned();
+            p.push(if n == 1 { ".bak".to_string() } else { format!(".bak{n}") });
+            PathBuf::from(p)
+        })
+        .find(|p| std::fs::symlink_metadata(p).is_err())
+        .expect("a free name")
+}
+
 /// A key from a passphrase by PBKDF2-HMAC-SHA256, stretched so guessing is slow.
 fn pbkdf2(passphrase: &str, salt: &[u8], rounds: u32) -> [u8; 32] {
     let mac = <Hmac<Sha256> as Mac>::new_from_slice(passphrase.as_bytes()).expect("HMAC takes any key length");
@@ -139,6 +191,7 @@ fn ssh_files() -> Vec<(String, Vec<u8>)> {
             if meta.is_dir() && depth < 3 {
                 walk(&e.path(), &format!("{name}/"), depth + 1, out);
             } else if meta.is_file()
+                && !ssh_file_kept_apart(&name)
                 && meta.len() <= MAX_SSH_FILE
                 && let Ok(data) = std::fs::read(e.path())
             {
@@ -153,38 +206,31 @@ fn ssh_files() -> Vec<(String, Vec<u8>)> {
 }
 
 /// Writes a file of ~/.ssh from a backup: missing ones are created, changed ones replaced with the
-/// current file kept beside it as NAME.bak. Returns whether anything was written.
+/// current file kept beside it as NAME.bak (NAME.bak2 when that is taken). authorized_keys gains
+/// the backup's lines rather than losing those added since. Returns whether anything was written.
 fn put_ssh_file(ssh: &Path, rel: &str, data: &[u8]) -> Result<bool, String> {
     let parts: Vec<&str> = rel.split('/').collect();
     if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains(['\\', ':'])) {
         return Err(format!("unsafe name in the backup: {rel}"));
     }
     let path = parts.iter().fold(ssh.to_path_buf(), |p, part| p.join(part));
-    if std::fs::read(&path).is_ok_and(|now| now == data) {
+    let now = std::fs::read(&path).ok();
+    let data = if rel == "authorized_keys" && let Some(now) = &now {
+        union(&String::from_utf8_lossy(now), &String::from_utf8_lossy(data)).into_bytes()
+    } else {
+        data.to_vec()
+    };
+    if now.as_deref() == Some(data.as_slice()) {
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        private_dir(dir)?;
     }
-    if path.exists() {
-        let mut bak = path.clone().into_os_string();
-        bak.push(".bak");
-        std::fs::rename(&path, bak).map_err(|e| e.to_string())?;
+    if now.is_some() {
+        std::fs::rename(&path, free_bak(&path)).map_err(|e| e.to_string())?;
     }
     // Readable by this user only from the start: ssh refuses private keys that others can read.
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    o.open(&path).and_then(|mut f| std::io::Write::write_all(&mut f, data)).map_err(|e| format!("{}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    write_private(&path, &data)?;
     Ok(true)
 }
 
@@ -192,9 +238,22 @@ fn put_ssh_file(ssh: &Path, rel: &str, data: &[u8]) -> Result<bool, String> {
 pub fn save(passphrase: Option<&str>) -> Result<PathBuf, String> {
     let dir = folder();
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(format!("sshremote-backup-{}.json", stamp()));
-    std::fs::write(&path, create(passphrase)).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(path)
+    let text = create(passphrase);
+    // Two in the same minute are two files, not one written over the other.
+    let stamp = stamp();
+    for n in 1..100 {
+        let name = if n == 1 { format!("sshremote-backup-{stamp}.json") } else { format!("sshremote-backup-{stamp} ({n}).json") };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                std::io::Write::write_all(&mut f, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err("too many backups this minute".into())
 }
 
 /// Keeps one automatic backup a day (without passwords), the last two weeks of them.
@@ -291,37 +350,40 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
                 union(text, &here)
             };
             std::fs::write(dir.join(name), merged).map_err(|e| e.to_string())?;
+            if name == "settings.txt" {
+                // At once: the next setting saved would otherwise write the cached old ones back.
+                crate::hosts::reload_settings();
+            }
         }
         done.push(format!("{} lists", files.len()));
     }
-    {
-        let ssh = crate::sys::ssh_dir();
-        let _ = std::fs::create_dir_all(&ssh);
-        if let Some(known) = v["ssh"]["known_hosts"].as_str() {
-            let here = std::fs::read_to_string(ssh.join("known_hosts")).unwrap_or_default();
-            std::fs::write(ssh.join("known_hosts"), union(&here, known)).map_err(|e| e.to_string())?;
-            done.push("known_hosts".into());
-        }
-        if ssh_config && let Some(config) = v["ssh"]["config"].as_str() {
-            let path = ssh.join("config");
-            if path.exists() {
-                std::fs::copy(&path, ssh.join("config.bak")).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&path, config).map_err(|e| e.to_string())?;
-            done.push("~/.ssh/config (the old one is config.bak)".into());
-        }
+    let ssh = crate::sys::ssh_dir();
+    private_dir(&ssh)?;
+    if let Some(known) = v["ssh"]["known_hosts"].as_str() {
+        let here = std::fs::read_to_string(ssh.join("known_hosts")).unwrap_or_default();
+        write_private(&ssh.join("known_hosts"), union(&here, known).as_bytes())?;
+        done.push("known_hosts".into());
     }
+    if ssh_config && let Some(config) = v["ssh"]["config"].as_str() {
+        let path = ssh.join("config");
+        let kept = if path.exists() {
+            let bak = free_bak(&path);
+            std::fs::copy(&path, &bak).map_err(|e| e.to_string())?;
+            format!(" (the old one is {})", bak.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()))
+        } else {
+            String::new()
+        };
+        write_private(&path, config.as_bytes())?;
+        done.push(format!("~/.ssh/config{kept}"));
+    }
+    // The sealed part: ~/.ssh's files first (they need nothing else), then the passwords, whose
+    // store may be missing on this machine.
+    let mut passwords: Vec<(String, String)> = Vec::new();
     if v.get("passwords").is_some() {
         match opened.get("passwords") {
             Some(plain) => {
-                let secrets: serde_json::Map<String, Value> =
-                    serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
-                for (host, s) in &secrets {
-                    if let Some(s) = s.as_str() {
-                        crate::vault::set(host, s)?;
-                    }
-                }
-                done.push(format!("{} passwords", secrets.len()));
+                let list: serde_json::Map<String, Value> = serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
+                passwords.extend(list.iter().filter_map(|(h, s)| Some((h.clone(), s.as_str()?.to_string()))));
             }
             None => done.push("passwords skipped (no passphrase)".into()),
         }
@@ -330,16 +392,15 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
         match opened.get("secrets") {
             Some(plain) => {
                 let secrets: Value = serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
-                let passwords = secrets["passwords"].as_object().cloned().unwrap_or_default();
-                for (host, s) in &passwords {
-                    if let Some(s) = s.as_str() {
-                        crate::vault::set(host, s)?;
-                    }
-                }
-                done.push(format!("{} passwords", passwords.len()));
-                let files = secrets["ssh"].as_object().cloned().unwrap_or_default();
+                let list = secrets["passwords"].as_object().cloned().unwrap_or_default();
+                passwords.extend(list.iter().filter_map(|(h, s)| Some((h.clone(), s.as_str()?.to_string()))));
+                // Backups made before config and known_hosts were kept apart still hold them:
+                // those are restored above on their own terms, never replaced from here.
+                let files: Vec<(String, Value)> = secrets["ssh"]
+                    .as_object()
+                    .map(|m| m.iter().filter(|(rel, _)| !ssh_file_kept_apart(rel)).map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
                 if ssh_files {
-                    let ssh = crate::sys::ssh_dir();
                     let mut written = 0;
                     let base64 = secrets["encoding"] == "base64";
                     for (rel, data) in &files {
@@ -359,7 +420,20 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             None => done.push("passwords and ~/.ssh files skipped (no passphrase)".into()),
         }
     }
-    crate::hosts::reload_settings();
+    if !passwords.is_empty() {
+        let mut failed = None;
+        let mut saved = 0;
+        for (host, s) in &passwords {
+            match crate::vault::set(host, s) {
+                Ok(()) => saved += 1,
+                Err(e) => failed = Some(e),
+            }
+        }
+        done.push(match failed {
+            None => format!("{saved} passwords"),
+            Some(e) => format!("{saved} of {} passwords ({e})", passwords.len()),
+        });
+    }
     Ok(format!("Restored {}", done.join(", ")))
 }
 
@@ -404,6 +478,29 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("keys").join("id_test.bak")).unwrap(), b"new");
         assert!(put_ssh_file(&dir, "../escape", b"x").is_err());
         assert!(put_ssh_file(&dir, "a/../../escape", b"x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the sealed part leaves to the plain one, and earlier copies, are not restored from it;
+    /// authorized_keys keeps the keys added since the backup.
+    #[test]
+    fn restoring_keys_leaves_config_and_known_hosts_and_keeps_new_authorized_keys() {
+        for kept in ["config", "known_hosts", "known_hosts.old", "id_ed25519.bak", "id_rsa.bak2", "x.old"] {
+            assert!(ssh_file_kept_apart(kept), "{kept}");
+        }
+        for taken in ["id_ed25519", "id_ed25519.pub", "authorized_keys", "keys/work"] {
+            assert!(!ssh_file_kept_apart(taken), "{taken}");
+        }
+        let dir = std::env::temp_dir().join(format!("sshremote-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("authorized_keys"), "ssh-ed25519 AAAA monday\nssh-ed25519 BBBB colleague\n").unwrap();
+        assert!(put_ssh_file(&dir, "authorized_keys", b"ssh-ed25519 AAAA monday\nssh-ed25519 CCCC old\n").unwrap());
+        let now = std::fs::read_to_string(dir.join("authorized_keys")).unwrap();
+        assert_eq!(now, "ssh-ed25519 AAAA monday\nssh-ed25519 BBBB colleague\nssh-ed25519 CCCC old\n");
+        // A second replacement keeps the first copy too.
+        assert!(put_ssh_file(&dir, "authorized_keys", b"ssh-ed25519 DDDD\n").unwrap());
+        assert!(dir.join("authorized_keys.bak").exists() && dir.join("authorized_keys.bak2").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
