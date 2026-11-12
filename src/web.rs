@@ -1067,7 +1067,7 @@ Host: x
 ").unwrap();
         let mut js = String::new();
         script.read_to_string(&mut js).unwrap();
-        assert!(js.starts_with("HTTP/1.1 200") && js.contains("showScreen") && !body.contains("<script>"));
+        assert!(js.starts_with("HTTP/1.1 200") && js.contains("class Client") && !body.contains("<script>"));
 
         let open = || {
             let mut s = TcpStream::connect(&addr).unwrap();
