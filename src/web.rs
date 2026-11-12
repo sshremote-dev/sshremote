@@ -364,6 +364,8 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     let failed = || -> Result<(), String> {
         std::thread::sleep(Duration::from_secs(2));
         let mut f = gate.failures.lock().map_err(|e| e.to_string())?;
+        // Addresses quiet for a quarter of an hour are forgotten, so the list stays short.
+        f.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(900));
         let e = f.entry(who).or_insert((0, Instant::now()));
         *e = (if e.1.elapsed() > Duration::from_secs(900) { 1 } else { e.0 + 1 }, Instant::now());
         Ok(())
@@ -389,9 +391,12 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
             }
         };
         let open = Open { name: format!("ID {}", crate::access::spaced(&id)), agent, lazy: false, shell: None };
+        // Only a password the computer refused counts against this address: an offline
+        // computer or a relay that is down is nobody's guess.
         match client(r, w, open, view, term)? {
-            true => drop(gate.failures.lock().map_err(|e| e.to_string())?.remove(&who)),
-            false => failed()?,
+            Opened::Yes => drop(gate.failures.lock().map_err(|e| e.to_string())?.remove(&who)),
+            Opened::WrongPassword => failed()?,
+            Opened::No => {}
         }
         return Ok(());
     }
@@ -570,6 +575,13 @@ fn reach(target: crate::transport::Target, view: (u16, u16)) -> Result<(crate::s
     Ok((sess, rx))
 }
 
+/// How opening a computer went, for the count of wrong tries.
+enum Opened {
+    Yes,
+    WrongPassword,
+    No,
+}
+
 /// The agent of a session, or where it stands.
 enum Agent {
     Up(crate::session::Session, mpsc::Receiver<crate::session::Ev>),
@@ -580,14 +592,14 @@ enum Agent {
 }
 
 /// A computer in the browser as in the app: a shell first, its screen (made only while shown) and
-/// its files. False when it could not be reached at all.
+/// its files. Says whether it was reached, refused the password, or could not be reached.
 fn client(
     mut r: BufReader<TcpStream>,
     w: Arc<Mutex<TcpStream>>,
     open: Open,
     view: (u16, u16),
     (cols, rows): (u16, u16),
-) -> Result<bool, String> {
+) -> Result<Opened, String> {
     use crate::proto::{ToAgent, ToClient};
     use crate::session::Ev;
     let io = |e: std::io::Error| e.to_string();
@@ -598,7 +610,11 @@ fn client(
     } else {
         match start(open.agent.clone(), view) {
             Ok((s, rx)) => Agent::Up(s, rx),
-            Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
+            Err(e) => {
+                let refused = e.to_lowercase().contains("wrong password");
+                send_json(&w, serde_json::json!({ "error": plain(&e) }))?;
+                return Ok(if refused { Opened::WrongPassword } else { Opened::No });
+            }
         }
     };
     // The shell: the agent's, or a program in a terminal here.
@@ -611,7 +627,7 @@ fn client(
     match (&open.shell, &mut agent) {
         (Some(_), _) => match spawn(cols, rows) {
             Ok(p) => pty = Some(p),
-            Err(e) => return send_json(&w, serde_json::json!({ "error": e })).map(|_| false),
+            Err(e) => return send_json(&w, serde_json::json!({ "error": e })).map(|_| Opened::No),
         },
         (None, Agent::Up(sess, _)) => sess.send(ToAgent::TermOpen { id: shell, cols, rows }).map_err(io)?,
         (None, _) => {}
@@ -921,7 +937,7 @@ fn client(
     if let Ok(s) = w.lock() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
-    Ok(true)
+    Ok(Opened::Yes)
 }
 
 /// Why a connection failed, in the words of someone who only typed an ID and a password.
@@ -1101,11 +1117,16 @@ Host: x
         let (mut s, mut r) = open();
         put(&mut s, 1, br#"{"id":"12 34","password":"x"}"#);
         assert!(String::from_utf8(get(&mut r).1).unwrap().contains("9 digits"));
-        let (mut s, mut r) = open();
-        put(&mut s, 1, br#"{"id":"123 456 789","password":"x","w":800,"h":600}"#);
-        let mut said = String::new();
-        while !said.contains("error") {
-            said = String::from_utf8(get(&mut r).1).unwrap();
+        // A relay that is down is said each time, never taken for wrong passwords that lock
+        // the browser out.
+        for _ in 0..7 {
+            let (mut s, mut r) = open();
+            put(&mut s, 1, br#"{"id":"123 456 789","password":"x","w":800,"h":600}"#);
+            let mut said = String::new();
+            while !said.contains("error") {
+                said = String::from_utf8(get(&mut r).1).unwrap();
+            }
+            assert!(!said.contains("Too many"), "{said}");
         }
 
         // Everything else needs the gateway's password, or a sign-in it gave.
