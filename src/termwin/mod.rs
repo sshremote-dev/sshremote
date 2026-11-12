@@ -266,6 +266,27 @@ fn pal(i: usize) -> Color32 {
     rgb(scheme().3[i % 16])
 }
 
+/// A colour as a program asking for it (OSC 4, 10, 11, 12) gets it when it set none: the
+/// scheme's 16, xterm's cube and greys for the rest of the 256, and the scheme's text and
+/// background for the special ones (256 text, 257 background, 258 cursor).
+fn default_color(i: usize) -> Color32 {
+    match i {
+        0..16 => pal(i),
+        16..232 => {
+            let v = |x: usize| if x == 0 { 0 } else { (55 + 40 * x) as u8 };
+            let n = i - 16;
+            Color32::from_rgb(v(n / 36), v(n / 6 % 6), v(n % 6))
+        }
+        232..256 => {
+            let g = (8 + 10 * (i - 232)) as u8;
+            Color32::from_rgb(g, g, g)
+        }
+        256 => scheme_fg(),
+        257 => scheme_bg(),
+        _ => scheme_fg(),
+    }
+}
+
 struct Size {
     cols: usize,
     rows: usize,
@@ -873,6 +894,26 @@ impl TermWindow {
                     TermEvent::Title(s) => t.title = tab_title(&s),
                     TermEvent::ResetTitle => t.title = format!("Shell {}", t.id),
                     TermEvent::ClipboardStore(_, s) => ctx.copy_text(s),
+                    // A program asking the colours (to pick a light or dark theme) or the size in
+                    // pixels gets them, as from any terminal.
+                    TermEvent::ColorRequest(i, reply) => {
+                        let c = t.term.colors()[i].unwrap_or_else(|| {
+                            let c = default_color(i);
+                            Rgb { r: c.r(), g: c.g(), b: c.b() }
+                        });
+                        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: reply(c).into_bytes() }));
+                    }
+                    TermEvent::TextAreaSizeRequest(reply) => {
+                        let font = FontId::monospace(self.font_size);
+                        let (cw, ch) = ctx.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+                        let ws = alacritty_terminal::event::WindowSize {
+                            num_cols: t.size.0,
+                            num_lines: t.size.1,
+                            cell_width: cw.round() as u16,
+                            cell_height: ch.round() as u16,
+                        };
+                        out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: reply(ws).into_bytes() }));
+                    }
                     _ => {}
                 }
             }

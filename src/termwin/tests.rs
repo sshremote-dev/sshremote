@@ -51,6 +51,29 @@ fn the_emulator_answers_cursor_queries() {
     assert_eq!(replies, ["\x1b[1;3R"]);
 }
 
+/// A program asking the background colour (to pick a light or a dark theme) or the size in
+/// pixels gets an answer, as from any terminal.
+#[test]
+fn programs_asking_colours_and_size_get_answers() {
+    let ctx = egui::Context::default();
+    let mut w = TermWindow::new(None);
+    frame(&ctx, &mut w, Vec::new());
+    let id = w.tabs[0].id;
+    w.output(id, b"\x1b]11;?\x07\x1b]4;1;?\x07\x1b[14t");
+    let replies: Vec<String> = frame(&ctx, &mut w, Vec::new())
+        .into_iter()
+        .filter_map(|c| match c {
+            Cmd::Send(ToAgent::TermInput { id: i, data }) if i == id => Some(String::from_utf8_lossy(&data).into_owned()),
+            _ => None,
+        })
+        .collect();
+    let all = replies.concat();
+    let bg = scheme_bg();
+    assert!(all.contains(&format!("\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}", bg.r(), bg.r(), bg.g(), bg.g(), bg.b(), bg.b())), "{all:?}");
+    assert!(all.contains("\x1b]4;1;rgb:"), "palette colour 1: {all:?}");
+    assert!(all.contains("\x1b[4;") && all.ends_with('t'), "size in pixels: {all:?}");
+}
+
 /// A frame of the window with no real display, as the window would run it.
 fn frame(ctx: &egui::Context, w: &mut TermWindow, events: Vec<Event>) -> Vec<Cmd> {
     let input = egui::RawInput {
