@@ -605,6 +605,77 @@ impl Control {
 mod tests {
     use super::*;
 
+    /// On a Windows host whose agent the service runs (an ssh session has no desktop, so the
+    /// service's SYSTEM helper serves it): the terminal is the signed-in person's and so are the
+    /// files, never SYSTEM's. Needs SSHREMOTE_WINDOWS_HOST (an ssh alias) and the service there.
+    #[test]
+    #[ignore]
+    fn a_windows_agent_run_as_system_acts_as_the_signed_in_person() {
+        let Ok(host) = std::env::var("SSHREMOTE_WINDOWS_HOST") else { return };
+        let target = Target::Ssh {
+            host,
+            port: None,
+            args: Vec::new(),
+            remote: r#""C:\Program Files\SSH Remote\sshremote.exe" --agent"#.into(),
+            capture: "auto".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let wait = |want: &dyn Fn(&ToClient) -> bool| -> ToClient {
+            let until = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < until {
+                if let Ok(Ev::Net(m)) = rx.recv_timeout(Duration::from_millis(200))
+                    && want(&m)
+                {
+                    return m;
+                }
+            }
+            panic!("no answer in time");
+        };
+        sess.send(ToAgent::ListDir { path: String::new() }).unwrap();
+        let ToClient::DirList { path, error, .. } = wait(&|m| matches!(m, ToClient::DirList { .. })) else { unreachable!() };
+        assert!(error.is_empty(), "{error}");
+        assert!(path.to_lowercase().contains(r"\users\") && !path.to_lowercase().contains("systemprofile"), "home: {path}");
+        sess.send(ToAgent::TermOpen { id: 1, cols: 120, rows: 30 }).unwrap();
+        sess.send(ToAgent::TermInput { id: 1, data: b"whoami\r\n".to_vec() }).unwrap();
+        // The terminal's control sequences out: CSI (ESC [ ... letter) and OSC (ESC ] ... BEL).
+        let plain = |out: &str| -> String {
+            let mut s = String::new();
+            let mut it = out.chars().peekable();
+            while let Some(c) = it.next() {
+                match (c, it.peek()) {
+                    ('\x1b', Some('[')) => {
+                        it.next();
+                        while it.next().is_some_and(|c| !('@'..='~').contains(&c)) {}
+                    }
+                    ('\x1b', Some(']')) => while it.next().is_some_and(|c| c != '\x07') {},
+                    _ => s.push(c),
+                }
+            }
+            s
+        };
+        // "whoami" answers with DOMAIN\user alone on a line; the prompt has a backslash too.
+        let answer = |out: &str| -> Option<String> {
+            plain(out).split(['\r', '\n'])
+                .map(|l| l.trim().trim_matches(|c: char| c.is_control()))
+                .find(|l| l.matches('\\').count() == 1 && !l.contains([' ', ':', '>', '[', ']']))
+                .map(str::to_lowercase)
+        };
+        let mut out = String::new();
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until && answer(&out).is_none() {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Ev::Net(ToClient::TermOutput { data, .. })) => out.push_str(&String::from_utf8_lossy(&data)),
+                Ok(Ev::Net(ToClient::TermExit { text, .. })) => panic!("no shell: {text}"),
+                _ => {}
+            }
+        }
+        let who = answer(&out).unwrap_or_default();
+        assert!(!who.is_empty() && !who.contains("system"), "the shell is {who:?}: {out}");
+        sess.close();
+    }
+
     fn aged(budget: Option<f64>, level: usize) -> Auto {
         let mut a = Auto::new(budget, level);
         a.changed -= SETTLE;

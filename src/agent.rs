@@ -53,6 +53,51 @@ fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
     (((w * k).round() as usize).max(16), ((h * k).round() as usize).max(16))
 }
 
+/// The person signed in at the screen, acted as on this thread for a file operation when this
+/// agent runs as SYSTEM; None when it runs as a person already; why not when nobody is signed in.
+#[cfg(windows)]
+fn files_as_user() -> Result<Option<crate::console_user::AsUser>, &'static str> {
+    use crate::console_user::{Acting, NOBODY, acting};
+    match acting() {
+        Acting::Myself => Ok(None),
+        Acting::Nobody => Err(NOBODY),
+        Acting::User(u) => {
+            crate::files::set_home(Some(u.profile.clone()));
+            u.impersonate().map(Some).ok_or("could not act as the person signed in at that computer")
+        }
+    }
+}
+
+/// What a file request refused for `why` is answered with.
+#[cfg(windows)]
+fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
+    let why = why.to_string();
+    match m {
+        ToAgent::ListDir { path } => vec![ToClient::DirList { path: path.clone(), entries: Vec::new(), error: why }],
+        ToAgent::Fetch { tag, .. } => {
+            let mut out = vec![ToClient::FetchEnd { id: 0, ok: false, text: why }];
+            if tag & crate::files::DONE_TAG != 0 {
+                out.push(ToClient::FetchDone { tag: *tag });
+            }
+            out
+        }
+        ToAgent::FileStart { id, .. } | ToAgent::FileEnd { id } => vec![ToClient::FileDone { id: *id, ok: false, text: why }],
+        ToAgent::FileOp { .. } => vec![ToClient::OpDone { ok: false, text: why }],
+        _ => Vec::new(),
+    }
+}
+
+/// The viewer came by this computer's remote access ID (rather than over ssh as its owner).
+static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_by_id() {
+    BY_ID.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn by_id() -> bool {
+    BY_ID.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
 pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
     #[cfg(windows)]
@@ -277,6 +322,23 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             if !typed_text && matches!(m, ToAgent::Key { .. } | ToAgent::KeyState { .. } | ToAgent::Button { .. }) {
                 paste(&mut pending, &mut clip, cap.as_mut());
             }
+            // Files are the signed-in person's business: an agent run as SYSTEM acts as them, and
+            // with nobody signed in there are none to hand out.
+            #[cfg(windows)]
+            let _as_user = match &m {
+                ToAgent::ListDir { .. } | ToAgent::Fetch { .. } | ToAgent::FileStart { .. } | ToAgent::FileEnd { .. } | ToAgent::FileOp { .. } => {
+                    match files_as_user() {
+                        Ok(g) => g,
+                        Err(why) => {
+                            for r in refused(&m, why) {
+                                send(enc, &r).map_err(io_err)?;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                _ => None,
+            };
             match m {
                 ToAgent::Settings(s) => {
                     let t = target(desk, &s);
@@ -519,6 +581,22 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             send(enc, &m).map_err(io_err)?;
         }
         // Downloads share the stream with the screen, a slice per turn.
+        // A file or folder is opened as the person signed in (an agent run as SYSTEM); one who
+        // signed out ends what is left of the downloads.
+        #[cfg(windows)]
+        let _as_user = if outbox.opens_next() {
+            match files_as_user() {
+                Ok(g) => g,
+                Err(why) => {
+                    for m in outbox.cancel_all(why) {
+                        send(enc, &m).map_err(io_err)?;
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
         for m in outbox.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
         }

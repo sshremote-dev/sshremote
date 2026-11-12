@@ -17,13 +17,24 @@ pub const REPORT: u64 = 256 << 10;
 pub const WINDOW: u64 = 1 << 20;
 pub const CHUNK: usize = 64 << 10;
 
-pub fn downloads() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-    home.map(|h| h.join("Downloads")).unwrap_or_else(std::env::temp_dir)
+/// The home folder of the person transfers are for, when not this process's own: an agent run as
+/// SYSTEM acts for the person signed in at the screen.
+static HOME: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn set_home(home: Option<PathBuf>) {
+    *HOME.lock().unwrap_or_else(|e| e.into_inner()) = home;
 }
 
 pub fn home() -> PathBuf {
-    downloads().parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir)
+    if let Some(h) = HOME.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return h;
+    }
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+}
+
+pub fn downloads() -> PathBuf {
+    home().join("Downloads")
 }
 
 /// Names Windows keeps for devices, whatever their extension: "aux.c" opens the AUX device.
@@ -376,6 +387,36 @@ impl Outbox {
             }
             !hit
         });
+        out
+    }
+
+    /// Whether the next step opens a file or a folder (rather than reading one already open).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn opens_next(&self) -> bool {
+        match self.queue.front() {
+            Some(Queued::File(o)) => o.file.is_none(),
+            Some(Queued::Folder { .. }) => true,
+            None => false,
+        }
+    }
+
+    /// Drops every download, saying so for those under way and for requests that asked to be told.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn cancel_all(&mut self, why: &str) -> Vec<ToClient> {
+        let mut out = Vec::new();
+        let mut tags = Vec::new();
+        for q in self.queue.drain(..) {
+            if let Queued::File(o) = &q
+                && o.file.is_some()
+            {
+                out.push(ToClient::FetchEnd { id: o.id, ok: false, text: why.to_string() });
+            }
+            let tag = q.tag();
+            if tag & DONE_TAG != 0 && !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+        out.extend(tags.into_iter().map(|tag| ToClient::FetchDone { tag }));
         out
     }
 

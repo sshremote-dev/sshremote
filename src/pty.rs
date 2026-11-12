@@ -275,7 +275,7 @@ mod sys {
     use windows_sys::Win32::System::Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole};
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
         GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
         STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
     };
@@ -300,10 +300,13 @@ mod sys {
 
     /// PowerShell (or cmd) attached to a new pseudo console.
     pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>, env: &[(String, String)]) -> Result<(File, File, Handle), String> {
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        if user.eq_ignore_ascii_case("SYSTEM") || user.ends_with('$') {
-            return Err("the agent runs as the Windows service; connect over SSH for a terminal".into());
-        }
+        // An agent the service started runs as SYSTEM: its shells are the signed-in person's,
+        // never SYSTEM's, and with nobody signed in there are none.
+        let user = match crate::console_user::acting() {
+            crate::console_user::Acting::Myself => None,
+            crate::console_user::Acting::User(u) => Some(u),
+            crate::console_user::Acting::Nobody => return Err(crate::console_user::NOBODY.into()),
+        };
         unsafe {
             let (mut in_r, mut in_w, mut out_r, mut out_w): (HANDLE, HANDLE, HANDLE, HANDLE) =
                 (null_mut(), null_mut(), null_mut(), null_mut());
@@ -351,17 +354,22 @@ mod sys {
             si.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
             si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
             si.lpAttributeList = attrs;
-            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+            let home = match &user {
+                Some(u) => u.profile.display().to_string(),
+                None => std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into()),
+            };
             let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
             let mut started = false;
             let wanted: Vec<String> = match argv {
                 Some(a) => vec![command_line(a)],
                 None => vec!["powershell.exe -NoLogo".into(), "cmd.exe".into()],
             };
-            // This program's environment with `env` over it, as a block of "K=V" strings; none
-            // given, the program inherits this one's.
-            let block: Option<Vec<u16>> = (!env.is_empty()).then(|| {
-                let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(k))).collect();
+            // This program's environment (the user's own, for a shell started as them) with `env`
+            // over it, as a block of "K=V" strings; none given, the program inherits this one's.
+            let base: Option<Vec<(String, String)>> = user.as_ref().map(|u| u.environment());
+            let block: Option<Vec<u16>> = (!env.is_empty() || base.is_some()).then(|| {
+                let base = base.clone().unwrap_or_else(|| std::env::vars().collect());
+                let mut vars: Vec<(String, String)> = base.into_iter().filter(|(k, _)| !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(k))).collect();
                 vars.extend(env.iter().cloned());
                 vars.sort_by_key(|(k, _)| k.to_uppercase());
                 let mut b: Vec<u16> = Vec::new();
@@ -376,19 +384,12 @@ mod sys {
             for cmd in &wanted {
                 let mut line = wide(cmd);
                 let dir = wide(&home);
-                if CreateProcessW(
-                    null(),
-                    line.as_mut_ptr(),
-                    null(),
-                    null(),
-                    0,
-                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                    block_ptr,
-                    dir.as_ptr(),
-                    &si.StartupInfo,
-                    &mut pi,
-                ) != 0
-                {
+                let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+                let made = match &user {
+                    Some(u) => CreateProcessAsUserW(u.token(), null(), line.as_mut_ptr(), null(), null(), 0, flags, block_ptr, dir.as_ptr(), &si.StartupInfo, &mut pi),
+                    None => CreateProcessW(null(), line.as_mut_ptr(), null(), null(), 0, flags, block_ptr, dir.as_ptr(), &si.StartupInfo, &mut pi),
+                };
+                if made != 0 {
                     started = true;
                     break;
                 }

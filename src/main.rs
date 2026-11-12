@@ -23,6 +23,8 @@ mod color;
 #[cfg(windows)]
 #[cfg(feature = "remote")]
 mod conpty;
+#[cfg(windows)]
+mod console_user;
 mod ext;
 mod exthost;
 #[cfg(feature = "remote")]
