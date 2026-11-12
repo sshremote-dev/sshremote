@@ -1224,8 +1224,9 @@ impl TermWindow {
                 ui.horizontal(|ui| self.strip(ui, out));
             });
         }
-        // Keyboard shortcuts of the window itself, as in other terminals.
-        let shortcuts = self.renaming.is_none();
+        // Keyboard shortcuts of the window itself, as in other terminals: only while it has the
+        // keys (beside a remote screen that has them, Ctrl+Shift+W is the host's).
+        let shortcuts = self.renaming.is_none() && self.keys_on;
         // Tabs and splits of a pane are the workspace's; text size stays the pane's.
         let tabs_keys = !self.bare;
         let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
@@ -1516,6 +1517,27 @@ mod tests {
         assert_eq!(key_bytes(Key::F5, none, false).unwrap(), b"\x1b[15~");
         assert_eq!(key_bytes(Key::B, egui::Modifiers::ALT, false).unwrap(), b"\x1bb");
         assert!(key_bytes(Key::A, none, false).is_none());
+        assert_eq!(key_bytes(Key::Enter, egui::Modifiers::ALT, false).unwrap(), b"\x1b\r", "Meta+Return");
+        assert_eq!(key_bytes(Key::Space, egui::Modifiers::CTRL, false).unwrap(), [0], "Ctrl+Space is NUL");
+        if !cfg!(windows) {
+            assert_eq!(key_bytes(Key::X, egui::Modifiers::CTRL | egui::Modifiers::ALT, false).unwrap(), [0x1b, 0x18]);
+        }
+    }
+
+    /// Alt+letter goes out once, as ESC and the letter: the text egui sends after the key is not
+    /// typed again.
+    #[test]
+    fn alt_letters_go_out_once() {
+        let ctx = egui::Context::default();
+        let mut w = TermWindow::new(None);
+        frame(&ctx, &mut w, Vec::new());
+        frame(&ctx, &mut w, Vec::new());
+        let key = |key| Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
+        let out = frame(&ctx, &mut w, vec![key(Key::B), Event::Text("b".into()), key(Key::Period), Event::Text(".".into())]);
+        assert_eq!(typed(&out), "\x1bb\x1b.");
+        // Plain text after an Alt key that sent nothing of its own is still typed.
+        let out = frame(&ctx, &mut w, vec![Event::Text("x".into())]);
+        assert_eq!(typed(&out), "x");
     }
 
     #[test]

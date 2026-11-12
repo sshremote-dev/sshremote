@@ -25,7 +25,11 @@ pub(super) fn key_bytes(key: Key, m: egui::Modifiers, app_cursor: bool) -> Optio
         }
     };
     Some(match key {
+        // Alt+Enter is Meta+Return (Claude Code's new line); Shift and Ctrl change nothing.
+        Key::Enter if m.alt => b"\x1b\r".to_vec(),
         Key::Enter => b"\r".to_vec(),
+        // Ctrl+Space is NUL (Emacs' set-mark), with Alt as Meta.
+        Key::Space if m.ctrl => if m.alt { b"\x1b\x00".to_vec() } else { vec![0] },
         Key::Backspace if m.ctrl => b"\x08".to_vec(),
         Key::Backspace if m.alt => b"\x1b\x7f".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
@@ -60,16 +64,24 @@ pub(super) fn key_bytes(key: Key, m: egui::Modifiers, app_cursor: bool) -> Optio
             let mut chars = name.chars();
             let (Some(c), None) = (chars.next(), chars.next()) else { return None };
             let c = c.to_ascii_lowercase();
-            if m.ctrl && !m.alt {
-                return match c {
-                    'a'..='z' => Some(vec![c as u8 - b'a' + 1]),
-                    ' ' | '2' | '@' => Some(vec![0]),
-                    '[' | '3' => Some(vec![0x1b]),
-                    '\\' | '4' => Some(vec![0x1c]),
-                    ']' | '5' => Some(vec![0x1d]),
-                    '6' | '^' => Some(vec![0x1e]),
-                    '/' | '-' | '7' => Some(vec![0x1f]),
-                    _ => None,
+            if m.ctrl {
+                let byte = match c {
+                    'a'..='z' => c as u8 - b'a' + 1,
+                    ' ' | '2' | '@' => 0,
+                    '[' | '3' => 0x1b,
+                    '\\' | '4' => 0x1c,
+                    ']' | '5' => 0x1d,
+                    '6' | '^' => 0x1e,
+                    '/' | '-' | '7' => 0x1f,
+                    '8' => 0x7f,
+                    _ => return None,
+                };
+                // Ctrl+Alt+X is Meta+Ctrl+X: ESC then the control character. Not on Windows,
+                // where AltGr arrives as Ctrl+Alt and its character comes as text.
+                return match (m.alt, cfg!(windows)) {
+                    (false, _) => Some(vec![byte]),
+                    (true, false) => Some(vec![0x1b, byte]),
+                    (true, true) => None,
                 };
             }
             if m.alt && !m.ctrl && c.is_ascii_graphic() {
@@ -143,8 +155,12 @@ pub(super) fn keyboard_with(
     });
     let mode = *t.term.mode();
     let mut send: Vec<u8> = Vec::new();
+    // A key sent as Alt+key (ESC, then its character) comes again as text right after it; that
+    // text is not typed a second time.
+    let mut meta_sent: Option<String> = None;
     for e in ui.ctx().input(|i| i.events.clone()) {
         match e {
+            Event::Text(s) if meta_sent.take().is_some_and(|m| m.eq_ignore_ascii_case(&s)) => {}
             Event::Text(s) => send.extend_from_slice(s.as_bytes()),
             Event::Ime(egui::ImeEvent::Preedit { text, .. }) => t.preedit = text,
             Event::Ime(egui::ImeEvent::Commit(s)) => {
@@ -212,6 +228,9 @@ pub(super) fn keyboard_with(
                     continue;
                 }
                 if let Some(b) = key_bytes(key, modifiers, mode.contains(TermMode::APP_CURSOR)) {
+                    if modifiers.alt && b.len() == 2 && b[0] == 0x1b && b[1].is_ascii_graphic() {
+                        meta_sent = Some((b[1] as char).to_string());
+                    }
                     send.extend_from_slice(&b);
                 }
             }
@@ -289,6 +308,10 @@ fn row_end(t: &Tab, line: i32) -> usize {
 fn chars_between(t: &Tab, from: (i32, usize), to: (i32, usize)) -> usize {
     let grid = t.term.grid();
     let cols = grid.columns();
+    // A point from before the terminal changed size is kept inside it.
+    let (top, bottom) = (-(grid.history_size() as i32), grid.screen_lines() as i32 - 1);
+    let fit = |(l, c): (i32, usize)| (l.clamp(top, bottom), c.min(cols.saturating_sub(1)));
+    let (from, to) = (fit(from), fit(to));
     let (a, b) = if from <= to { (from, to) } else { (to, from) };
     let mut n = 0;
     let (mut l, mut c) = a;

@@ -312,7 +312,11 @@ pub(super) fn screen(
         t.term.selection = Some(Selection::new(SelectionType::Semantic, pt, side));
     } else if resp.clicked() {
         t.term.selection = None;
-        if !ctrl
+        // Alt+click moves the cursor there, as in VS Code: a plain click never types arrow keys
+        // into whatever reads them (a password prompt, `cat > file`).
+        let alt = ui.input(|i| i.modifiers.alt);
+        if alt
+            && !ctrl
             && !app_mouse
             && focused
             && let Some(p) = resp.interact_pointer_pos()
