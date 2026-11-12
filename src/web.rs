@@ -330,10 +330,11 @@ fn send_json(w: &Mutex<TcpStream>, v: serde_json::Value) -> Result<(), String> {
 
 // ----- A session -------------------------------------------------------------------------------------
 
-/// The hosts a signed-in browser is offered: this computer, and the hosts of its ~/.ssh/config.
+/// The hosts a signed-in browser is offered: this computer, and the computers it reaches by SSH
+/// (its ~/.ssh/config aliases among them), favorites first.
 fn hosts() -> Vec<String> {
     let mut out = vec![HERE.to_string()];
-    out.extend(crate::hosts::ssh_config_hosts());
+    out.extend(crate::computers::all().into_iter().filter(|c| c.id().is_none()).map(|c| c.address));
     out.dedup();
     out
 }
@@ -458,7 +459,7 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
                 crate::transport::Target::Direct { addr, password: text("password") }
             }
         };
-        let open = Open { name: format!("ID {}", crate::access::spaced(&id)), agent, lazy: false, shell: None };
+        let open = Open { name: format!("ID {}", crate::computers::spaced(&id)), agent, lazy: false, shell: None };
         // Only a password the computer refused counts against this address: an offline
         // computer or a relay that is down is nobody's guess.
         match client(r, w, open, view, term)? {

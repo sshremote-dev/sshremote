@@ -46,7 +46,7 @@ impl SignIn {
             let why = if why.contains("wrong password") { "That password was not accepted.".to_string() } else { why };
             return Some(SignIn {
                 pane,
-                host: format!("ID {}", crate::access::spaced(&addr.id)),
+                host: format!("ID {}", crate::computers::spaced(&addr.id)),
                 user: String::new(),
                 port: String::new(),
                 purpose: purpose.to_string(),

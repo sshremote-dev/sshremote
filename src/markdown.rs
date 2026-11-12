@@ -512,10 +512,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn of(ui: &egui::Ui) -> Self {
-        Self::palette(ui.visuals().dark_mode)
-    }
-
     /// The palette that suits the terminal's colour scheme, on its background and foreground.
     pub fn terminal(bg: Color32, fg: Color32) -> Self {
         let dark = bg.r() as u32 + bg.g() as u32 + bg.b() as u32 <= 3 * 128;

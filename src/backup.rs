@@ -153,7 +153,7 @@ pub fn create(passphrase: Option<&str>) -> String {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             // The crash report is this computer's own, not a setting.
-            if name.ends_with(".txt")
+            if (name.ends_with(".txt") || name == "computers.json")
                 && name != "crash.txt"
                 && let Ok(text) = std::fs::read_to_string(e.path())
             {
@@ -332,8 +332,29 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut done = Vec::new();
     if let Some(files) = v["files"].as_object() {
+        // The computers by their address, the backup's winning; a backup older than the list
+        // brings its recent hosts, favorites and when each was opened.
+        let older = ["recent.txt", "favorites.txt", "seen.txt"];
+        let computers = match files.get("computers.json").and_then(Value::as_str) {
+            Some(text) => crate::computers::parse(text),
+            None if older.iter().any(|n| files.contains_key(*n)) => {
+                let from = std::env::temp_dir().join(format!("sshremote-restore-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&from);
+                for n in older {
+                    if let Some(t) = files.get(n).and_then(Value::as_str) {
+                        let _ = std::fs::write(from.join(n), t);
+                    }
+                }
+                let list = crate::computers::from_older_files(Some(&from));
+                let _ = std::fs::remove_dir_all(&from);
+                list
+            }
+            None => Vec::new(),
+        };
+        crate::computers::merge(computers);
         for (name, text) in files {
-            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !name.contains(['/', '\\', ':'])) else {
+            let older_list = older.contains(&name.as_str());
+            let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !older_list && !name.contains(['/', '\\', ':'])) else {
                 continue;
             };
             let here = std::fs::read_to_string(dir.join(name)).unwrap_or_default();

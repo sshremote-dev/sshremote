@@ -307,7 +307,7 @@ fn workspace_modes_splits_and_reconnect() {
     h.item("Screen sharing");
     h.until("screen mode", |w| mode_of(w, 0) == Some(PaneMode::Screen));
 
-    // Split beside: the open dialog is asked for; what it opens goes beside, and is active.
+    // Split beside: Quick open is asked for; what it opens goes beside, and is active.
     h.bar(ic::SPLIT_SIDE);
     assert_eq!(h.w.picker, Some(Place::Split { below: false }));
     let profile = crate::termwin::local_profiles().into_iter().next().unwrap();

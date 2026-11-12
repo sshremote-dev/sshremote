@@ -929,6 +929,38 @@ fn tag(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 }
 
 #[cfg(feature = "gui")]
+/// What this app is made of (Settings > Parts): the core, always here; and each part beyond
+/// it, which can be turned off.
+pub fn parts_page(ui: &mut egui::Ui) {
+    card(ui, |ui| {
+        ui.label(
+            RichText::new("Every part is inside the program you downloaded. Untick a part to hide it from the menus and the command line.")
+                .weak()
+                .size(12.0),
+        );
+        ui.add_space(4.0);
+        egui::Grid::new("parts").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.add_enabled(false, egui::Checkbox::new(&mut true, "Core"));
+            ui.label(RichText::new("Terminals, SSH hosts, the tools, extensions").weak().size(12.0));
+            tag(ui, "Built in", crate::gui::good());
+            ui.end_row();
+            for (id, name, what) in crate::modules::ALL {
+                let mut on = crate::modules::on(id);
+                if ui.checkbox(&mut on, *name).on_hover_text(*what).changed() {
+                    crate::modules::set(id, on);
+                }
+                ui.label(RichText::new(what.replace('`', "")).weak().size(12.0));
+                if crate::modules::built_in(id) {
+                    tag(ui, "Built in", crate::gui::good());
+                } else {
+                    tag(ui, "Not in this build", crate::gui::bad());
+                }
+                ui.end_row();
+            }
+        });
+    });
+}
+
 fn matches(search: &str, texts: &[&str]) -> bool {
     let s = search.trim().to_lowercase();
     s.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(&s))
@@ -1037,13 +1069,8 @@ impl ExtTool {
         }
     }
 
-    /// What you added first; the app's own parts below, folded unless one still needs an extension.
     fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
         self.added_list(ui, installed, offers, act);
-        ui.add_space(12.0);
-        egui::CollapsingHeader::new(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong())
-            .id_salt("ext-parts")
-            .show(ui, |ui| self.parts_card(ui));
     }
 
     /// The extensions you added, with their updates; a way to find some when there are none.
@@ -1297,38 +1324,6 @@ impl ExtTool {
         }
     }
 
-    /// What this app is made of: the core, always here; and each part beyond it, which can be
-    /// turned off.
-    fn parts_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.label(
-                RichText::new("Every part is inside the program you downloaded. Untick a part to hide it from the menus and the command line.")
-                    .weak()
-                    .size(12.0),
-            );
-            ui.add_space(4.0);
-            egui::Grid::new("parts").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
-                ui.add_enabled(false, egui::Checkbox::new(&mut true, "Core"));
-                ui.label(RichText::new("Terminals, SSH hosts, the tools, extensions").weak().size(12.0));
-                tag(ui, "Built in", crate::gui::good());
-                ui.end_row();
-                for (id, name, what) in crate::modules::ALL {
-                    let mut on = crate::modules::on(id);
-                    if ui.checkbox(&mut on, *name).on_hover_text(*what).changed() {
-                        crate::modules::set(id, on);
-                    }
-                    ui.label(RichText::new(what.replace('`', "")).weak().size(12.0));
-                    if crate::modules::built_in(id) {
-                        tag(ui, "Built in", crate::gui::good());
-                    } else {
-                        tag(ui, "Not in this build", crate::gui::bad());
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-    }
-
     fn manage_tab(&mut self, ui: &mut egui::Ui, act: &mut Act) {
         card(ui, |ui| {
             ui.label(RichText::new(format!("{}  Install a package file", ic::UPLOAD)).strong());
@@ -1522,7 +1517,7 @@ mod tests {
         crate::gui::style(&ctx);
         let size = Vec2::new(760.0, 900.0);
         let pages: [(ExtTab, &str, &[&str]); 3] = [
-            (ExtTab::Installed, "installed", &["Parts of this app", "Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "run its own program", "Update to 1.3.0"]),
+            (ExtTab::Installed, "installed", &["Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "run its own program", "Update to 1.3.0"]),
             (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Installed", "Desk pack", "Install"]),
             (ExtTab::Manage, "manage", &["Install a package file", "Registry", "sshremote ext new my-tool"]),
         ];

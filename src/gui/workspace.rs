@@ -59,7 +59,7 @@ impl PaneMode {
     }
 }
 
-/// What the open view asks for.
+/// What the home window or Quick open asks for.
 pub(super) enum Launch {
     /// A shell, local or over ssh, needing nothing on the host; `target` reaches the agent of the
     /// same machine when the pane turns to its screen or files.
@@ -201,7 +201,7 @@ pub(super) struct Workspace {
     tabs: Vec<Tab>,
     panes: Vec<Pane>,
     current: usize,
-    /// The open dialog is asked for: where its choice goes.
+    /// Quick open is asked for: where its choice goes.
     pub(super) picker: Option<Place>,
     opt: Options,
     /// One pane fills the tab, the others wait (a layout, not full screen).
@@ -308,7 +308,7 @@ impl Workspace {
         }
     }
 
-    /// Opens what the open view chose, in a new tab or beside the active pane.
+    /// Opens what the home window or Quick open chose, in a new tab or beside the active pane.
     pub(super) fn add(&mut self, launch: Launch, place: Place, start: PaneStart) {
         let Some(id) = self.new_pane(launch, start) else { return };
         match place {
@@ -367,7 +367,7 @@ impl Workspace {
         Some(id)
     }
 
-    /// The screen quality the next panes open with (as chosen in the Open dialog).
+    /// The screen quality the next panes open with (as chosen in Settings > Connections).
     pub(super) fn set_preset(&mut self, preset: Option<usize>) {
         self.opt.preset = preset;
     }

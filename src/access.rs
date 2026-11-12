@@ -228,10 +228,6 @@ pub fn address(id: &str, relay: &str) -> String {
     format!("sshremote://{}@{}", id.trim().replace(' ', ""), relay.trim())
 }
 
-/// "123 456 789", to read out.
-pub fn spaced(id: &str) -> String {
-    id.as_bytes().chunks(3).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" ")
-}
 
 /// How remote access is doing, for the window.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -264,9 +260,27 @@ pub fn state() -> State {
 /// change of those settings (off, a new password, ID or relay) ends them too.
 static SESSIONS: Mutex<Vec<(u64, String, TcpStream)>> = Mutex::new(Vec::new());
 
+/// When each viewer came in, by its number, in seconds since 1970.
+static SINCE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
 /// How many viewers this program serves by ID now (remote access run inside the app).
 pub fn viewers_here() -> usize {
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// The viewers this program serves by ID now: each one's number and when it came in.
+pub fn viewers() -> Vec<(u64, u64)> {
+    let since = SINCE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(n, _, _)| (*n, since.iter().find(|s| s.0 == *n).map_or(0, |s| s.1))).collect()
+}
+
+/// Ends one viewer's connection (the person at this screen chose to).
+pub fn disconnect(viewer: u64) {
+    for (n, _, s) in SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if *n == viewer {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 /// What a viewer had to know to come in: the ID and password at that relay.
@@ -590,11 +604,13 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     if let Ok(socket) = w.stream() {
         SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), socket));
+        SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
     }
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| *k != n);
+    SINCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != n);
 }
 
 /// The agent as a process of its own, its input and output the sealed stream.
@@ -819,7 +835,7 @@ pub fn uninstall_service() -> Result<(), String> {
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
-        println!("ID:       {}", spaced(&c.id));
+        println!("ID:       {}", crate::computers::spaced(&c.id));
         println!("password: {}", c.password);
         println!("relay:    {}", c.relay);
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
@@ -855,7 +871,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         Some("id") => {
             c.id = new_id();
             save(&c)?;
-            println!("ID: {}", spaced(&c.id));
+            println!("ID: {}", crate::computers::spaced(&c.id));
             Ok(())
         }
         Some("relay") => {
@@ -882,7 +898,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             let unit_started = std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|p| p == std::process::id().to_string());
             let service = args.iter().any(|a| a == "--service") || unit_started;
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
-            eprintln!("remote access as {} through {}", spaced(&c.id), c.relay);
+            eprintln!("remote access as {} through {}", crate::computers::spaced(&c.id), c.relay);
             let keep = || {
                 if parent.is_some_and(|p| !alive(p)) {
                     std::process::exit(0);
@@ -938,7 +954,7 @@ mod tests {
     fn ids_passwords_and_addresses() {
         let id = new_id();
         assert!(valid_id(&id) && id.len() == 9 && !id.starts_with('0'));
-        assert_eq!(spaced("123456789"), "123 456 789");
+        assert_eq!(crate::computers::spaced("123456789"), "123 456 789");
         assert_eq!(new_password().len(), 8);
         assert_eq!(relay_addr("r.example"), ("r.example".into(), crate::net::RELAY_PORT));
         assert_eq!(relay_addr("r.example:9000"), ("r.example".into(), 9000));

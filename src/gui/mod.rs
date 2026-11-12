@@ -22,6 +22,7 @@ use crate::options::Target;
 
 pub(crate) mod chrome;
 mod home;
+mod settings;
 mod access_ui;
 #[cfg(feature = "remote")]
 mod remote;
@@ -287,18 +288,25 @@ impl Fit {
 pub struct App {
     screen: Screen,
     form: Form,
-    recent: Vec<(String, String)>,
-    /// Host aliases from ~/.ssh/config; ssh applies their user, port and key itself.
-    ssh_hosts: Vec<String>,
-    favorites: Vec<String>,
-    seen: std::collections::HashMap<String, u64>,
-    search: String,
+    /// The computers as listed, and when they were read (None: read them again).
+    computers: Vec<crate::computers::Computer>,
+    computers_at: Option<Instant>,
+    /// The row of the list the arrow keys are on, and whether they just moved it.
+    picked: Option<usize>,
+    picked_moved: bool,
+    /// The address field asks for an SSH password, not only for an ID's.
+    ssh_password: bool,
+    /// This computer's names and addresses, looked up in the background, and when.
+    here: std::sync::Arc<std::sync::Mutex<Option<crate::here::Here>>>,
+    here_at: Option<Instant>,
+    /// What opens over the home window: a computer's sheet, remote access's settings, Settings.
+    sheet: Option<home::Sheet>,
+    access_sheet_open: bool,
+    settings: Option<settings::Settings>,
     error: Option<String>,
     budget: Option<f64>,
     /// System keys taken from Windows while a session is in front.
     grabbed: Option<mpsc::Receiver<(u32, bool)>>,
-    /// The page of Settings open, if one is.
-    tool: Option<home::Tool>,
     /// The address field takes the keyboard on the next frame.
     focus_host: bool,
     /// What the next connection opens with: its screen, its terminal or its files.
@@ -307,8 +315,6 @@ pub struct App {
     start_fullscreen: bool,
     /// The terminal panel and the chat beside the screen from the start (--open panel, chat).
     start_panels: (bool, bool),
-    /// The open view's place shown.
-    section: home::Section,
     /// `sshremote terminal`: the program ends with its last pane, as a terminal does.
     quit_when_empty: bool,
     /// The open window's close button was clicked; whether closing was asked about, and agreed.
@@ -326,7 +332,7 @@ pub struct App {
     /// Workspaces in windows of their own (tabs dragged out), with where they first appear.
     windows: Vec<(egui::ViewportId, Box<workspace::Workspace>, Pos2)>,
     windows_made: u64,
-    /// What to open next frame: the open view's choices, tools, the command line.
+    /// What to open next frame: the home window's choices, tools, the command line.
     queued: Vec<(workspace::Launch, workspace::Place, PaneStart)>,
     /// The open window growing into the working window: the size asked for and the frames waited.
     /// What is queued opens once it has its size, so a terminal starts at the size it keeps.
@@ -349,9 +355,18 @@ impl Form {
             password: opt.password.clone().unwrap_or_default(),
             // On unless the user turned it off: a password typed once is not asked again.
             remember: crate::hosts::setting("remember_password").is_none_or(|v| v != "no"),
-            preset: opt.preset,
-            remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
-            capture: opt.capture.clone(),
+            // The command line's, else what Settings > Connections keeps.
+            preset: opt.preset.or_else(|| crate::hosts::setting("preset").and_then(|p| p.parse().ok()).filter(|&i: &usize| i < PRESETS.len())),
+            remote: if !opt.remote.is_empty() {
+                opt.remote.clone()
+            } else {
+                crate::hosts::setting("agent_command").filter(|c| !c.trim().is_empty()).unwrap_or_else(|| REMOTE.into())
+            },
+            capture: if opt.capture.is_empty() || opt.capture == "auto" {
+                crate::hosts::setting("capture").filter(|c| !c.is_empty()).unwrap_or_else(|| opt.capture.clone())
+            } else {
+                opt.capture.clone()
+            },
             mode: crate::hosts::setting("connect_mode").and_then(|k| PaneMode::from_key(&k)).unwrap_or(PaneMode::Terminal),
         }
     }
@@ -372,6 +387,11 @@ pub fn run(opt: &Options) -> Result<(), String> {
         // Remote access by ID while this window is open, when it is on and no service runs it.
         #[cfg(feature = "remote")]
         crate::access::start_in_app();
+        // The tunnels set to open with the app, through the computers they belong to.
+        let refused = crate::tunnels::start_with_app();
+        if !refused.is_empty() {
+            app.error = Some(format!("Tunnels not opened: {}", refused.join("; ")));
+        }
         if auto_start {
             app.connect(local);
         }
@@ -584,7 +604,7 @@ fn friendly(e: &str) -> (String, &'static str) {
     } else if l.contains("host key verification failed") {
         "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
     } else if l.contains("wrong password") {
-        "The password does not match the one set on that computer (This computer > Remote access by ID)."
+        "The password does not match the one set on that computer (Remote access by ID, on the left of its window)."
     } else if l.contains("no agent with that id") || l.contains("relay: offline") {
         "That ID is not at the relay now: the computer is off, offline, or has remote access turned off."
     } else if l.contains("relay: the computer did not answer") {
@@ -611,13 +631,6 @@ enum Start {
     Files,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Source {
-    Favorite,
-    Recent,
-    SshConfig,
-}
-
 impl App {
     /// The app a new window starts with: the style, the system keys and the extensions' helpers set up.
     fn boot(cc: &eframe::CreationContext<'_>, form: Form, budget: Option<f64>, open: &str) -> App {
@@ -636,15 +649,19 @@ impl App {
         App {
             screen: Screen::Connect,
             form,
-            recent: crate::hosts::load_recent(),
-            ssh_hosts: crate::hosts::ssh_config_hosts(),
-            favorites: crate::hosts::favorites(),
-            seen: crate::hosts::last_seen(),
-            search: String::new(),
+            computers: Vec::new(),
+            computers_at: None,
+            picked: None,
+            picked_moved: false,
+            ssh_password: false,
+            here: Default::default(),
+            here_at: None,
+            sheet: None,
+            access_sheet_open: false,
+            settings: None,
             error: None,
             budget,
             grabbed,
-            tool: None,
             focus_host: true,
             start_with: if open.split_whitespace().any(|w| w == "terminal") {
                 Start::Terminal
@@ -661,7 +678,6 @@ impl App {
             exts: None,
             access: Default::default(),
             service: None,
-            section: home::Section::Connect,
             windows: Vec::new(),
             windows_made: 0,
             quit_when_empty: false,
@@ -837,7 +853,7 @@ impl eframe::App for App {
             if let Some(e) = w.failed.take() {
                 self.error = Some(e);
             }
-            self.open_dialog(&ctx, &mut w);
+            self.quick_open(&ctx, &mut w);
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
@@ -869,13 +885,13 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
                 }
                 ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_OPEN)));
-                self.focus_host = self.section == home::Section::Connect;
+                self.focus_host = true;
             } else {
                 ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_WORK)));
             }
         }
         if open {
-            self.connect_screen(ui);
+            self.home(ui);
             self.ask_before_quitting(&ctx);
         }
         #[cfg(feature = "drive")]
@@ -884,54 +900,6 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// The open dialog over workspace `w`, when it asks for one: the choice opens in it, where
-    /// it was asked for (a new tab, or beside the active pane).
-    fn open_dialog(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
-        // Opened just now (in this window): the address field takes the keyboard, so typing a
-        // host starts at once.
-        let shown = egui::Id::unique("open-dialog-shown").with(ctx.viewport_id());
-        let Some(place) = w.picker else {
-            ctx.data_mut(|d| d.remove::<bool>(shown));
-            return;
-        };
-        if ctx.data_mut(|d| d.get_temp::<bool>(shown).is_none()) {
-            ctx.data_mut(|d| d.insert_temp(shown, true));
-            self.focus_host = self.section == home::Section::Connect;
-        }
-        // What is opened from the dialog, a tool's terminal too, opens in this workspace.
-        let before = self.queued.len();
-        let (modal, fit) = modal(ctx, "open-dialog", Vec2::new(820.0, 560.0));
-        let modal = modal.show(ctx, |ui| {
-            ui.set_width(fit.x);
-            ui.set_height(fit.y);
-            let close = ui
-                .horizontal(|ui| {
-                    ui.label(RichText::new("Open").size(16.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked()
-                    })
-                    .inner
-                })
-                .inner;
-            ui.separator();
-            (close, self.open_view(ui))
-        });
-        // The modal closes on Esc itself, only when no drop-down of its own is open to take it.
-        let shut = modal.should_close() || modal.inner.0;
-        if let Some(c) = modal.inner.1 {
-            self.choose(c, place);
-        }
-        // Opened here, not in the main window: a host typed wrong keeps the dialog with its error.
-        for (launch, place, start) in self.queued.drain(before.min(self.queued.len())..) {
-            w.set_preset(self.form.preset);
-            w.add(launch, place, start);
-            w.picker = None;
-        }
-        if shut {
-            w.picker = None;
-        }
-    }
-
     /// Closing the open window ends the other windows and anyone connected by this computer's ID:
     /// that is asked first. With neither, it just closes.
     fn ask_before_quitting(&mut self, ctx: &egui::Context) {
@@ -1073,9 +1041,9 @@ impl App {
             }
             if let Some(port) = self.pending_ports.remove(&h) {
                 self.remember_host(&h, &port);
-            } else if self.recent.iter().any(|(r, _)| *r == h) || self.ssh_hosts.contains(&h) {
-                crate::hosts::mark_seen(&h);
-                self.seen = crate::hosts::last_seen();
+            } else if crate::computers::get(&h).is_some() {
+                crate::computers::used(&h, None);
+                self.computers_at = None;
             }
         }
     }
@@ -1114,7 +1082,7 @@ impl App {
                 if out.grab {
                     grab = Some(*id);
                 }
-                self.open_dialog(&ctx, w);
+                self.quick_open(&ctx, w);
             });
             keep
         });
@@ -1176,14 +1144,13 @@ mod tests {
     use crate::gui::snapshot::RunTest;
     use super::*;
 
-    /// The Open dialog over a workspace gives its address field the keyboard as it opens.
+    /// Quick open over a workspace gives its address field the keyboard as it opens.
     #[test]
-    fn the_open_dialog_starts_in_its_address_field() {
+    fn quick_open_starts_in_its_address_field() {
         let ctx = egui::Context::default();
         theme::style(&ctx);
         let opt = crate::parse_client(&["--gui".into()]).unwrap();
         let mut app = App::new(Form::from(&opt), None, "", None);
-        app.section = home::Section::Connect;
         // The start's focus long used up, as when "+" is pressed in a workspace.
         app.focus_host = false;
         let mut w = workspace::Workspace::new(app.options());
@@ -1193,7 +1160,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..3 {
-            ctx.run_test(input(), |ui| app.open_dialog(ui.ctx(), &mut w));
+            ctx.run_test(input(), |ui| app.quick_open(ui.ctx(), &mut w));
         }
         assert!(ctx.memory(|m| m.focused().is_some()), "a field has the keyboard");
     }
@@ -1309,43 +1276,37 @@ mod tests {
         }
     }
 
-    /// Pictures of the open dialog over a workspace, in a large and a small window:
-    /// SSHREMOTE_SNAP_DIR=folder cargo test --release open_dialog_pictures
+    /// Pictures of the home window and of quick open, in a large and a small window, with an
+    /// SSH address and an ID typed: SSHREMOTE_SNAP_DIR=folder cargo test --release home_pictures
     #[test]
-    fn open_dialog_pictures() {
+    fn home_pictures() {
         let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
-        for (w_, h_) in [(1280.0, 800.0), (760.0, 480.0)] {
-            let ctx = egui::Context::default();
-            theme::style(&ctx);
-            let opt = crate::parse_client(&["--gui".into()]).unwrap();
-            let mut app = App::new(Form::from(&opt), None, "", None);
-            let mut w = workspace::Workspace::new(app.options());
-            w.picker = Some(Place::Tab);
-            let mut snap = snapshot::Snap::default();
-            let size = Vec2::new(w_, h_);
-            for (section, name) in [
-                (home::Section::Connect, "connect"),
-                (home::Section::Local, "local"),
-                (home::Section::Extensions, "extensions"),
-                (home::Section::Settings, "settings"),
-                (home::Section::Settings, "settings_config"),
-            ] {
-                app.section = section;
-                if name == "settings_config" {
-                    app.tool = Some(home::Tool::Config(crate::tools::ConfigTool::new()));
+        for (w_, h_) in [(1100.0, 700.0), (760.0, 520.0)] {
+            for (typed, name) in [("", "empty"), ("dev@192.168.1.20:2222", "ssh"), ("123 456 789", "id")] {
+                for quick in [false, true] {
+                    let ctx = egui::Context::default();
+                    theme::style(&ctx);
+                    let opt = crate::parse_client(&["--gui".into()]).unwrap();
+                    let mut app = App::new(Form::from(&opt), None, "", None);
+                    app.form.host = typed.into();
+                    let mut w = workspace::Workspace::new(app.options());
+                    w.picker = Some(Place::Tab);
+                    let size = Vec2::new(w_, h_);
+                    let mut snap = snapshot::Snap::default();
+                    for k in 0..10 {
+                        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.05), ..Default::default() };
+                        snap.frame(&ctx, input, |ui| {
+                            if quick {
+                                egui::Panel::top("bar").exact_size(chrome::HEIGHT).show(ui, |_| {});
+                                app.quick_open(ui.ctx(), &mut w);
+                            } else {
+                                app.home(ui);
+                            }
+                        });
+                    }
+                    let what = if quick { "quick" } else { "home" };
+                    snap.save(&ctx, size, &dir.join(format!("{what}_{name}_{w_}.png")));
                 }
-                for k in 0..10 {
-                    let input = egui::RawInput {
-                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
-                        time: Some(k as f64 * 0.05),
-                        ..Default::default()
-                    };
-                    snap.frame(&ctx, input, |ui| {
-                        egui::Panel::top("bar").exact_size(chrome::HEIGHT).show(ui, |_| {});
-                        app.open_dialog(ui.ctx(), &mut w);
-                    });
-                }
-                snap.save(&ctx, size, &dir.join(format!("open_dialog_{name}_{w_}.png")));
             }
         }
     }
@@ -1375,8 +1336,9 @@ mod tests {
         }
     }
 
-    /// Digits in Connect are a remote access ID: its password field shows at once, and Connect
-    /// opens the screen (an ID has no terminal); a relay that has not the ID says why plainly.
+    /// Digits in the address field are a remote access ID: its password field shows at once, and
+    /// it opens the screen and files only (an ID has no terminal); a relay that has not the ID
+    /// says why plainly.
     #[test]
     fn an_id_opens_through_the_relay() {
         let ctx = egui::Context::default();
@@ -1385,18 +1347,20 @@ mod tests {
         let mut app = App::new(Form::from(&opt), None, "", None);
         let mut w = workspace::Workspace::new(app.options());
         w.picker = Some(Place::Tab);
-        app.section = home::Section::Connect;
         app.form.mode = PaneMode::Terminal;
         app.form.host = "123 456 789".into();
         let mut snap = snapshot::Snap::default();
         for k in 0..4 {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), time: Some(k as f64 * 0.05), ..Default::default() };
             snap.frame(&ctx, input, |ui| {
-                app.open_dialog(ui.ctx(), &mut w);
+                app.quick_open(ui.ctx(), &mut w);
             });
         }
-        assert!(!snap.find("Password of that computer").is_empty(), "the ID's password field");
-        assert!(!snap.find(&format!("{}  Connect", PaneMode::Screen.glyph())).is_empty(), "Connect opens the screen");
+        assert!(!snap.find("Password set on that computer").is_empty(), "the ID's password field");
+        let button = |m: PaneMode| format!("{}  {}", m.glyph(), m.name());
+        assert!(!snap.find(&button(PaneMode::Screen)).is_empty(), "the screen opens");
+        assert!(snap.find(&button(PaneMode::Terminal)).is_empty(), "no terminal by ID");
+        assert_eq!(app.default_mode(true), PaneMode::Screen, "Enter opens the screen");
         assert!(friendly("relay: offline").1.contains("not at the relay"));
     }
 

@@ -1,7 +1,6 @@
 //! Hosts the user has reached before or named in ~/.ssh/config, offered by both
 //! viewers; ssh itself applies each alias's user, port and key.
 
-use std::io::{BufRead, Write};
 
 /// Concrete `Host` names in ~/.ssh/config and the files it includes (patterns with wildcards or
 /// negation are skipped).
@@ -158,57 +157,6 @@ fn find_config_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// How many recent hosts are remembered.
-pub const RECENT_MAX: usize = 12;
-
-/// Recent connections as `host port` lines; passwords are never stored.
-pub fn load_recent() -> Vec<(String, String)> {
-    let Some(p) = config_dir().map(|d| d.join("recent.txt")) else { return Vec::new() };
-    std::fs::read_to_string(p)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            Some((it.next()?.to_string(), it.next().unwrap_or("").to_string()))
-        })
-        .collect()
-}
-
-pub fn save_recent(list: &[(String, String)]) {
-    if let Some(d) = config_dir() {
-        let _ = std::fs::create_dir_all(&d);
-        let text: String = list.iter().map(|(h, p)| format!("{h} {p}\n")).collect();
-        let _ = std::fs::write(d.join("recent.txt"), text);
-    }
-}
-
-/// Terminal counterpart of the connect screen: a numbered list, or any host typed in.
-pub fn pick() -> Option<String> {
-    let recent: Vec<String> = load_recent().into_iter().map(|(h, _)| h).collect();
-    let mut all = recent.clone();
-    for h in ssh_config_hosts() {
-        if !all.contains(&h) {
-            all.push(h);
-        }
-    }
-    let mut out = std::io::stderr();
-    let _ = writeln!(out, "sshremote: choose a host");
-    for (i, h) in all.iter().enumerate() {
-        let tag = if recent.contains(h) { "recent" } else { "~/.ssh/config" };
-        let _ = writeln!(out, "  {:>2}  {h:<32} {tag}", i + 1);
-    }
-    let _ = write!(out, "number, or user@host / sshremote://host: ");
-    let _ = out.flush();
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok()?;
-    let line = line.trim();
-    match line.parse::<usize>() {
-        Ok(n) if (1..=all.len()).contains(&n) => Some(all[n - 1].clone()),
-        _ if !line.is_empty() => Some(line.to_string()),
-        _ => None,
-    }
-}
-
 fn read_lines(name: &str) -> Vec<String> {
     let Some(p) = config_dir().map(|d| d.join(name)) else { return Vec::new() };
     std::fs::read_to_string(p).unwrap_or_default().lines().map(str::to_string).filter(|l| !l.is_empty()).collect()
@@ -219,40 +167,6 @@ fn write_lines(name: &str, lines: &[String]) {
         let _ = std::fs::create_dir_all(&d);
         let _ = std::fs::write(d.join(name), lines.iter().map(|l| format!("{l}\n")).collect::<String>());
     }
-}
-
-/// Hosts marked with a star on the connect screen.
-pub fn favorites() -> Vec<String> {
-    read_lines("favorites.txt")
-}
-
-pub fn set_favorite(host: &str, on: bool) {
-    let mut list = favorites();
-    list.retain(|h| h != host);
-    if on {
-        list.insert(0, host.to_string());
-    }
-    write_lines("favorites.txt", &list);
-}
-
-/// When each host was last connected, in seconds since 1970.
-pub fn last_seen() -> std::collections::HashMap<String, u64> {
-    read_lines("seen.txt")
-        .iter()
-        .filter_map(|l| {
-            let (h, t) = l.rsplit_once(' ')?;
-            Some((h.to_string(), t.parse().ok()?))
-        })
-        .collect()
-}
-
-pub fn mark_seen(host: &str) {
-    let mut seen = last_seen();
-    seen.insert(host.to_string(), crate::sys::now_secs());
-    let mut lines: Vec<(String, u64)> = seen.into_iter().collect();
-    lines.sort_by_key(|l| std::cmp::Reverse(l.1));
-    lines.truncate(64);
-    write_lines("seen.txt", &lines.iter().map(|(h, t)| format!("{h} {t}")).collect::<Vec<_>>());
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 days ago".
@@ -304,16 +218,6 @@ fn with_settings<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
 /// Reads the settings from disk again (after a restore wrote them).
 pub fn reload_settings() {
     *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = None;
-}
-
-/// Puts `host` first in the recent list.
-pub fn remember(host: &str) {
-    let mut list = load_recent();
-    list.retain(|(h, _)| h != host);
-    list.insert(0, (host.to_string(), String::new()));
-    list.truncate(RECENT_MAX);
-    save_recent(&list);
-    mark_seen(host);
 }
 
 #[cfg(test)]

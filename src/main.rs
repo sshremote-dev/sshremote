@@ -25,6 +25,7 @@ mod color;
 mod conpty;
 #[cfg(windows)]
 mod console_user;
+mod computers;
 mod ext;
 mod exthost;
 #[cfg(feature = "remote")]
@@ -34,6 +35,7 @@ mod filewin;
 #[cfg(feature = "gui")]
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod gui;
+mod here;
 mod hosts;
 #[cfg(windows)]
 #[cfg(feature = "gui")]
@@ -78,6 +80,7 @@ mod termwin;
 mod tools;
 #[cfg(feature = "remote")]
 mod transport;
+mod tunnels;
 #[cfg(feature = "remote")]
 mod ui;
 mod vault;
@@ -224,10 +227,10 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
         if !args.iter().any(|a| a == "--term") {
             return Err(USAGE.into());
         }
-        o.host = Some(hosts::pick().ok_or("no host chosen")?);
+        o.host = Some(computers::pick().ok_or("no host chosen")?);
     }
     if let Some(h) = o.host.as_deref().filter(|_| !o.local && o.probe.is_none()) {
-        hosts::remember(h);
+        computers::used(h, None);
     }
     // A password handed over by the window that started this one, through the environment (a
     // command line can be read by other users); taken out of it, so nothing started from here

@@ -312,31 +312,26 @@ mod pictures {
         for dark in [true, false] {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
             let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);
-            let mut s = Shot::new("open", Vec2::new(900.0, 600.0), dark, |ui| app.connect_screen(ui));
-            s.save("connect");
-            // A host's menu, when there is a host (from ~/.ssh/config or used before).
-            if !s.snap.find(ic::DOTS).is_empty() {
-                s.click(ic::DOTS, 0, PointerButton::Primary);
-                s.save("row_menu");
+            let mut s = Shot::new("home", Vec2::new(960.0, 620.0), dark, |ui| app.home(ui));
+            s.save("home");
+            if !s.snap.find("Remote access settings").is_empty() {
+                s.click("Remote access settings", 0, PointerButton::Primary);
+                s.save("access_settings");
                 s.escape();
             }
-            for (place, what) in [("This computer", "local"), ("Extensions", "extensions"), ("Settings", "settings")] {
-                s.click(place, 0, PointerButton::Primary);
-                s.save(what);
+            s.click(&format!("{}  Add", ic::PLUS), 0, PointerButton::Primary);
+            s.save("add_computer");
+            s.click("By its ID", 0, PointerButton::Primary);
+            s.save("add_computer_id");
+            s.click("Cancel", 0, PointerButton::Primary);
+            s.click(ic::GEAR, 0, PointerButton::Primary);
+            s.save("settings");
+            for page in ["Connections", "SSH keys", "Passwords", "Backup", "Extensions", "Parts", "About"] {
+                s.click(page, 0, PointerButton::Primary);
+                s.save(&format!("settings_{}", page.to_lowercase().replace(' ', "_")));
             }
-            // Each tool is a page of the settings, with a way back.
-            for (tool, what) in [("SSH keys", "tool_keys"), ("SSH config file", "tool_hosts"), ("Saved passwords", "tool_vault"), ("Backup and restore", "tool_backup")] {
-                s.click(tool, 0, PointerButton::Primary);
-                s.save(what);
-                // Adding opens a page of its own; back returns to the list, then to the tools.
-                if what == "tool_hosts" {
-                    s.click("Add a host", 0, PointerButton::Primary);
-                    s.save("tool_hosts_add");
-                    s.click(ic::ARROW_LEFT, 0, PointerButton::Primary);
-                    s.save("tool_hosts_back");
-                }
-                s.click(ic::ARROW_LEFT, 0, PointerButton::Primary);
-            }
+            s.escape();
         }
     }
+
 }

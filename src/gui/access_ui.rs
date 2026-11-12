@@ -1,37 +1,42 @@
-//! The Remote access card under This computer: this computer's ID and password for viewers that
-//! come through the relay, turning it on and off, and starting it with the computer.
+//! Remote access by ID as the home window shows it: the settings read once, and the relay and the
+//! service asked about in the background; the drawing is the home's (`home/this_computer.rs`).
 
-use eframe::egui::{self, CornerRadius, RichText, Stroke};
+use eframe::egui::{self, CornerRadius};
 
-use super::{App, bad, good, ic, icon, theme};
+use super::{App, bad, good};
 
-/// What the card keeps between frames.
+/// What remote access keeps between frames.
 #[derive(Default)]
 pub(super) struct AccessUi {
     #[cfg(feature = "remote")]
-    cfg: Option<crate::access::Config>,
-    show_password: bool,
-    new_password: String,
-    relay: String,
+    pub(super) cfg: Option<crate::access::Config>,
+    pub(super) show_password: bool,
+    pub(super) new_password: String,
+    pub(super) relay: String,
     /// Whether the relay sees this ID now (for which ID and relay), looked up in the background
     /// every few seconds, one lookup at a time.
-    online: Shared<Option<(String, String, Result<bool, String>)>>,
-    looked: Option<std::time::Instant>,
+    pub(super) online: Shared<Option<Online>>,
+    pub(super) looked: Option<std::time::Instant>,
     /// The service: installed, running, and running this program file; looked up in the background.
-    service: Shared<Option<Service>>,
-    service_looked: Option<std::time::Instant>,
+    pub(super) service: Shared<Option<Service>>,
+    pub(super) service_looked: Option<std::time::Instant>,
     /// Why the stored settings could not be read or kept, shown instead of an ID.
     #[cfg(feature = "remote")]
-    problem: Option<String>,
+    pub(super) problem: Option<String>,
 }
 
 type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 
+/// The relay's answer: for which ID and relay, and whether it sees the ID there.
+type Online = (String, String, Result<bool, String>);
+
 #[derive(Clone, Copy, Default)]
-struct Service {
-    installed: bool,
-    runs: bool,
-    this: bool,
+pub(super) struct Service {
+    pub(super) installed: bool,
+    /// It runs now (and so serves the viewers, not this window).
+    pub(super) runs: bool,
+    /// It runs this program file (not an older copy).
+    pub(super) this: bool,
 }
 
 /// Runs `look` on a thread of its own unless one still runs for `slot`, then repaints.
@@ -62,28 +67,11 @@ static ONLINE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 static SERVICE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl App {
-    /// The Remote access card.
-    pub(super) fn access_card(&mut self, ui: &mut egui::Ui) {
-        let v = ui.visuals().clone();
-        egui::Frame::new()
-            .fill(v.faint_bg_color)
-            .stroke(Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
-            .corner_radius(CornerRadius::same(theme::R_LG))
-            .inner_margin(egui::Margin::symmetric(14, 12))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                #[cfg(feature = "remote")]
-                self.access_body(ui);
-                #[cfg(not(feature = "remote"))]
-                ui.label(RichText::new(crate::not_built("remote access by ID")).weak());
-            });
-    }
-
     /// The settings kept, read once (a fresh ID kept at once, so the ID shown is the one others
     /// will use), and the service and the relay asked about in the background now and then.
     /// `None` when they cannot be read or kept (see `problem`).
     #[cfg(feature = "remote")]
-    fn access_status(&mut self, ctx: &egui::Context) -> Option<(crate::access::Config, Service)> {
+    pub(super) fn access_status(&mut self, ctx: &egui::Context) -> Option<(crate::access::Config, Service)> {
         use crate::access;
         let a = &mut self.access;
         if a.cfg.is_none() && a.problem.is_none() {
@@ -125,7 +113,7 @@ impl App {
 
     /// Whether viewers can reach this computer now, as a colour and a line.
     #[cfg(feature = "remote")]
-    fn access_state(&self, cfg: &crate::access::Config, svc: Service, weak: egui::Color32) -> (egui::Color32, String) {
+    pub(super) fn access_state(&self, cfg: &crate::access::Config, svc: Service, weak: egui::Color32) -> (egui::Color32, String) {
         use crate::access;
         // Only an answer about this ID at this relay counts.
         let online = self.access.online.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|(id, relay, _)| *id == cfg.id && *relay == cfg.relay).map(|(_, _, r)| r);
@@ -147,219 +135,37 @@ impl App {
         }
     }
 
-    /// This computer's ID and password in the side bar of the open window, as RustDesk shows them
-    /// beside the place to connect: copied with a click; off, a word that it is off.
+    /// Keeps changed remote access settings; the relay is asked again about the new ones.
     #[cfg(feature = "remote")]
-    pub(super) fn access_summary(&mut self, ui: &mut egui::Ui) -> bool {
-        let ctx = ui.ctx().clone();
-        let mut open_page = false;
-        let Some((cfg, svc)) = self.access_status(&ctx) else { return false };
-        let weak = ui.visuals().weak_text_color();
-        ui.label(RichText::new("This computer").size(11.5).color(weak));
-        if !cfg.enabled {
-            ui.label(RichText::new("Remote access by ID is off").size(12.5));
-            open_page = ui.link(RichText::new("Turn it on").size(12.5)).clicked();
-            return open_page;
+    pub(super) fn save_access(&mut self, cfg: crate::access::Config) {
+        match crate::access::save(&cfg) {
+            Ok(()) => {
+                self.access.cfg = Some(cfg);
+                self.access.looked = None;
+                *self.access.online.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            Err(e) => {
+                self.error = Some(e);
+                self.access.cfg = None;
+            }
         }
-        let copy = |ui: &mut egui::Ui, text: RichText, value: &str, what: &str| {
-            let r = ui.add(egui::Label::new(text).sense(egui::Sense::click())).on_hover_text(format!("Click to copy the {what}"));
-            if r.clicked() {
-                ui.ctx().copy_text(value.to_string());
-            }
-            r.on_hover_cursor(egui::CursorIcon::PointingHand);
-        };
-        copy(ui, RichText::new(crate::access::spaced(&cfg.id)).size(19.0).strong().monospace(), &cfg.id, "ID");
-        ui.horizontal(|ui| {
-            let shown = if self.access.show_password { cfg.password.clone() } else { "\u{2022}".repeat(cfg.password.chars().count()) };
-            copy(ui, RichText::new(shown).size(14.0).monospace(), &cfg.password, "password");
-            let (g, t) = if self.access.show_password { (ic::EYE_SLASH, "Hide the password") } else { (ic::EYE, "Show the password") };
-            if ui.add(egui::Button::new(RichText::new(g).size(13.0)).frame_when_inactive(false).min_size(egui::vec2(22.0, 22.0))).on_hover_text(t).clicked() {
-                self.access.show_password = !self.access.show_password;
-            }
-        });
-        let (color, text) = self.access_state(&cfg, svc, weak);
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-            ui.painter().circle_filled(r.center(), 3.5, color);
-            let short = text.split(':').next().unwrap_or(&text).to_string();
-            ui.add(egui::Label::new(RichText::new(short).size(11.5).color(color)).truncate()).on_hover_text(&text);
-        });
-        open_page
+    }
+
+    /// Installs, updates or removes the service that runs remote access with the computer; it is
+    /// looked up again after.
+    #[cfg(feature = "remote")]
+    pub(super) fn service_change(&mut self, install: bool) {
+        let r = if install { crate::access::install_service() } else { crate::access::uninstall_service() };
+        self.error = r.err().map(|e| format!("Service: {e}"));
+        self.access.service_looked = None;
+        *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.service = None;
     }
 
-    #[cfg(feature = "remote")]
-    fn access_body(&mut self, ui: &mut egui::Ui) {
-        use crate::access;
-        let ctx = ui.ctx().clone();
-        let Some((mut cfg, svc)) = self.access_status(&ctx) else {
-            ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
-            ui.label(RichText::new("Lets others reach this computer with an ID and a password through the relay, for computers on Wi-Fi or without a fixed address.").weak().size(12.0));
-            ui.add_space(6.0);
-            let why = self.access.problem.clone().unwrap_or_default();
-            ui.label(RichText::new(format!("Not set up yet: {why}")).color(bad()));
-            ui.horizontal(|ui| {
-                if cfg!(windows) && !crate::admin::elevated() && ui.add(theme::primary(format!("{}  Restart as administrator to set it up", ic::SHIELD_CHECK))).clicked() {
-                    self.restart_elevated(ui.ctx());
-                }
-                if ui.button("Try again").clicked() {
-                    self.access.problem = None;
-                }
-            });
-            return;
-        };
-        let service = svc.installed;
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut on = cfg.enabled;
-                if toggle(ui, &mut on).on_hover_text(if on { "Turn remote access off" } else { "Turn remote access on" }).clicked() {
-                    cfg.enabled = on;
-                    changed = true;
-                }
-            });
-        });
-        ui.label(RichText::new("Anyone with this ID and password can see and control this computer, from anywhere, through the relay. For computers on Wi-Fi or without a fixed address; SSH stays the way for one host you reach directly.").weak().size(12.0));
-        // Off, the card is only its switch: the ID, the password and the service show once it is on.
-        'on: {
-            if !cfg.enabled {
-                break 'on;
-            }
-            ui.add_space(8.0);
-            // The ID and the password, large, to read out or copy.
-            egui::Grid::new("access-grid").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-                ui.label(RichText::new("ID").weak());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(access::spaced(&cfg.id)).size(22.0).strong().monospace());
-                    if icon(ui, ic::COPY, "Copy the ID", false).clicked() {
-                        ui.ctx().copy_text(cfg.id.clone());
-                    }
-                });
-                ui.end_row();
-                ui.label(RichText::new("Password").weak());
-                ui.horizontal(|ui| {
-                    let shown = if self.access.show_password { cfg.password.clone() } else { "\u{2022}".repeat(cfg.password.chars().count()) };
-                    ui.label(RichText::new(shown).size(18.0).monospace());
-                    let (g, t) = if self.access.show_password { (ic::EYE_SLASH, "Hide") } else { (ic::EYE, "Show") };
-                    if icon(ui, g, t, false).clicked() {
-                        self.access.show_password = !self.access.show_password;
-                    }
-                    if icon(ui, ic::COPY, "Copy the password", false).clicked() {
-                        ui.ctx().copy_text(cfg.password.clone());
-                    }
-                    if icon(ui, ic::ARROWS_CLOCKWISE, "A new random password (viewers need the new one)", false).clicked() {
-                        cfg.password = access::new_password();
-                        self.access.show_password = true;
-                        changed = true;
-                    }
-                });
-                ui.end_row();
-                ui.label(RichText::new("State").weak());
-                let (color, text) = self.access_state(&cfg, svc, ui.visuals().weak_text_color());
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.5, color);
-                    ui.label(RichText::new(text).color(color));
-                });
-                ui.end_row();
-            });
-            ui.add_space(8.0);
-            ui.separator();
-            // Starting with the computer: the service, which also works at the sign-in screen.
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{}  Start with the computer", ic::SHIELD_CHECK)).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let admin = !cfg!(windows) || crate::admin::elevated();
-                    if service && !svc.this {
-                        let b = ui.add_enabled(admin, theme::primary(format!("{}  Update the service", ic::DOWNLOAD)));
-                        if b.on_hover_text("The installed service runs another copy of sshremote; this one has what it lacks").on_disabled_hover_text("Needs administrator rights").clicked() {
-                            self.error = access::install_service().err().map(|e| format!("Service: {e}"));
-                            self.access.service_looked = None;
-                            *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            self.service = None;
-                        }
-                    } else if service {
-                        ui.label(RichText::new(format!("{}  Installed", ic::CHECK)).color(good()));
-                        if ui.add_enabled(admin, egui::Button::new("Remove")).on_disabled_hover_text("Needs administrator rights").clicked() {
-                            self.error = access::uninstall_service().err().map(|e| format!("Service: {e}"));
-                            self.access.service_looked = None;
-                            *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            self.service = None;
-                        }
-                    } else if admin {
-                        if ui.add(theme::primary(format!("{}  Install", ic::DOWNLOAD))).clicked() {
-                            cfg.enabled = true;
-                            let _ = access::save(&cfg);
-                            self.error = access::install_service().err().map(|e| format!("Service: {e}"));
-                            self.access.service_looked = None;
-                            *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            self.service = None;
-                        }
-                    } else if ui.add(theme::primary(format!("{}  Restart as administrator to install", ic::SHIELD_CHECK))).clicked() {
-                        self.restart_elevated(ui.ctx());
-                    }
-                });
-            });
-            let what = if cfg!(windows) {
-                "Installs the SSH Remote service: reachable after a restart, at the sign-in and lock screens, with no window open."
-            } else {
-                "Adds a systemd user service: reachable whenever you are signed in, with no window open."
-            };
-            ui.label(RichText::new(what).weak().size(12.0));
-            if !service {
-                ui.label(RichText::new("Without it, remote access works while this window is open.").weak().size(12.0));
-            }
-            ui.add_space(4.0);
-            egui::CollapsingHeader::new(RichText::new("More").size(12.0)).id_salt("access-more").show(ui, |ui| {
-                egui::Grid::new("access-more-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Your own password").weak());
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.access.new_password).password(true).hint_text("8 characters or more").desired_width(180.0));
-                        if ui.add_enabled(self.access.new_password.trim().chars().count() >= 8, egui::Button::new("Set")).clicked() {
-                            cfg.password = self.access.new_password.trim().to_string();
-                            self.access.new_password.clear();
-                            changed = true;
-                        }
-                    });
-                    ui.end_row();
-                    ui.label(RichText::new("Relay").weak()).on_hover_text("sshremote.dev, or your own: sshremote-relay (github.com/thinkbigx/sshremote-relay) on a server");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.access.relay).desired_width(180.0));
-                        if ui.add_enabled(self.access.relay.trim() != cfg.relay, egui::Button::new("Use")).clicked() {
-                            let r = self.access.relay.trim();
-                            cfg.relay = if r.is_empty() { access::DEFAULT_RELAY.into() } else { r.to_string() };
-                            self.access.relay = cfg.relay.clone();
-                            changed = true;
-                        }
-                    });
-                    ui.end_row();
-                    ui.label(RichText::new("New ID").weak());
-                    if ui.button("Take a new ID").on_hover_text("Those who know the old ID can no longer use it").clicked() {
-                        cfg.id = access::new_id();
-                        changed = true;
-                    }
-                    ui.end_row();
-                });
-            });
-        }
-        if changed {
-            match access::save(&cfg) {
-                Ok(()) => {
-                    self.access.cfg = Some(cfg);
-                    self.access.looked = None;
-                    *self.access.online.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                }
-                Err(e) => {
-                    self.error = Some(e);
-                    self.access.cfg = None;
-                }
-            }
-        }
-    }
 }
 
 /// An on/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+pub(super) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let size = egui::vec2(38.0, 20.0);
     let (rect, mut r) = ui.allocate_exact_size(size, egui::Sense::click());
     if r.clicked() {

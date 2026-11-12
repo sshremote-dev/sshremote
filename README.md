@@ -39,12 +39,24 @@ Tests that reach other computers name them by ssh alias:
 
 ## The window
 
-`sshremote` opens a small open window: a new connection, this computer (local shells, its screen
-and files), the SSH hosts (favorites, recent, `~/.ssh/config`) and the tools.
+`sshremote` opens its home window in two columns:
+
+- **This computer** on the left: how others reach it (its remote access ID, IP addresses, full
+  name, and `user@IP` when an SSH server answers), each copied with a click; then remote access by
+  ID: its switch, password, state and who is connected, with its settings in a sheet.
+- **Going out** on the right: one address field for `user@host`, an alias, an IP or an ID. It says
+  what it reads there and opens a terminal, the screen or the files on it; an ID asks for its
+  password in place. Under it the computers: this computer first, then favorites and the last
+  opened, with the aliases of `~/.ssh/config`. A computer's sheet (Add, or Edit in its menu) keeps
+  its name, its address or its `~/.ssh/config` block (host, user, port, key), its saved password
+  and its **tunnels** (`-L`, `-R` or SOCKS through it, opened on demand or with the app).
+- The gear opens **Settings**: Appearance, Connections, SSH keys, Passwords, Backup, Extensions,
+  Parts and About.
+
 What is opened goes into the workspace:
 
 - **Tabs and panes** as in Windows Terminal: each tab (host and round trip) holds panes split
-  beside or below; + opens the same open dialog. The active pane is outlined and the title bar
+  beside or below; + opens Quick open, the same address field and computers. The active pane is outlined and the title bar
   follows it. On the right: the pane's **mode** (terminal, screen sharing, files; switching does not
   connect again), its controls, then full screen, split beside, split below, move left and right.
   A narrow window folds the controls into one menu.
@@ -120,11 +132,11 @@ as text (accessibility tree) and act on its controls, with screenshots only when
 
 ## Remote access by ID (without ssh)
 
-For a PC on Wi-Fi or behind NAT with no fixed address: open dialog → This computer → **Remote
-access by ID**. Turn it on; the card shows a lasting 9-digit ID and a password (show, copy, a new
-one, or your own). **Start with the computer** installs the service (Windows, also at the sign-in
-screen) or a systemd user unit (Linux). On the other side, type the ID in New connection, give the
-password and open the screen or files.
+For a PC on Wi-Fi or behind NAT with no fixed address: turn on **Remote access by ID** on the left
+of the home window. It shows a lasting 9-digit ID and a password (show, copy, a new one); its
+settings sheet sets your own password, the relay, a new ID and **Start with the computer**, which
+installs the service (Windows, also at the sign-in screen) or a systemd user unit (Linux). On the
+other side, type the ID in the address field, give the password and open the screen or files.
 
 ```sh
 sshremote remote-access            # this computer's ID, password and state

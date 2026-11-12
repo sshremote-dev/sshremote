@@ -125,7 +125,7 @@ impl KeyTool {
         self.keys = list_keys();
     }
 
-    /// The page, in the open view's tools: the keys, or the form creating one or installing one
+    /// The page, in Settings: the keys, or the form creating one or installing one
     /// on a host.
     pub fn ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
         if self.creating || self.installing.is_some() {
@@ -264,6 +264,38 @@ pub struct HostEntry {
     pub user: String,
     pub port: String,
     pub identity: String,
+}
+
+/// The block of `alias` in ~/.ssh/config, as a form shows it.
+pub fn config_entry(alias: &str) -> Option<HostEntry> {
+    parse_config(&std::fs::read_to_string(config_path()).unwrap_or_default()).into_iter().find(|h| h.alias == alias)
+}
+
+/// Writes ~/.ssh/config with `change` made to it, keeping the file before as config.bak.
+fn rewrite_config(change: impl FnOnce(&str) -> String) -> Result<(), String> {
+    let path = config_path();
+    let _ = std::fs::create_dir_all(ssh_dir());
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    if path.exists() {
+        let _ = std::fs::copy(&path, ssh_dir().join("config.bak"));
+    }
+    std::fs::write(&path, change(&before)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Puts `entry` in ~/.ssh/config: the block of `was` changed, or a new one at the end.
+pub fn save_config_entry(was: &str, entry: &HostEntry) -> Result<(), String> {
+    if entry.alias.trim().is_empty() || entry.alias.contains(char::is_whitespace) {
+        return Err("A name of one word is needed, such as web1.".into());
+    }
+    if let Some(p) = host_problem(entry) {
+        return Err(p);
+    }
+    rewrite_config(|text| upsert_host(text, was, entry))
+}
+
+/// Takes the block of `alias` out of ~/.ssh/config.
+pub fn remove_config_entry(alias: &str) -> Result<(), String> {
+    rewrite_config(|text| remove_host(text, alias))
 }
 
 fn parse_config(text: &str) -> Vec<HostEntry> {
@@ -414,308 +446,8 @@ pub fn remove_host(text: &str, alias: &str) -> String {
     s
 }
 
-#[derive(PartialEq)]
-enum ConfigView {
-    Hosts,
-    File,
-}
-
-/// `~/.ssh/config`: its hosts as a list with a form to add, change or remove one, and the whole
-/// file in an editor.
-pub struct ConfigTool {
-    view: ConfigView,
-    hosts: Vec<HostEntry>,
-    form: HostEntry,
-    /// The alias of the host being changed; empty while adding one.
-    editing: String,
-    /// The dialog adding or changing a host is open.
-    form_open: bool,
-    text: String,
-    saved: String,
-    status: Option<(bool, String)>,
-}
-
 fn config_path() -> PathBuf {
     ssh_dir().join("config")
-}
-
-impl ConfigTool {
-    pub fn new() -> Self {
-        let text = std::fs::read_to_string(config_path()).unwrap_or_default();
-        ConfigTool {
-            view: ConfigView::Hosts,
-            hosts: parse_config(&text),
-            form: HostEntry { port: "22".into(), ..Default::default() },
-            editing: String::new(),
-            form_open: false,
-            saved: text.clone(),
-            text,
-            status: None,
-        }
-    }
-
-    /// Whether the file is as it was read; changed meanwhile (by an editor, by ssh-keygen), it is
-    /// read again and nothing is written over it.
-    fn unchanged_outside(&mut self) -> bool {
-        let now = std::fs::read_to_string(config_path()).unwrap_or_default();
-        if now == self.saved {
-            return true;
-        }
-        self.hosts = parse_config(&now);
-        self.saved = now.clone();
-        self.text = now;
-        self.status = Some((false, "The file was changed outside this tool; it is read again. Check, then try once more.".into()));
-        false
-    }
-
-    /// Writes the file, keeping the previous one as config.bak.
-    fn write(&mut self, text: String, done: String) -> bool {
-        let path = config_path();
-        let _ = std::fs::create_dir_all(ssh_dir());
-        if path.exists() {
-            let _ = std::fs::copy(&path, ssh_dir().join("config.bak"));
-        }
-        match std::fs::write(&path, &text) {
-            Ok(()) => {
-                self.hosts = parse_config(&text);
-                self.saved = text.clone();
-                self.text = text;
-                self.status = Some((true, done));
-                true
-            }
-            Err(e) => {
-                self.status = Some((false, format!("{}: {e}", path.display())));
-                false
-            }
-        }
-    }
-
-    fn save_form(&mut self) -> bool {
-        let h = &self.form;
-        let alias = h.alias.trim().to_string();
-        if alias.is_empty() || h.hostname.trim().is_empty() || alias.contains(char::is_whitespace) {
-            self.status = Some((false, "An alias (one word) and a host name or address are needed.".into()));
-            return false;
-        }
-        if alias != self.editing && self.hosts.iter().any(|e| e.alias == alias) {
-            self.status = Some((false, format!("{alias} is in the file already.")));
-            return false;
-        }
-        if let Some(problem) = host_problem(h) {
-            self.status = Some((false, problem));
-            return false;
-        }
-        if self.text != self.saved {
-            self.status = Some((false, "The file has unsaved edits; save or revert them first.".into()));
-            return false;
-        }
-        if !self.unchanged_outside() {
-            return false;
-        }
-        let h = &self.form;
-        let text = upsert_host(&self.saved, &self.editing, h);
-        let done = if self.editing.is_empty() { format!("Added {alias}") } else { format!("Saved {alias}") };
-        let ok = self.write(text, done);
-        if ok {
-            self.form = HostEntry { port: "22".into(), ..Default::default() };
-            self.editing.clear();
-        }
-        ok
-    }
-
-    /// The page, in the open view's tools; sets `changed` when the host list changed.
-    pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
-        if self.form_open {
-            return self.host_form(ui, changed);
-        }
-        ui.horizontal(|ui| {
-            if ui.add(choice("Hosts", self.view == ConfigView::Hosts)).clicked() {
-                self.view = ConfigView::Hosts;
-            }
-            let dirty = if self.text != self.saved { " *" } else { "" };
-            if ui.add(choice(format!("Edit the file{dirty}"), self.view == ConfigView::File)).clicked() {
-                self.view = ConfigView::File;
-            }
-        });
-        ui.add_space(6.0);
-        match self.view {
-            ConfigView::Hosts => self.hosts_view(ui, changed),
-            ConfigView::File => self.file_view(ui, changed),
-        }
-        status(ui, &self.status);
-    }
-
-    fn hosts_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
-        ui.label(RichText::new("ssh, this app and other tools use these names, users, ports and keys.").weak());
-        ui.add_space(8.0);
-        if ui.add(primary(format!("{}  Add a host", ic::PLUS))).clicked() {
-            self.editing.clear();
-            self.form = HostEntry { port: "22".into(), ..Default::default() };
-            self.form_open = true;
-            self.status = None;
-        }
-        let mut edit = None;
-        let mut remove = None;
-        ui.add_space(4.0);
-        {
-            egui::Grid::new("hosts").striped(true).num_columns(6).spacing([14.0, 2.0]).min_row_height(30.0).show(ui, |ui| {
-                for t in ["Alias", "Host", "User", "Port", "Key", ""] {
-                    ui.label(RichText::new(t).weak().small());
-                }
-                ui.end_row();
-                for h in &self.hosts {
-                    ui.label(RichText::new(&h.alias).strong());
-                    ui.label(&h.hostname);
-                    ui.label(&h.user);
-                    ui.label(if h.port.is_empty() { "22" } else { &h.port });
-                    ui.label(RichText::new(&h.identity).small());
-                    ui.horizontal(|ui| {
-                        if icon(ui, ic::PENCIL, &format!("Change {}", h.alias), self.editing == h.alias).clicked() {
-                            edit = Some(h.clone());
-                        }
-                        if icon(ui, ic::TRASH, &format!("Remove {} from the file (the old file is kept as config.bak)", h.alias), false).clicked() {
-                            remove = Some(h.alias.clone());
-                        }
-                    });
-                    ui.end_row();
-                }
-            });
-        }
-        if let Some(h) = edit {
-            self.editing = h.alias.clone();
-            self.form = HostEntry { port: if h.port.is_empty() { "22".into() } else { h.port.clone() }, ..h };
-            self.form_open = true;
-            self.status = None;
-        }
-        if let Some(alias) = remove {
-            if self.text != self.saved {
-                self.status = Some((false, "The file has unsaved edits; save or revert them first.".into()));
-            } else if self.unchanged_outside()
-                && self.write(remove_host(&self.saved, &alias), format!("Removed {alias} (the old file is config.bak)"))
-            {
-                *changed = true;
-            }
-        }
-    }
-
-    pub fn sub_page(&self) -> bool {
-        self.form_open
-    }
-
-    /// Edits of the file not saved yet: leaving would lose them, so it asks for a save first.
-    pub fn keep_open(&mut self) -> bool {
-        let unsaved = self.text != self.saved;
-        if unsaved {
-            self.view = ConfigView::File;
-            self.status = Some((false, "The file has unsaved edits: save them (Ctrl+S) or revert them first.".into()));
-        }
-        unsaved
-    }
-
-    pub fn back(&mut self) {
-        self.form_open = false;
-        self.editing.clear();
-        self.status = None;
-    }
-
-    /// The form adding or changing a host, in place of the list.
-    fn host_form(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
-        let title = if self.editing.is_empty() { "Add a host".to_string() } else { format!("Change {}", self.editing) };
-        let ok = if self.editing.is_empty() { "Add host" } else { "Save" };
-        let ready = !self.form.alias.trim().is_empty() && !self.form.hostname.trim().is_empty();
-        let keys: Vec<String> = list_keys().into_iter().map(|k| format!("~/.ssh/{}", k.name)).collect();
-        let status = self.status.clone();
-        let answer = form_page(ui, &title, ok, ready, &status, |ui| {
-            egui::Grid::new("addhost").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Alias");
-                ui.add(egui::TextEdit::singleline(&mut self.form.alias).hint_text("web1").desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("Host name");
-                ui.add(egui::TextEdit::singleline(&mut self.form.hostname).hint_text("192.168.1.20 or server.example.com").desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("User");
-                ui.add(egui::TextEdit::singleline(&mut self.form.user).desired_width(FIELD_W));
-                ui.end_row();
-                ui.label("Port");
-                ui.add(egui::TextEdit::singleline(&mut self.form.port).desired_width(80.0));
-                ui.end_row();
-                ui.label("Key");
-                let shown = if self.form.identity.is_empty() { "default".to_string() } else { self.form.identity.clone() };
-                combo("hostkey", shown).width(FIELD_W).show_ui(ui, |ui| {
-                    crate::gui::menu_look(ui);
-                    ui.selectable_value(&mut self.form.identity, String::new(), "default");
-                    for k in &keys {
-                        ui.selectable_value(&mut self.form.identity, k.clone(), k);
-                    }
-                });
-                ui.end_row();
-            });
-        });
-        match answer {
-            Some(true) => {
-                if self.save_form() {
-                    *changed = true;
-                    self.form_open = false;
-                }
-            }
-            Some(false) => {
-                self.form_open = false;
-                self.editing.clear();
-                self.status = None;
-            }
-            None => {}
-        }
-    }
-
-    fn file_view(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
-        ui.horizontal(|ui| {
-            let dirty = self.text != self.saved;
-            let save = primary(format!("{}  Save", ic::CHECK));
-            if ui.add_enabled(dirty, save).on_hover_text("Ctrl+S; the previous file is kept as config.bak").clicked()
-                || (dirty && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)))
-            {
-                let text = self.text.clone();
-                if self.write(text, "Saved ~/.ssh/config (the old file is config.bak)".into()) {
-                    *changed = true;
-                }
-            }
-            if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
-                self.text = self.saved.clone();
-            }
-            if ui.button("Reload").on_hover_text("Read the file again from disk").clicked() {
-                *self = ConfigTool { view: ConfigView::File, ..ConfigTool::new() };
-            }
-            if ui.button("Open in the system editor").clicked() {
-                let path = config_path();
-                if !path.exists() {
-                    let _ = std::fs::create_dir_all(ssh_dir());
-                    let _ = std::fs::write(&path, "");
-                }
-                open_path(&path);
-            }
-        });
-        let th = crate::markdown::Theme::of(ui);
-        egui::Frame::new().fill(th.bg).corner_radius(crate::gui::theme::R_SM).inner_margin(6.0).show(ui, |ui| {
-            egui::ScrollArea::both().max_height(440.0).auto_shrink([false, false]).show(
-                ui,
-                |ui| {
-                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
-                        let mut job = crate::markdown::highlight(buf.as_str(), "ssh-config", &th, 13.0);
-                        job.wrap.max_width = f32::INFINITY;
-                        ui.ctx().fonts_mut(|f| f.layout_job(job))
-                    };
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.text)
-                            .code_editor()
-                            .frame(egui::Frame::NONE)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(18)
-                            .layouter(&mut layouter),
-                    );
-                },
-            );
-        });
-    }
 }
 
 /// Saved SSH passwords, kept in the system's password store.
@@ -732,7 +464,7 @@ impl VaultTool {
         VaultTool { hosts: crate::vault::list(), host: host.to_string(), password: String::new(), status: None, adding: false }
     }
 
-    /// The page, in the open view's tools. `known` are hosts to pick from.
+    /// The page, in Settings. `known` are the computers to pick from.
     pub fn ui(&mut self, ui: &mut egui::Ui, known: &[String]) {
         if self.adding {
             return self.form(ui, known);
@@ -876,7 +608,7 @@ impl BackupTool {
             .collect();
     }
 
-    /// The page, in the open view's tools: the backups; backing up and restoring ask what they
+    /// The page, in Settings: the backups; backing up and restoring ask what they
     /// need in dialogs. Sets `changed` after a restore.
     pub fn ui(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         if self.dialog.is_some() {
@@ -1169,13 +901,9 @@ Host c
         let ctx = eframe::egui::Context::default();
         crate::gui::style(&ctx);
         let mut keys = super::KeyTool::new();
-        let mut config = super::ConfigTool::new();
         let mut vault = super::VaultTool::new("user@host");
         let mut backup = super::BackupTool::new();
-        for frame in 0..4 {
-            if frame == 2 {
-                config.view = super::ConfigView::File;
-            }
+        for _ in 0..4 {
             let input = eframe::egui::RawInput {
                 screen_rect: Some(eframe::egui::Rect::from_min_size(
                     Default::default(),
@@ -1187,7 +915,6 @@ Host c
                 let mut actions = Vec::new();
                 let mut changed = false;
                 keys.ui(ui, &mut actions);
-                config.ui(ui, &mut changed);
                 vault.ui(ui, &["a".into(), "b".into()]);
                 backup.ui(ui, &mut changed);
                 assert!(!changed, "drawing changes nothing");

@@ -50,28 +50,30 @@ remote access settings (relay, start with the computer) in a sheet of their own.
 **Right: going out.** One address field takes anything: an alias, `user@host[:port]`, an IP, or a
 nine-digit ID. Under it, what was recognised ("SSH host", "Computer by ID", "This computer") and
 the actions it allows: Terminal, Screen, Files (an ID has no terminal). A password field appears in
-the same row only when the address needs one (an ID). There are no fields inside drop-downs.
+the same card only when the address needs one: an ID, or an SSH computer that refused the keys (or
+when asked for with the key button). There are no fields inside drop-downs.
 
 Below, the computers: this computer first, then favorites, then the rest by last use; computers of
 `~/.ssh/config` among them. A row shows the name, its address, how it is reached and when it was
 last used; its actions appear on hover and by keyboard. Its sheet (Edit) holds the name, user,
 port, key, saved password and tunnels; an SSH alias is written back to `~/.ssh/config`.
 
-The gear opens Settings: Appearance, SSH keys, Passwords, Backup, Extensions, Parts, About.
+The gear opens Settings: Appearance, Connections, SSH keys, Passwords, Backup, Extensions, Parts, About.
 
-In a workspace, `+` opens Quick open: a field and the computers filtered as one types; Enter opens
-the default action, the arrow keys and Tab choose another. It never repeats the home window.
+In a workspace, `+` opens Quick open: the same field and computers, filtered as one types; the
+arrow keys pick a computer and Enter opens it with the last action chosen.
 
 ## The computers list
 
 ```
-Computer { key, name, how: Ssh { host, user, port, key } | Id { id, relay } | Local,
-           favorite, last_used, alias_in_ssh_config, tunnels: [Tunnel] }
+Computer { address, port, name, favorite, last_used, in_ssh_config, tunnels: [Tunnel] }
 Tunnel   { kind: Local | Remote | Socks, port, dest, start_with_app }
 ```
 
-It is kept in `computers.json` in the settings folder; `~/.ssh/config` aliases are read live and
-merged by name. The older `recent.txt`, `favorites.txt` and `seen.txt` are read once into it.
+The address is how it is reached and what it is known by: an alias of `~/.ssh/config` (whose host,
+user, port and key stay there), `user@host`, or `sshremote://ID@RELAY`. It is kept in
+`computers.json` in the settings folder; `~/.ssh/config` aliases are read live and merged by
+address. The older `recent.txt`, `favorites.txt` and `seen.txt` are read once into it.
 Passwords stay in the system's password store, keyed by the computer's address. The window, the
 web gateway and the terminal picker all read this one list.
 
