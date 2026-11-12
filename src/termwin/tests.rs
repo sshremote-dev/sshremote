@@ -51,6 +51,19 @@ fn the_emulator_answers_cursor_queries() {
     assert_eq!(replies, ["\x1b[1;3R"]);
 }
 
+/// In a tab of one pane Alt+arrows are the shell's (a word left or right); with two panes they
+/// move between them.
+#[test]
+fn alt_arrows_reach_the_shell_in_a_tab_of_one_pane() {
+    let ctx = egui::Context::default();
+    let mut w = TermWindow::new(None);
+    frame(&ctx, &mut w, Vec::new());
+    frame(&ctx, &mut w, Vec::new());
+    let left = Event::Key { key: Key::ArrowLeft, physical_key: Some(Key::ArrowLeft), pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
+    let out = frame(&ctx, &mut w, vec![left]);
+    assert_eq!(typed(&out), "\x1b[1;3D");
+}
+
 /// A program asking the background colour (to pick a light or a dark theme) or the size in
 /// pixels gets an answer, as from any terminal.
 #[test]

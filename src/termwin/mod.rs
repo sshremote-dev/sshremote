@@ -855,8 +855,11 @@ impl TermWindow {
         for (p, split) in std::mem::take(&mut self.pending) {
             self.start(ctx, p, split, out);
         }
+        // Alt+arrows move between the panes of a tab when it has more than one; with one they are
+        // the shell's (a word left or right).
+        let groups: Vec<u32> = self.tabs.iter().map(|t| t.group).collect();
         for t in &mut self.tabs {
-            t.nav_keys = !self.bare;
+            t.nav_keys = !self.bare && groups.iter().filter(|&&g| g == t.group).count() > 1;
         }
         // Output of local programs.
         for t in &mut self.tabs {
