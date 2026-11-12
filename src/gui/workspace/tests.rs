@@ -1158,6 +1158,8 @@ fn a_shell_that_cannot_reach_the_agent_stays_a_shell() {
 /// a caret; unfolded, the bar's tabs and controls.
 #[test]
 fn full_screen_dock_folds_and_unfolds() {
+    // Folded at first, as for someone who never unfolded it.
+    crate::hosts::set_setting("toolbar_expanded", "no");
     let mut h = Harness::new();
     let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
     h.w.add(
@@ -1194,7 +1196,18 @@ fn full_screen_dock_folds_and_unfolds() {
     for _ in 0..60 {
         h.frame(vec![Event::PointerMoved(away)]);
     }
-    assert!(!h.w.dock.open && !tabs_shown(&h), "folded again");
+    assert!(!h.w.dock.open && !tabs_shown(&h), "gone again");
+    assert!(h.snap.find(ic::CARET_DOWN).is_empty(), "whole, not into the tab: it was left unfolded");
+    // Unfolded last, the band itself comes back at the top edge.
+    h.frame(vec![Event::PointerMoved(Pos2::new(900.0, 1.0))]);
+    h.frame(Vec::new());
+    assert!(h.w.dock.open && tabs_shown(&h), "remembered unfolded");
+    let tab_h = h.snap.find(ic::CARET_UP).into_iter().next().expect("the band's caret").height();
+    assert!(tab_h < 20.0, "a compact band: {tab_h}");
+    for _ in 0..60 {
+        h.frame(vec![Event::PointerMoved(away)]);
+    }
+    assert!(!h.w.dock.open, "gone after a moment");
     // Ctrl+Alt+Home unfolds and folds it.
     let home = |pressed| Event::Key { key: egui::Key::Home, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT };
     h.frame(vec![home(true)]);

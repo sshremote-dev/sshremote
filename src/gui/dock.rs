@@ -4,8 +4,9 @@
 //! It shows for a moment when full screen begins, then only while the pointer is at the top edge or
 //! on it, so the picture is whole. A click on it unfolds it: the tab gives way to a band in its
 //! place with the title bar's tabs and controls, whose own caret folds it back into the tab;
-//! unpinned, the band also folds by itself a moment after the pointer leaves. Dragging the tab
-//! moves the dock along the top edge.
+//! unpinned, the band goes a moment after the pointer leaves. Unfolded or folded is remembered:
+//! once unfolded, the band comes back at the top edge until folded again. Dragging the tab moves
+//! the dock along the top edge.
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Vec2, ViewportCommand};
 
@@ -81,6 +82,8 @@ pub(super) struct Dock {
     pub open: bool,
     /// The band stays down; remembered.
     pub pinned: bool,
+    /// The band, not the tab, shows at the top edge; remembered.
+    expanded: bool,
     /// The dock's middle along the top edge, 0 left to 1 right; remembered.
     x: f32,
     /// The tab's width last frame, to keep it on the screen.
@@ -98,6 +101,7 @@ impl Default for Dock {
         Dock {
             open: false,
             pinned: crate::hosts::setting("toolbar_pinned").is_some_and(|v| v == "yes"),
+            expanded: crate::hosts::setting("toolbar_expanded").is_some_and(|v| v == "yes"),
             x: crate::hosts::setting("toolbar_x").and_then(|v| v.parse().ok()).unwrap_or(0.5),
             w: 160.0,
             until: 0.0,
@@ -113,7 +117,7 @@ const LINGER: f64 = 2.0;
 const GREET: f64 = 3.0;
 const STAY: f64 = 1.0;
 /// The band's bar height.
-const BAR_H: f32 = 36.0;
+const BAR_H: f32 = 32.0;
 /// The folded tab's text size and the longest name it shows.
 const TAB_TEXT: f32 = 11.0;
 const TAB_NAME_W: f32 = 150.0;
@@ -121,16 +125,20 @@ const TAB_NAME_W: f32 = 150.0;
 impl Dock {
     /// Full screen began: the tab shows a moment (the band, if pinned), then steps aside.
     pub fn greet(&mut self, now: f64) {
-        self.open = self.pinned;
+        self.open = self.pinned || self.expanded;
         self.shown_until = now + GREET;
-        self.until = now + LINGER;
+        self.until = now + GREET;
     }
 
-    /// Drops the band down or folds it up (the caret, Ctrl+Alt+Home).
+    /// Drops the band down or folds it up (the caret, Ctrl+Alt+Home), and remembers which.
     pub fn toggle(&mut self, now: f64) {
         self.open = !self.open;
         self.until = now + LINGER;
         self.shown_until = self.shown_until.max(now + STAY);
+        if self.expanded != self.open {
+            self.expanded = self.open;
+            crate::hosts::set_setting("toolbar_expanded", if self.open { "yes" } else { "no" });
+        }
     }
 
     /// Draws the dock over the top of `screen` when it is to be seen: folded the tab, unfolded the
@@ -144,13 +152,22 @@ impl Dock {
         let menus = super::menu_open(ctx) || ctx.any_popup_open();
         if at_edge || on_it || menus {
             self.shown_until = self.shown_until.max(now + STAY);
+            // Unfolded last: the band itself comes back.
+            if self.expanded && !self.open {
+                self.open = true;
+                self.until = now + LINGER;
+            }
         }
         if on_it || menus {
             self.until = now + LINGER;
         }
-        // Unpinned, the band folds up a moment after the pointer left the dock.
+        // Unpinned, the band goes a moment after the pointer left the dock: whole, when it is to
+        // come back unfolded; into the tab for a moment otherwise.
         if self.open && !self.pinned && now > self.until {
             self.open = false;
+            if self.expanded {
+                self.shown_until = now;
+            }
         }
         if !self.open && now >= self.shown_until {
             self.rect = Rect::NOTHING;
@@ -175,7 +192,9 @@ impl Dock {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 let radius = CornerRadius { nw: 0, ne: 0, sw: crate::gui::theme::R_SM, se: crate::gui::theme::R_SM };
-                let inner = frame(ui, radius, egui::Margin { left: 7, right: 5, top: 1, bottom: 2 }).show(ui, |ui| {
+                let inner = frame(ui, radius, egui::Margin { left: 8, right: 7, top: 1, bottom: 2 }).show(ui, |ui| {
+                    // As small as the web page's: a line of small text, not a row of controls.
+                    ui.spacing_mut().interact_size.y = 0.0;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 5.0;
                         status_chip(ui, status);
@@ -220,6 +239,7 @@ impl Dock {
             .show(ctx, |ui| {
                 let radius = CornerRadius { nw: 0, ne: 0, sw: crate::gui::theme::R_MD, se: crate::gui::theme::R_MD };
                 frame(ui, radius, egui::Margin { left: 6, right: 6, top: 0, bottom: 2 }).show(ui, |ui| {
+                    ui.spacing_mut().interact_size.y = 26.0;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.allocate_ui_with_layout(Vec2::new(w, BAR_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -293,7 +313,7 @@ fn status_chip(ui: &mut egui::Ui, s: &Status) {
     if let Some(rtt) = s.rtt {
         let text = if rtt >= 999.5 { "999+ ms".to_string() } else { format!("{rtt:.0} ms") };
         // A fixed width, so the tab does not jitter as the round trip changes.
-        ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(text).size(TAB_TEXT - 1.0).weak()).selectable(false));
+        ui.add_sized([38.0, 12.0], egui::Label::new(RichText::new(text).size(TAB_TEXT - 1.0).weak()).selectable(false));
     }
     if s.view_only {
         ui.label(RichText::new(ic::EYE).size(TAB_TEXT).weak());
