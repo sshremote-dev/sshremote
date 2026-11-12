@@ -109,6 +109,7 @@ usage: sshremote                       open the window: connect screen, recent h
                                   extensions: style packs from sshremote.dev or a file;
                                   roll-back ID returns to the version before the last update
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
+       sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|install|uninstall]
                                        this computer reachable by ID and password through a relay
@@ -341,6 +342,11 @@ fn main() {
             std::process::exit(1);
         }
         println!("{secret}");
+        return;
+    }
+    // Which version this is, for a bug report or to check an update took.
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
+        println!("sshremote {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     // `--saved-login HOST -- ssh ...`: ssh with the password saved for HOST answering its prompt.
