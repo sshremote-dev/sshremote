@@ -1,35 +1,86 @@
-# What is built in and what is an extension
+# SSH Remote: what it does, and how it is built
 
-One rule decides it: **what every user needs to reach and work on another computer is built in;
-what only some users need, or what can change without the app, is an extension.**
+One app reaches other computers (by SSH or by a remote access ID) as terminals, screens and
+files, and lets other people reach this one. Everything a user needs for that is built in;
+extensions only add looks, commands and panels.
 
-| Layer | Contents | Where it lives |
+## What it does
+
+| Group | Features |
+|---|---|
+| Going out | SSH host (alias, `user@host[:port]`, IP) as terminal, screen or files; a computer by its ID and password as screen or files; this computer's own terminal, screen and files |
+| Coming in | Remote access by ID: on and off, password, relay, start with the computer (Windows service); who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
+| Computers | One list: favorites, recent, `~/.ssh/config` aliases, computers by ID, this computer; per computer its user, port, key, saved password and tunnels |
+| Tunnels | Local, remote and SOCKS port forwards through an SSH computer, started by hand or with the app |
+| Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection; full screen; reconnecting; chat, sound, clipboard, sharing one window or program |
+| Settings | Appearance, SSH keys, saved passwords, backup, extensions, parts of the app on or off, about |
+| Servers and command line | Web gateway (`sshremote web`), MCP server (`sshremote mcp`), terminal viewer (`sshremote HOST`), `remote-access`, `ext`, `module` |
+
+## One app
+
+There is one edition. The remote desktop, the web gateway and the MCP server are part of it, so no
+extension provides them and no second program has to be fetched for them. A part a user does not
+want is turned off in Settings > Parts (`sshremote module off ID`).
+
+Extensions are add-ons only: style packs (background layers), WASM scripts and commands (text
+tools), and resident extensions (status bar, panels, palette commands, forms). They run as their own
+processes or in a WASM sandbox and may do only what their manifest's permissions name.
+
+Port forwarding is SSH's own and is built in, per computer.
+
+## The code
+
+| Layer | Modules | |
 |---|---|---|
-| Core | Workspace (tabs, panes, windows), terminal and local shells, SSH hosts and `~/.ssh` tools, saved passwords, the open dialog, look and themes, the extension host | Built into both editions |
-| Remote | Agent, screen sharing, files, chat, sound, terminal viewer (`sshremote HOST`), remote access by ID through a relay, the Windows service | Built into **SSH Remote**; the **Remote desktop** extension for **SSH Remote Terminal** |
-| Gateways | Web gateway (`sshremote web`), MCP server (`sshremote mcp`) | Built into full builds with `web`/`mcp`; extensions otherwise |
-| Add-ons | Style packs, WASM scripts, command-line programs, resident extensions (status bar, panels, palette commands, keys, forms, settings) | Always extensions, from the signed registry or a `.sshx` file |
+| Engine | `proto`, `net`, `transport`, `session`, `agent`, `capture/*`, `video`, `audio`, `files`, `clip`, `chat`, `pty`, `conpty`, `keys`, `xk`, `keygrab`, `access`, `relay`, `service`, `admin`, `console_user` | kept |
+| Data | `computers` (the one list), `tunnels`, `vault`, `hosts` (settings and `~/.ssh/config`), `backup` | `computers` and `tunnels` new |
+| Servers | `web`, `mcp` | kept |
+| Window | `gui/mod.rs` (app, windows), `gui/home/*` (this computer, connect, computer sheet, quick open), `gui/settings/*`, `gui/workspace/*`, `gui/remote/*`, `termwin/*`, `filewin` | home and settings new |
+| Extensions | `ext` (manifests, registry, install), `exthost` (resident), `script` (WASM) | without providers |
 
-## Why this split
+## The home window
 
-- **Connecting is never an add-on.** Without SSH, terminals and the open dialog there is nothing to
-  extend, so they stay in the core and work offline, with no registry.
-- **Remote is one unit.** The agent, the viewer, files, the service and remote access by ID share
-  one protocol (`src/proto.rs`) and must match in version, so they move together: built in, or the
-  one Remote desktop extension. A computer reached by ID runs the same agent as one reached by SSH.
-- **Gateways are servers.** They open ports or serve other programs, so a user adds them on purpose.
-- **Extensions cannot break the core.** They run as their own processes (or in a WASM sandbox),
-  talk JSON-RPC to the extension host, and may do only what their manifest's permissions name.
-  A failing extension is stopped and reported; the app goes on.
+Two columns, each fact shown once.
 
-## How the two ways to connect relate
+**Left: this computer, as others reach it.** Its name; its addresses, each with a copy button: the
+remote access ID, its IP addresses, its host name, and `user@IP` when an SSH server answers here;
+the remote access switch and password (show, copy, new); who is connected, each with Disconnect;
+remote access settings (relay, start with the computer) in a sheet of their own.
 
-| | SSH | Remote access by ID |
-|---|---|---|
-| For | One host you reach directly (server, VM, LAN, VPN) | A PC on Wi-Fi or behind NAT, with no fixed address or SSH server |
-| Sign-in | Your SSH keys or password | The ID and the password set on that computer |
-| Path | `ssh -T HOST sshremote --agent` | Both ends dial out to a relay (TCP 7071), which only copies sealed bytes |
-| Opens | Terminal, screen, files | Screen and files |
-| Unattended | sshd runs anyway | The service (Windows) or a systemd user unit starts it with the computer |
+**Right: going out.** One address field takes anything: an alias, `user@host[:port]`, an IP, or a
+nine-digit ID. Under it, what was recognised ("SSH host", "Computer by ID", "This computer") and
+the actions it allows: Terminal, Screen, Files (an ID has no terminal). A password field appears in
+the same row only when the address needs one (an ID). There are no fields inside drop-downs.
 
-Both end in the same agent and the same viewer, so every screen feature works on both.
+Below, the computers: this computer first, then favorites, then the rest by last use; computers of
+`~/.ssh/config` among them. A row shows the name, its address, how it is reached and when it was
+last used; its actions appear on hover and by keyboard. Its sheet (Edit) holds the name, user,
+port, key, saved password and tunnels; an SSH alias is written back to `~/.ssh/config`.
+
+The gear opens Settings: Appearance, SSH keys, Passwords, Backup, Extensions, Parts, About.
+
+In a workspace, `+` opens Quick open: a field and the computers filtered as one types; Enter opens
+the default action, the arrow keys and Tab choose another. It never repeats the home window.
+
+## The computers list
+
+```
+Computer { key, name, how: Ssh { host, user, port, key } | Id { id, relay } | Local,
+           favorite, last_used, alias_in_ssh_config, tunnels: [Tunnel] }
+Tunnel   { kind: Local | Remote | Socks, port, dest, start_with_app }
+```
+
+It is kept in `computers.json` in the settings folder; `~/.ssh/config` aliases are read live and
+merged by name. The older `recent.txt`, `favorites.txt` and `seen.txt` are read once into it.
+Passwords stay in the system's password store, keyed by the computer's address. The window, the
+web gateway and the terminal picker all read this one list.
+
+## Order of work
+
+1. One edition: remove the provider plumbing, the Terminal edition's branches and the three packs
+   that duplicate built-in parts.
+2. The computers list and tunnels as data.
+3. The home window, Settings and Quick open.
+4. Tunnels in the window.
+5. Site, registry, release scripts and README for one download.
+6. Tests in the private GNOME session and on Windows, then a release.
