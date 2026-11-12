@@ -12,7 +12,7 @@ use std::process::Command;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -21,14 +21,18 @@ use windows_sys::Win32::Security::{
     DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TokenPrimary,
     TokenSessionId,
 };
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+    SECURITY_SQOS_PRESENT,
+};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows_sys::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
+    SERVICE_QUERY_STATUS, SERVICE_STATUS_PROCESS, RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
     SERVICE_STATUS_HANDLE, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
     StartServiceCtrlDispatcherW,
 };
@@ -219,27 +223,40 @@ fn serve() {
         bInheritHandle: 0,
     };
     let name = wide(PIPE);
-    loop {
+    // One instance, made first and kept: the name is never free between requests for another
+    // program to take. One already there (someone else's) is waited out rather than shared.
+    let h = loop {
         let h = unsafe {
-            CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 4, 4096, 4096, 0, &sa)
+            CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, &sa)
         };
-        if h == INVALID_HANDLE_VALUE {
-            break;
+        if h != INVALID_HANDLE_VALUE {
+            break h;
         }
-        unsafe { ConnectNamedPipe(h, null_mut()) };
-        let mut pipe = unsafe { File::from_raw_handle(h) };
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    };
+    // The handle stays the pipe's; reads and writes borrow it.
+    let pipe = std::mem::ManuallyDrop::new(unsafe { File::from_raw_handle(h) });
+    loop {
+        // A client that connected before this call is connected all the same.
+        if unsafe { ConnectNamedPipe(h, null_mut()) } == 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(535)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
         let mut line = String::new();
-        let _ = BufReader::new(&pipe).read_line(&mut line);
+        let _ = BufReader::new(&*pipe).read_line(&mut line);
         let answer = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["sas"] => send_sas(),
             ["spawn", base, capture] => spawn_helper(base, capture),
             _ => Err("unknown request".into()),
         };
-        let _ = writeln!(pipe, "{}", answer.err().unwrap_or_else(|| "ok".into()));
-        let _ = pipe.flush();
-        unsafe { DisconnectNamedPipe(h) };
+        let _ = writeln!(&*pipe, "{}", answer.err().unwrap_or_else(|| "ok".into()));
+        unsafe {
+            FlushFileBuffers(h);
+            DisconnectNamedPipe(h);
+        }
     }
-    unsafe { LocalFree(sd as _) };
 }
 
 fn send_sas() -> Result<(), String> {
@@ -302,16 +319,51 @@ fn spawn_helper(base: &str, capture: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The running service's process id, from the service manager.
+fn service_pid() -> Option<u32> {
+    let name = wide(NAME);
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return None;
+        }
+        let svc = OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_STATUS);
+        let mut st: SERVICE_STATUS_PROCESS = std::mem::zeroed();
+        let mut needed = 0u32;
+        let ok = !svc.is_null()
+            && QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, &mut st as *mut _ as *mut u8, size_of::<SERVICE_STATUS_PROCESS>() as u32, &mut needed) != 0;
+        if !svc.is_null() {
+            CloseServiceHandle(svc);
+        }
+        CloseServiceHandle(scm);
+        (ok && st.dwProcessId != 0).then_some(st.dwProcessId)
+    }
+}
+
 /// Sends one request to the service; `None` when no service is installed or reachable.
 pub fn ask(request: &str) -> Option<Result<(), String>> {
     let name = wide(PIPE);
+    // Identification only: whoever answers cannot act as the caller.
     let h = unsafe {
-        CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, null_mut(), OPEN_EXISTING, 0, null_mut())
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+            null_mut(),
+        )
     };
     if h == INVALID_HANDLE_VALUE {
         return None;
     }
     let mut pipe = unsafe { File::from_raw_handle(h) };
+    // The pipe must be the service's own, not one another program made under its name.
+    let mut server = 0u32;
+    if unsafe { GetNamedPipeServerProcessId(h, &mut server) } == 0 || service_pid() != Some(server) {
+        return Some(Err("the service's pipe is held by another program".into()));
+    }
     if writeln!(pipe, "{request}").and_then(|_| pipe.flush()).is_err() {
         return None;
     }
