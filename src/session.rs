@@ -76,6 +76,25 @@ impl Options {
 }
 
 
+/// The agent commands for a Windows host, by the shell it runs: cmd with the service's copy, any
+/// shell with one on the PATH, PowerShell with the service's copy.
+const WINDOWS_AGENT: [&str; 3] = [
+    r#""%ProgramFiles%\SSH Remote\sshremote.exe" --agent"#,
+    "sshremote --agent",
+    r#"& "$env:ProgramFiles\SSH Remote\sshremote.exe" --agent"#,
+];
+
+/// The agent command that worked for each SSH host, when not the usual one.
+static WORKED: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
+/// Whether the usual agent command failed as Windows' shells fail it: cmd takes `PATH=...` as its
+/// own command and ends without a word or a byte (the stream ends before its first frame, and
+/// with nothing on stderr the error is the reader's own); PowerShell and cmd say a name is not
+/// recognised.
+fn windows_shell(error: &str) -> bool {
+    ["connection closed", "incomplete frame"].contains(&error) || error.contains("is not recognized as")
+}
+
 impl Session {
     /// Starts the agent and waits for its hello.
     pub fn connect(opt: &Options) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
@@ -83,7 +102,48 @@ impl Session {
     }
 
     /// Opens `target` and waits for the agent's hello; `hidden` keeps helper consoles out of sight.
+    /// An SSH host given the usual agent command that turns out to run Windows' shell (which
+    /// takes `PATH=...` as its own command and says nothing) is tried with Windows' commands, and
+    /// the one that worked is kept for the next time.
     pub fn open(target: &Target, hidden: bool) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
+        let Target::Ssh { host, remote, .. } = target else { return Session::open_once(target, hidden) };
+        if remote != crate::options::REMOTE {
+            return Session::open_once(target, hidden);
+        }
+        let with = |cmd: &str| {
+            let mut t = target.clone();
+            if let Target::Ssh { remote, .. } = &mut t {
+                *remote = cmd.to_string();
+            }
+            t
+        };
+        let kept = WORKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().get(host).cloned();
+        if let Some(cmd) = kept
+            && let Ok(s) = Session::open_once(&with(&cmd), hidden)
+        {
+            return Ok(s);
+        }
+        let first = match Session::open_once(target, hidden) {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
+        if !windows_shell(&first) {
+            return Err(first);
+        }
+        let mut last = first;
+        for cmd in WINDOWS_AGENT {
+            match Session::open_once(&with(cmd), hidden) {
+                Ok(s) => {
+                    WORKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert(host.clone(), cmd.to_string());
+                    return Ok(s);
+                }
+                Err(e) => last = e,
+            }
+        }
+        Err(format!("{last}\nsshremote was not found on that Windows computer: install SSH Remote there (This computer, Start with the computer), or put sshremote.exe on its PATH."))
+    }
+
+    fn open_once(target: &Target, hidden: bool) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
         let mut link = transport::open(target, hidden)?;
         let reader = std::mem::replace(&mut link.reader, Box::new(io::empty()));
         let writer = std::mem::replace(&mut link.writer, Box::new(io::sink()));
@@ -604,6 +664,53 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Any SSH host with sshremote on it answers to the usual agent command, as it always did.
+    /// Needs SSHREMOTE_SSH_HOST (an ssh alias).
+    #[test]
+    #[ignore]
+    fn an_ssh_host_answers_the_usual_agent_command() {
+        let Ok(host) = std::env::var("SSHREMOTE_SSH_HOST") else { return };
+        let target = Target::Ssh {
+            host: host.clone(),
+            port: None,
+            args: Vec::new(),
+            remote: crate::options::REMOTE.into(),
+            capture: "auto".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, _rx) = Session::open(&target, true).expect("the agent answers");
+        assert!(sess.desk.0 > 0);
+        sess.close();
+        assert!(WORKED.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&host)), "no other command was needed");
+    }
+
+    /// A Windows host reached over ssh with the usual agent command (which its shell does not
+    /// run) is tried with Windows' own, and the one that worked is used straight away next time.
+    #[test]
+    #[ignore]
+    fn a_windows_ssh_host_needs_no_agent_command_of_its_own() {
+        let Ok(host) = std::env::var("SSHREMOTE_WINDOWS_HOST") else { return };
+        let target = Target::Ssh {
+            host: host.clone(),
+            port: None,
+            args: Vec::new(),
+            remote: crate::options::REMOTE.into(),
+            capture: "auto".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, _rx) = Session::open(&target, true).expect("reached with Windows' command");
+        assert!(sess.desk.0 > 0, "a screen: {:?}", sess.desk);
+        sess.close();
+        let kept = WORKED.lock().unwrap().as_ref().and_then(|m| m.get(&host).cloned());
+        assert!(kept.is_some(), "the command that worked is kept");
+        let started = Instant::now();
+        let (mut again, _, _) = Session::open(&target, true).expect("again");
+        again.close();
+        assert!(started.elapsed() < Duration::from_secs(8), "straight away the second time: {:?}", started.elapsed());
+    }
 
     /// On a Windows host whose agent the service runs (an ssh session has no desktop, so the
     /// service's SYSTEM helper serves it): the terminal is the signed-in person's and so are the
