@@ -624,6 +624,10 @@ fn ask(frame: Frame) -> Option<Ask> {
     if let Some(t) = s("clipboard") {
         return Some(Ask::Agent(ToAgent::Clipboard(t)));
     }
+    // A message for the person at the host: a chat window opens there.
+    if let Some(t) = s("chat").filter(|t| !t.trim().is_empty()) {
+        return Some(Ask::Agent(ToAgent::Chat(t)));
+    }
     if v.get("sas").is_some() {
         return Some(Ask::Agent(ToAgent::SecureAttention));
     }
@@ -885,6 +889,9 @@ fn client(
                 }
                 ToClient::Notice(t) => {
                     let _ = send_json(&w, serde_json::json!({ "notice": t }));
+                }
+                ToClient::Chat(t) => {
+                    let _ = send_json(&w, serde_json::json!({ "chat": t }));
                 }
                 _ => {}
             }

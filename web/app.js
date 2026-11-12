@@ -25,6 +25,7 @@ const ICONS = {
   rename: "M4 20h4L19 9l-4-4L4 16z|M13.5 6.5l4 4",
   trash: "M4 7h16|M10 11v6|M14 11v6|M6 7l1 13h10l1-13|M9 7V4h6v3",
   keyboard: "M3 6h18v12H3z|M7 10h.01|M11 10h.01|M15 10h.01|M7.5 14h9",
+  chat: "M4 5h16v11H10l-5 4v-4H4z",
   clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z|M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
   camera: "M4 8h3.5l2-3h5l2 3H20v11H4z|M12 10a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6z",
@@ -530,6 +531,8 @@ class Client {
     this.nextUpload = 1;
     this.monitors = null;
     this.hostClip = null;
+    this.chatLines = [];         // { you, text, at }
+    this.unread = 0;
     $("home").hidden = true;
     $("client").hidden = false;
     $("banner").hidden = true;
@@ -666,6 +669,7 @@ class Client {
     if (v.progress) this.progress(v.progress[0], v.progress[1]);
     if (v.uploaded) this.uploaded(v.uploaded);
     if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
+    if (v.chat !== undefined) this.chatIn(v.chat);
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
     if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied/i.test(v.notice) });
     if (v.end || v.error) {
@@ -719,6 +723,20 @@ class Client {
     $("fold").onclick = () => fold(true);
     $("tab").onclick = () => fold(false);
     $("bye").onclick = () => this.leave();
+    // The chat: opened from the screen's tools, closed here; a message typed goes on Enter.
+    setButton($("chatx"), "x");
+    $("chatx").onclick = () => this.chatShow(false);
+    $("chatform").onsubmit = e => {
+      e.preventDefault();
+      const text = $("chatin").value.trim();
+      if (!text) return;
+      this.send({ chat: text });
+      this.chatLines.push({ you: true, text, at: new Date() });
+      $("chatin").value = "";
+      this.chatRender();
+    };
+    $("chat").hidden = true;
+    this.chatRender();
     $("again").textContent = "Reconnect";
     $("again").onclick = () => connect({ ...this.t, view: this.view });
     $("home2").onclick = () => this.leave();
@@ -919,6 +937,32 @@ class Client {
     for (const k of [...keys].reverse()) this.send({ key: [k, 0] });
     this.keyboard();
   }
+  // A message from the person at the host: in the chat, and said when the chat is closed.
+  chatIn(text) {
+    this.chatLines.push({ you: false, text, at: new Date() });
+    if ($("chat").hidden) {
+      this.unread++;
+      toast("Message from the host: " + text);
+      this.screenTools();
+    }
+    this.chatRender();
+  }
+  chatShow(on) {
+    $("chat").hidden = !on;
+    if (on) { this.unread = 0; this.chatRender(); $("chatin").focus(); } else if (this.view === "screen") this.keyboard();
+    this.screenTools();
+  }
+  chatRender() {
+    const log = $("chatlog");
+    log.textContent = "";
+    if (!this.chatLines.length) log.append(h("div", { class: "empty", text: "Messages go to a chat window on the host's screen, and its answers come here." }));
+    for (const m of this.chatLines) {
+      const line = h("div", { class: "msg" + (m.you ? " you" : ""), text: m.text });
+      line.append(h("small", { text: (m.you ? "You" : "Host") + ", " + m.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }));
+      log.append(line);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
   // The screen takes the keyboard (on a phone, its on-screen keyboard opens).
   keyboard() {
     $("kbd").focus({ preventScroll: true });
@@ -978,6 +1022,7 @@ class Client {
       more.onclick = () => {
         const items = [
           ["Keyboard", () => this.keyboard(), { icon: "keyboard" }],
+          [this.unread ? "Chat (" + this.unread + " new)" : "Chat", () => this.chatShow($("chat").hidden), { icon: "chat", on: !$("chat").hidden }],
           ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
           ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
@@ -995,7 +1040,11 @@ class Client {
     clip.onclick = () => clipMenu(clip);
     const quality = button("sliders", null, { title: "Picture quality" });
     quality.onclick = () => qualityMenu(quality);
-    bar.append(keys, clip, quality);
+    const chat = button("chat", null, { title: "Chat with the person at the host" });
+    chat.classList.toggle("on", !$("chat").hidden);
+    if (this.unread) chat.append(h("span", { class: "count", text: String(this.unread) }));
+    chat.onclick = () => this.chatShow($("chat").hidden);
+    bar.append(keys, clip, quality, chat);
     if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
       mon.onclick = () => monitorMenu(mon);
