@@ -1363,6 +1363,7 @@ impl Viewer {
             }
             ToClient::Notice(t) => self.notify(&t)?,
             ToClient::Chat(t) => {
+                let t = crate::chat::trimmed(&t);
                 crate::chat::append_history(&self.host, true, &t);
                 if matches!(self.overlay, Overlay::Chat(_)) {
                     self.draw_chat()?;

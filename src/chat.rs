@@ -301,6 +301,20 @@ pub(crate) fn when(at: u64) -> String {
 
 /// How many earlier messages are kept with each host.
 const HISTORY_KEEP: usize = 300;
+/// The longest message kept or shown; a longer one is cut there (a chat is not for files).
+pub const MAX_MESSAGE: usize = 16 << 10;
+
+/// `text` cut to `MAX_MESSAGE` bytes, at a character's edge, with an ellipsis when cut.
+pub fn trimmed(text: &str) -> String {
+    if text.len() <= MAX_MESSAGE {
+        return text.to_string();
+    }
+    let mut end = MAX_MESSAGE;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &text[..end])
+}
 
 /// Where the conversation with `host` is kept between sessions.
 fn history_path(host: &str) -> Option<std::path::PathBuf> {
@@ -333,16 +347,27 @@ fn load_from(path: &std::path::Path) -> Vec<Line> {
     lines[lines.len().saturating_sub(HISTORY_KEEP)..].to_vec()
 }
 
-/// Adds a message to `path`; past `limit` bytes the file is written again with the last ones only.
+/// Adds a message to `path`; past `limit` bytes the file is written again with the last ones that
+/// fill half of it, so it is not rewritten for every message after.
 fn append_to(path: &std::path::Path, theirs: bool, text: &str, at: u64, limit: u64) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    let text = trimmed(text);
     if std::fs::metadata(path).is_ok_and(|m| m.len() > limit) {
         let mut kept = load_from(path);
-        kept.push((theirs, text.to_string(), at));
-        let body: String = kept.iter().map(|m| serde_json::to_string(m).expect("json") + "\n").collect();
-        let _ = std::fs::write(path, body);
+        kept.push((theirs, text, at));
+        let lines: Vec<String> = kept.iter().map(|m| serde_json::to_string(m).expect("json") + "\n").collect();
+        let (mut size, mut from) = (0, lines.len());
+        while from > 0 && size + lines[from - 1].len() as u64 <= limit / 2 {
+            from -= 1;
+            size += lines[from].len() as u64;
+        }
+        // Written beside it and renamed over it: a crash midway leaves the old file whole.
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, lines[from..].concat()).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
     } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = f.write_all((serde_json::to_string(&(theirs, text, at)).expect("json") + "\n").as_bytes());
@@ -478,6 +503,23 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
 
 #[cfg(test)]
 mod tests {
+    /// A huge message is cut where a chat stops being one, and many keep the file small: it is
+    /// written again with half its room, not rewritten for every message after.
+    #[test]
+    fn huge_messages_and_long_histories_stay_small() {
+        let cut = super::trimmed(&"한".repeat(10_000));
+        assert!(cut.len() <= super::MAX_MESSAGE + 3 && cut.ends_with('\u{2026}'));
+        let path = std::env::temp_dir().join(format!("sshremote-chat-big-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let limit = 64 << 10;
+        for i in 0..100 {
+            super::append_to(&path, i % 2 == 0, &"x".repeat(40_000), i, limit);
+            assert!(std::fs::metadata(&path).unwrap().len() <= limit + 20_000, "at {i}");
+        }
+        assert!(!super::load_from(&path).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The conversation kept with a host: in order, with any text, trimmed to the last ones.
     #[test]
     fn history_round_trip() {

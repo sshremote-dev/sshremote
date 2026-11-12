@@ -409,7 +409,7 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
                     }
                 }
                 ToAgent::Chat(text) => {
-                    if let Err(e) = chat.show(&text) {
+                    if let Err(e) = chat.show(&crate::chat::trimmed(&text)) {
                         send(enc, &ToClient::Notice(format!("Chat: {e}"))).map_err(io_err)?;
                     }
                 }

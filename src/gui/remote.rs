@@ -484,6 +484,8 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
                 Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::session::save_snapshot(&png)),
                 Ok(Ev::Net(ToClient::Chat(t))) => {
+                    // A message is cut where a chat stops being one.
+                    let t = crate::chat::trimmed(&t);
                     crate::chat::append_history(self.host(), true, &t);
                     match self.chat.as_mut() {
                         Some((lines, _)) => lines.push((true, t, crate::chat::now())),
