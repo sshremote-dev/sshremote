@@ -569,6 +569,8 @@ enum Ask {
     Quality(WebQuality),
     /// The browser drew the picture update of this number.
     Drawn(u32),
+    /// The picture paused by the user (to save traffic), or going on.
+    Pause(bool),
     Gone,
 }
 
@@ -664,6 +666,13 @@ fn ask(frame: Frame) -> Option<Ask> {
     }
     if let Some(seq) = n("drawn") {
         return Some(Ask::Drawn(seq as u32));
+    }
+    if let Some(on) = v.get("pause").and_then(|x| x.as_bool()) {
+        return Some(Ask::Pause(on));
+    }
+    // A lossless picture of the screen, as the app saves one.
+    if v.get("snapshot").is_some() {
+        return Some(Ask::Agent(ToAgent::Snapshot));
     }
     if let Some(u) = v.get("upload") {
         let id = u.get("id")?.as_u64()? as u32;
@@ -912,7 +921,8 @@ fn client(
         }
     });
     let mut fb = crate::session::Framebuffer::default();
-    let mut shown = false;
+    // The screen shows in the browser, and the user did not pause its picture.
+    let (mut shown, mut paused) = (false, false);
     // What changed of the picture since the browser was last sent it, and the moves the agent
     // made before any of that (sent as moves, not as pictures of what moved).
     let (mut damage, mut moves): (Vec<Area>, Vec<crate::scroll::Move>) = (Vec::new(), Vec::new());
@@ -946,7 +956,7 @@ fn client(
                 Ok(Ok((mut sess, rx))) => {
                     // Reached: what was asked meanwhile goes now.
                     let _ = send_json(&w, serde_json::json!({ "agent": { "screen": [sess.desk.0, sess.desk.1] } }));
-                    if shown {
+                    if shown && !paused {
                         let _ = sess.send(ToAgent::Pause(false));
                     }
                     for m in waiting.drain(..) {
@@ -1073,6 +1083,11 @@ fn client(
                 ToClient::Chat(t) => {
                     let _ = send_json(&w, serde_json::json!({ "chat": t }));
                 }
+                ToClient::Snapshot(png) => {
+                    if send(&w, 0x2, &[&[5u8][..], &png].concat()).is_err() {
+                        break 'run String::new();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1143,6 +1158,10 @@ fn client(
                     let _ = send_json(&w, serde_json::json!({ "quality": quality_state(&ctl) }));
                     Some(ToAgent::Settings(settings(&ctl, view)))
                 }
+                Ask::Pause(on) => {
+                    paused = on;
+                    Some(ToAgent::Pause(on || !shown))
+                }
                 Ask::Drawn(n) => {
                     if let Some(i) = drawing.iter().position(|d| d.0 == n) {
                         let ms = drawing.remove(i).1.elapsed().as_secs_f64() * 1000.0;
@@ -1170,7 +1189,7 @@ fn client(
                             drawing.clear();
                         }
                         if let Agent::Up(sess, _) = &mut agent {
-                            sess.send(ToAgent::Pause(!on)).map_err(io)?;
+                            sess.send(ToAgent::Pause(!on || paused)).map_err(io)?;
                         }
                         on.then_some(ToAgent::Refresh)
                     }
@@ -1700,6 +1719,8 @@ Host: x
         assert!(matches!(a(r#"{"quality":"custom","mode":"mono","scale":5,"fps":90}"#), Some(Ask::Quality(WebQuality::Custom(crate::color::Mode::Mono, 10, 60)))));
         assert!(a(r#"{"quality":"custom","mode":"sepia","scale":50,"fps":10}"#).is_none(), "an unknown colour mode is refused");
         assert!(matches!(a(r#"{"drawn":7}"#), Some(Ask::Drawn(7))));
+        assert!(matches!(a(r#"{"pause":true}"#), Some(Ask::Pause(true))));
+        assert!(matches!(a(r#"{"snapshot":1}"#), Some(Ask::Agent(ToAgent::Snapshot))));
         assert!(matches!(a(r#"{"list":""}"#), Some(Ask::Agent(ToAgent::ListDir { .. }))));
         assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
         assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));

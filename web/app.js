@@ -26,6 +26,8 @@ const ICONS = {
   trash: "M4 7h16|M10 11v6|M14 11v6|M6 7l1 13h10l1-13|M9 7V4h6v3",
   keyboard: "M3 6h18v12H3z|M7 10h.01|M11 10h.01|M15 10h.01|M7.5 14h9",
   chat: "M4 5h16v11H10l-5 4v-4H4z",
+  pause: "M8 5v14|M16 5v14",
+  play: "M7 5l12 7-12 7z",
   clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z|M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
   camera: "M4 8h3.5l2-3h5l2 3H20v11H4z|M12 10a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6z",
@@ -598,14 +600,30 @@ class Client {
   // The connection went: back to the page if it never came up, else say so and offer to try again.
   closed(why) {
     if (this.ended || this.lost) return;
+    // A try at coming back that did not get through: the next one, a while later.
+    if (!this.ready && this.t.retry) { this.lost = true; this.retry(why, this.t.retry); return; }
     if (!this.ready) { this.leave(why || "The connection could not be made."); return; }
     this.lost = true;
     this.ready = false;
     this.state("Disconnected", "down");
     this.releaseKeys?.();
-    $("bannertext").textContent = why || "The connection was lost.";
+    this.retry(why, 0);
+  }
+  // Comes back by itself, as the app does: after 2, 4, 8... seconds (30 at most), eight times;
+  // the banner counts down, and Reconnect tries at once.
+  retry(why, done) {
+    const text = why || "The connection was lost.";
     $("banner").hidden = false;
-    $("again").focus();
+    clearInterval(this.retryTimer);
+    if (done >= 8) { $("bannertext").textContent = text; $("again").focus(); return; }
+    let left = Math.min(30, 2 ** (done + 1));
+    const tick = () => {
+      if (current !== this) { clearInterval(this.retryTimer); return; }
+      $("bannertext").textContent = text + " Trying again in " + left + " s…";
+      if (left-- <= 0) { clearInterval(this.retryTimer); connect({ ...this.t, view: this.view, retry: done + 1 }); }
+    };
+    tick();
+    this.retryTimer = setInterval(tick, 1000);
   }
   leave(error, password) {
     const t = this.t;
@@ -626,6 +644,7 @@ class Client {
   }
   close() {
     this.ended = true;
+    clearInterval(this.retryTimer);
     try { this.ws?.close(); } catch { /* gone */ }
     this.term?.dispose();
     this.unbind?.();
@@ -644,6 +663,10 @@ class Client {
         this.tail = ((this.tail || "") + new TextDecoder().decode(b.subarray(1))).slice(-2000);
       }
       else if (b[0] === 4) this.show(m.data);
+      else if (b[0] === 5) {
+        saveBlob(new Blob([b.subarray(1)], { type: "image/png" }), "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
+        toast("A lossless picture of the screen was saved.");
+      }
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       return;
     }
@@ -768,7 +791,7 @@ class Client {
     $("chat").hidden = true;
     this.chatRender();
     $("again").textContent = "Reconnect";
-    $("again").onclick = () => connect({ ...this.t, view: this.view });
+    $("again").onclick = () => { clearInterval(this.retryTimer); connect({ ...this.t, view: this.view, retry: 0 }); };
     $("home2").onclick = () => this.leave();
     const resize = () => this.relayout();
     addEventListener("resize", resize);
@@ -1032,6 +1055,15 @@ class Client {
     // Keys still down when the page loses focus come up, so none sticks on the host.
     this.releaseKeys = () => { for (const k of held.values()) this.send({ key: [k, 0] }); held.clear(); };
     kbd.onblur = () => this.releaseKeys();
+    // Files dropped on the screen go to the host's Downloads folder, as in the app.
+    const scr = $("vscreen");
+    scr.ondragover = e => { if (!this.viewOnly) e.preventDefault(); };
+    scr.ondrop = async e => {
+      e.preventDefault();
+      if (this.viewOnly) return;
+      const list = await dropped(e.dataTransfer);
+      if (list.length) { this.queueUploads(list, ""); toast("Sending to the host's Downloads folder; the Files view shows how far it is."); }
+    };
     // The tools as buttons or as one menu, by the window's width.
     const narrow = matchMedia("(max-width: 760px)");
     const retool = () => this.screenTools();
@@ -1181,7 +1213,14 @@ class Client {
       toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
       this.screenTools();
     };
-    const shot = () => $("canvas").toBlob(b => b && saveBlob(b, "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png"));
+    // The host's own pixels, lossless, whatever the quality shown here.
+    const shot = () => this.send({ snapshot: 1 });
+    const pause = () => {
+      this.paused = !this.paused;
+      this.send({ pause: this.paused });
+      toast(this.paused ? "Paused: no picture comes until you go on or fetch one." : "The picture goes on.");
+      this.screenTools();
+    };
     // A narrow screen (a phone): one button for all of it, so the bar keeps its right end.
     if (matchMedia("(max-width: 760px)").matches) {
       const more = button("dots", null, { title: "The screen's tools" });
@@ -1195,7 +1234,9 @@ class Client {
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
         ];
         if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
-        items.push(null, ["View only", viewOnly, { icon: "eye", on: this.viewOnly }], ["Save a picture of the screen", shot, { icon: "camera" }]);
+        items.push(null, [this.paused ? "Go on" : "Pause the picture", pause, { icon: this.paused ? "play" : "pause", on: this.paused }]);
+        if (this.paused) items.push(["Fetch one picture", () => this.send({ refresh: 1 }), { icon: "reload" }]);
+        items.push(["View only", viewOnly, { icon: "eye", on: this.viewOnly }], ["Save a picture of the screen", shot, { icon: "camera" }]);
         menu(items, more);
       };
       bar.append(more);
@@ -1220,9 +1261,18 @@ class Client {
     const eye = button("eye", null, { title: "View only: watch without sending keys or clicks" });
     eye.classList.toggle("on", this.viewOnly);
     eye.onclick = viewOnly;
-    const cam = button("camera", null, { title: "Save a picture of the screen" });
+    const cam = button("camera", null, { title: "Save a lossless picture of the screen" });
     cam.onclick = shot;
-    bar.append(eye, cam);
+    const hold = button(this.paused ? "play" : "pause", null, { title: this.paused ? "Go on with the picture" : "Pause the picture, to save traffic" });
+    hold.classList.toggle("on", !!this.paused);
+    hold.onclick = pause;
+    bar.append(eye, hold);
+    if (this.paused) {
+      const one = button("reload", null, { title: "Fetch one picture" });
+      one.onclick = () => this.send({ refresh: 1 });
+      bar.append(one);
+    }
+    bar.append(cam);
   }
   async pasteHere() {
     if (!navigator.clipboard?.readText) { toast("This browser does not let the page read the clipboard; use “Type or paste text”.", { bad: true }); return; }
@@ -1540,16 +1590,16 @@ class Client {
   }
 
   // ----- Uploads, one file at a time
-  queueUploads(list) {
-    const f = this.files;
+  // `dir` "" sends to the host's Downloads folder.
+  queueUploads(list, dir = this.files.cwd) {
     if (!list.length) return;
-    if (f.cwd === null || f.cwd === "::") { toast("Open a folder first."); return; }
+    if (dir === null || dir === "::") { toast("Open a folder first."); return; }
     const big = list.filter(u => u.file.size > MAX_TRANSFER);
     if (big.length) toast(big.length + " larger than 2 GB left out: too large to send from a browser.", { bad: true });
     const items = list.filter(u => u.file.size <= MAX_TRANSFER);
     if (!items.length) return;
     const total = items.reduce((n, u) => n + u.file.size, 0);
-    const batch = { dir: f.cwd, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false };
+    const batch = { dir, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false };
     batch.ui = this.xferRow("upload", items.length === 1 ? items[0].name : items.length + " files", total, () => { batch.cancelled = true; });
     for (const u of items) this.uploads.push({ ...u, batch });
     this.pump();
@@ -1642,6 +1692,8 @@ async function dropped(dt) {
     }
   };
   for (const e of entries) await walk(e, "");
+  // Entries the browser cannot read (WebKit's, for files it was handed by a page): the files.
+  if (!out.length && dt.files.length) return [...dt.files].map(file => ({ file, name: file.name }));
   return out;
 }
 
