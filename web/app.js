@@ -452,24 +452,46 @@ function keysym(e) {
   return 0;
 }
 
-// Draws JPEG pictures on `canvas`, the newest only, each when the last is done.
-function drawer(canvas, first) {
+// Draws the gateway's picture updates on `canvas`, in order: the moves (an area shifted, as the
+// host scrolled), then the changed areas, each a WebP or JPEG picture. `drawn` is told each
+// update's number once it is on the canvas, and `first` the first time.
+function painter(canvas, first, drawn) {
   const ctx = canvas.getContext("2d");
-  let busy = false, next = null;
-  const draw = () => {
-    if (!next) { busy = false; return; }
-    busy = true;
-    const blob = new Blob([next], { type: "image/jpeg" });
-    next = null;
-    createImageBitmap(blob).then(b => {
-      if (canvas.width !== b.width || canvas.height !== b.height) { canvas.width = b.width; canvas.height = b.height; }
-      ctx.drawImage(b, 0, 0);
-      b.close();
-      first();
-      draw();
-    }, () => draw());
+  const TYPES = ["image/webp", "image/jpeg"];
+  const queue = [];
+  let busy = false;
+  const apply = async buf => {
+    const d = new DataView(buf);
+    let o = 1;
+    const seq = d.getUint32(o, true), w = d.getUint16(o + 4, true), hh = d.getUint16(o + 6, true);
+    o += 8;
+    if (canvas.width !== w || canvas.height !== hh) { canvas.width = w; canvas.height = hh; }
+    const moves = d.getUint8(o++);
+    for (let i = 0; i < moves; i++, o += 10) {
+      const x = d.getUint16(o, true), y = d.getUint16(o + 2, true), mw = d.getUint16(o + 4, true), mh = d.getUint16(o + 6, true), dy = d.getInt16(o + 8, true);
+      ctx.drawImage(canvas, x, y - dy, mw, mh, x, y, mw, mh);
+    }
+    const parts = [];
+    const areas = d.getUint8(o++);
+    for (let i = 0; i < areas; i++) {
+      const x = d.getUint16(o, true), y = d.getUint16(o + 2, true), fmt = d.getUint8(o + 8), len = d.getUint32(o + 9, true);
+      o += 13;
+      parts.push([x, y, createImageBitmap(new Blob([new Uint8Array(buf, o, len)], { type: TYPES[fmt] || TYPES[1] }))]);
+      o += len;
+    }
+    for (const [x, y, made] of parts) {
+      try { const b = await made; ctx.drawImage(b, x, y); b.close(); } catch { /* a part this browser cannot decode */ }
+    }
+    drawn(seq);
+    first();
   };
-  return data => { next = data; if (!busy) draw(); };
+  const run = async () => {
+    if (busy) return;
+    busy = true;
+    while (queue.length) await apply(queue.shift());
+    busy = false;
+  };
+  return buf => { queue.push(buf); run(); };
 }
 
 // A ZIP file (stored, not compressed: what is sent is already as small as it gets over the
@@ -621,7 +643,7 @@ class Client {
         // The last of what was printed, to tell why a shell ended.
         this.tail = ((this.tail || "") + new TextDecoder().decode(b.subarray(1))).slice(-2000);
       }
-      else if (b[0] === 2) this.show(m.data.slice(1));
+      else if (b[0] === 4) this.show(m.data);
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       return;
     }
@@ -647,7 +669,7 @@ class Client {
     }
     if (v.agent) this.agentUp(v.agent.screen);
     if (v.agentError) this.agentDown(v.agentError);
-    if (v.screen) this.state(v.screen[0] + "×" + v.screen[1], "up");
+    if (v.screen) { this.desk = v.screen; this.figures(); }
     if (v.exit !== undefined) {
       this.shellEnded = true;
       this.term.write("\r\n\x1b[2m[" + (v.exit || "the shell ended") + " — press a key for a new one]\x1b[0m\r\n");
@@ -671,6 +693,14 @@ class Client {
     if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
     if (v.chat !== undefined) this.chatIn(v.chat);
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
+    if (v.qualities) {
+      this.qualities = v.qualities;
+      // The quality chosen last time, asked for again.
+      const saved = store.get("picture", null);
+      if (saved) this.send(saved);
+    }
+    if (v.quality) { this.quality = v.quality; this.figures(); }
+    if (v.stats) { this.stats = v.stats; this.figures(); }
     if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied/i.test(v.notice) });
     if (v.end || v.error) {
       const why = v.end || v.error;
@@ -756,6 +786,7 @@ class Client {
     if (view === "screen") { this.send({ view: this.want() }); this.keyboard(); this.screenWait(); }
     if (view === "files") { if (!this.files.wanted) { this.files.wanted = true; this.list(""); } else $("ftable").focus(); this.filesWait(); }
     if (this.ready) update(this.t.key || keyOf(this.t), { view });
+    if (this.desk) this.figures();
   }
   relayout() {
     if (this.view === "term") this.fit.fit();
@@ -829,7 +860,7 @@ class Client {
     this.pictured = false;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    this.show = drawer(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } });
+    this.show = painter(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } }, seq => this.send({ drawn: seq }));
     const send = v => { if (!this.viewOnly) this.send(v); };
     // Pointer positions in the picture's pixels, past the letterbox around it.
     const point = e => {
@@ -937,6 +968,50 @@ class Client {
     for (const k of [...keys].reverse()) this.send({ key: [k, 0] });
     this.keyboard();
   }
+  // The picture's quality, kept for the next connection from this browser.
+  setQuality(v) {
+    store.set("picture", v);
+    this.send(v);
+  }
+  // Colours, resolution and frame rate of one's own: from black and white at a tenth of the
+  // size and one picture a second, the least traffic, to full colour at full size and 60.
+  customQuality() {
+    const Q = this.quality || { mode: "true", scale: 100, fps: 30 };
+    const MODES = [["mono", "Black and white"], ["gray4", "4 greys"], ["gray16", "16 greys"], ["16c", "16 colours"], ["256c", "256 colours"], ["true", "Full colour"]];
+    const box = $("modal").firstElementChild;
+    box.textContent = "";
+    const mode = h("select", { "aria-label": "Colours" }, ...MODES.map(([v, t]) => h("option", { value: v, text: t, selected: v === Q.mode })));
+    const slider = (label, min, max, step, value, unit) => {
+      const out = h("output", { text: value + unit });
+      const r = h("input", { type: "range", min, max, step, value, "aria-label": label });
+      r.oninput = () => { out.textContent = r.value + unit; };
+      return [h("label", { class: "range" }, h("span", { text: label }), r, out), r];
+    };
+    const [scaleRow, scale] = slider("Resolution", 10, 100, 5, Q.scale || 100, "%");
+    const [fpsRow, fps] = slider("Frame rate", 1, 60, 1, Q.fps || 30, " fps");
+    const finish = ok => {
+      $("modal").hidden = true;
+      removeEventListener("keydown", keys, true);
+      if (ok) this.setQuality({ quality: "custom", mode: mode.value, scale: +scale.value, fps: +fps.value });
+    };
+    const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(false); } };
+    const yes = h("button", { type: "button", class: "btn primary", text: "Use it", onclick: () => finish(true) });
+    box.append(h("h2", { text: "Picture quality of your own" }),
+      h("p", { text: "Fewer colours, a smaller picture and fewer pictures a second send less: black and white at a tenth of the size and 1 fps is the least." }),
+      h("label", { class: "range" }, h("span", { text: "Colours" }), mode), scaleRow, fpsRow,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: () => finish(false) }), yes));
+    $("modal").hidden = false;
+    addEventListener("keydown", keys, true);
+    mode.focus();
+  }
+  // The status line: the host's screen, the quality in effect, and the link's figures.
+  figures() {
+    const parts = [];
+    if (this.desk) parts.push(this.desk[0] + "×" + this.desk[1]);
+    if (this.quality && this.view === "screen") parts.push(this.quality.text);
+    if (this.stats && this.view === "screen") parts.push(this.stats.kbps.toFixed(this.stats.kbps < 10 ? 1 : 0) + " KB/s", Math.round(this.stats.rtt) + " ms");
+    this.state(parts.join(" · "), "up");
+  }
   // A message from the person at the host: in the chat, and said when the chat is closed.
   chatIn(text) {
     this.chatLines.push({ you: false, text, at: new Date() });
@@ -994,16 +1069,14 @@ class Client {
       null,
       ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
     ], at);
-    const q = store.get("quality", "balanced");
-    const setQ = v => { store.set("quality", v); this.send({ quality: v }); };
-    const qualityMenu = at => menu(["Picture",
-      ["Best (sharpest, more data)", () => setQ("best"), { on: store.get("quality", "balanced") === "best" }],
-      ["Balanced", () => setQ("balanced"), { on: store.get("quality", "balanced") === "balanced" }],
-      ["Fast (for slow links)", () => setQ("fast"), { on: store.get("quality", "balanced") === "fast" }],
+    const Q = this.quality || {};
+    const qualityMenu = at => menu(["Picture quality",
+      ["Auto (adapts to the connection)", () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
+      ...(this.qualities || []).map((p, i) => [p.text, () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
+      ["Custom: colours, resolution, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
       null,
       ["Repaint the whole screen", () => this.send({ refresh: 1 })],
     ], at);
-    if (q !== "balanced") setTimeout(() => this.send({ quality: q }), 0);
     const several = this.monitors && this.monitors.list.length > 1;
     const monitorMenu = at => menu(this.monitors.list.map((m, i) =>
       [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), at);

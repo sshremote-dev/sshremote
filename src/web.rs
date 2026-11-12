@@ -564,9 +564,20 @@ enum Ask {
     Upload { id: u32, size: u64, dir: String, name: String },
     Chunk(u32, Vec<u8>),
     UploadEnd(u32),
-    /// How the picture is sent: JPEG quality and the least time between pictures.
-    Quality(u8, u64),
+    /// The picture's quality: as the app's (auto, a preset, or colours, resolution and frame
+    /// rate of the user's own).
+    Quality(WebQuality),
+    /// The browser drew the picture update of this number.
+    Drawn(u32),
     Gone,
+}
+
+/// A quality asked for from the browser.
+#[derive(Debug, PartialEq)]
+enum WebQuality {
+    Auto,
+    Preset(usize),
+    Custom(crate::color::Mode, u8, u8),
 }
 
 /// One message of a browser's session: JSON in text frames, typed bytes in binary ones.
@@ -638,11 +649,21 @@ fn ask(frame: Frame) -> Option<Ask> {
         return Some(Ask::Agent(ToAgent::Refresh));
     }
     if let Some(q) = s("quality") {
-        return Some(match q.as_str() {
-            "best" => Ask::Quality(90, 60),
-            "fast" => Ask::Quality(60, 150),
-            _ => Ask::Quality(80, 80),
-        });
+        let level = n("level").map(|l| (l as usize).min(crate::proto::PRESETS.len() - 1));
+        return Some(Ask::Quality(match q.as_str() {
+            "preset" => WebQuality::Preset(level?),
+            "custom" => {
+                let mode = crate::color::Mode::parse(&s("mode")?)?;
+                WebQuality::Custom(mode, n("scale")?.clamp(10, 100) as u8, n("fps")?.clamp(1, 60) as u8)
+            }
+            // The page's older words.
+            "best" => WebQuality::Preset(crate::proto::PRESETS.len() - 1),
+            "fast" => WebQuality::Preset(1),
+            _ => WebQuality::Auto,
+        }));
+    }
+    if let Some(seq) = n("drawn") {
+        return Some(Ask::Drawn(seq as u32));
     }
     if let Some(u) = v.get("upload") {
         let id = u.get("id")?.as_u64()? as u32;
@@ -659,18 +680,152 @@ fn ask(frame: Frame) -> Option<Ask> {
     }
 }
 
-/// What the picture is asked to be: the browser's view, all colours, 15 pictures a second at most.
-fn settings((vw, vh): (u16, u16)) -> crate::proto::Settings {
-    crate::proto::Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 }
+/// What the picture is asked to be: the quality chosen, for the browser's view.
+fn settings(ctl: &crate::session::Control, (vw, vh): (u16, u16)) -> crate::proto::Settings {
+    crate::proto::Settings { view_w: vw, view_h: vh, ..ctl.s }
 }
 
 /// Reaches the agent, with no picture until the screen shows.
-fn reach(target: crate::transport::Target, view: (u16, u16)) -> Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String> {
+fn reach(target: crate::transport::Target, s: crate::proto::Settings) -> Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String> {
     use crate::proto::ToAgent;
     let (mut sess, _tx, rx) = crate::session::Session::open(&target, true)?;
     sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
-    sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
+    sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
     Ok((sess, rx))
+}
+
+/// A rectangle of the picture: x, y, width, height.
+type Area = (usize, usize, usize, usize);
+
+/// The picture's changed parts as a few rectangles: those that touch or nearly do become one,
+/// and at most `MAX_AREAS` remain (the closest merged first), each inside a `w` x `h` picture.
+fn merge_areas(areas: &[Area], w: usize, h: usize) -> Vec<Area> {
+    const NEAR: usize = 8;
+    const MAX_AREAS: usize = 12;
+    let mut out: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut sorted: Vec<Area> = areas.iter().filter(|a| a.2 > 0 && a.3 > 0 && a.0 < w && a.1 < h).copied().collect();
+    sorted.sort_by_key(|a| (a.1, a.0));
+    for (x, y, aw, ah) in sorted {
+        let (l, t, r, b) = (x, y, (x + aw).min(w), (y + ah).min(h));
+        match out.iter_mut().find(|o| l <= o.2 + NEAR && o.0 <= r + NEAR && t <= o.3 + NEAR && o.1 <= b + NEAR) {
+            Some(o) => *o = (o.0.min(l), o.1.min(t), o.2.max(r), o.3.max(b)),
+            None => out.push((l, t, r, b)),
+        }
+    }
+    // Merged rectangles can now touch others: again until none do, then down to the most kept.
+    loop {
+        let mut merged = false;
+        'outer: for i in 0..out.len() {
+            for j in i + 1..out.len() {
+                let (a, b) = (out[i], out[j]);
+                if a.0 <= b.2 + NEAR && b.0 <= a.2 + NEAR && a.1 <= b.3 + NEAR && b.1 <= a.3 + NEAR {
+                    out[i] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+                    out.swap_remove(j);
+                    merged = true;
+                    break 'outer;
+                }
+            }
+        }
+        if merged {
+            continue;
+        }
+        if out.len() <= MAX_AREAS {
+            break;
+        }
+        let area = |r: &(usize, usize, usize, usize)| (r.2 - r.0) * (r.3 - r.1);
+        let mut best = (usize::MAX, 0, 1);
+        for i in 0..out.len() {
+            for j in i + 1..out.len() {
+                let u = (out[i].0.min(out[j].0), out[i].1.min(out[j].1), out[i].2.max(out[j].2), out[i].3.max(out[j].3));
+                let grow = area(&u).saturating_sub(area(&out[i]) + area(&out[j]));
+                if grow < best.0 {
+                    best = (grow, i, j);
+                }
+            }
+        }
+        let (_, i, j) = best;
+        let (a, b) = (out[i], out[j]);
+        out[i] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+        out.swap_remove(j);
+    }
+    out.into_iter().map(|(l, t, r, b)| (l, t, r - l, b - t)).collect()
+}
+
+/// One part of the picture as the browser decodes it: lossless WebP for what has few colours
+/// (text, screens of the reduced colour modes) or when lossless is asked for, JPEG at `q` for
+/// photographs. Returns the format (0 WebP, 1 JPEG) and the bytes.
+fn encode_area(fb: &crate::session::Framebuffer, (x, y, w, h): Area, lossless: bool, q: u8) -> Result<(u8, Vec<u8>), String> {
+    let mut px = Vec::with_capacity(w * h * 3);
+    for row in y..y + h {
+        let o = (row * fb.w + x) * 3;
+        px.extend_from_slice(&fb.rgb[o..o + w * 3]);
+    }
+    // A sample of its colours: more than 256 reads as a photograph.
+    let few = lossless || {
+        let mut seen = std::collections::HashSet::new();
+        let step = (w * h / 4096).max(1);
+        px.chunks(3).step_by(step).all(|c| {
+            seen.insert([c[0], c[1], c[2]]);
+            seen.len() <= 256
+        })
+    };
+    let mut out = Vec::new();
+    if few {
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .encode(&px, w as u32, h as u32, image::ExtendedColorType::Rgb8)
+            .map_err(|e| e.to_string())?;
+        Ok((0, out))
+    } else {
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q).encode(&px, w as u32, h as u32, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+        Ok((1, out))
+    }
+}
+
+/// A picture update for the browser: its number and the picture's size, the moves to make (an
+/// area shifted up or down, as the agent found the screen scrolled), then the changed areas.
+fn picture_update(seq: u32, fb: &crate::session::Framebuffer, moves: &[crate::scroll::Move], areas: &[Area], lossless: bool, q: u8) -> Result<Vec<u8>, String> {
+    let mut b = vec![4u8];
+    b.extend_from_slice(&seq.to_le_bytes());
+    b.extend_from_slice(&(fb.w as u16).to_le_bytes());
+    b.extend_from_slice(&(fb.h as u16).to_le_bytes());
+    b.push(moves.len().min(255) as u8);
+    for m in moves.iter().take(255) {
+        for v in [m.x, m.y, m.w, m.h] {
+            b.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        b.extend_from_slice(&(m.dy as i16).to_le_bytes());
+    }
+    b.push(areas.len() as u8);
+    for &a in areas {
+        let (fmt, data) = encode_area(fb, a, lossless, q)?;
+        for v in [a.0, a.1, a.2, a.3] {
+            b.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        b.push(fmt);
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&data);
+    }
+    Ok(b)
+}
+
+/// The quality in effect, for the page's menu and status.
+fn quality_state(ctl: &crate::session::Control) -> serde_json::Value {
+    serde_json::json!({
+        "auto": ctl.auto.is_some(),
+        "preset": ctl.preset,
+        "mode": ctl.s.mode.name(),
+        "scale": ctl.s.scale,
+        "fps": ctl.s.fps,
+        "text": ctl.describe(),
+    })
+}
+
+/// The presets as the browser lists them.
+fn quality_list() -> serde_json::Value {
+    crate::proto::PRESETS
+        .iter()
+        .map(|p| serde_json::json!({ "name": p.name, "text": format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps) }))
+        .collect()
 }
 
 /// How opening a computer went, for the count of wrong tries.
@@ -703,10 +858,13 @@ fn client(
     let io = |e: std::io::Error| e.to_string();
     let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {}\u{2026}", open.name) }));
     let start = reach;
+    // The picture's quality, as the app's: auto until the browser asks for another.
+    let mut ctl = crate::session::Control::for_preset(None, crate::color::Mode::True);
+    (ctl.s.view_w, ctl.s.view_h) = view;
     let mut agent = if open.lazy {
         Agent::Idle
     } else {
-        match start(open.agent.clone(), view) {
+        match start(open.agent.clone(), settings(&ctl, view)) {
             Ok((s, rx)) => Agent::Up(s, rx),
             Err(e) => {
                 let refused = e.to_lowercase().contains("wrong password");
@@ -735,6 +893,7 @@ fn client(
         _ => serde_json::Value::Null,
     };
     send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk } }))?;
+    send_json(&w, serde_json::json!({ "qualities": quality_list(), "quality": quality_state(&ctl) }))?;
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
     let w_in = w.clone();
@@ -753,8 +912,17 @@ fn client(
         }
     });
     let mut fb = crate::session::Framebuffer::default();
-    let (mut dirty, mut sent, mut shown) = (false, Instant::now(), false);
-    let (mut jpeg_q, mut gap) = (80u8, Duration::from_millis(80));
+    let mut shown = false;
+    // What changed of the picture since the browser was last sent it, and the moves the agent
+    // made before any of that (sent as moves, not as pictures of what moved).
+    let (mut damage, mut moves): (Vec<Area>, Vec<crate::scroll::Move>) = (Vec::new(), Vec::new());
+    // Updates sent and not drawn yet: their numbers, and when they went. At most two wait, so a
+    // slow browser gets fewer, larger updates rather than a queue of stale ones.
+    let mut drawing: Vec<(u32, Instant)> = Vec::new();
+    let mut seq = 0u32;
+    // How long the browser takes to draw, which auto counts as part of the round trip.
+    let mut draw_ms = 0.0f64;
+    let mut sent_bytes = (0u64, Instant::now());
     let mut view = view;
     // Asks waiting for the agent to be reached.
     let mut waiting: Vec<ToAgent> = Vec::new();
@@ -815,12 +983,24 @@ fn client(
             let Agent::Up(sess, _) = &mut agent else { break };
             match m {
                 ToClient::Frame(f) => {
-                    fb.apply(&f).map_err(io)?;
+                    let resized = fb.apply(&f).map_err(io)?;
                     sess.send(ToAgent::Ack(f.id)).map_err(io)?;
                     if std::mem::take(&mut fb.need_key) {
                         sess.send(ToAgent::Refresh).map_err(io)?;
                     }
-                    dirty = true;
+                    ctl.frame_done(f.covered() * 2 > fb.w * fb.h);
+                    if resized {
+                        (damage, moves) = (vec![(0, 0, fb.w, fb.h)], Vec::new());
+                    } else {
+                        // A move goes as a move while nothing waits; after other changes, as the
+                        // picture of where it landed.
+                        if damage.is_empty() {
+                            moves.extend(f.moves.iter().copied());
+                        } else {
+                            damage.extend(f.moves.iter().map(|m| (m.x, m.y, m.w, m.h)));
+                        }
+                        damage.extend(f.tiles.iter().chain(f.video.iter()).map(|t| (t.x as usize, t.y as usize, t.w as usize, t.h as usize)));
+                    }
                 }
                 ToClient::Hello { w: dw, h: dh, .. } => {
                     let _ = send_json(&w, serde_json::json!({ "screen": [dw, dh] }));
@@ -951,10 +1131,23 @@ fn client(
                 Ask::Agent(a) => Some(a),
                 Ask::View(vw, vh) => {
                     view = (vw, vh);
-                    Some(ToAgent::Settings(settings(view)))
+                    (ctl.s.view_w, ctl.s.view_h) = view;
+                    Some(ToAgent::Settings(settings(&ctl, view)))
                 }
-                Ask::Quality(q, ms) => {
-                    (jpeg_q, gap, dirty) = (q, Duration::from_millis(ms), fb.w > 0);
+                Ask::Quality(q) => {
+                    match q {
+                        WebQuality::Auto => drop(ctl.menu('a')),
+                        WebQuality::Preset(i) => drop(ctl.menu(char::from(b'0' + i as u8))),
+                        WebQuality::Custom(mode, scale, fps) => ctl.set_custom(mode, scale, fps),
+                    }
+                    let _ = send_json(&w, serde_json::json!({ "quality": quality_state(&ctl) }));
+                    Some(ToAgent::Settings(settings(&ctl, view)))
+                }
+                Ask::Drawn(n) => {
+                    if let Some(i) = drawing.iter().position(|d| d.0 == n) {
+                        let ms = drawing.remove(i).1.elapsed().as_secs_f64() * 1000.0;
+                        draw_ms = draw_ms * 0.7 + ms * 0.3;
+                    }
                     None
                 }
                 Ask::Show(v) => {
@@ -963,14 +1156,19 @@ fn client(
                     if v != "terminal" && matches!(agent, Agent::Idle) {
                         let _ = send_json(&w, serde_json::json!({ "status": "Connecting for the screen and files\u{2026}" }));
                         let (tx, rx) = mpsc::channel();
-                        let (target, at) = (open.agent.clone(), view);
+                        let (target, at) = (open.agent.clone(), settings(&ctl, view));
                         std::thread::spawn(move || drop(tx.send(start(target, at))));
                         agent = Agent::Connecting(rx);
                     }
                     if on == shown {
                         None
                     } else {
-                        (shown, dirty) = (on, on && fb.w > 0);
+                        shown = on;
+                        // Shown again: the whole picture, as it is now.
+                        if on && fb.w > 0 {
+                            (damage, moves) = (vec![(0, 0, fb.w, fb.h)], Vec::new());
+                            drawing.clear();
+                        }
                         if let Agent::Up(sess, _) = &mut agent {
                             sess.send(ToAgent::Pause(!on)).map_err(io)?;
                         }
@@ -1006,7 +1204,7 @@ fn client(
                 // Files asked for before any view wanted them reach for the agent too.
                 Agent::Idle => {
                     let (tx, rx) = mpsc::channel();
-                    let (target, at) = (open.agent.clone(), view);
+                    let (target, at) = (open.agent.clone(), settings(&ctl, view));
                     std::thread::spawn(move || drop(tx.send(start(target, at))));
                     agent = Agent::Connecting(rx);
                     waiting.push(m);
@@ -1016,15 +1214,32 @@ fn client(
                 }
             }
         }
-        if shown && dirty && fb.w > 0 && sent.elapsed() >= gap {
-            let mut jpeg = vec![2u8];
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, jpeg_q)
-                .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
-                .map_err(|e| e.to_string())?;
-            if send(&w, 0x2, &jpeg).is_err() {
+        // An answer lost on the way never stops the picture.
+        drawing.retain(|d| d.1.elapsed() < Duration::from_secs(3));
+        if shown && fb.w > 0 && drawing.len() < 2 && (!damage.is_empty() || !moves.is_empty()) {
+            let areas = merge_areas(&damage, fb.w, fb.h);
+            // Lossless at the best preset; photographs as JPEG otherwise, sharper at the crisp one.
+            let lossless = ctl.auto.is_none() && ctl.preset == crate::proto::PRESETS[crate::proto::PRESETS.len() - 1].name;
+            let q = if ctl.preset == "crisp" { 88 } else { 78 };
+            seq = seq.wrapping_add(1);
+            let update = picture_update(seq, &fb, &moves, &areas, lossless, q)?;
+            (damage, moves) = (Vec::new(), Vec::new());
+            sent_bytes.0 += update.len() as u64;
+            if send(&w, 0x2, &update).is_err() {
                 break String::new();
             }
-            (dirty, sent) = (false, Instant::now());
+            drawing.push((seq, Instant::now()));
+        }
+        // Once a second: what auto makes of the link (the browser's drawing counted in its round
+        // trip), and the figures for the page.
+        if shown && let Agent::Up(sess, _) = &mut agent {
+            ctl.rtt = ctl.rtt.max(draw_ms);
+            if ctl.tick(sess).map_err(io)? {
+                let secs = sent_bytes.1.elapsed().as_secs_f64().max(0.001);
+                let kbps = sent_bytes.0 as f64 / 1024.0 / secs;
+                sent_bytes = (0, Instant::now());
+                let _ = send_json(&w, serde_json::json!({ "stats": { "kbps": kbps, "fps": ctl.fps_now, "rtt": ctl.rtt }, "quality": quality_state(&ctl) }));
+            }
         }
     };
     if let Agent::Up(mut sess, _) = agent {
@@ -1391,6 +1606,50 @@ Host: x
         assert!(!token_ok("pw", &b64.encode(&b)), "its end cannot be moved");
     }
 
+    /// Changed parts become a few rectangles: neighbours merge, and many far apart are merged
+    /// down to the most kept, all inside the picture.
+    #[test]
+    fn changed_parts_merge_into_few_rectangles() {
+        assert_eq!(merge_areas(&[(0, 0, 32, 32), (32, 0, 32, 32), (64, 0, 32, 32)], 640, 480), vec![(0, 0, 96, 32)]);
+        assert_eq!(merge_areas(&[(600, 450, 100, 100)], 640, 480), vec![(600, 450, 40, 30)], "cut to the picture");
+        let spread: Vec<Area> = (0..40).map(|i| ((i % 8) * 80, (i / 8) * 90, 10, 10)).collect();
+        let merged = merge_areas(&spread, 640, 480);
+        assert!(merged.len() <= 12, "{}", merged.len());
+        for (x, y, _, _) in &spread {
+            assert!(merged.iter().any(|m| m.0 <= *x && *x < m.0 + m.2 && m.1 <= *y && *y < m.1 + m.3), "every part kept");
+        }
+    }
+
+    /// A picture update carries the moves, then each area as a picture the browser can decode:
+    /// few colours lossless, a photograph as JPEG.
+    #[test]
+    fn picture_updates_carry_moves_and_areas() {
+        let mut fb = crate::session::Framebuffer::default();
+        (fb.rgb, fb.w, fb.h) = (vec![0; 64 * 32 * 3], 64, 32);
+        // A noisy right half, a plain left one.
+        for (i, px) in fb.rgb.chunks_mut(3).enumerate() {
+            if i % 64 >= 32 {
+                px.copy_from_slice(&[(i * 37 % 251) as u8, (i * 91 % 241) as u8, (i * 53 % 239) as u8]);
+            }
+        }
+        let m = crate::scroll::Move { x: 0, y: 4, w: 64, h: 20, dy: -3 };
+        let b = picture_update(9, &fb, &[m], &[(0, 0, 32, 32), (32, 0, 32, 32)], false, 80).unwrap();
+        assert_eq!(b[0], 4);
+        assert_eq!(u32::from_le_bytes(b[1..5].try_into().unwrap()), 9);
+        assert_eq!((u16::from_le_bytes([b[5], b[6]]), u16::from_le_bytes([b[7], b[8]])), (64, 32));
+        assert_eq!(b[9], 1, "one move");
+        assert_eq!(i16::from_le_bytes([b[18], b[19]]), -3);
+        assert_eq!(b[20], 2, "two areas");
+        let fmt = |at: usize| b[at + 8];
+        let len = |at: usize| u32::from_le_bytes(b[at + 9..at + 13].try_into().unwrap()) as usize;
+        let first = 21;
+        let second = first + 13 + len(first);
+        assert_eq!((fmt(first), fmt(second)), (0, 1), "plain as WebP, noise as JPEG");
+        assert_eq!(second + 13 + len(second), b.len());
+        let lossless = picture_update(1, &fb, &[], &[(32, 0, 32, 32)], true, 80).unwrap();
+        assert_eq!(lossless[10 + 8], 0, "lossless when asked, even for a photograph");
+    }
+
     /// A host typed in the browser is only ever ssh's destination, and its password goes in the
     /// environment, never on the command line.
     #[test]
@@ -1435,7 +1694,12 @@ Host: x
         assert!(matches!(a(r#"{"download":"/d","tag":2147483649}"#), Some(Ask::Agent(ToAgent::Fetch { tag: 0x8000_0001, .. }))));
         assert!(matches!(a(r#"{"clipboard":"hi"}"#), Some(Ask::Agent(ToAgent::Clipboard(t))) if t == "hi"));
         assert!(matches!(a(r#"{"sas":1}"#), Some(Ask::Agent(ToAgent::SecureAttention))));
-        assert!(matches!(a(r#"{"quality":"fast"}"#), Some(Ask::Quality(60, 150))));
+        assert!(matches!(a(r#"{"quality":"fast"}"#), Some(Ask::Quality(WebQuality::Preset(1)))));
+        assert!(matches!(a(r#"{"quality":"auto"}"#), Some(Ask::Quality(WebQuality::Auto))));
+        assert!(matches!(a(r#"{"quality":"preset","level":0}"#), Some(Ask::Quality(WebQuality::Preset(0)))));
+        assert!(matches!(a(r#"{"quality":"custom","mode":"mono","scale":5,"fps":90}"#), Some(Ask::Quality(WebQuality::Custom(crate::color::Mode::Mono, 10, 60)))));
+        assert!(a(r#"{"quality":"custom","mode":"sepia","scale":50,"fps":10}"#).is_none(), "an unknown colour mode is refused");
+        assert!(matches!(a(r#"{"drawn":7}"#), Some(Ask::Drawn(7))));
         assert!(matches!(a(r#"{"list":""}"#), Some(Ask::Agent(ToAgent::ListDir { .. }))));
         assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
         assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));

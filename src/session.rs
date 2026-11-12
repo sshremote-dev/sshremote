@@ -503,21 +503,41 @@ pub struct Control {
 
 impl Control {
     pub fn new(opt: &Options, max_mode: Mode) -> Control {
-        let level = opt.preset.unwrap_or(2).min(PRESETS.len() - 1);
+        Control::with(opt.preset, opt.budget, (opt.mode, opt.scale, opt.fps), max_mode)
+    }
+
+    /// Auto, or preset `preset`, with nothing else asked (a browser's start).
+    #[cfg(feature = "web")]
+    pub fn for_preset(preset: Option<usize>, max_mode: Mode) -> Control {
+        Control::with(preset, None, (None, None, None), max_mode)
+    }
+
+    /// Colours, resolution and frame rate of the user's own; auto ends.
+    #[cfg(feature = "web")]
+    pub fn set_custom(&mut self, mode: Mode, scale: u8, fps: u8) {
+        self.s.mode = if mode.to_u8() > self.max_mode.to_u8() { self.max_mode } else { mode };
+        self.s.scale = scale.clamp(10, 100);
+        self.s.fps = fps.clamp(1, 60);
+        self.custom();
+    }
+
+    fn with(preset: Option<usize>, budget: Option<f64>, (mode, scale, fps): (Option<Mode>, Option<u8>, Option<u8>), max_mode: Mode) -> Control {
+        let opt = (preset, budget, mode, scale, fps);
+        let level = opt.0.unwrap_or(2).min(PRESETS.len() - 1);
         let p = &PRESETS[level];
         let mode = if p.mode.to_u8() > max_mode.to_u8() { max_mode } else { p.mode };
         let mut s = Settings { view_w: 0, view_h: 0, scale: p.scale, mode, fps: p.fps };
-        let custom = opt.mode.is_some() || opt.scale.is_some() || opt.fps.is_some();
-        s.mode = opt.mode.unwrap_or(s.mode);
-        s.scale = opt.scale.unwrap_or(s.scale).clamp(10, 100);
-        s.fps = opt.fps.unwrap_or(s.fps).clamp(1, 60);
+        let custom = opt.2.is_some() || opt.3.is_some() || opt.4.is_some();
+        s.mode = opt.2.unwrap_or(s.mode);
+        s.scale = opt.3.unwrap_or(s.scale).clamp(10, 100);
+        s.fps = opt.4.unwrap_or(s.fps).clamp(1, 60);
         let now = Instant::now();
         Control {
             s,
             preset: if custom { "custom".into() } else { p.name.into() },
-            auto: (opt.preset.is_none() && !custom).then(|| Auto::new(opt.budget, level)),
+            auto: (opt.0.is_none() && !custom).then(|| Auto::new(opt.1, level)),
             max_mode,
-            budget: opt.budget,
+            budget: opt.1,
             epoch: now,
             ping: None,
             stat_at: now,

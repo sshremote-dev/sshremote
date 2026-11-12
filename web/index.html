@@ -105,6 +105,11 @@
   #vscreen { background: #000; }
   #vscreen canvas { width: 100%; height: 100%; object-fit: contain; outline: none; display: block; }
   #vscreen.viewonly canvas { cursor: not-allowed; }
+  /* A setting with its name before it and its value after it, in a dialog. */
+  label.range { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 10px; margin: 12px 0; }
+  label.range span { color: var(--dim); }
+  label.range output { text-align: right; font-variant-numeric: tabular-nums; }
+  label.range select { grid-column: 2 / 4; }
   /* The chat with the person at the host, at the right of the views. */
   #chat { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; max-width: 100%; z-index: 15; display: flex; flex-direction: column;
           background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px #0006; }
