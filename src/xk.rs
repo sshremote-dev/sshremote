@@ -17,9 +17,11 @@ pub const END: u32 = 0xff57;
 pub const PRINT: u32 = 0xff61;
 pub const INSERT: u32 = 0xff63;
 pub const MENU: u32 = 0xff67;
-/// F1 to F12 follow one another.
+/// F1 to F24 follow one another.
 pub const F1: u32 = 0xffbe;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const F12: u32 = 0xffc9;
+pub const F24: u32 = 0xffd5;
 pub const SHIFT_L: u32 = 0xffe1;
 pub const SHIFT_R: u32 = 0xffe2;
 pub const CONTROL_L: u32 = 0xffe3;

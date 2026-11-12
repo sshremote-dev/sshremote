@@ -689,7 +689,7 @@ fn special_vk(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         xk::INSERT => (VK_INSERT, true),
         xk::DELETE => (VK_DELETE, true),
         // F1 to F24: their virtual keys follow one another as their keysyms do.
-        xk::F1..=0xffd5 => (VK_F1 + (keysym - xk::F1) as u16, false),
+        xk::F1..=xk::F24 => (VK_F1 + (keysym - xk::F1) as u16, false),
         xk::SUPER_L => (VK_LWIN, true),
         xk::SUPER_R => (VK_RWIN, true),
         _ => return None,
