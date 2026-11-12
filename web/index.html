@@ -105,6 +105,8 @@
   #vscreen { background: #000; }
   #vscreen canvas { width: 100%; height: 100%; object-fit: contain; outline: none; display: block; }
   #vscreen.viewonly canvas { cursor: not-allowed; }
+  /* Takes the keyboard for the host: keys, an input method's text, a phone's on-screen keyboard. */
+  #kbd { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }
   .wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); text-align: center; padding: 20px; }
   .wait .bad { color: var(--bad); }
   .spin { width: 22px; height: 22px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; margin: 0 auto 10px; }
@@ -231,7 +233,7 @@
   <button id="tab" title="Show the toolbar"><i class="dot" id="tabdot"></i><span id="tabname"></span></button>
   <div id="views">
     <div id="vterm" class="view"></div>
-    <div id="vscreen" class="view"><canvas id="canvas" tabindex="0"></canvas><div class="wait" id="swait"></div></div>
+    <div id="vscreen" class="view"><canvas id="canvas" tabindex="-1"></canvas><textarea id="kbd" aria-label="Keyboard for the host" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><div class="wait" id="swait"></div></div>
     <div id="vfiles" class="view">
       <div class="ftools">
         <button class="btn icon" id="fup" title="Up one folder (Backspace)"></button>

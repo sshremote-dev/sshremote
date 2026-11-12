@@ -735,7 +735,7 @@ class Client {
     $("stools").hidden = view !== "screen";
     if (!first || view !== "term") this.send({ show: view === "term" ? "terminal" : view });
     if (view === "term") { this.fit.fit(); this.term.focus(); }
-    if (view === "screen") { this.send({ view: this.want() }); $("canvas").focus(); this.screenWait(); }
+    if (view === "screen") { this.send({ view: this.want() }); this.keyboard(); this.screenWait(); }
     if (view === "files") { if (!this.files.wanted) { this.files.wanted = true; this.list(""); } else $("ftable").focus(); this.filesWait(); }
     if (this.ready) update(this.t.key || keyOf(this.t), { view });
   }
@@ -828,7 +828,7 @@ class Client {
     canvas.style.touchAction = "none";
     canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
     canvas.onpointerdown = e => {
-      canvas.focus();
+      this.keyboard();
       const p = point(e); if (!p) return;
       canvas.setPointerCapture(e.pointerId);
       down = BUTTON[e.button] || 1;
@@ -853,18 +853,47 @@ class Client {
       const sx = Math.trunc(wheel[0]), sy = Math.trunc(wheel[1]);
       if (sx || sy) { send({ wheel: [sx, sy] }); wheel = [wheel[0] - sx, wheel[1] - sy]; }
     };
-    const held = new Set();
-    canvas.onkeydown = e => {
+    // The keyboard goes through a hidden text field, which input methods and phones' on-screen
+    // keyboards can type into. A key comes up as the key it went down as, by its place on the
+    // keyboard: let go after Shift, an "A" must not stay down as an "a" comes up.
+    const kbd = $("kbd");
+    const held = new Map();
+    kbd.onkeydown = e => {
+      // An input method is composing (Korean, Japanese, Chinese) or a phone keyboard sends no
+      // key: its text comes when it is done.
+      if (e.isComposing || e.key === "Process" || e.key === "Unidentified" || e.keyCode === 229) return;
       const k = keysym(e); if (!k) return;
-      e.preventDefault(); held.add(k); send({ key: [k, 1] });
+      e.preventDefault();
+      // "Win + the next key" from the keys menu: this key goes with Win held.
+      if (this.winNext && !SIDED[e.key]) {
+        this.winNext = false;
+        send({ key: [K.win, 1] }); send({ key: [k, 1] }); send({ key: [k, 0] }); send({ key: [K.win, 0] });
+        return;
+      }
+      held.set(e.code || e.key, k); send({ key: [k, 1] });
     };
-    canvas.onkeyup = e => {
-      const k = keysym(e); if (!k) return;
-      e.preventDefault(); held.delete(k); send({ key: [k, 0] });
+    kbd.onkeyup = e => {
+      const id = e.code || e.key;
+      const k = held.get(id) ?? keysym(e); if (!k) return;
+      e.preventDefault(); held.delete(id); send({ key: [k, 0] });
     };
+    const tap = k => { send({ key: [k, 1] }); send({ key: [k, 0] }); };
+    // Text typed in as text, each character as the key that makes it.
+    const typeText = t => { for (const ch of t) { const c = ch.codePointAt(0); tap(c < 0x100 ? c : 0x01000000 + c); } };
+    // One space stays in the field so a phone's Backspace has something to delete, and says so.
+    const reset = () => { kbd.value = " "; kbd.setSelectionRange(1, 1); };
+    kbd.addEventListener("compositionend", e => { if (e.data) typeText(e.data); reset(); });
+    kbd.addEventListener("input", e => {
+      if (e.isComposing) return;
+      if (e.inputType === "insertText" && e.data) typeText(e.data);
+      else if (e.inputType === "insertLineBreak") tap(0xff0d);
+      else if (e.inputType === "deleteContentBackward") tap(0xff08);
+      reset();
+    });
+    reset();
     // Keys still down when the page loses focus come up, so none sticks on the host.
-    this.releaseKeys = () => { for (const k of held) this.send({ key: [k, 0] }); held.clear(); };
-    canvas.onblur = () => this.releaseKeys();
+    this.releaseKeys = () => { for (const k of held.values()) this.send({ key: [k, 0] }); held.clear(); };
+    kbd.onblur = () => this.releaseKeys();
     // The tools as buttons or as one menu, by the window's width.
     const narrow = matchMedia("(max-width: 760px)");
     const retool = () => this.screenTools();
@@ -873,7 +902,7 @@ class Client {
     this.unbind = () => { old?.(); narrow.removeEventListener("change", retool); };
     // What was copied here goes to the host as the screen takes the keyboard, once the browser
     // lets the page read the clipboard (asked the first time "Paste my clipboard" is used).
-    canvas.onfocus = async () => {
+    kbd.onfocus = async () => {
       if (this.viewOnly || !navigator.clipboard?.readText || !navigator.permissions) return;
       try {
         const p = await navigator.permissions.query({ name: "clipboard-read" });
@@ -888,7 +917,11 @@ class Client {
     if (this.viewOnly) { toast("View only: nothing is sent to the host."); return; }
     for (const k of keys) this.send({ key: [k, 1] });
     for (const k of [...keys].reverse()) this.send({ key: [k, 0] });
-    $("canvas").focus();
+    this.keyboard();
+  }
+  // The screen takes the keyboard (on a phone, its on-screen keyboard opens).
+  keyboard() {
+    $("kbd").focus({ preventScroll: true });
   }
   screenTools() {
     const bar = $("stools");
@@ -899,6 +932,8 @@ class Client {
       ["Ctrl+Alt+Del", () => { if (!this.viewOnly) this.send({ sas: 1 }); }],
       ["Lock the screen", () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
       ["Start menu", () => this.combo([K.win]), { kbd: "Win" }],
+      ["Show the desktop", () => this.combo([K.win, 0x64]), { kbd: "Win+D" }],
+      ["Win + the next key", () => { this.winNext = true; toast("Press the key to go with Win."); this.keyboard(); }],
       ["Switch windows", () => this.combo([K.alt, K.tab]), { kbd: "Alt+Tab" }],
       ["Close the window", () => this.combo([K.alt, K.f4]), { kbd: "Alt+F4" }],
       ["Task Manager", () => this.combo([K.ctrl, K.shift, K.esc]), { kbd: "Ctrl+Shift+Esc" }],
@@ -942,6 +977,7 @@ class Client {
       more.classList.toggle("on", this.viewOnly);
       more.onclick = () => {
         const items = [
+          ["Keyboard", () => this.keyboard(), { icon: "keyboard" }],
           ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
           ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
