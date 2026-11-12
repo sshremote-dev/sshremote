@@ -15,9 +15,33 @@ enum Out {
 }
 
 struct Shell {
-    input: File,
+    input: Input,
     out: mpsc::Receiver<Out>,
     sys: sys::Handle,
+}
+
+/// What is typed into a program, written on a thread of its own: a program that does not read
+/// (a paste into a stopped one, say) holds that thread, never the window or the agent's loop.
+struct Input(mpsc::SyncSender<Vec<u8>>);
+
+impl Input {
+    fn new(mut file: File) -> Input {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(256);
+        std::thread::spawn(move || {
+            for data in rx {
+                if file.write_all(&data).and_then(|_| file.flush()).is_err() {
+                    return;
+                }
+            }
+        });
+        Input(tx)
+    }
+
+    /// Queues `data`; a program that has not read the last 256 writes loses this one, as keys
+    /// typed into a frozen program are.
+    fn write(&self, data: &[u8]) {
+        let _ = self.0.try_send(data.to_vec());
+    }
 }
 
 /// The shells opened by one viewer.
@@ -34,7 +58,7 @@ impl Terms {
                 // Bounded, so a flood of output waits for the reader instead of filling memory.
                 let (tx, rx) = mpsc::sync_channel(64);
                 std::thread::spawn(move || read_loop(output, tx, Box::new(|| {})));
-                self.open.insert(id, Shell { input, out: rx, sys: handle });
+                self.open.insert(id, Shell { input: Input::new(input), out: rx, sys: handle });
                 None
             }
             Err(e) => Some(ToClient::TermExit { id, text: format!("cannot start a shell: {e}") }),
@@ -42,9 +66,8 @@ impl Terms {
     }
 
     pub fn input(&mut self, id: u32, data: &[u8]) {
-        if let Some(s) = self.open.get_mut(&id) {
-            let _ = s.input.write_all(data);
-            let _ = s.input.flush();
+        if let Some(s) = self.open.get(&id) {
+            s.input.write(data);
         }
     }
 
@@ -110,7 +133,7 @@ fn read_loop(mut output: File, tx: mpsc::SyncSender<Out>, wake: Box<dyn Fn() + S
 
 /// A program in a pseudo-terminal on this computer: a local shell, or `ssh HOST`.
 pub struct Local {
-    input: File,
+    input: Input,
     out: mpsc::Receiver<Out>,
     sys: sys::Handle,
 }
@@ -127,12 +150,11 @@ impl Local {
         let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv), env)?;
         let (tx, out) = mpsc::sync_channel(64);
         std::thread::spawn(move || read_loop(output, tx, wake));
-        Ok(Local { input, out, sys })
+        Ok(Local { input: Input::new(input), out, sys })
     }
 
     pub fn write(&mut self, data: &[u8]) {
-        let _ = self.input.write_all(data);
-        let _ = self.input.flush();
+        self.input.write(data);
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -381,6 +403,12 @@ mod sys {
                 b
             });
             let block_ptr = block.as_ref().map_or(null(), |b| b.as_ptr() as *const core::ffi::c_void);
+            // A shell started as the person at the screen runs on their desktop, as one they start
+            // themselves would: what it opens appears there, not on the service's hidden one.
+            let mut desktop = wide(r"winsta0\default");
+            if user.is_some() {
+                si.StartupInfo.lpDesktop = desktop.as_mut_ptr();
+            }
             for cmd in &wanted {
                 let mut line = wide(cmd);
                 let dir = wide(&home);
@@ -434,5 +462,31 @@ mod sys {
                 CloseHandle(self.process as HANDLE);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    /// A program that does not read holds no one who types into it, and one that reads gets it all.
+    #[test]
+    fn typing_never_waits_for_the_program() {
+        let mut stuck = super::Local::spawn(&["sleep".into(), "5".into()], 80, 24, Box::new(|| {})).unwrap();
+        let started = Instant::now();
+        for _ in 0..8 {
+            stuck.write(&vec![b'x'; 1 << 20]);
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        let mut cat = super::Local::spawn(&["cat".into()], 80, 24, Box::new(|| {})).unwrap();
+        cat.write(b"hello there\n");
+        let mut seen = Vec::new();
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until && !String::from_utf8_lossy(&seen).matches("hello there").nth(1).is_some() {
+            seen.extend(cat.drain().0);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The terminal echoes the line, then cat prints it.
+        assert_eq!(String::from_utf8_lossy(&seen).matches("hello there").count(), 2, "{:?}", String::from_utf8_lossy(&seen));
     }
 }
