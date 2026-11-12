@@ -1279,9 +1279,9 @@ impl TermWindow {
         let shortcuts = self.renaming.is_none() && self.keys_on;
         // Tabs and splits of a pane are the workspace's; text size stays the pane's.
         let tabs_keys = !self.bare;
-        let (new_tab, close_tab, next, bigger, smaller) = ui.ctx().input(|i| {
+        let (new_tab, close_tab, next, bigger, smaller, back) = ui.ctx().input(|i| {
             if !shortcuts {
-                return (false, false, false, false, false);
+                return (false, false, false, false, false, false);
             }
             let cs = i.modifiers.ctrl && i.modifiers.shift;
             (
@@ -1290,6 +1290,8 @@ impl TermWindow {
                 tabs_keys && i.modifiers.ctrl && i.key_pressed(Key::Tab),
                 i.modifiers.ctrl && !i.modifiers.alt && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
                 i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::Minus),
+                // Ctrl+Shift+Tab goes the other way.
+                i.modifiers.shift,
             )
         });
         let (split, step) = ui.ctx().input(|i| {
@@ -1326,7 +1328,8 @@ impl TermWindow {
             let groups = self.groups();
             let current = self.tabs[self.active].group;
             let at = groups.iter().position(|g| g.0 == current).unwrap_or(0);
-            self.active = groups[(at + 1) % groups.len()].1;
+            let to = if back { (at + groups.len() - 1) % groups.len() } else { (at + 1) % groups.len() };
+            self.active = groups[to].1;
         }
         if let Some(side) = split {
             // Alt+Shift+D splits along the longer side of the area.
