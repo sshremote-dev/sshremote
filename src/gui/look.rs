@@ -980,6 +980,9 @@ struct Editor {
     image_error: Option<String>,
     /// A file's path to add as a layer.
     new_file: String,
+    /// The size being dragged to: applied when the slider is let go, since changing the size
+    /// moves the slider under the pointer.
+    scale_drag: Option<f32>,
 }
 
 /// Opens the Appearance settings in this window.
@@ -1007,7 +1010,7 @@ fn editor_window(ctx: &egui::Context) {
     let mut open = true;
     let mut l = get();
     let before = l.clone();
-    egui::Window::new(RichText::new(format!("{}  Appearance", ic::EYE)).strong())
+    let shown = egui::Window::new(RichText::new(format!("{}  Appearance", ic::EYE)).strong())
         .id(egui::Id::unique("look-editor"))
         .open(&mut open)
         .collapsible(false)
@@ -1019,8 +1022,16 @@ fn editor_window(ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| editor(ui, &mut l, ed));
         });
-    // A picture dropped on the window is a new background layer.
-    if let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())) {
+    // A picture dropped on this window is a new background layer; one dropped elsewhere (on a
+    // pane of files, a screen) is theirs. Where the pointer is: the system's cursor on Windows,
+    // which a drag does not report, else the last place egui knows.
+    let at = crate::sys::pointer_on_screen()
+        .map(|(x, y)| super::workspace::window_point(ctx, egui::Pos2::new(x as f32, y as f32)))
+        .or_else(|| ctx.input(|i| i.pointer.latest_pos()));
+    let on_editor = shown.zip(at).is_some_and(|(w, p)| w.response.rect.contains(p));
+    if on_editor
+        && let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty()))
+    {
         let path = p.to_string_lossy().into_owned();
         l.layers.push(BgLayer { src: path, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
     }
@@ -1125,9 +1136,17 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         ui.label("Font");
         font_picker(ui, "look-ui-font", &mut l.ui_font, &mut ed.ui_filter, false);
     });
-    let mut pct = (l.ui_scale * 100.0).round();
-    if ui.add(egui::Slider::new(&mut pct, 70.0..=160.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Size")).changed() {
+    let mut pct = (ed.scale_drag.unwrap_or(l.ui_scale) * 100.0).round();
+    let size = ui.add(egui::Slider::new(&mut pct, 70.0..=160.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Size"));
+    if size.dragged() {
+        ed.scale_drag = Some(pct / 100.0);
+    } else if size.changed() {
         l.ui_scale = pct / 100.0;
+    }
+    if !size.dragged()
+        && let Some(v) = ed.scale_drag.take()
+    {
+        l.ui_scale = v;
     }
 
     heading(ui, "Terminal");
