@@ -64,6 +64,28 @@ fn frame(ctx: &egui::Context, w: &mut TermWindow, events: Vec<Event>) -> Vec<Cmd
     out
 }
 
+/// A pane's program that ends well closes its pane; a tool's stays, its output there to read.
+#[cfg(unix)]
+#[test]
+fn a_tools_pane_stays_when_its_program_ends_well() {
+    let ctx = egui::Context::default();
+    for (launch, stays) in [(Launch::Local(vec!["true".into()]), false), (Launch::Tool(vec!["true".into()]), true)] {
+        let mut w = TermWindow::single(Profile { name: "t".into(), icon: ic::TERMINAL, launch });
+        let mut closed = false;
+        for _ in 0..100 {
+            closed |= frame(&ctx, &mut w, Vec::new()).iter().any(|c| matches!(c, Cmd::Close));
+            if closed || w.tabs.first().is_some_and(|t| t.exited.is_some()) && stays {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for _ in 0..3 {
+            closed |= frame(&ctx, &mut w, Vec::new()).iter().any(|c| matches!(c, Cmd::Close));
+        }
+        assert_eq!(!closed, stays, "stays: {stays}");
+    }
+}
+
 /// Syntax-coloured code is fenced with its indentation, and a frame drawn right above the
 /// prompt (as an agent's input box) stays with the prompt in the live rows.
 #[test]

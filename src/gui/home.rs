@@ -642,7 +642,7 @@ impl App {
                 crate::tools::ToolAction::Terminal { title, argv } => self.open_profile(crate::termwin::Profile {
                     name: title,
                     icon: ic::KEY,
-                    launch: crate::termwin::Launch::Local(argv),
+                    launch: crate::termwin::Launch::Tool(argv),
                 }),
             }
         }

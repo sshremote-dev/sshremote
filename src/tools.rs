@@ -60,6 +60,8 @@ pub struct KeyTool {
     /// The dialog open: creating a key, or installing the key at this index on a host.
     creating: bool,
     installing: Option<usize>,
+    /// When ~/.ssh was last listed: a key made in a terminal (with a passphrase) shows up.
+    listed: std::time::Instant,
 }
 
 const KINDS: [(&str, &[&str]); 3] = [
@@ -84,6 +86,7 @@ impl KeyTool {
             host: String::new(),
             creating: false,
             installing: None,
+            listed: std::time::Instant::now(),
         }
     }
 
@@ -128,6 +131,11 @@ impl KeyTool {
         if self.creating || self.installing.is_some() {
             return self.forms(ui, actions);
         }
+        if self.listed.elapsed() > std::time::Duration::from_secs(2) {
+            self.keys = list_keys();
+            self.listed = std::time::Instant::now();
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
         ui.label(RichText::new("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.").weak());
         ui.add_space(8.0);
         ui.horizontal(|ui| {

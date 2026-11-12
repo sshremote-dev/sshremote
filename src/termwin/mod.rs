@@ -325,6 +325,8 @@ struct Tab {
     /// A name the user gave the tab, which the program's title does not replace.
     custom: Option<String>,
     exited: Option<String>,
+    /// Kept open when its program ends well (a tool's output to read).
+    hold: bool,
     size: (u16, u16),
     backend: Backend,
     view: View,
@@ -454,6 +456,9 @@ pub enum Launch {
     Agent,
     /// A program here; empty means the login shell.
     Local(Vec<String>),
+    /// A program here whose pane stays when it ends well, its output there to read (a tool's
+    /// ssh-keygen or key install).
+    Tool(Vec<String>),
 }
 
 /// An entry of the new-tab menu.
@@ -657,7 +662,7 @@ impl TermWindow {
                 out.push(Cmd::Send(ToAgent::TermOpen { id, cols: size.0, rows: size.1 }));
                 (Backend::Agent, None)
             }
-            Launch::Local(argv) => {
+            Launch::Local(argv) | Launch::Tool(argv) => {
                 let waker = ctx.clone();
                 match crate::pty::Local::spawn(argv, size.0, size.1, Box::new(move || waker.request_repaint())) {
                     Ok(l) => (Backend::Local(l), None),
@@ -673,6 +678,7 @@ impl TermWindow {
             title: profile.name.clone(),
             custom: None,
             exited,
+            hold: matches!(profile.launch, Launch::Tool(_)),
             size,
             backend,
             view: View::Terminal,
@@ -1309,7 +1315,7 @@ impl TermWindow {
         // A pane's shell that ended well closes its pane, as Windows Terminal does by default; one
         // that failed stays, its message there to read.
         if self.bare
-            && let Some(i) = self.tabs.iter().position(|t| t.exited.as_deref().is_some_and(|e| e.ends_with("code 0")))
+            && let Some(i) = self.tabs.iter().position(|t| !t.hold && t.exited.as_deref().is_some_and(|e| e.ends_with("code 0")))
         {
             self.close_pane(i, out);
         }
