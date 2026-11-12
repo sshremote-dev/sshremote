@@ -81,6 +81,9 @@ pub struct Gnome {
     checked_alive: std::time::Instant,
     /// The shared window or program closed and the whole screen came back; the viewer is told once.
     ended: bool,
+    /// The helper's interface, made once without a property cache: it is asked several times a
+    /// second while a program is shared.
+    helper: std::sync::OnceLock<Proxy<'static>>,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -106,6 +109,11 @@ pub fn ensure_env() {
         }
     }
     if std::env::var_os("DISPLAY").is_some() && std::env::var_os("XAUTHORITY").is_some() {
+        return;
+    }
+    // Asked once: a session without an X authority would otherwise ask at every monitor or share.
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
     // The desktop session's display (Xwayland is not always :0) and its X authority come from the user manager.
@@ -315,6 +323,7 @@ impl Gnome {
             last_frame: std::time::Instant::now(),
             checked_alive: std::time::Instant::now(),
             ended: false,
+            helper: std::sync::OnceLock::new(),
         })
     }
 
@@ -394,8 +403,22 @@ impl Gnome {
         self.src != Src::Monitor || self.app.is_some()
     }
 
+    fn helper(&self) -> Result<&Proxy<'static>, String> {
+        if let Some(p) = self.helper.get() {
+            return Ok(p);
+        }
+        let p = zbus::blocking::proxy::Builder::new(&self.conn)
+            .destination(HELPER)
+            .and_then(|b| b.path(HELPER_PATH))
+            .and_then(|b| b.interface(HELPER))
+            .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
+            .and_then(|b| b.build())
+            .map_err(|e| e.to_string())?;
+        Ok(self.helper.get_or_init(|| p))
+    }
+
     fn helper_list(&self) -> Result<Vec<HelperWin>, String> {
-        let p = Proxy::new(&self.conn, HELPER, HELPER_PATH, HELPER).map_err(|e| e.to_string())?;
+        let p = self.helper()?;
         update_helper();
         p.call("List", &()).map_err(|e| {
             let e = e.to_string();
@@ -417,7 +440,7 @@ impl Gnome {
     }
 
     fn helper_activate(&self, id: u64) {
-        if let Ok(p) = Proxy::new(&self.conn, HELPER, HELPER_PATH, HELPER) {
+        if let Ok(p) = self.helper() {
             let _ = p.call::<_, _, ()>("Activate", &(id,));
         }
     }

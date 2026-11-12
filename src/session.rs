@@ -805,6 +805,63 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         sess.close();
     }
 
+    /// Sharing the focused program on a GNOME host with the sshremote helper sends the part of the
+    /// screen its windows take, and the whole screen comes back as it was. Needs
+    /// SSHREMOTE_GNOME_HOST with the helper running and a program's window focused there (and
+    /// SSHREMOTE_GNOME_ENV, SSHREMOTE_GNOME_AGENT as above).
+    #[test]
+    #[ignore]
+    fn a_gnome_program_shared_alone_is_cut_out_of_the_screen() {
+        use crate::proto::{Settings, ToAgent};
+        use crate::shared::Share;
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh {
+            host,
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Option<(u8, String)>, (u16, u16)) {
+            if let Some(m) = first {
+                sess.send(m).unwrap();
+            }
+            let mut shared = None;
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(Ev::Net(ToClient::Sharing { kind, text })) => shared = Some((kind, text)),
+                    Ok(Ev::Net(ToClient::Notice(n))) if n.starts_with("Sharing") => panic!("{n}"),
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        if want(f.w, f.h) {
+                            return (shared, (f.w, f.h));
+                        }
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            panic!("no such frame in time");
+        };
+        next(None, &|w, h| (w, h) == screen);
+        let (shared, part) = next(Some(ToAgent::Share(Share::ActiveApp)), &|w, h| (w, h) != screen);
+        let (kind, text) = shared.expect("the share is confirmed");
+        assert!(text.starts_with("every window of"), "{kind} {text}");
+        assert!(part.0 < screen.0 && part.1 < screen.1, "the program's part: {part:?}");
+        let (_, back) = next(Some(ToAgent::Share(Share::Screen)), &|w, h| (w, h) == screen);
+        assert_eq!(back, screen);
+        drop(next);
+        sess.close();
+    }
+
     /// Any SSH host with sshremote on it answers to the usual agent command, as it always did.
     /// Needs SSHREMOTE_SSH_HOST (an ssh alias).
     #[test]
