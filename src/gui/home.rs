@@ -314,8 +314,9 @@ impl App {
         if (connect || enter) && !self.form.host.trim().is_empty() {
             #[cfg(feature = "remote")]
             let target = if by_id { crate::access::address(&digits, &crate::access::relay()) } else { self.form.host.trim().to_string() };
+            // The Remote desktop extension's window reaches it (through the default relay).
             #[cfg(not(feature = "remote"))]
-            let target = self.form.host.trim().to_string();
+            let target = if by_id { format!("sshremote://{digits}") } else { self.form.host.trim().to_string() };
             let how = match mode {
                 PaneMode::Terminal => How::Terminal,
                 PaneMode::Screen => How::Screen,
@@ -712,7 +713,9 @@ impl App {
         let typed_here = {
             let field = self.form.host.trim();
             let digits: String = field.chars().filter(|c| !c.is_whitespace()).collect();
-            field == host || (!digits.is_empty() && host.contains(&format!("//{digits}")))
+            // The ID typed, not one that starts with the same digits.
+            let id = format!("//{digits}");
+            field == host || (!digits.is_empty() && (host.ends_with(&id) || host.contains(&format!("{id}@"))))
         };
         let typed = if typed_here { std::mem::take(&mut self.form.password) } else { String::new() };
         // Kept once the connection works (a terminal signs in inside itself: kept at once).

@@ -355,7 +355,12 @@ impl Workspace {
         // Screens and files come from the Remote desktop extension, in a window of its own.
         #[cfg(not(feature = "remote"))]
         if let Launch::Agent { target, mode, .. } = &launch {
-            if let Err(e) = crate::ext::spawn_provided("remote", &remote_args(target, *mode)) {
+            // A computer by its ID takes its password through the environment.
+            let password = match target {
+                Target::Ssh { host, password: Some(p), .. } if host.starts_with("sshremote://") => vec![(crate::PASSWORD_VAR, p.clone())],
+                _ => Vec::new(),
+            };
+            if let Err(e) = crate::ext::spawn_provided("remote", &remote_args(target, *mode), &password) {
                 self.failed = Some(e);
             }
             return None;

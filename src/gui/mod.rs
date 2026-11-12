@@ -345,7 +345,8 @@ impl Form {
         Form {
             host: opt.host.clone().unwrap_or_default(),
             port: String::new(),
-            password: String::new(),
+            // Given with the address (by the window that started this one, say): used for it.
+            password: opt.password.clone().unwrap_or_default(),
             // On unless the user turned it off: a password typed once is not asked again.
             remember: crate::hosts::setting("remember_password").is_none_or(|v| v != "no"),
             preset: opt.preset,
