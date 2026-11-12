@@ -7,7 +7,7 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOTOWNER, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
+    EnumChildWindows, EnumWindows, GA_ROOTOWNER, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
     GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     SW_RESTORE, SetForegroundWindow, ShowWindow, WS_CHILD, WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -148,12 +148,29 @@ pub enum Scope {
     App(String),
 }
 
-/// Does `w` belong to the shared window or program?
-fn belongs(scope: &Scope, w: &Win, exe_cache: &mut Vec<(u32, String)>) -> bool {
+unsafe extern "system" fn child_pid(hwnd: HWND, pids: LPARAM) -> BOOL {
+    let pids = unsafe { &mut *(pids as *mut Vec<u32>) };
+    let pid = pid_of(hwnd);
+    if !pids.contains(&pid) {
+        pids.push(pid);
+    }
+    1
+}
+
+/// The processes drawing in window `h`: its own, and those of windows inside it (a Store app's
+/// frame belongs to ApplicationFrameHost, its content and its menus to the app's process).
+fn processes_of(h: HWND) -> Vec<u32> {
+    let mut pids = vec![pid_of(h)];
+    unsafe { EnumChildWindows(h, Some(child_pid), &mut pids as *mut Vec<u32> as LPARAM) };
+    pids
+}
+
+/// Does `w` belong to the shared window or program? `pids` are the shared window's processes.
+fn belongs(scope: &Scope, w: &Win, pids: &[u32], exe_cache: &mut Vec<(u32, String)>) -> bool {
     match scope {
         Scope::Screen => true,
         Scope::Window(h) => {
-            w.hwnd == *h || unsafe { GetAncestor(w.hwnd, GA_ROOTOWNER) } == *h || (w.transient && w.pid == pid_of(*h))
+            w.hwnd == *h || unsafe { GetAncestor(w.hwnd, GA_ROOTOWNER) } == *h || (w.transient && pids.contains(&w.pid))
         }
         Scope::App(exe) => {
             let name = match exe_cache.iter().find(|(p, _)| *p == w.pid) {
@@ -179,7 +196,11 @@ pub struct Layout {
 pub fn layout(scope: &Scope, screen: R) -> Option<Layout> {
     let wins = z_order();
     let mut cache = Vec::new();
-    let mine: Vec<bool> = wins.iter().map(|w| belongs(scope, w, &mut cache)).collect();
+    let pids = match scope {
+        Scope::Window(h) => processes_of(*h),
+        _ => Vec::new(),
+    };
+    let mine: Vec<bool> = wins.iter().map(|w| belongs(scope, w, &pids, &mut cache)).collect();
     let stack: Vec<(R, bool, bool)> = wins.iter().zip(&mine).map(|(w, &m)| (w.rect, m, w.transient)).collect();
     arrange(&stack, screen)
 }

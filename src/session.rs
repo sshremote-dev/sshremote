@@ -837,6 +837,58 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         sess.close();
     }
 
+    /// A window shared alone shows the menus it opens: Shift+F10 in it opens its context menu, and
+    /// the shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
+    /// window with a context menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,
+    /// SSHREMOTE_GNOME_AGENT as above).
+    #[test]
+    #[ignore]
+    fn a_gnome_window_shared_alone_shows_its_menus() {
+        use crate::proto::{Settings, ToAgent};
+        use crate::shared::Share;
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh { host, port: None, args: Vec::new(), remote: format!("env {env} {agent} --agent"), capture: "gnome".into(), password: None, unattended: true };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::True, fps: 10 })).unwrap();
+        let mut fb = Framebuffer::default();
+        // Frames for `secs` seconds (or until one for which `want` holds), applied to `fb`.
+        let frames = |sess: &mut Session, fb: &mut Framebuffer, secs: u64, want: &dyn Fn(u16, u16) -> bool| -> bool {
+            let until = Instant::now() + Duration::from_secs(secs);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        fb.apply(&f).unwrap();
+                        if want(f.w, f.h) {
+                            return true;
+                        }
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            false
+        };
+        assert!(frames(&mut sess, &mut fb, 20, &|w, h| (w, h) == screen), "the screen");
+        sess.send(ToAgent::Share(Share::ActiveWindow)).unwrap();
+        assert!(frames(&mut sess, &mut fb, 20, &|w, h| (w, h) != screen), "the window alone");
+        frames(&mut sess, &mut fb, 2, &|_, _| false);
+        let before = (fb.w, fb.h, fb.rgb.clone());
+        // Its context menu, as Shift+F10 opens it (the keyboard's right click).
+        sess.send(ToAgent::Key { keysym: crate::xk::F1 + 9, mods: crate::proto::MOD_SHIFT }).unwrap();
+        frames(&mut sess, &mut fb, 3, &|_, _| false);
+        a_picture(&fb, "window-menu");
+        let grew = (fb.w, fb.h) != (before.0, before.1);
+        let changed = if grew { usize::MAX } else { fb.rgb.chunks(3).zip(before.2.chunks(3)).filter(|(a, b)| a != b).count() };
+        // A menu is thousands of pixels; a blinking caret a few hundred.
+        assert!(changed > 5000, "the menu shows in the shared picture: {changed} pixels changed");
+        sess.send(ToAgent::Key { keysym: crate::xk::ESCAPE, mods: 0 }).unwrap();
+        sess.close();
+    }
+
     /// Sharing the focused program on a GNOME host with the sshremote helper sends the part of the
     /// screen its windows take, and the whole screen comes back as it was. Needs
     /// SSHREMOTE_GNOME_HOST with the helper running and a program's window focused there (and

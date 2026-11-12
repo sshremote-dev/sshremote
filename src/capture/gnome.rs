@@ -37,16 +37,23 @@ type HelperWin = (u64, String, String, i32, i32, i32, i32, bool, bool, bool, u64
 #[derive(Clone, Copy, PartialEq)]
 enum Src {
     Monitor,
-    /// The focused window.
+    /// The focused window (without the helper, which would tell where it is to cut it out).
     Focused,
-    Window(u64),
     /// Whatever was chosen in GNOME's screen-sharing dialog on the remote screen.
     Portal,
 }
 
 /// Sharing one program: its windows' part of the monitor, the rest greyed out.
+/// What is cut out of the monitor stream: a program's windows, or one window, each with the
+/// pop-ups it opened (menus, dialogs, tooltips), which a window's own stream leaves out.
+#[derive(Clone, PartialEq)]
+enum Cut {
+    App(String),
+    Window(u64),
+}
+
 struct AppShare {
-    app: String,
+    of: Cut,
     area: R,
     shown: Vec<R>,
     focused: bool,
@@ -74,8 +81,6 @@ pub struct Gnome {
     portal: Option<super::portal::Portal>,
     /// The dialog is open on the remote screen; its answer arrives here.
     picking: Option<std::sync::mpsc::Receiver<Result<super::portal::Portal, String>>>,
-    /// For a shared window: whether it had the focus when last asked, and when that was.
-    window_focus: (bool, std::time::Instant),
     /// When the last frame came, and when the shared window was last checked for having closed.
     last_frame: std::time::Instant,
     checked_alive: std::time::Instant,
@@ -276,10 +281,6 @@ impl Gnome {
             Src::Monitor => cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?,
             Src::Focused => cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?,
             Src::Portal => unreachable!("portal streams come from pick"),
-            Src::Window(id) => {
-                sprops.insert("window-id", Value::U64(id));
-                cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?
-            }
         };
         let stream_path = stream.as_str().to_owned();
         let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
@@ -319,7 +320,6 @@ impl Gnome {
             app: None,
             portal: None,
             picking: None,
-            window_focus: (true, std::time::Instant::now()),
             last_frame: std::time::Instant::now(),
             checked_alive: std::time::Instant::now(),
             ended: false,
@@ -477,11 +477,11 @@ impl Gnome {
     /// resolution, one added or taken away): it is recorded again, a shared program cut out of it
     /// again.
     fn record_again(&mut self) -> Result<(), String> {
-        let app = self.app.as_ref().map(|a| a.app.clone());
+        let cut = self.app.as_ref().map(|a| a.of.clone());
         let (desk, target) = (self.desk, self.target);
         *self = Gnome::open_on(Some(self.current), Src::Monitor)?;
-        if let Some(app) = app {
-            self.cut_out(app)?;
+        if let Some(cut) = cut {
+            self.cut_out(cut)?;
         }
         if self.desk == desk && target != desk {
             self.set_target(target.0, target.1)?;
@@ -490,9 +490,9 @@ impl Gnome {
     }
 
     /// Shares the program `app` from the monitor stream: its windows' part, the rest greyed out.
-    fn cut_out(&mut self, app: String) -> Result<(), String> {
+    fn cut_out(&mut self, of: Cut) -> Result<(), String> {
         self.app = Some(AppShare {
-            app,
+            of,
             area: R { l: 0, t: 0, r: self.desk.0 as i32, b: self.desk.1 as i32 },
             shown: Vec::new(),
             focused: true,
@@ -513,8 +513,20 @@ impl Gnome {
             return;
         }
         let Ok(list) = self.helper_list() else { return };
-        if !list.iter().any(|w| self.app.as_ref().is_some_and(|a| a.app == w.2)) {
-            // The program closed its last window.
+        // A window is the cut's when it is (or its pop-up's root is) the shared window, or of the
+        // shared program.
+        let of = self.app.as_ref().map(|a| a.of.clone()).expect("checked above");
+        let app_of = |id: u64| list.iter().find(|w| w.0 == id).map(|w| w.2.as_str());
+        let mine = |w: &HelperWin| match &of {
+            Cut::Window(id) => w.0 == *id || w.10 == *id,
+            Cut::App(app) => w.2 == *app || app_of(w.10) == Some(app.as_str()),
+        };
+        let alive = match &of {
+            Cut::Window(id) => list.iter().any(|w| w.0 == *id),
+            Cut::App(app) => list.iter().any(|w| w.2 == *app),
+        };
+        if !alive {
+            // The window closed, or the program its last window.
             self.app = None;
             self.desk = self.screen;
             let _ = self.restart_pipe();
@@ -528,17 +540,19 @@ impl Gnome {
         let mut stack = Vec::new();
         let mut area: Option<R> = None;
         let mut focused = false;
-        for (_, _, app, x, y, w, h, hidden, shareable, focus, _) in &list {
-            // Not drawn: neither part of the program nor over it.
-            if *hidden {
+        for win in &list {
+            let (x, y, w, h, hidden, focus) = (win.3, win.4, win.5, win.6, win.7, win.9);
+            // Not drawn: neither part of what is shared nor over it.
+            if hidden {
                 continue;
             }
-            let r = R { l: px(*x, lx), t: px(*y, ly), r: px(x + w, lx), b: px(y + h, ly) };
-            let mine = *app == a.app;
-            if mine && *shareable {
+            let r = R { l: px(x, lx), t: px(y, ly), r: px(x + w, lx), b: px(y + h, ly) };
+            let mine = mine(win);
+            // Its pop-ups too, so a menu reaching past its window is seen whole.
+            if mine {
                 area = Some(area.map_or(r, |u| u.union(&r)));
             }
-            focused |= mine && *focus;
+            focused |= mine && focus;
             stack.push((r, mine));
         }
         a.checked = std::time::Instant::now();
@@ -552,19 +566,6 @@ impl Gnome {
             .into_iter()
             .map(|r| R { l: r.l - area.l, t: r.t - area.t, r: r.r - area.l, b: r.b - area.t })
             .collect();
-    }
-
-    /// Whether the shared window has the focus, asked at most twice a second.
-    fn window_has_focus(&mut self) -> bool {
-        let Src::Window(id) = self.src else { return true };
-        if self.window_focus.1.elapsed() > std::time::Duration::from_millis(500) {
-            let focused = match self.helper_list() {
-                Ok(list) => list.iter().any(|w| w.9 && (w.0 == id || w.10 == id)),
-                Err(_) => true,
-            };
-            self.window_focus = (focused, std::time::Instant::now());
-        }
-        self.window_focus.0
     }
 }
 
@@ -747,7 +748,16 @@ impl Capture for Gnome {
                 Ok("the whole screen".into())
             }
             Share::ActiveWindow => {
-                *self = Gnome::open_on(Some(self.current), Src::Focused)?;
+                // Cut out of the monitor with its pop-ups when the helper tells where it is; its own
+                // stream (without them) otherwise.
+                if let Ok(list) = self.helper_list()
+                    && let Some(id) = list.iter().find(|w| w.9).map(|w| w.10)
+                {
+                    monitor(self)?;
+                    self.cut_out(Cut::Window(id))?;
+                } else {
+                    *self = Gnome::open_on(Some(self.current), Src::Focused)?;
+                }
                 Ok("the active window".into())
             }
             Share::ActiveApp => {
@@ -764,7 +774,9 @@ impl Capture for Gnome {
                 let list = self.helper_list()?;
                 let title = list.iter().find(|w| w.0 == id).map(|w| w.1.clone()).ok_or("that window is gone")?;
                 self.helper_activate(id);
-                *self = Gnome::open_on(Some(self.current), Src::Window(id))?;
+                // Cut out of the monitor, so its menus and dialogs show with it.
+                monitor(self)?;
+                self.cut_out(Cut::Window(id))?;
                 Ok(format!("the window \"{title}\""))
             }
             Share::App(id) => {
@@ -772,7 +784,7 @@ impl Capture for Gnome {
                 let app = list.iter().find(|w| w.0 == id).map(|w| w.2.clone()).ok_or("that window is gone")?;
                 self.helper_activate(id);
                 monitor(self)?;
-                self.cut_out(app.clone())?;
+                self.cut_out(Cut::App(app.clone()))?;
                 Ok(format!("every window of {app}"))
             }
         }
@@ -906,12 +918,11 @@ impl Capture for Gnome {
                 Input::Button { pressed: true, .. } if !a.inside => return Err(super::OUTSIDE.into()),
                 Input::Scroll { .. } | Input::HScroll { .. } if !a.inside => return Ok(()),
                 Input::Key { .. } | Input::KeyState { down: true, .. } if !a.focused => {
-                    return Err("keys go only to the shared program; click it first".into());
+                    let what = if matches!(a.of, Cut::Window(_)) { "window" } else { "program" };
+                    return Err(format!("keys go only to the shared {what}; click it first"));
                 }
                 _ => {}
             }
-        } else if matches!(ev, Input::Key { .. } | Input::KeyState { down: true, .. }) && !self.window_has_focus() {
-            return Err("keys go only to the shared window; click it first".into());
         }
         match ev {
             Input::Move { x, y } => {
