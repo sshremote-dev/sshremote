@@ -58,6 +58,8 @@ web = ["remote"]
 mcp = ["remote"]
 # The built-in synthetic desktop in the open window, for trying the viewer during development.
 test-desktop = []
+# Input and screenshots of the real window from a command file (SSHREMOTE_DRIVE), for testing builds by hand.
+drive = ["gui"]
 
 [profile.release]
 opt-level = 3

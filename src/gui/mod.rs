@@ -36,6 +36,8 @@ mod lottie;
 pub(crate) mod snapshot;
 mod signin;
 mod extui;
+#[cfg(feature = "drive")]
+mod drive;
 
 use remote::Remote;
 #[cfg(not(feature = "remote"))]
@@ -367,6 +369,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
 
 /// Runs the window with the app `make` builds, then stops the extensions' helpers.
 fn boot(native: eframe::NativeOptions, make: impl FnOnce(&eframe::CreationContext<'_>) -> App + 'static) -> Result<(), String> {
+    #[cfg(feature = "drive")]
+    drive::start();
     let r = eframe::run_native("sshremote", native, Box::new(move |cc| Ok(Box::new(make(cc)))))
         .map_err(|e| e.to_string());
     crate::exthost::stop_all();
@@ -726,6 +730,11 @@ const OPEN_SIZE: [f32; 2] = [900.0, 600.0];
 pub(crate) const MIN_WORK: [f32; 2] = [760.0, 480.0];
 
 impl eframe::App for App {
+    #[cfg(feature = "drive")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        drive::hook(ctx, raw);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         crate::exthost::pump();
@@ -809,6 +818,8 @@ impl eframe::App for App {
             self.connect_screen(ui);
         }
         self.side_windows(&ctx);
+        #[cfg(feature = "drive")]
+        drive::end_of_frame(&ctx);
     }
 }
 
