@@ -290,7 +290,10 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
     zip.by_name("extension.json").map_err(|_| "the package has no extension.json".to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
     let m = parse_manifest(&text)?;
     let root = root().ok_or("no settings folder")?;
-    let fresh = root.join(format!(".{}.new", m.id));
+    // A folder of its own for each install: two at once never unpack into one.
+    static INSTALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = INSTALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fresh = root.join(format!(".{}.new-{}-{n}", m.id, std::process::id()));
     let _ = std::fs::remove_dir_all(&fresh);
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
@@ -317,10 +320,18 @@ pub fn install_bytes(bytes: &[u8]) -> Result<Manifest, String> {
     let place = root.join(&m.id);
     let old = root.join(format!(".{}.old", m.id));
     let _ = std::fs::remove_dir_all(&old);
-    if place.exists() {
-        std::fs::rename(&place, &old).map_err(|e| e.to_string())?;
+    if place.exists()
+        && let Err(e) = std::fs::rename(&place, &old)
+    {
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(format!("the installed version could not be moved aside (is it in use?): {e}"));
     }
-    std::fs::rename(&fresh, &place).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&fresh, &place) {
+        // The version that was there goes back: never none at all.
+        let _ = std::fs::rename(&old, &place);
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(e.to_string());
+    }
     changed_id(&m.id);
     Ok(m)
 }
@@ -457,7 +468,14 @@ pub fn provider(cmd: &str) -> Option<(PathBuf, String)> {
     let here = platform();
     installed().into_iter().find_map(|m| {
         let file = m.programs.iter().find(|(p, _)| *p == here)?.1.clone();
-        m.provides.iter().any(|p| p == cmd).then(|| (root.join(&m.id).join(file), m.name.clone()))
+        let installed = root.join(&m.id).join(file);
+        // Run from a copy, as extensions beside the app are: the installed folder is never held
+        // by a running program, so an update can always replace it.
+        #[cfg(not(test))]
+        let program = crate::exthost::run_copy(&m.id, &installed).unwrap_or(installed);
+        #[cfg(test)]
+        let program = installed;
+        m.provides.iter().any(|p| p == cmd).then(|| (program, m.name.clone()))
     })
 }
 
@@ -517,8 +535,24 @@ pub fn remove(id: &str) -> Result<(), String> {
     let root = root().ok_or("no settings folder")?;
     #[cfg(not(test))]
     crate::exthost::stop(id);
+    // What it kept goes with it: its secrets in the password store, its settings, the copies of
+    // its programs that were run.
+    let manifest = std::fs::read_to_string(root.join(id).join("extension.json")).ok().and_then(|t| parse_manifest(&t).ok());
     std::fs::remove_dir_all(root.join(id)).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(root.join(format!(".{id}.old")));
+    // By each setting's own key ("ext.ID.SETTING="): a prefix alone would also take those of an
+    // extension whose id starts with this one's.
+    for s in manifest.iter().flat_map(|m| &m.settings) {
+        if s.kind == "secret" {
+            let _ = crate::vault::delete(&secret_name(id, &s.id));
+        } else {
+            crate::hosts::remove_settings(&format!("ext.{id}.{}=", s.id));
+        }
+    }
+    #[cfg(not(test))]
+    if let Some(dir) = crate::hosts::config_dir() {
+        let _ = std::fs::remove_dir_all(dir.join("run").join(id));
+    }
     changed_id(id);
     Ok(())
 }

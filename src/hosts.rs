@@ -205,6 +205,17 @@ pub fn set_setting(key: &str, value: &str) {
     });
 }
 
+/// Forgets the preferences whose line starts with `prefix` ("key=" for one key).
+pub fn remove_settings(prefix: &str) {
+    with_settings(|lines| {
+        let before = lines.len();
+        lines.retain(|l| !l.starts_with(prefix));
+        if lines.len() != before {
+            write_lines("settings.txt", lines);
+        }
+    });
+}
+
 /// The settings, read from disk once and kept: windows ask for them every frame.
 static SETTINGS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 

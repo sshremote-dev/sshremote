@@ -261,7 +261,7 @@ fn lossy_lines(r: impl std::io::Read) -> impl Iterator<Item = String> {
 }
 
 /// The program copied out of the extension's folder, once for each version of it.
-fn run_copy(id: &str, program: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn run_copy(id: &str, program: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let meta = std::fs::metadata(program).map_err(|e| format!("{}: {e}", program.display()))?;
     let when = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
     let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
