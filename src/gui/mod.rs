@@ -887,7 +887,17 @@ impl App {
     /// The open dialog over workspace `w`, when it asks for one: the choice opens in it, where
     /// it was asked for (a new tab, or beside the active pane).
     fn open_dialog(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
-        let Some(place) = w.picker else { return };
+        // Opened just now (in this window): the address field takes the keyboard, so typing a
+        // host starts at once.
+        let shown = egui::Id::unique("open-dialog-shown").with(ctx.viewport_id());
+        let Some(place) = w.picker else {
+            ctx.data_mut(|d| d.remove::<bool>(shown));
+            return;
+        };
+        if ctx.data_mut(|d| d.get_temp::<bool>(shown).is_none()) {
+            ctx.data_mut(|d| d.insert_temp(shown, true));
+            self.focus_host = self.section == home::Section::Connect;
+        }
         // What is opened from the dialog, a tool's terminal too, opens in this workspace.
         let before = self.queued.len();
         let (modal, fit) = modal(ctx, "open-dialog", Vec2::new(820.0, 560.0));
@@ -1165,6 +1175,28 @@ pub(crate) use crate::sys::human;
 mod tests {
     use crate::gui::snapshot::RunTest;
     use super::*;
+
+    /// The Open dialog over a workspace gives its address field the keyboard as it opens.
+    #[test]
+    fn the_open_dialog_starts_in_its_address_field() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        app.section = home::Section::Connect;
+        // The start's focus long used up, as when "+" is pressed in a workspace.
+        app.focus_host = false;
+        let mut w = workspace::Workspace::new(app.options());
+        w.picker = Some(Place::Tab);
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            ctx.run_test(input(), |ui| app.open_dialog(ui.ctx(), &mut w));
+        }
+        assert!(ctx.memory(|m| m.focused().is_some()), "a field has the keyboard");
+    }
 
     /// The open window closes at once when nothing goes with it, and asks first when another
     /// window would.
