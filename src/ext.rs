@@ -137,8 +137,15 @@ thread_local!(static TEST_REGISTRY: std::cell::RefCell<Option<String>> = const {
 #[cfg(test)]
 thread_local!(static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) });
 
+/// A reverse-domain id (dev.sshremote.remote-desktop): letters and digits at both ends, never
+/// "." or "..", which as folder names would point at the extensions folder or the settings.
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    let ends = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    id.len() <= 100
+        && ends(id.chars().next())
+        && ends(id.chars().last())
+        && !id.contains("..")
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 fn parse_manifest(text: &str) -> Result<Manifest, String> {
@@ -1453,6 +1460,18 @@ mod tests {
     /// A pack made, installed from the file, its layer found; then the registry offers a newer
     /// one (a local index), the update installs it after the checksum, and roll-back and remove
     /// work; a package with a wrong checksum is refused.
+    /// Ids that would name the extensions folder or its parent are refused everywhere.
+    #[test]
+    fn ids_never_name_a_folder_above() {
+        for bad in ["", ".", "..", "a..b", ".hidden", "trailing.", "-x", "a/b", "a\\b", "a b"] {
+            assert!(!valid_id(bad), "{bad:?}");
+        }
+        for good in ["dev.sshremote.remote-desktop", "x", "a_b-c.d9"] {
+            assert!(valid_id(good), "{good:?}");
+        }
+        assert!(folder("..").is_none() && folder(".").is_none());
+    }
+
     #[test]
     fn packs_install_update_and_go() {
         use sha2::Digest;
