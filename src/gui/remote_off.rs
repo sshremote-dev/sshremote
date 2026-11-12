@@ -53,6 +53,10 @@ impl Remote {
         match self.never {}
     }
     #[cfg(test)]
+    pub(super) fn frames(&self) -> u32 {
+        match self.never {}
+    }
+    #[cfg(test)]
     pub(super) fn set_view_only(&mut self, _: bool) {
         match self.never {}
     }

@@ -68,6 +68,8 @@ pub(super) struct Remote {
     paused: bool,
     /// The user paused the picture (rather than the pane showing something else).
     user_paused: bool,
+    /// The picture was paused because the pane is not drawn (another tab, behind a zoomed pane).
+    hidden_paused: bool,
     monitors: Vec<crate::proto::MonitorInfo>,
     monitor: usize,
     /// The monitor the user picked, if any, to pick again after a reconnect.
@@ -241,6 +243,7 @@ impl Remote {
             term_focus: false,
             paused: false,
             user_paused: false,
+            hidden_paused: false,
             monitors: Vec::new(),
             monitor: 0,
             chosen_monitor: None,
@@ -348,6 +351,11 @@ impl Remote {
     /// One UI pass: network, input, picture and toolbar. An error ends the session.
     pub(super) fn frame(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
         let ctx = ui.ctx().clone();
+        // Shown again: the picture comes back, whole.
+        if std::mem::take(&mut self.hidden_paused) && !self.paused {
+            self.send(ToAgent::Pause(false))?;
+            self.send(ToAgent::Refresh)?;
+        }
         self.pump(&ctx)?;
         // What is copied here goes to the host being worked in, as the pane becomes active if
         // it was copied meanwhile; the others do not get it.
@@ -448,6 +456,11 @@ impl Remote {
     /// The connection kept going while its pane is not drawn: pictures, files and shells read,
     /// transfers fed, the link watched; keys held at the host let go.
     pub(super) fn background(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        // Nobody sees the picture: it stops, costing the link and the host nothing meanwhile.
+        if !self.paused && !self.hidden_paused {
+            self.hidden_paused = true;
+            self.send(ToAgent::Pause(true))?;
+        }
         self.pump(ctx)?;
         self.ctl.tick(&mut self.sess).map_err(|e| e.to_string())?;
         self.feed_uploads()?;
@@ -780,7 +793,9 @@ impl Remote {
         if self.chat.is_none() {
             return (area, None);
         }
-        let w = self.chat_w.clamp(260.0, (area.width() * 0.6).max(260.0));
+        // At most six tenths of the pane, so the picture keeps the rest however narrow it is.
+        let most = area.width() * 0.6;
+        let w = self.chat_w.clamp(260.0_f32.min(most), most.max(1.0));
         let panel = area.with_min_x(area.right() - w);
         let handle = Rect::from_min_max(Pos2::new(panel.left() - 3.0, area.top()), Pos2::new(panel.left() + 3.0, area.bottom()));
         let r = ui.interact(handle, ui.scope_id().with("chat-splitter"), egui::Sense::drag());
@@ -1855,6 +1870,12 @@ impl Remote {
     #[cfg(test)]
     pub(super) fn shown_rect(&self) -> Option<Rect> {
         self.last_shown
+    }
+
+    /// Pictures received so far.
+    #[cfg(test)]
+    pub(super) fn frames(&self) -> u32 {
+        self.ctl.frames
     }
 
     #[cfg(test)]
