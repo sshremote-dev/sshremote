@@ -90,9 +90,6 @@ impl App {
             }
         }
         let cfg = a.cfg.clone()?;
-        if a.relay.is_empty() {
-            a.relay = cfg.relay.clone();
-        }
         if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
             a.service_looked = Some(std::time::Instant::now());
             in_background(&a.service, &SERVICE_BUSY, ctx, || Service { installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });

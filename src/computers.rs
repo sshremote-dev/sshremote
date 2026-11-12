@@ -84,8 +84,9 @@ pub fn relay() -> String {
     return "sshremote.dev".into();
 }
 
-/// The list as kept: read once, written on every change.
-static KEPT: Mutex<Option<Vec<Computer>>> = Mutex::new(None);
+/// The list as kept, with when its file last changed: read again when another program (the
+/// command line, the gateway, another window) changed the file since.
+static KEPT: Mutex<Option<(Vec<Computer>, Option<std::time::SystemTime>)>> = Mutex::new(None);
 
 #[cfg(test)]
 thread_local!(static TEST_FILE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) });
@@ -105,7 +106,20 @@ fn with<R>(f: impl FnOnce(&mut Vec<Computer>) -> R) -> R {
         return f(&mut read());
     }
     let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-    f(kept.get_or_insert_with(read))
+    let changed = || file().and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    let now = changed();
+    if kept.as_ref().is_none_or(|(_, at)| *at != now) {
+        let list = read();
+        // Reading can write (what older files held, taken in): the time is the file's after it.
+        *kept = Some((list, changed()));
+    }
+    let (list, at) = kept.as_mut().expect("read above");
+    let before = list.clone();
+    let out = f(list);
+    if *list != before {
+        *at = changed();
+    }
+    out
 }
 
 fn read() -> Vec<Computer> {
@@ -150,15 +164,21 @@ pub fn parse(text: &str) -> Vec<Computer> {
     serde_json::from_str::<Value>(text).ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(Computer::from_json).collect())).unwrap_or_default()
 }
 
-/// Takes in `more` (a backup's): each replaces the one at its address, the others stay.
-pub fn merge(more: Vec<Computer>) {
+/// Takes in `more` (a backup's): each replaces the one at its address and the others stay; or,
+/// not `whole` (a backup older than this list, without names or tunnels), adds to it only.
+pub fn merge(more: Vec<Computer>, whole: bool) {
     if more.is_empty() {
         return;
     }
     with(|l| {
         for c in more {
             match l.iter_mut().find(|k| k.address == c.address) {
-                Some(k) => *k = c,
+                Some(k) if whole => *k = c,
+                Some(k) => {
+                    k.favorite |= c.favorite;
+                    k.last_used = k.last_used.max(c.last_used);
+                    k.port = k.port.or(c.port);
+                }
                 None => l.push(c),
             }
         }
@@ -389,7 +409,9 @@ mod tests {
         let by = |a: &str| list.iter().find(|c| c.address == a).cloned();
         assert!(by("old@host").is_none());
         assert_eq!(by("new@host").map(|c| (c.name, c.favorite)), Some(("Box".into(), true)));
-        merge(parse(r#"[{"address":"other@host","name":"From the backup"},{"address":"nas","favorite":true}]"#));
+        merge(parse(r#"[{"address":"other@host","name":"From the backup"},{"address":"nas","favorite":true}]"#), true);
+        merge(vec![Computer { address: "new@host".into(), favorite: false, last_used: 9, ..Default::default() }], false);
+        assert_eq!(with(|l| l.iter().find(|c| c.address == "new@host").map(|c| (c.name.clone(), c.favorite, c.last_used))), Some(("Box".into(), true, 9)));
         let list = with(|l| l.clone());
         let names: Vec<(String, String)> = list.iter().map(|c| (c.address.clone(), c.name.clone())).collect();
         assert!(names.contains(&("other@host".into(), "From the backup".into())));

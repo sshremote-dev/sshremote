@@ -123,7 +123,8 @@ struct Run {
     child: Option<std::process::Child>,
     said: std::sync::Arc<Mutex<String>>,
     since: std::time::Instant,
-    failed: Option<String>,
+    /// How ssh ended, once it has.
+    ended: Option<String>,
 }
 
 static RUNS: Mutex<Vec<Run>> = Mutex::new(Vec::new());
@@ -156,6 +157,9 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
     }
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"]);
+    // Its own connection: as a shared one (ControlMaster in ~/.ssh/config) it would go on in the
+    // background, out of reach of Stop.
+    cmd.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
     if let Some(p) = port {
         cmd.args(["-p", &p.to_string()]);
     }
@@ -178,7 +182,7 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
             *said.lock().unwrap_or_else(|e| e.into_inner()) = text;
         });
     }
-    runs.push(Run { address: address.into(), tunnel: t.clone(), child: Some(child), said, since: std::time::Instant::now(), failed: None });
+    runs.push(Run { address: address.into(), tunnel: t.clone(), child: Some(child), said, since: std::time::Instant::now(), ended: None });
     Ok(())
 }
 
@@ -202,16 +206,36 @@ pub fn state(address: &str, t: &Tunnel) -> State {
         && let Ok(Some(status)) = c.try_wait()
     {
         r.child = None;
-        // What ssh said is read to its end on a thread of its own; it ends with ssh.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let said = r.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        r.failed = Some(if said.trim().is_empty() { format!("ssh ended ({status})") } else { plain(said.lines().last().unwrap_or("")) });
+        r.ended = Some(format!("ssh ended ({status})"));
     }
-    match (&r.child, &r.failed) {
+    match (&r.child, &r.ended) {
         (Some(_), _) if r.since.elapsed() < std::time::Duration::from_secs(3) => State::Starting,
         (Some(_), _) => State::On,
-        (None, Some(why)) => State::Failed(why.clone()),
+        // What ssh said is read to its end on a thread of its own, shortly after it ends.
+        (None, Some(ended)) => {
+            let said = r.said.lock().unwrap_or_else(|e| e.into_inner());
+            State::Failed(said.lines().rfind(|l| !l.trim().is_empty()).map_or_else(|| ended.clone(), plain))
+        }
         (None, None) => State::Off,
+    }
+}
+
+/// Closes every tunnel of the computer at `address` but those in `keep`.
+pub fn stop_others(address: &str, keep: &[Tunnel]) {
+    let gone: Vec<Tunnel> =
+        RUNS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|r| r.address == address && !keep.iter().any(|k| same(k, &r.tunnel))).map(|r| r.tunnel.clone()).collect();
+    for t in gone {
+        stop(address, &t);
+    }
+}
+
+/// Closes them all, as the app ends (on Windows its job ends them too; elsewhere nothing would).
+pub fn stop_all() {
+    for r in RUNS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        if let Some(mut c) = r.child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
 
@@ -259,7 +283,8 @@ mod tests {
         start(address, Some(1), &t).unwrap();
         let mut s = state(address, &t);
         for _ in 0..100 {
-            if matches!(s, State::Failed(_)) {
+            // First "ssh ended", then what it said, once read.
+            if matches!(&s, State::Failed(why) if !why.starts_with("ssh ended")) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

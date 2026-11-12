@@ -35,6 +35,12 @@ pub(in crate::gui) struct Sheet {
     /// SSH, kept in ~/.ssh/config as an alias.
     in_config: bool,
     entry: HostEntry,
+    /// It was in ~/.ssh/config when the sheet opened, with this block.
+    was_in_config: bool,
+    entry_was: HostEntry,
+    /// Its block can be changed here: one of its own in ~/.ssh/config itself (not in a file it
+    /// includes, nor one named with other computers).
+    editable: bool,
     /// By ID: the ID and the relay it is at.
     id: String,
     relay: String,
@@ -56,6 +62,9 @@ impl Sheet {
             port: String::new(),
             in_config: false,
             entry: HostEntry::default(),
+            was_in_config: false,
+            entry_was: HostEntry::default(),
+            editable: true,
             id: String::new(),
             relay: String::new(),
             password: String::new(),
@@ -89,8 +98,11 @@ impl Sheet {
             s.id = id.to_string();
             s.relay = relay_of(&c.address);
         } else if c.in_ssh_config {
-            s.in_config = true;
-            s.entry = crate::tools::config_entry(&c.address).unwrap_or_else(|| HostEntry { alias: c.address.clone(), ..Default::default() });
+            (s.in_config, s.was_in_config) = (true, true);
+            let found = crate::tools::config_entry(&c.address);
+            s.editable = found.is_some();
+            s.entry = found.unwrap_or_else(|| HostEntry { alias: c.address.clone(), ..Default::default() });
+            s.entry_was = s.entry.clone();
         } else {
             s.address = c.address.clone();
             s.port = c.port.map(|p| p.to_string()).unwrap_or_default();
@@ -114,6 +126,17 @@ impl Sheet {
     /// Keeps it all: the config block, the list's entry (moved when its address changed), the
     /// password and the tunnels. Returns why not, if not.
     fn save(&mut self) -> Result<String, String> {
+        // A port typed after the address goes in its own field.
+        if !self.by_id
+            && !self.in_config
+            && let Typed::Ssh { host, port } = super::connect::typed(&self.address)
+            && !port.is_empty()
+        {
+            if !self.port.trim().is_empty() && self.port.trim() != port {
+                return Err("The port is given twice, after the address and as Port.".into());
+            }
+            (self.address, self.port) = (host, port);
+        }
         let address = self.address_now();
         // All of it is checked before any of it is written.
         if self.by_id {
@@ -130,10 +153,17 @@ impl Sheet {
             Some(self.port.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or("The port is a number from 1 to 65535.")?)
         };
         let tunnels = if self.by_id { Vec::new() } else { self.tunnels.iter().map(TunnelForm::tunnel).collect::<Result<Vec<_>, _>>()? };
-        if self.in_config && !self.by_id {
-            let was_alias = if crate::tools::config_entry(&self.was).is_some() { self.was.clone() } else { String::new() };
+        // Another computer's address, or another block of ~/.ssh/config, is never taken over.
+        let in_file = self.in_config && !self.by_id;
+        if address != self.was && (crate::computers::get(&address).is_some() || (in_file && crate::tools::config_entry(&address).is_some())) {
+            return Err(format!("{address} is a computer of its own already: change that one instead."));
+        }
+        if in_file && self.editable && self.entry != self.entry_was {
+            let was_alias = if self.was_in_config { self.was.clone() } else { String::new() };
             crate::tools::save_config_entry(&was_alias, &self.entry)?;
         }
+        // Tunnels taken out, or of an address it no longer has, close.
+        crate::tunnels::stop_others(&self.was, if self.was == address { &tunnels } else { &[] });
         if !self.was.is_empty() && self.was != address {
             crate::computers::rename(&self.was, &address);
             if let Some(pw) = crate::vault::get(&self.was) {
@@ -163,14 +193,23 @@ impl Sheet {
                 crate::tunnels::stop(&c.address, t);
             }
         }
-        if crate::tools::config_entry(&self.was).is_some() {
+        if self.editable && crate::tools::config_entry(&self.was).is_some() {
             crate::tools::remove_config_entry(&self.was)?;
         }
         crate::computers::forget(&self.was);
-        if crate::vault::get(&self.was).is_some() {
+        if crate::vault::has(&self.was) {
             crate::vault::delete(&self.was)?;
         }
         Ok(())
+    }
+}
+
+impl Sheet {
+    /// Closed without saving: tunnels started from it that its computer does not keep close.
+    fn drop_unsaved(&self) {
+        let address = self.address_now();
+        let kept = crate::computers::get(&address).map(|c| c.tunnels).unwrap_or_default();
+        crate::tunnels::stop_others(&address, &kept);
     }
 }
 
@@ -228,22 +267,29 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut s.relay).hint_text(crate::computers::relay()).desired_width(220.0));
                         ui.end_row();
                     } else if s.in_config {
+                        let on = s.editable;
                         ui.label("Alias").on_hover_text("The name ssh and other programs know it by: ssh ALIAS");
-                        ui.add(egui::TextEdit::singleline(&mut s.entry.alias).hint_text("web1").desired_width(160.0));
+                        ui.add_enabled(on, egui::TextEdit::singleline(&mut s.entry.alias).hint_text("web1").desired_width(160.0));
                         ui.end_row();
-                        ui.label("Host");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut s.entry.hostname).hint_text("192.168.1.20 or web1.example.com").desired_width(240.0));
-                            ui.label(RichText::new("Port").weak());
-                            ui.add(egui::TextEdit::singleline(&mut s.entry.port).hint_text("22").desired_width(56.0));
-                        });
-                        ui.end_row();
-                        ui.label("User");
-                        ui.add(egui::TextEdit::singleline(&mut s.entry.user).hint_text("your name there").desired_width(160.0));
-                        ui.end_row();
-                        ui.label("Key file");
-                        ui.add(egui::TextEdit::singleline(&mut s.entry.identity).hint_text("~/.ssh/id_ed25519 (optional)").desired_width(300.0));
-                        ui.end_row();
+                        if !on {
+                            ui.label("");
+                            ui.add(egui::Label::new(RichText::new("Its block of ~/.ssh/config is in a file it includes, or names other computers too: change it in the file.").weak().size(12.0)).wrap());
+                            ui.end_row();
+                        } else {
+                            ui.label("Host");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(&mut s.entry.hostname).hint_text("192.168.1.20 or web1.example.com").desired_width(240.0));
+                                ui.label(RichText::new("Port").weak());
+                                ui.add(egui::TextEdit::singleline(&mut s.entry.port).hint_text("22").desired_width(56.0));
+                            });
+                            ui.end_row();
+                            ui.label("User");
+                            ui.add(egui::TextEdit::singleline(&mut s.entry.user).hint_text("your name there").desired_width(160.0));
+                            ui.end_row();
+                            ui.label("Key file");
+                            ui.add(egui::TextEdit::singleline(&mut s.entry.identity).hint_text("~/.ssh/id_ed25519 (optional)").desired_width(300.0));
+                            ui.end_row();
+                        }
                     } else {
                         ui.label("Address");
                         ui.horizontal(|ui| {
@@ -253,7 +299,7 @@ impl App {
                         });
                         ui.end_row();
                     }
-                    if !s.by_id && (new || !s.in_config) {
+                    if !s.by_id && !s.was_in_config {
                         ui.label("");
                         let r = ui.checkbox(&mut s.in_config, "Keep it in ~/.ssh/config").on_hover_text("As an alias, with its user, port and key: ssh and other programs know it too");
                         if r.changed() && s.in_config {
@@ -273,7 +319,7 @@ impl App {
                     }
                     ui.label("Password");
                     ui.horizontal(|ui| {
-                        let saved_pw = !new && crate::vault::get(&s.was).is_some();
+                        let saved_pw = !new && crate::vault::has(&s.was);
                         let hint = if saved_pw { "saved; type to replace it" } else if s.by_id { "set on that computer" } else { "none: keys sign in" };
                         ui.add_enabled(crate::vault::backend().is_some(), egui::TextEdit::singleline(&mut s.password).password(true).hint_text(hint).desired_width(220.0));
                         if saved_pw
@@ -298,7 +344,11 @@ impl App {
             ui.horizontal(|ui| {
                 if !new {
                     if s.sure_to_remove {
-                        let what = if s.in_config { "Remove it, its password, its tunnels and its block of ~/.ssh/config" } else { "Remove it, its password and its tunnels" };
+                        let what = match (s.was_in_config, s.editable) {
+                            (true, true) => "Remove it, its password, its tunnels and its block of ~/.ssh/config",
+                            (true, false) => "Forget its name, password and tunnels (it stays in ~/.ssh/config)",
+                            _ => "Remove it, its password and its tunnels",
+                        };
                         if ui.add(egui::Button::new(RichText::new(what).color(Color32::WHITE)).fill(bad())).clicked() {
                             match s.remove() {
                                 Ok(()) => close = true,
@@ -334,6 +384,8 @@ impl App {
         }
         if !(close || r.should_close()) {
             self.sheet = Some(s);
+        } else if !saved {
+            s.drop_unsaved();
         }
     }
 

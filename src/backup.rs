@@ -335,6 +335,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
         // The computers by their address, the backup's winning; a backup older than the list
         // brings its recent hosts, favorites and when each was opened.
         let older = ["recent.txt", "favorites.txt", "seen.txt"];
+        let whole = files.contains_key("computers.json");
         let computers = match files.get("computers.json").and_then(Value::as_str) {
             Some(text) => crate::computers::parse(text),
             None if older.iter().any(|n| files.contains_key(*n)) => {
@@ -351,7 +352,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             }
             None => Vec::new(),
         };
-        crate::computers::merge(computers);
+        crate::computers::merge(computers, whole);
         for (name, text) in files {
             let older_list = older.contains(&name.as_str());
             let (Some(text), true) = (text.as_str(), name.ends_with(".txt") && !older_list && !name.contains(['/', '\\', ':'])) else {

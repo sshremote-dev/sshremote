@@ -215,8 +215,8 @@ impl App {
                     Err(e) => {
                         // Shown over the computers, with the address it was about in the field.
                         self.error = Some(e);
-                        if !host.is_empty() && self.form.host.trim() != host {
-                            (self.form.host, self.form.port) = (host, port);
+                        if !host.is_empty() && !self.in_field(&host) {
+                            self.form.host = with_port(&host, &port);
                             self.form.password.clear();
                         }
                         self.focus_host = true;
@@ -236,14 +236,7 @@ impl App {
         if host.is_empty() {
             return Err("Enter a computer: an alias, user@host, an IP or an ID".into());
         }
-        let typed_here = {
-            let field = self.form.host.trim();
-            let digits: String = field.chars().filter(|c| !c.is_whitespace()).collect();
-            // The ID typed, not one that starts with the same digits.
-            let id = format!("//{digits}");
-            field == host || (!digits.is_empty() && (host.ends_with(&id) || host.contains(&format!("{id}@"))))
-        };
-        let typed = if typed_here { std::mem::take(&mut self.form.password) } else { String::new() };
+        let typed = if self.in_field(&host) { std::mem::take(&mut self.form.password) } else { String::new() };
         // Kept once the connection works (a terminal signs in inside itself: kept at once).
         let by_agent = mode != PaneMode::Terminal || host.starts_with("sshremote://");
         if !typed.is_empty() && self.form.remember {
@@ -294,6 +287,17 @@ impl App {
         })
     }
 
+    /// Whether `host` is the computer the address field holds (with a port after it or not): a
+    /// password typed there is for it alone.
+    fn in_field(&self, host: &str) -> bool {
+        match connect::typed(&self.form.host) {
+            connect::Typed::Ssh { host: h, .. } => h == host,
+            // The ID typed, not one that starts with the same digits.
+            connect::Typed::Id { address, id } => address == host || host.ends_with(&format!("//{id}")) || host.contains(&format!("//{id}@")),
+            _ => false,
+        }
+    }
+
     /// Opened now: first among the recently used, with its port.
     pub(super) fn remember_host(&mut self, host: &str, port: &str) {
         crate::computers::used(host, port.trim().parse().ok());
@@ -315,6 +319,16 @@ pub(super) enum How {
 
 /// An address, its port, and what to open on it.
 pub(super) type Choice = (String, String, How);
+
+/// An address as the field takes it: `host:port`, `[v6]:port`, or the host alone.
+fn with_port(host: &str, port: &str) -> String {
+    let port = port.trim();
+    if port.is_empty() || port == "22" {
+        return host.to_string();
+    }
+    let (user, at) = host.rsplit_once('@').map_or((String::new(), host), |(u, h)| (format!("{u}@"), h));
+    if at.contains(':') { format!("{user}[{at}]:{port}") } else { format!("{user}{at}:{port}") }
+}
 
 /// A heading over a group of things in a column.
 fn heading(ui: &mut egui::Ui, text: &str) {

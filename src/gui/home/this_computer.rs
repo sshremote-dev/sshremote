@@ -32,8 +32,9 @@ impl App {
         if let Some(at) = here.ssh_address() {
             address_row(ui, "SSH", &at, &at, "SSH address");
         }
-        if here.ips.is_empty() && here.name.is_empty() {
-            ui.label(RichText::new("Looking\u{2026}").weak());
+        if here.ips.is_empty() {
+            let text = if here.name.is_empty() { "Looking\u{2026}" } else { "No network address now." };
+            ui.label(RichText::new(text).weak().size(12.5));
         }
         #[cfg(feature = "remote")]
         if crate::modules::on("screen") {
@@ -146,6 +147,8 @@ impl App {
         }
         ui.add_space(6.0);
         if ui.add(egui::Button::new(RichText::new(format!("{}  Remote access settings", ic::SLIDERS_HORIZONTAL)).size(12.5)).frame_when_inactive(false)).clicked() {
+            // The relay field starts from the one in use; emptied, Use goes back to the default.
+            self.access.relay = cfg.relay.clone();
             self.access_sheet_open = true;
         }
         if changed {
@@ -166,9 +169,6 @@ impl App {
                 self.access_sheet_open = false;
                 return;
             };
-            if self.access.relay.is_empty() {
-                self.access.relay = cfg.relay.clone();
-            }
             let mut changed = false;
             let mut service: Option<bool> = None;
             let mut restart = false;

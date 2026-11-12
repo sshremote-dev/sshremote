@@ -281,6 +281,12 @@ pub fn delete(host: &str) -> Result<(), String> {
     sys::delete(host)
 }
 
+/// Whether `host` has a saved password, from the list kept (asking the store for the password
+/// itself can start a program each time).
+pub fn has(host: &str) -> bool {
+    list().iter().any(|h| h == host)
+}
+
 /// Hosts with a saved password, asked of the store once and kept until a password is saved or
 /// removed (the store can be slow, and terminal tabs ask on every ssh tab).
 pub fn list() -> Vec<String> {

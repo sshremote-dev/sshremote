@@ -257,7 +257,7 @@ impl KeyTool {
 }
 
 /// One `Host` block of ~/.ssh/config.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq, Debug)]
 pub struct HostEntry {
     pub alias: String,
     pub hostname: String,
@@ -325,8 +325,9 @@ fn parse_config(text: &str) -> Vec<HostEntry> {
             "hostname" => h.hostname = v,
             "user" => h.user = v,
             "port" => h.port = v,
-            // ssh tries them in order; the form shows the first.
-            "identityfile" if h.identity.is_empty() => h.identity = v,
+            // ssh tries them in order; the form shows the first, without the quotes a path with a
+            // space is written in.
+            "identityfile" if h.identity.is_empty() => h.identity = v.trim_matches('"').to_string(),
             _ => {}
         }
     }
@@ -842,6 +843,18 @@ Host *
             (h.alias.as_str(), h.hostname.as_str(), h.user.as_str(), h.port.as_str()),
             ("web1", "10.0.0.5", "ana", "2222")
         );
+    }
+
+    /// A key path with a space goes in quoted and comes back as it was typed, so it can be saved
+    /// again.
+    #[test]
+    fn a_quoted_key_path_round_trips() {
+        let h = super::HostEntry { alias: "jo".into(), hostname: "10.0.0.9".into(), user: "jo".into(), port: String::new(), identity: r"C:\Users\Jo Ann\.ssh\id_ed25519".into() };
+        let text = super::upsert_host("", "", &h);
+        assert!(text.contains("\"C:\\Users\\Jo Ann"));
+        let back = super::parse_config(&text).remove(0);
+        assert_eq!(back, h);
+        assert!(super::host_problem(&back).is_none());
     }
 
     #[test]

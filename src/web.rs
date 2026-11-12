@@ -535,7 +535,8 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
         if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
             return send_json(&w, serde_json::json!({ "error": "Enter a host, for example user@192.168.1.20" }));
         }
-        let port = o.get("port").and_then(|x| x.as_u64()).filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
+        // One of the gateway's computers opens on its own port unless the browser gives another.
+        let port = o.get("port").and_then(|x| x.as_u64()).filter(|p| (1..=65535).contains(p)).map(|p| p as u16).or_else(|| crate::computers::get(&host).and_then(|c| c.port));
         let password = o.get("password").and_then(|x| x.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
         ssh_open(&host, port, password)
     };

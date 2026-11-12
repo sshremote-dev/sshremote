@@ -294,6 +294,8 @@ pub struct App {
     /// The row of the list the arrow keys are on, and whether they just moved it.
     picked: Option<usize>,
     picked_moved: bool,
+    /// The row whose menu is open, by its computer's address (empty: this computer).
+    row_menu: Option<String>,
     /// The address field asks for an SSH password, not only for an ID's.
     ssh_password: bool,
     /// This computer's names and addresses, looked up in the background, and when.
@@ -382,7 +384,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let size = if auto_start { WORK_SIZE } else { OPEN_SIZE };
     let mut native = native_options("SSH Remote", size);
     native.centered = true;
-    boot(native, move |cc| {
+    let r = boot(native, move |cc| {
         let mut app = App::boot(cc, form, budget, &open);
         std::thread::spawn(crate::backup::auto);
         std::thread::spawn(crate::ext::retire_built_in);
@@ -398,7 +400,10 @@ pub fn run(opt: &Options) -> Result<(), String> {
             app.connect(local);
         }
         app
-    })
+    });
+    // The tunnels end with the window.
+    crate::tunnels::stop_all();
+    r
 }
 
 /// Runs the window with the app `make` builds, then stops the extensions' helpers.
@@ -655,6 +660,7 @@ impl App {
             computers_at: None,
             picked: None,
             picked_moved: false,
+            row_menu: None,
             ssh_password: false,
             here: Default::default(),
             here_at: None,
@@ -1341,6 +1347,7 @@ mod tests {
                     let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(Default::default());
+                    app.access.relay = cfg.relay.clone();
                     app.access.cfg = Some(cfg);
                     app.access.looked = Some(Instant::now());
                     app.access.service_looked = Some(Instant::now());
@@ -1431,6 +1438,56 @@ mod tests {
         assert_eq!(app.form.password, "secret", "still there for its own");
         let own = app.host_launch("alice@a", "", PaneMode::Screen).unwrap();
         assert_eq!(password_of(own), Some("secret".into()));
+        // Typed with its port, or as an IPv6 address in brackets, it is still the field's.
+        for (field, host) in [("alice@a:2222", "alice@a"), ("bob@[fe80::1]:22", "bob@fe80::1")] {
+            app.form.host = field.into();
+            app.form.password = "secret".into();
+            let l = app.host_launch(host, "2222", PaneMode::Screen).unwrap();
+            assert_eq!(password_of(l), Some("secret".into()), "{field}");
+        }
+    }
+
+    /// A computer's menu stays open while the pointer goes from its row over to it, and Edit
+    /// there opens its sheet.
+    #[test]
+    fn a_rows_menu_can_be_reached() {
+        let ctx = egui::Context::default();
+        theme::style(&ctx);
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        app.computers = vec![crate::computers::Computer { address: "dev@build".into(), name: "Build box".into(), ..Default::default() }];
+        app.computers_at = Some(Instant::now());
+        app.here_at = Some(Instant::now());
+        app.here_ssh_at = Some(Instant::now());
+        let mut snap = snapshot::Snap::default();
+        let mut t = 0.0;
+        let mut frame = |app: &mut App, snap: &mut snapshot::Snap, events: Vec<egui::Event>| {
+            t += 0.05;
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 640.0))), time: Some(t), events, ..Default::default() };
+            snap.frame(&ctx, input, |ui| app.home(ui));
+        };
+        for _ in 0..3 {
+            frame(&mut app, &mut snap, Vec::new());
+        }
+        let row = snap.find("Build box")[0].center();
+        frame(&mut app, &mut snap, vec![egui::Event::PointerMoved(row)]);
+        frame(&mut app, &mut snap, Vec::new());
+        let dots = *snap.find(ic::DOTS).first().expect("the row's menu button under the pointer");
+        for e in snapshot::click(dots.center(), egui::PointerButton::Primary) {
+            frame(&mut app, &mut snap, e);
+        }
+        frame(&mut app, &mut snap, Vec::new());
+        let edit = snap.find("Edit\u{2026}").first().expect("the menu open").center();
+        // On the way over, the pointer leaves the row.
+        for at in [Pos2::new(dots.center().x, edit.y - 30.0), edit] {
+            frame(&mut app, &mut snap, vec![egui::Event::PointerMoved(at)]);
+            frame(&mut app, &mut snap, Vec::new());
+        }
+        assert!(!snap.find("Edit\u{2026}").is_empty(), "still open over the menu");
+        for e in snapshot::click(edit, egui::PointerButton::Primary) {
+            frame(&mut app, &mut snap, e);
+        }
+        assert!(app.sheet.is_some(), "Edit opened the sheet");
     }
 
     fn main(app: &mut App) -> &mut workspace::Workspace {

@@ -199,6 +199,8 @@ impl App {
             Typed::Ssh { host, port } => (host.clone(), port.clone(), false),
         };
         let known = self.computers.iter().find(|c| c.address == address).cloned();
+        // A computer in the list opens on its own port unless another is typed.
+        let port = if port.is_empty() { known.as_ref().and_then(|c| c.port).map(|p| p.to_string()).unwrap_or_default() } else { port };
         let mut open: Option<PaneMode> = None;
         let v = ui.visuals().clone();
         egui::Frame::new()
@@ -255,7 +257,7 @@ impl App {
                 });
                 // An ID needs the password set on that computer; SSH only when asked for, or
                 // when the computer refused the keys.
-                let saved = crate::vault::get(&address).is_some();
+                let saved = crate::vault::has(&address);
                 let refused = self.error.as_deref().is_some_and(|e| e.to_lowercase().contains("permission denied"));
                 if by_id || self.ssh_password || refused {
                     ui.add_space(6.0);
@@ -357,6 +359,7 @@ impl App {
             }
             RowAct::Edit => self.sheet = Some(Sheet::open(&c)),
             RowAct::Remove => {
+                crate::tunnels::stop_others(&c.address, &[]);
                 crate::computers::forget(&c.address);
                 self.computers_at = None;
                 self.picked = None;
@@ -369,10 +372,21 @@ impl App {
         }
     }
 
+    /// Notes whose menu is open (`key`: a computer's address, empty for this computer).
+    fn menu_open(&mut self, key: &str, open: bool) {
+        if open {
+            self.row_menu = Some(key.to_string());
+        } else if self.row_menu.as_deref() == Some(key) {
+            self.row_menu = None;
+        }
+    }
+
     /// A row: where it is drawn, its look when picked or under the mouse, and the
     /// space for its buttons on the right. Returns the row's response and its inner ui.
-    fn row_frame(&mut self, ui: &mut egui::Ui, picked: bool) -> (egui::Response, egui::Ui, bool) {
+    fn row_frame(&mut self, ui: &mut egui::Ui, picked: bool, key: &str) -> (egui::Response, egui::Ui, bool) {
         let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), egui::Sense::click());
+        // Its menu open keeps its buttons there, the pointer gone over to the menu.
+        let picked = picked || self.row_menu.as_deref() == Some(key);
         // Brought into view when the arrow keys reach it, not while the wheel scrolls past it.
         if picked && std::mem::take(&mut self.picked_moved) {
             r.scroll_to_me(None);
@@ -391,7 +405,7 @@ impl App {
     /// This computer as the first row: its terminals, its screen and its files.
     fn here_row(&mut self, ui: &mut egui::Ui, picked: bool) -> Option<RowAct> {
         let mut act = None;
-        let (r, mut row, lit) = self.row_frame(ui, picked);
+        let (r, mut row, lit) = self.row_frame(ui, picked, "");
         let (rect, _) = row.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
         row.painter().circle_filled(rect.center(), 16.0, super::super::brand().gamma_multiply(0.18));
         row.painter().text(rect.center(), Align2::CENTER_CENTER, ic::HOUSE, FontId::proportional(16.0), super::super::brand());
@@ -400,7 +414,7 @@ impl App {
         let profiles = crate::termwin::local_profiles();
         if lit {
             if profiles.len() > 1 || cfg!(feature = "test-desktop") {
-                egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
+                let (_, open) = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
                     crate::gui::menu_look(ui);
                     ui.set_min_width(200.0);
                     for p in &profiles {
@@ -412,6 +426,7 @@ impl App {
                         act = Some(RowAct::Open(How::TestDesktop));
                     }
                 });
+                self.menu_open("", open.is_some());
             }
             if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, "This computer's files", false).clicked() {
                 act = Some(RowAct::Open(How::This(PaneMode::Files)));
@@ -446,13 +461,13 @@ impl App {
     /// the mouse, what can be opened on it, the star and a menu.
     fn computer_row(&mut self, ui: &mut egui::Ui, c: &Computer, picked: bool) -> Option<RowAct> {
         let mut act = None;
-        let (r, mut row, lit) = self.row_frame(ui, picked);
+        let (r, mut row, lit) = self.row_frame(ui, picked, &c.address);
         badge(&mut row, &c.label());
         let by_id = c.id().is_some();
         let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
         right.spacing_mut().item_spacing.x = 2.0;
         if lit {
-            egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
+            let (_, open) = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(220.0);
                 if ui.button(format!("{}  Edit\u{2026}", ic::PENCIL)).clicked() {
@@ -464,13 +479,14 @@ impl App {
                 if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
                     ui.ctx().copy_text(c.id().map_or_else(|| c.address.clone(), str::to_string));
                 }
-                if crate::vault::get(&c.address).is_some() && ui.button(format!("{}  Forget the saved password", ic::LOCK_KEY)).clicked() {
+                if crate::vault::has(&c.address) && ui.button(format!("{}  Forget the saved password", ic::LOCK_KEY)).clicked() {
                     act = Some(RowAct::ForgetPassword);
                 }
                 if !c.in_ssh_config && ui.button(format!("{}  Remove from the list", ic::TRASH)).clicked() {
                     act = Some(RowAct::Remove);
                 }
             });
+            self.menu_open(&c.address, open.is_some());
         }
         if lit || c.favorite {
             let mut star = RichText::new(ic::STAR).size(16.0);
