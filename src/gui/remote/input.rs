@@ -124,7 +124,14 @@ impl Remote {
                 // modifiers already held there), never a bare letter.
                 Event::Copy if !local => self.tap(if crate::sys::insert_held() { xk::INSERT } else { 'c' as u32 })?,
                 Event::Cut if !local => self.tap(if self.mods.shift && !self.mods.ctrl { xk::DELETE } else { 'x' as u32 })?,
-                Event::Paste(_) if !local => self.tap(if self.mods.shift && !self.mods.ctrl { xk::INSERT } else { 'v' as u32 })?,
+                Event::Paste(text) if !local => {
+                    // What was copied here a moment ago may not have gone over yet (the clipboard
+                    // is looked at twice a second): it goes first, then the keys that paste it.
+                    if self.share_clipboard && !text.is_empty() {
+                        self.send(ToAgent::Clipboard(text))?;
+                    }
+                    self.tap(if self.mods.shift && !self.mods.ctrl { xk::INSERT } else { 'v' as u32 })?
+                }
                 Event::Ime(egui::ImeEvent::Commit(text)) if !local => {
                     for c in text.chars() {
                         let sym = xk::of_char(c);

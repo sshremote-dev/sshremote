@@ -12,7 +12,8 @@ const POLL: Duration = Duration::from_millis(500);
 const MAX: usize = 1 << 20;
 
 enum Req {
-    Set(String),
+    /// Puts text on the clipboard, saying so when done.
+    Set(String, Sender<()>),
     /// Holds text on the clipboard just long enough to paste it, then puts the old text back.
     Paste(String, Sender<bool>),
 }
@@ -86,10 +87,11 @@ impl Clip {
             loop {
                 // Requests fall through too, so a steady stream of them cannot hold off the restore.
                 match incoming.recv_timeout(POLL) {
-                    Ok(Req::Set(text)) => {
+                    Ok(Req::Set(text, done)) => {
                         if board.set_text(text.clone()).is_ok() {
                             last = Some(mark(&text));
                         }
+                        let _ = done.send(());
                     }
                     Ok(Req::Paste(text, done)) => {
                         // A paste right after another keeps what was there before the first one.
@@ -134,7 +136,11 @@ impl Clip {
 
     /// Puts text from the other side on the local clipboard.
     pub fn set(&mut self, text: String) {
-        let _ = self.to_board.send(Req::Set(text));
+        // Waited for (a little), so the Ctrl+V a viewer sends right after pastes this text.
+        let (tx, rx) = mpsc::channel();
+        if self.to_board.send(Req::Set(text, tx)).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+        }
     }
 
     /// Puts text on the clipboard for a paste; true once it is there.
