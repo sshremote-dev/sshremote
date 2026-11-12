@@ -674,6 +674,24 @@ fn ask(frame: Frame) -> Option<Ask> {
     if v.get("snapshot").is_some() {
         return Some(Ask::Agent(ToAgent::Snapshot));
     }
+    // What is shared: the whole screen, a window, a program; and the windows to choose from.
+    if v.get("windows").is_some() {
+        return Some(Ask::Agent(ToAgent::ListWindows));
+    }
+    if let Some(sh) = v.get("share") {
+        use crate::shared::Share;
+        // Window ids go as text: they can be larger than a browser's numbers hold exactly.
+        let id = || sh.get("id").and_then(|x| x.as_str()).and_then(|t| t.parse::<u64>().ok());
+        let share = match sh.get("kind").and_then(|x| x.as_str())? {
+            "screen" => Share::Screen,
+            "window" => Share::Window(id()?),
+            "app" => Share::App(id()?),
+            "activeWindow" => Share::ActiveWindow,
+            "activeApp" => Share::ActiveApp,
+            _ => return None,
+        };
+        return Some(Ask::Agent(ToAgent::Share(share)));
+    }
     if let Some(u) = v.get("upload") {
         let id = u.get("id")?.as_u64()? as u32;
         let size = u.get("size")?.as_u64()?;
@@ -1082,6 +1100,13 @@ fn client(
                 }
                 ToClient::Chat(t) => {
                     let _ = send_json(&w, serde_json::json!({ "chat": t }));
+                }
+                ToClient::WindowList { list, error } => {
+                    let list: Vec<_> = list.iter().map(|w| serde_json::json!({ "id": w.id.to_string(), "title": w.title, "app": w.app, "w": w.w, "h": w.h })).collect();
+                    let _ = send_json(&w, serde_json::json!({ "windows": { "list": list, "error": error } }));
+                }
+                ToClient::Sharing { kind, text } => {
+                    let _ = send_json(&w, serde_json::json!({ "sharing": { "kind": kind, "text": text } }));
                 }
                 ToClient::Snapshot(png) => {
                     if send(&w, 0x2, &[&[5u8][..], &png].concat()).is_err() {
@@ -1721,6 +1746,11 @@ Host: x
         assert!(matches!(a(r#"{"drawn":7}"#), Some(Ask::Drawn(7))));
         assert!(matches!(a(r#"{"pause":true}"#), Some(Ask::Pause(true))));
         assert!(matches!(a(r#"{"snapshot":1}"#), Some(Ask::Agent(ToAgent::Snapshot))));
+        use crate::shared::Share;
+        assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
+        assert!(matches!(a(r#"{"share":{"kind":"window","id":"18446744073709551000"}}"#), Some(Ask::Agent(ToAgent::Share(Share::Window(18446744073709551000))))));
+        assert!(matches!(a(r#"{"share":{"kind":"activeApp"}}"#), Some(Ask::Agent(ToAgent::Share(Share::ActiveApp)))));
+        assert!(a(r#"{"share":{"kind":"window"}}"#).is_none(), "a window needs its id");
         assert!(matches!(a(r#"{"list":""}"#), Some(Ask::Agent(ToAgent::ListDir { .. }))));
         assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
         assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));

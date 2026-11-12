@@ -27,6 +27,7 @@ const ICONS = {
   keyboard: "M3 6h18v12H3z|M7 10h.01|M11 10h.01|M15 10h.01|M7.5 14h9",
   chat: "M4 5h16v11H10l-5 4v-4H4z",
   pause: "M8 5v14|M16 5v14",
+  window: "M3 5h18v14H3z|M3 9h18",
   play: "M7 5l12 7-12 7z",
   clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z|M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
@@ -715,6 +716,8 @@ class Client {
     if (v.uploaded) this.uploaded(v.uploaded);
     if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
     if (v.chat !== undefined) this.chatIn(v.chat);
+    if (v.windows) this.windowPick(v.windows);
+    if (v.sharing) { this.sharing = v.sharing; toast("Sharing " + v.sharing.text + "."); this.screenTools(); }
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
     if (v.qualities) {
       this.qualities = v.qualities;
@@ -1133,6 +1136,26 @@ class Client {
     if (this.stats && this.view === "screen") parts.push(this.stats.kbps.toFixed(this.stats.kbps < 10 ? 1 : 0) + " KB/s", Math.round(this.stats.rtt) + " ms");
     this.state(parts.join(" · "), "up");
   }
+  // The host's windows to choose from: one, or every window of its program.
+  windowPick(w) {
+    const box = $("modal").firstElementChild;
+    box.textContent = "";
+    const finish = () => { $("modal").hidden = true; removeEventListener("keydown", keys, true); };
+    const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(); } };
+    const list = h("div", { class: "picklist" });
+    if (w.error) list.append(h("p", { class: "bad", text: w.error }));
+    for (const win of w.list || []) {
+      const one = h("button", { type: "button", class: "btn", text: "This window", onclick: () => { finish(); this.send({ share: { kind: "window", id: win.id } }); } });
+      const all = h("button", { type: "button", class: "btn", text: "All of " + (win.app || "its program"), onclick: () => { finish(); this.send({ share: { kind: "app", id: win.id } }); } });
+      list.append(h("div", { class: "pick" }, h("div", { class: "grow" }, h("b", { text: win.title || "(no title)" }), h("small", { text: (win.app ? win.app + " · " : "") + win.w + "×" + win.h })), one, all));
+    }
+    if (!w.error && !(w.list || []).length) list.append(h("p", { text: "No window to share on its own." }));
+    box.append(h("h2", { text: "Share one window or program" }),
+      h("p", { text: "Its menus and dialogs show with it; clicks outside it stay here." }), list,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: finish })));
+    $("modal").hidden = false;
+    addEventListener("keydown", keys, true);
+  }
   // A message from the person at the host: in the chat, and said when the chat is closed.
   chatIn(text) {
     this.chatLines.push({ you: false, text, at: new Date() });
@@ -1204,6 +1227,14 @@ class Client {
       ["Repaint the whole screen", () => this.send({ refresh: 1 })],
     ], at);
     const several = this.monitors && this.monitors.list.length > 1;
+    // What of the host is shared: all of the screen, or one window or program, with its menus.
+    const kind = this.sharing?.kind || 0;
+    const shareMenu = at => menu(["Share",
+      ["The whole screen", () => this.send({ share: { kind: "screen" } }), { on: kind === 0 }],
+      ["The window in front", () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
+      ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
+      ["One window or program…", () => this.send({ windows: 1 })],
+    ], at);
     const monitorMenu = at => menu(this.monitors.list.map((m, i) =>
       [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), at);
     const viewOnly = () => {
@@ -1232,6 +1263,7 @@ class Client {
           ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
           ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
+          ["Share…", () => shareMenu(more), { icon: "window", on: kind !== 0 }],
         ];
         if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
         items.push(null, [this.paused ? "Go on" : "Pause the picture", pause, { icon: this.paused ? "play" : "pause", on: this.paused }]);
@@ -1252,7 +1284,10 @@ class Client {
     chat.classList.toggle("on", !$("chat").hidden);
     if (this.unread) chat.append(h("span", { class: "count", text: String(this.unread) }));
     chat.onclick = () => this.chatShow($("chat").hidden);
-    bar.append(keys, clip, quality, chat);
+    const share = button("window", null, { title: "Share the whole screen, one window or one program" });
+    share.classList.toggle("on", kind !== 0);
+    share.onclick = () => shareMenu(share);
+    bar.append(keys, clip, quality, share, chat);
     if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
       mon.onclick = () => monitorMenu(mon);

@@ -108,6 +108,12 @@
   #vscreen.zoomed { overflow: auto; }
   #vscreen.zoomed canvas { max-width: none; flex: none; }
   #vscreen.viewonly canvas { cursor: not-allowed; }
+  /* The host's windows to share, one to a row. */
+  .picklist { max-height: 50vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+  .pick { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); }
+  .pick b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick small { color: var(--dim); }
+  .pick .grow { min-width: 0; }
   /* A setting with its name before it and its value after it, in a dialog. */
   label.range { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 10px; margin: 12px 0; }
   label.range span { color: var(--dim); }
