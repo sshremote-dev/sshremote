@@ -37,6 +37,22 @@ pub fn insert_held() -> bool {
     false
 }
 
+/// Where the mouse pointer is on the screen, in pixels, where the system says (Windows; None
+/// elsewhere). Files dragged over a window move no pointer events there, so this is how a drop
+/// knows where it landed.
+pub fn pointer_on_screen() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut p = POINT { x: 0, y: 0 };
+        // SAFETY: a plain query into a local.
+        (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// Now, in seconds since 1970.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())

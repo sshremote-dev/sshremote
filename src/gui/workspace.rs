@@ -1138,6 +1138,14 @@ impl Workspace {
             Some(z) => rects.push((z, area)),
             None => tab.root.layout(ui, area, 0, &mut rects),
         }
+        // Files dropped go to the pane they were dropped on, which becomes the active one.
+        if ctx.input(|i| !i.raw.dropped_files.is_empty())
+            && let Some((x, y)) = crate::sys::pointer_on_screen()
+            && let p = window_point(&ctx, Pos2::new(x as f32, y as f32))
+            && let Some((id, _)) = rects.iter().find(|(_, r)| r.contains(p))
+        {
+            tab.active = *id;
+        }
         // A click in a pane makes it the active one, with the keyboard.
         if let Some(p) = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
             && let Some((id, _)) = rects.iter().find(|(_, r)| r.contains(p))
@@ -1949,11 +1957,23 @@ impl Workspace {
 /// A point of this window as a point of the whole screen in pixels: windows on monitors of
 /// different scales compare there.
 pub(super) fn screen_point(ctx: &egui::Context, p: Pos2) -> Pos2 {
-    let (origin, scale) = ctx.input(|i| {
+    // The window's place is in the system's points; `p` is in the page's, which a UI scale other
+    // than 100 % makes larger or smaller.
+    let (origin, native) = window_origin(ctx);
+    (origin * native + p.to_vec2() * ctx.pixels_per_point()).to_pos2()
+}
+
+/// The point in this window at a place on the screen in pixels: the opposite of `screen_point`.
+pub(super) fn window_point(ctx: &egui::Context, px: Pos2) -> Pos2 {
+    let (origin, native) = window_origin(ctx);
+    ((px.to_vec2() - origin * native) / ctx.pixels_per_point()).to_pos2()
+}
+
+fn window_origin(ctx: &egui::Context) -> (Vec2, f32) {
+    ctx.input(|i| {
         let v = i.viewport();
         (v.inner_rect.map_or(Vec2::ZERO, |r| r.min.to_vec2()), v.native_pixels_per_point.unwrap_or(1.0))
-    });
-    (p + origin) * scale
+    })
 }
 
 /// A question before something that cannot be undone: Cancel, or the red action. Enter says
@@ -2689,6 +2709,41 @@ mod tests {
         h.w.close_all();
     }
 
+    /// A screen in a tab not shown stops its picture, so it costs the link nothing, and has it
+    /// again when shown.
+    #[test]
+    #[ignore]
+    fn a_screen_in_a_hidden_tab_stops_its_picture() {
+        let mut h = Harness::new();
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+        h.until("the test desktop connects", |w| live(w, 0));
+        let frames = |w: &Workspace| match &w.panes[0].state {
+            State::Live(r) => r.frames(),
+            _ => 0,
+        };
+        let settle = |h: &mut Harness, n: usize| {
+            for _ in 0..n {
+                h.frame(Vec::new());
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        };
+        settle(&mut h, 20);
+        // How many come in a while shown, then in as long hidden.
+        let start = frames(&h.w);
+        settle(&mut h, 70);
+        let shown = frames(&h.w) - start;
+        assert!(shown >= 4, "pictures while shown: {shown}");
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        h.w.add(Launch::Shell { label: "shell".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
+        settle(&mut h, 15);
+        let hidden = frames(&h.w);
+        settle(&mut h, 70);
+        assert!(frames(&h.w) <= hidden + 1, "none while hidden ({shown} when shown): {hidden} then {}", frames(&h.w));
+        h.w.select_tab(0);
+        h.until("pictures again when shown", |w| frames(w) > hidden + 2);
+        h.w.close_all();
+    }
+
     /// A shell in a tab not shown keeps taking its output, so it does not stall.
     #[test]
     fn shells_in_hidden_tabs_keep_running() {
@@ -2771,8 +2826,18 @@ mod tests {
         info.inner_rect = Some(Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 600.0)));
         info.native_pixels_per_point = Some(1.5);
         let mut got = Pos2::ZERO;
-        let _ = ctx.run_test(input, |ui| got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0)));
+        let _ = ctx.run_test(input.clone(), |ui| got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0)));
         assert_eq!(got, Pos2::new(165.0, 105.0));
+        // With the page zoomed, a point in it is that much further from the window's corner, and
+        // a place on the screen comes back to the same point.
+        ctx.set_zoom_factor(1.25);
+        let mut back = Pos2::ZERO;
+        let _ = ctx.run_test(input, |ui| {
+            got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0));
+            back = window_point(ui.ctx(), got);
+        });
+        assert_eq!(got, Pos2::new(150.0 + 18.75, 75.0 + 37.5));
+        assert!((back - Pos2::new(10.0, 20.0)).length() < 0.01, "{back:?}");
     }
 
     /// Let go outside the window, a tab drag ends even when the pointer is gone in that frame.
