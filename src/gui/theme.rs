@@ -49,6 +49,11 @@ fn system_fonts() -> (FontFiles, FontFiles) {
     }
 }
 
+/// A font for Korean, Japanese and Chinese, kept as a fallback behind a Latin one.
+fn is_cjk(path: &str) -> bool {
+    path.contains("malgun") || path.contains("CJK") || path.contains("Gothic")
+}
+
 pub(crate) fn install_fonts(ctx: &egui::Context) {
     crate::markdown::install_bold(ctx);
     // The system's UI font first (one Latin face, then its Korean, Japanese and Chinese fallback),
@@ -69,7 +74,7 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         let found: Vec<_> = list.into_iter().filter(|(p, _)| std::path::Path::new(p).is_file()).collect();
         let mut picked = Vec::new();
         for (path, index) in found {
-            let cjk = path.contains("malgun") || path.contains("CJK") || path.contains("Gothic");
+            let cjk = is_cjk(path);
             if cjk || !latin_done {
                 latin_done |= !cjk;
                 picked.push((path, index));
@@ -79,7 +84,11 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
             let Ok(bytes) = std::fs::read(path) else { continue };
             let mut data = egui::FontData::from_owned(bytes);
             data.index = index;
-            let families = vec![InsertFontFamily { family: family.clone(), priority: FontPriority::Highest }];
+            let mut families = vec![InsertFontFamily { family: family.clone(), priority: FontPriority::Highest }];
+            // Korean, Japanese and Chinese in terminals and code too, behind the code fonts.
+            if family == FontFamily::Proportional && is_cjk(path) {
+                families.push(InsertFontFamily { family: FontFamily::Monospace, priority: FontPriority::Lowest });
+            }
             ctx.add_font(FontInsert { name: format!("system:{path}"), data, families });
         }
     }
@@ -252,6 +261,21 @@ pub(crate) fn primary(text: impl Into<String>) -> egui::Button<'static> {
 
 /// The main action's blue: the logo's, dark enough under white text in both themes.
 pub(crate) const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0x2B, 0x59, 0xC3);
+
+/// Korean reads in the terminal's font as in the windows' wherever the system has a CJK font.
+#[test]
+fn terminals_draw_korean() {
+    let (ui_fonts, _) = system_fonts();
+    if !ui_fonts.iter().any(|(p, _)| is_cjk(p) && std::path::Path::new(p).is_file()) {
+        return;
+    }
+    let ctx = egui::Context::default();
+    install_fonts(&ctx);
+    let _ = ctx.run_ui(Default::default(), |_| {});
+    let has = |family: FontFamily| ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::new(14.0, family), '안'));
+    assert!(has(FontFamily::Proportional));
+    assert!(has(FontFamily::Monospace), "Hangul in the terminal's font");
+}
 
 #[cfg(test)]
 mod contrast {
