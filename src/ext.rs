@@ -1465,9 +1465,6 @@ mod tests {
         TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir));
     }
 
-    /// A pack made, installed from the file, its layer found; then the registry offers a newer
-    /// one (a local index), the update installs it after the checksum, and roll-back and remove
-    /// work; a package with a wrong checksum is refused.
     /// A command line goes to the extension that serves it as typed: `web --listen x` as such,
     /// `remote-access status` without the name of the part that serves it put in front.
     #[cfg(unix)]
@@ -1511,6 +1508,9 @@ mod tests {
         assert!(folder("..").is_none() && folder(".").is_none());
     }
 
+    /// A pack made, installed from the file, its layer found; then the registry offers a newer
+    /// one (a local index), the update installs it after the checksum, and roll-back and remove
+    /// work; a package with a wrong checksum is refused.
     #[test]
     fn packs_install_update_and_go() {
         use sha2::Digest;
