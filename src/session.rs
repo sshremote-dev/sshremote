@@ -748,6 +748,16 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         sess.close();
     }
 
+    /// A picture with something in it (not one flat colour), kept as NAME.ppm in
+    /// SSHREMOTE_TEST_SHOTS when that is set.
+    fn a_picture(fb: &Framebuffer, name: &str) {
+        if let Ok(dir) = std::env::var("SSHREMOTE_TEST_SHOTS") {
+            std::fs::write(std::path::Path::new(&dir).join(format!("{name}.ppm")), fb.ppm()).unwrap();
+        }
+        let shades: std::collections::HashSet<&[u8]> = fb.rgb.chunks(3).collect();
+        assert!(shades.len() > 2, "the {name} has a picture: {} shades in {}x{}", shades.len(), fb.w, fb.h);
+    }
+
     /// Sharing a GNOME host's active window sends that window at its own size, scaled to fit, and
     /// the whole screen comes back as it was. Needs SSHREMOTE_GNOME_HOST with a window focused
     /// there (and SSHREMOTE_GNOME_ENV, SSHREMOTE_GNOME_AGENT as above).
@@ -772,6 +782,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
         sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
         // Sends `first`, then waits for a frame for which `want` holds.
+        let mut fb = Framebuffer::default();
         let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Vec<(u16, u16)>, (u16, u16)) {
             if let Some(m) = first {
                 sess.send(m).unwrap();
@@ -783,6 +794,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
                     Ok(Ev::Net(ToClient::Hello { w, h, .. })) => hellos.push((w, h)),
                     Ok(Ev::Net(ToClient::Frame(f))) => {
                         sess.send(ToAgent::Ack(f.id)).unwrap();
+                        fb.apply(&f).unwrap();
                         seen.push((f.w, f.h));
                         if want(f.w, f.h) {
                             return (hellos, (f.w, f.h));
@@ -799,6 +811,26 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let (hellos, window) = next(Some(ToAgent::Share(Share::ActiveWindow)), &|w, h| (w, h) != screen);
         assert_eq!(hellos.last(), Some(&window), "the window's size is announced and sent as it is");
         assert!(window.0 < screen.0 || window.1 < screen.1, "a window, not the screen: {window:?}");
+        drop(next);
+        a_picture(&fb, "window");
+        let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| {
+            sess.send(first.unwrap()).unwrap();
+            let until = Instant::now() + Duration::from_secs(20);
+            let mut hellos = Vec::new();
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(Ev::Net(ToClient::Hello { w, h, .. })) => hellos.push((w, h)),
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        if want(f.w, f.h) {
+                            return (hellos, (f.w, f.h));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("no such frame in time");
+        };
         let (hellos, back) = next(Some(ToAgent::Share(Share::Screen)), &|w, h| (w, h) == screen);
         assert_eq!((hellos.last(), back), (Some(&screen), screen));
         drop(next);
@@ -829,7 +861,8 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
         let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
         sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
-        let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Option<(u8, String)>, (u16, u16)) {
+        let mut fb = Framebuffer::default();
+        let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Option<(u8, String)>, (u16, u16), Vec<u8>) {
             if let Some(m) = first {
                 sess.send(m).unwrap();
             }
@@ -841,8 +874,9 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
                     Ok(Ev::Net(ToClient::Notice(n))) if n.starts_with("Sharing") => panic!("{n}"),
                     Ok(Ev::Net(ToClient::Frame(f))) => {
                         sess.send(ToAgent::Ack(f.id)).unwrap();
+                        fb.apply(&f).unwrap();
                         if want(f.w, f.h) {
-                            return (shared, (f.w, f.h));
+                            return (shared, (f.w, f.h), fb.rgb.clone());
                         }
                     }
                     Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
@@ -852,13 +886,15 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
             panic!("no such frame in time");
         };
         next(None, &|w, h| (w, h) == screen);
-        let (shared, part) = next(Some(ToAgent::Share(Share::ActiveApp)), &|w, h| (w, h) != screen);
+        let (shared, part, shot) = next(Some(ToAgent::Share(Share::ActiveApp)), &|w, h| (w, h) != screen);
         let (kind, text) = shared.expect("the share is confirmed");
         assert!(text.starts_with("every window of"), "{kind} {text}");
         assert!(part.0 < screen.0 && part.1 < screen.1, "the program's part: {part:?}");
-        let (_, back) = next(Some(ToAgent::Share(Share::Screen)), &|w, h| (w, h) == screen);
+        let (_, back, _) = next(Some(ToAgent::Share(Share::Screen)), &|w, h| (w, h) == screen);
         assert_eq!(back, screen);
         drop(next);
+        let fb = Framebuffer { rgb: shot, w: part.0 as usize, h: part.1 as usize, ..Framebuffer::default() };
+        a_picture(&fb, "program");
         sess.close();
     }
 

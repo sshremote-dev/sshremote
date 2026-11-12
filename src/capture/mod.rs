@@ -116,6 +116,14 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
 }
 
 /// Nearest-neighbour BGRx resize for backends that cannot scale themselves.
+/// A frame's pixels where they lie (a mapped capture buffer, say), BGRx rows `stride` apart.
+pub struct Pixels<'a> {
+    pub w: usize,
+    pub h: usize,
+    pub stride: usize,
+    pub data: &'a [u8],
+}
+
 pub fn scale_nearest(src: &[u8], sw: usize, sh: usize, sstride: usize, w: usize, h: usize) -> Image {
     let mut data = vec![0u8; w * h * 4];
     let xs: Vec<usize> = (0..w).map(|x| (x * sw / w) * 4).collect();

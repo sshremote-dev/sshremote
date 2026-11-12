@@ -12,7 +12,7 @@ use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use super::region::{self, R};
-use super::{Capture, Image, Input, Monitor, NEEDS_HELPER, Share, WindowInfo};
+use super::{Capture, Image, Input, Monitor, NEEDS_HELPER, Pixels, Share, WindowInfo};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 // Input goes to Mutter without waiting for its reply: a round trip per pointer move would hold up
@@ -193,7 +193,7 @@ fn to_image(sample: &gst::Sample) -> Result<Image, String> {
 
 /// A window stream without crop information (older PipeWire): the frame minus pure black rows and
 /// columns at its right and bottom. Never for a monitor, whose dark edges are part of the picture.
-fn content_box(img: &Image) -> (usize, usize, usize, usize) {
+fn content_box(img: &Pixels) -> (usize, usize, usize, usize) {
     let black_px = |x: usize, y: usize| img.data[y * img.stride + x * 4..y * img.stride + x * 4 + 3] == [0, 0, 0];
     let mut h = img.h;
     while h > 16 && (0..img.w).step_by(4).all(|x| black_px(x, h - 1)) {
@@ -843,15 +843,21 @@ impl Capture for Gnome {
             }
             self.refresh_app(true);
         }
-        let mut img = to_image(&s)?;
         if !self.native() {
-            return Ok(Some(img));
+            return to_image(&s).map(Some);
         }
+        // Cut and scaled straight from the stream's buffer: one copy of the part sent, not three
+        // of the whole frame.
+        let caps = s.caps().ok_or("frame without caps")?;
+        let info = gst_video::VideoInfo::from_caps(caps).map_err(|e| e.to_string())?;
+        let buf = s.buffer().ok_or("frame without buffer")?;
+        let map = buf.map_readable().map_err(|e| e.to_string())?;
+        let frame = Pixels { w: info.width() as usize, h: info.height() as usize, stride: info.stride()[0] as usize, data: map.as_slice() };
         if self.app.is_some() {
             self.refresh_app(false);
             // Its last window closed: the whole monitor comes next, the pipeline already restarted.
             let Some(a) = self.app.as_ref() else { return Ok(None) };
-            let img = region::crop_masked(&img, a.area, &a.shown);
+            let img = region::crop_masked(&frame, a.area, &a.shown);
             if (img.w, img.h) != self.desk {
                 self.desk = (img.w, img.h);
                 self.target = self.desk;
@@ -863,30 +869,30 @@ impl Capture for Gnome {
         }
         // A window stream's buffers can be larger than the window; the window is the crop area.
         // Mutter marks a monitor's frames with an empty crop.
-        let crop = s.buffer().and_then(|b| b.meta::<gst_video::VideoCropMeta>().map(|m| m.rect()));
+        let crop = buf.meta::<gst_video::VideoCropMeta>().map(|m| m.rect());
         let monitor = self.portal.as_ref().is_some_and(|p| p.monitor);
-        let (cx, cy, cw, ch) = match crop {
+        let (mut cx, mut cy, mut cw, mut ch) = match crop {
             Some((x, y, w, h)) if w > 0 && h > 0 => (x as usize, y as usize, w as usize, h as usize),
-            None if !monitor => content_box(&img),
-            _ => (0, 0, img.w, img.h),
+            None if !monitor => content_box(&frame),
+            _ => (0, 0, frame.w, frame.h),
         };
-        if (cx, cy, cw, ch) != (0, 0, img.w, img.h) && cx + cw <= img.w && cy + ch <= img.h {
-            let mut data = Vec::with_capacity(cw * ch * 4);
-            for y in cy..cy + ch {
-                let row = y * img.stride + cx * 4;
-                data.extend_from_slice(&img.data[row..row + cw * 4]);
-            }
-            img = Image { w: cw, h: ch, stride: cw * 4, data };
+        if cx + cw > frame.w || cy + ch > frame.h {
+            (cx, cy, cw, ch) = (0, 0, frame.w, frame.h);
         }
-        if (img.w, img.h) != self.desk {
+        if (cw, ch) != self.desk {
             // The window was resized: the agent sees the new size and asks for a new target.
-            self.desk = (img.w, img.h);
+            self.desk = (cw, ch);
             self.target = self.desk;
         }
-        if self.target == self.desk {
-            return Ok(Some(img));
+        let from = &frame.data[cy * frame.stride + cx * 4..];
+        if self.target != self.desk {
+            return Ok(Some(super::scale_nearest(from, cw, ch, frame.stride, self.target.0, self.target.1)));
         }
-        Ok(Some(super::scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
+        let mut data = Vec::with_capacity(cw * ch * 4);
+        for y in 0..ch {
+            data.extend_from_slice(&from[y * frame.stride..y * frame.stride + cw * 4]);
+        }
+        Ok(Some(Image { w: cw, h: ch, stride: cw * 4, data }))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

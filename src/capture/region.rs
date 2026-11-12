@@ -1,7 +1,7 @@
 //! Rectangles for sharing part of a screen: which parts of the shared windows
 //! show, and greying out the rest of a frame.
 
-use super::Image;
+use super::{Image, Pixels};
 
 /// A rectangle in pixels, right and bottom exclusive.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,7 +79,7 @@ pub const HIDDEN: [u8; 4] = [38, 34, 34, 0];
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// `area` of `img` with everything outside `shown` (given relative to `area`) greyed out.
-pub fn crop_masked(img: &Image, area: R, shown: &[R]) -> Image {
+pub fn crop_masked(img: &Pixels, area: R, shown: &[R]) -> Image {
     let area = area.and(&R { l: 0, t: 0, r: img.w as i32, b: img.h as i32 });
     let (w, h) = ((area.r - area.l).max(1) as usize, (area.b - area.t).max(1) as usize);
     let mut data = vec![0u8; w * h * 4];
@@ -121,8 +121,8 @@ mod tests {
         let shared = R { l: 0, t: 0, r: 100, b: 100 };
         let shown = shown_parts(&[(top, false), (shared, true)], shared);
         assert_eq!(shown, vec![R { l: 0, t: 0, r: 50, b: 100 }]);
-        let img = Image { w: 100, h: 100, stride: 400, data: vec![200; 100 * 100 * 4] };
-        let out = crop_masked(&img, shared, &shown);
+        let data = vec![200; 100 * 100 * 4];
+        let out = crop_masked(&Pixels { w: 100, h: 100, stride: 400, data: &data }, shared, &shown);
         assert_eq!(&out.data[0..4], &[200, 200, 200, 200]);
         assert_eq!(&out.data[60 * 4..61 * 4], &HIDDEN);
     }
