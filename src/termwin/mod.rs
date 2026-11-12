@@ -490,19 +490,13 @@ pub struct TermWindow {
     profiles: Vec<Profile>,
     /// Where the window's position is remembered and what its title says.
     viewport: egui::ViewportId,
-    /// Where a window made from a torn-off tab opens, in screen points.
-    position: Option<Pos2>,
     /// The tab being dragged in the strip.
     dragging: Option<u32>,
-    /// Windows made from tabs dragged out of this one, for the owner to show.
-    torn: Vec<TermWindow>,
     title: String,
     copy_on_select: bool,
     renaming: Option<(u32, String)>,
     /// Tabs and panes to open on the next frame (the window's context is needed to wake it for output).
     pending: Vec<Pending>,
-    /// The window closes with its last tab instead of opening a fresh shell.
-    standalone: bool,
     /// A window of its own, which draws its frame: tabs in the title bar beside the window buttons.
     framed: bool,
 }
@@ -518,16 +512,6 @@ impl TermWindow {
         w
     }
 
-    /// The stand-alone terminal: local shells and ssh sessions, the first profile opening first.
-    pub fn standalone(first: Profile, mut more: Vec<Profile>) -> Self {
-        let mut profiles = local_profiles();
-        profiles.append(&mut more);
-        let mut w = Self::with_profiles(profiles, "sshremote-standalone-terminal", "SSH Remote Terminal");
-        w.pending.push((first, None));
-        w.standalone = true;
-        w
-    }
-
     /// Keeps only the shells running on this computer (a local shell, `ssh HOST`): those of an
     /// agent end with its connection. Whether any is left.
     pub fn keep_local(&mut self) -> bool {
@@ -538,8 +522,8 @@ impl TermWindow {
 
     /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
     pub fn single(profile: Profile) -> Self {
-        let mut w = Self::standalone(profile, Vec::new());
-        w.standalone = false;
+        let mut w = Self::with_profiles(local_profiles(), "sshremote-pane-terminal", "Terminal");
+        w.pending.push((profile, None));
         w.bare = true;
         w
     }
@@ -564,14 +548,11 @@ impl TermWindow {
             system: None,
             profiles,
             viewport: egui::ViewportId::from_hash_of(viewport),
-            position: None,
             dragging: None,
-            torn: Vec::new(),
             title: title.into(),
             copy_on_select: setting("term_copy_select").is_some_and(|v| v == "1"),
             renaming: None,
             pending: Vec::new(),
-            standalone: false,
             framed: false,
         }
     }
@@ -657,52 +638,6 @@ impl TermWindow {
         if let Some(id) = active {
             self.active = self.tabs.iter().position(|t| t.id == id).unwrap_or(0);
         }
-    }
-
-    /// Takes the tab `group` out into a new window at `at` (screen points). Shells on the SSH host
-    /// of a remote-screen session stay with it, since that session carries their output.
-    fn tear(&mut self, group: u32, at: Pos2) {
-        if !self.framed
-            || !self.standalone
-            || self.tabs.iter().any(|t| t.group == group && matches!(t.backend, Backend::Agent))
-        {
-            return;
-        }
-        let active = self.tabs.get(self.active).map(|t| t.id);
-        let moved: Vec<Tab> = self.tabs.extract_if(.., |t| t.group == group).collect();
-        if moved.is_empty() {
-            return;
-        }
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut w = TermWindow::with_profiles(self.profiles.clone(), "sshremote-torn-terminal", &self.title);
-        w.viewport = egui::ViewportId::from_hash_of(("sshremote-torn-terminal", n));
-        w.next_id = moved.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        w.tabs = moved;
-        w.framed = true;
-        w.standalone = true;
-        w.position = Some(at);
-        w.system = self.system.clone();
-        w.font_size = self.font_size;
-        self.torn.push(w);
-        self.active = active.and_then(|id| self.tabs.iter().position(|t| t.id == id)).unwrap_or(0);
-    }
-
-    /// Windows made from tabs dragged out of this one since the last call.
-    pub fn take_torn(&mut self) -> Vec<TermWindow> {
-        std::mem::take(&mut self.torn)
-    }
-
-    /// Shows windows made from torn-off tabs, keeps those still open, and adds windows torn off
-    /// them in turn.
-    pub fn show_torn(ctx: &egui::Context, windows: &mut Vec<TermWindow>) {
-        let mut more = Vec::new();
-        windows.retain_mut(|w| {
-            let cmds = w.show(ctx, "");
-            more.extend(w.take_torn());
-            !cmds.iter().any(|c| matches!(c, Cmd::Close))
-        });
-        windows.extend(more);
     }
 
     fn close_group(&mut self, group: u32, out: &mut Vec<Cmd>) {
@@ -872,9 +807,6 @@ impl TermWindow {
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);
         }
-        if let Some(p) = self.position.take() {
-            builder = builder.with_position(p);
-        }
         ctx.show_viewport_immediate(self.viewport, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 out.extend(self.close_all());
@@ -891,9 +823,6 @@ impl TermWindow {
     /// Starts pending tabs and takes in program output; false once a stand-alone window has no tabs left.
     fn before(&mut self, ctx: &egui::Context, out: &mut Vec<Cmd>) -> bool {
         if self.tabs.is_empty() && self.pending.is_empty() {
-            if self.standalone {
-                return false;
-            }
             self.open_tab();
         }
         for (p, split) in std::mem::take(&mut self.pending) {
@@ -981,7 +910,7 @@ impl TermWindow {
         let room = (ui.available_width() - controls).max(64.0);
         let tab_w = (room / n).clamp(64.0, 220.0);
         let mut tab_rects: Vec<(u32, Rect)> = Vec::new();
-        let mut drag_end: Option<(u32, Pos2)> = None;
+        let mut drag_end = false;
         for (gi, &(group, i)) in groups.iter().enumerate() {
             let active = Some(group) == current;
             let next_active = groups.get(gi + 1).is_some_and(|g| Some(g.0) == current);
@@ -1071,11 +1000,8 @@ impl TermWindow {
                     self.active = i;
                 }
             }
-            if r.drag_stopped()
-                && self.dragging == Some(group)
-                && let Some(p) = ui.ctx().input(|inp| inp.pointer.latest_pos())
-            {
-                drag_end = Some((group, p));
+            if r.drag_stopped() && self.dragging == Some(group) {
+                drag_end = true;
             }
             if r.middle_clicked() {
                 close = Some(group);
@@ -1086,7 +1012,7 @@ impl TermWindow {
             }
             r.on_hover_text(&self.tabs[i].title);
         }
-        // A dragged tab moves along the strip; dropped away from it, it opens in a window of its own.
+        // A dragged tab moves along the strip.
         if let Some(group) = self.dragging
             && ui.input(|i| i.pointer.primary_down())
             && let Some(p) = ui.ctx().pointer_interact_pos()
@@ -1094,13 +1020,8 @@ impl TermWindow {
         {
             self.move_group(group, over);
         }
-        if let Some((group, p)) = drag_end {
+        if drag_end {
             self.dragging = None;
-            let strip = tab_rects.iter().fold(Rect::NOTHING, |a, (_, r)| a.union(*r));
-            if (p.y - strip.center().y).abs() > 60.0 || !ui.ctx().content_rect().contains(p) {
-                let origin = ui.ctx().input(|i| i.viewport().outer_rect.map_or(Pos2::ZERO, |r| r.min));
-                self.tear(group, origin + p.to_vec2() - Vec2::new(60.0, 16.0));
-            }
         }
         if !ui.input(|i| i.pointer.any_down()) {
             self.dragging = None;
@@ -2563,11 +2484,6 @@ mod tests {
         assert_eq!(order(&w), [before[1], before[2], before[0]]);
         w.move_group(before[0], before[1]);
         assert_eq!(order(&w), before);
-        // Shells on the SSH host belong to the session's window.
-        w.framed = true;
-        w.tear(before[1], Pos2::ZERO);
-        assert!(w.take_torn().is_empty());
-        assert_eq!(order(&w).len(), 3);
     }
 }
 
