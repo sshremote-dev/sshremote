@@ -36,10 +36,12 @@ export default class DeskHelper extends Extension {
     }
 
     // Every window from the top of the stack down: id, title, program, frame in stage
-    // coordinates, minimized, shareable on its own, focused, and the window it belongs to.
+    // coordinates, hidden (minimized, or on a workspace not shown, where its frame still lies over
+    // the screen), shareable on its own, focused, and the window it belongs to.
     List() {
         const tracker = Shell.WindowTracker.get_default();
         const focus = global.display.get_focus_window();
+        const shown = global.workspace_manager.get_active_workspace();
         const windows = global.display.sort_windows_by_stacking(global.display.list_all_windows()).reverse();
         return windows.map(w => {
             const r = w.get_frame_rect();
@@ -51,7 +53,8 @@ export default class DeskHelper extends Extension {
                 Meta.WindowType.UTILITY];
             const normal = root === w && !w.is_skip_taskbar() && types.includes(w.get_window_type());
             return [w.get_id(), w.get_title() ?? '', app ? app.get_name() : (w.get_wm_class() ?? ''),
-                r.x, r.y, r.width, r.height, w.minimized, normal, w === focus, root.get_id()];
+                r.x, r.y, r.width, r.height, w.minimized || !w.located_on_workspace(shown), normal, w === focus,
+                root.get_id()];
         });
     }
 

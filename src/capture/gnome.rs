@@ -29,7 +29,8 @@ const HELPER: &str = "io.github.thinkbigx.SshRemote.Windows";
 const HELPER_PATH: &str = "/io/github/thinkbigx/SshRemote/Windows";
 const HELPER_UUID: &str = "sshremote-helper@thinkbigx.github.io";
 
-/// id, title, program, x, y, width, height (stage coordinates), minimized, shareable, focused, owner id.
+/// id, title, program, x, y, width, height (stage coordinates), hidden (minimized or on another
+/// workspace; older helpers tell only minimized), shareable, focused, owner id.
 type HelperWin = (u64, String, String, i32, i32, i32, i32, bool, bool, bool, u64);
 
 /// What a stream records.
@@ -395,6 +396,7 @@ impl Gnome {
 
     fn helper_list(&self) -> Result<Vec<HelperWin>, String> {
         let p = Proxy::new(&self.conn, HELPER, HELPER_PATH, HELPER).map_err(|e| e.to_string())?;
+        update_helper();
         p.call("List", &()).map_err(|e| {
             let e = e.to_string();
             if e.contains("ServiceUnknown") || e.contains("NameHasNoOwner") || e.contains("UnknownObject") {
@@ -503,8 +505,9 @@ impl Gnome {
         let mut stack = Vec::new();
         let mut area: Option<R> = None;
         let mut focused = false;
-        for (_, _, app, x, y, w, h, minimized, shareable, focus, _) in &list {
-            if *minimized {
+        for (_, _, app, x, y, w, h, hidden, shareable, focus, _) in &list {
+            // Not drawn: neither part of the program nor over it.
+            if *hidden {
                 continue;
             }
             let r = R { l: px(*x, lx), t: px(*y, ly), r: px(x + w, lx), b: px(y + h, ly) };
@@ -570,6 +573,27 @@ mod tests {
     }
 }
 
+/// The helper extension's files, as this program has them.
+const HELPER_FILES: [(&str, &str); 2] = [
+    ("metadata.json", include_str!("../../assets/gnome-helper/metadata.json")),
+    ("extension.js", include_str!("../../assets/gnome-helper/extension.js")),
+];
+
+/// A helper installed by an older sshremote is brought up to date, once per agent; GNOME loads
+/// the new files at the next login.
+fn update_helper() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = helper_dir();
+        for (name, body) in HELPER_FILES {
+            let path = dir.join(name);
+            if path.exists() && std::fs::read_to_string(&path).ok().as_deref() != Some(body) {
+                let _ = std::fs::write(&path, body);
+            }
+        }
+    });
+}
+
 /// Where the helper extension lives for this user.
 fn helper_dir() -> std::path::PathBuf {
     let data = std::env::var_os("XDG_DATA_HOME")
@@ -631,10 +655,7 @@ impl Capture for Gnome {
     fn install_helper(&mut self) -> Result<String, String> {
         let dir = helper_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        for (name, body) in [
-            ("metadata.json", include_str!("../../assets/gnome-helper/metadata.json")),
-            ("extension.js", include_str!("../../assets/gnome-helper/extension.js")),
-        ] {
+        for (name, body) in HELPER_FILES {
             std::fs::write(dir.join(name), body).map_err(|e| format!("{name}: {e}"))?;
         }
         // Enabled in the settings now; GNOME Shell on Wayland loads new extensions only at login.
