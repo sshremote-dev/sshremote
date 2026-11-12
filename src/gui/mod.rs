@@ -816,6 +816,7 @@ impl eframe::App for App {
                     self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
                 }
                 if let Screen::Work(w) = &mut self.screen {
+                    w.set_preset(self.form.preset);
                     w.add(launch, place, start);
                 }
             }
@@ -912,6 +913,7 @@ impl App {
         }
         // Opened here, not in the main window: a host typed wrong keeps the dialog with its error.
         for (launch, place, start) in self.queued.drain(before.min(self.queued.len())..) {
+            w.set_preset(self.form.preset);
             w.add(launch, place, start);
             w.picker = None;
         }

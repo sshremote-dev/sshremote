@@ -181,6 +181,8 @@ struct Pane {
     prefs: Option<remote::Prefs>,
     /// A password typed in the sign-in dialog, kept in the password store once it works.
     keep: Option<(String, String)>,
+    /// The screen quality chosen when it was opened (None: adapts to the connection).
+    preset: Option<usize>,
     state: State,
 }
 
@@ -377,6 +379,7 @@ impl Workspace {
                 start,
                 prefs: None,
                 keep: None,
+                preset: self.opt.preset,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
             Launch::Agent { target, label, ssh_cmd, mode } => Pane {
@@ -389,11 +392,17 @@ impl Workspace {
                 start,
                 prefs: None,
                 keep: None,
+                preset: self.opt.preset,
                 state: State::Down(Down::new(false, String::new())),
             },
         };
         self.panes.push(pane);
         Some(id)
+    }
+
+    /// The screen quality the next panes open with (as chosen in the Open dialog).
+    pub(super) fn set_preset(&mut self, preset: Option<usize>) {
+        self.opt.preset = preset;
     }
 
     /// The first pane's shell starts in this view (terminal, text or markdown).
@@ -685,7 +694,10 @@ impl Workspace {
 
     #[cfg(feature = "remote")]
     fn go_live(&mut self, i: usize, sess: Session, rx: mpsc::Receiver<Ev>, ctx: &egui::Context) {
-        let ctl = Control::new(&self.opt, Mode::True);
+        // The quality chosen for this pane when it was opened, not the workspace's first one.
+        let mut opt = self.opt.clone();
+        opt.preset = self.panes[i].preset;
+        let ctl = Control::new(&opt, Mode::True);
         let waker = ctx.clone();
         sess.on_message(move || waker.request_repaint());
         let p = &mut self.panes[i];

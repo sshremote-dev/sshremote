@@ -753,6 +753,11 @@ impl Remote {
     }
 
     #[cfg(test)]
+    pub(in crate::gui) fn preset_name(&self) -> String {
+        self.ctl.preset.clone()
+    }
+
+    #[cfg(test)]
     pub(super) fn toast_texts(&self) -> Vec<&str> {
         self.toasts.texts()
     }

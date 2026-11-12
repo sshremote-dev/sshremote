@@ -143,6 +143,19 @@ fn tabs_and_panes_change_by_key_over_a_shared_screen() {
     assert_eq!(h.w.current, 1, "other keys stay the host's");
 }
 
+/// A screen opened into a workspace takes the quality chosen for it then, not the one the
+/// workspace was made with.
+#[test]
+#[ignore]
+fn a_pane_keeps_the_quality_it_was_opened_with() {
+    let mut h = Harness::new();
+    h.w.set_preset(Some(0));
+    h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+    h.until("the test desktop connects", |w| live(w, 0));
+    let State::Live(r) = &h.w.panes[0].state else { unreachable!() };
+    assert_eq!(r.preset_name(), crate::proto::PRESETS[0].name);
+}
+
 /// In full screen a split tab's screen fills the monitor alone, again after going to another tab
 /// and back; stepping to the other pane moves that zoom along, and leaving full screen undoes it.
 #[test]
