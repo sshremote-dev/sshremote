@@ -252,11 +252,33 @@ fn set_state(s: State) {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
 }
 
-/// This process's own remote access, when it runs one.
+/// This process's own remote access, when it runs one: in use for as long as a viewer is served,
+/// whatever the line to the relay is doing.
 pub fn state() -> State {
     let n = VIEWERS.load(Ordering::Relaxed);
     let s = STATE.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
-    if n > 0 && s == State::Online { State::InUse(n) } else { s }
+    if n > 0 { State::InUse(n) } else { s }
+}
+
+/// The viewers being served: a number, the settings they came in by, and their connection, so a
+/// change of those settings (off, a new password, ID or relay) ends them too.
+static SESSIONS: Mutex<Vec<(u64, String, TcpStream)>> = Mutex::new(Vec::new());
+
+/// What a viewer had to know to come in: the ID and password at that relay.
+fn credentials(c: &Config) -> String {
+    format!("{}\n{}\n{}", c.id, c.password, c.relay)
+}
+
+/// Ends every viewer that came in by other settings than `now`; all of them when it is off.
+fn end_sessions_but(now: Option<&Config>) {
+    let keep = now.map(credentials);
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, k, s)| {
+        let stays = keep.as_ref() == Some(k);
+        if !stays {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        stays
+    });
 }
 
 pub(crate) fn line(s: &mut TcpStream) -> io::Result<String> {
@@ -418,8 +440,11 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let mut heard = std::time::Instant::now();
         let mut pending = Vec::new();
         'line: loop {
-            if keep().as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
+            let now = keep();
+            if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
+                // Viewers let in by the settings that changed go too.
+                end_sessions_but(now.as_ref());
                 break;
             }
             let mut b = [0u8; 256];
@@ -457,6 +482,8 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         sleep_while(&keep, 1);
     }
     set_state(State::Off);
+    // Off: nobody stays in.
+    end_sessions_but(None);
 }
 
 fn sleep_while(keep: &impl Fn() -> Option<Config>, secs: u64) {
@@ -498,9 +525,15 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
         }
     };
     guard.passed();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    if let Ok(socket) = w.stream() {
+        SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), socket));
+    }
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| *k != n);
 }
 
 /// The agent as a process of its own, its input and output the sealed stream.

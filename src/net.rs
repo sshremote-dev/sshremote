@@ -5,6 +5,8 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -13,6 +15,11 @@ use spake2::{Ed25519Group, Identity, Password, Spake2};
 
 pub const RELAY_PORT: u16 = 7071;
 const MAX_FRAME: usize = 1 << 20;
+/// What one write puts in a sealed frame at most; a larger write goes out in several.
+const WRITE_FRAME: usize = 64 << 10;
+/// The whole handshake, from the first byte to the password proven, takes at most this long:
+/// a caller that trickles bytes cannot hold the agent's one password check.
+const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 
 /// Where a viewer finds an agent: `sshremote://ID@relay[:port]`, or `sshremote://ID` at the default relay.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,12 +84,15 @@ impl SealedWriter {
 }
 
 impl Write for SealedWriter {
+    /// Takes as much of `data` as fits in the frame being filled, so no frame is larger than the
+    /// other side accepts (`write_all` loops for the rest).
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        if self.buf.len() >= 64 << 10 {
+        let take = data.len().min(WRITE_FRAME - self.buf.len());
+        self.buf.extend_from_slice(&data[..take]);
+        if self.buf.len() >= WRITE_FRAME {
             self.emit()?;
         }
-        Ok(data.len())
+        Ok(take)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -96,6 +106,8 @@ pub struct SealedReader {
     seal: Sealer,
     plain: Vec<u8>,
     at: usize,
+    /// The largest frame taken: the confirmation's size until the password is proven.
+    limit: usize,
 }
 
 impl Read for SealedReader {
@@ -107,7 +119,7 @@ impl Read for SealedReader {
                 r => r?,
             }
             let len = u32::from_le_bytes(len) as usize;
-            if len > MAX_FRAME + 16 {
+            if len > self.limit + 16 {
                 return Err(io::Error::other("oversized frame"));
             }
             let mut ct = vec![0u8; len];
@@ -128,8 +140,18 @@ impl Read for SealedReader {
 
 const CONFIRM: &[u8] = b"sshremote/1 ready";
 
-/// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here.
+/// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here. On
+/// a failure the connection is shut at once, so the other side hears it without waiting.
 fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(SealedReader, SealedWriter)> {
+    let closer = stream.try_clone()?;
+    let result = handshake_on(stream, password, viewer);
+    if result.is_err() {
+        let _ = closer.shutdown(std::net::Shutdown::Both);
+    }
+    result
+}
+
+fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(SealedReader, SealedWriter)> {
     let (a, b) = (Identity::new(b"sshremote viewer"), Identity::new(b"sshremote agent"));
     let pw = Password::new(password.trim().as_bytes());
     let (state, msg) = if viewer {
@@ -139,11 +161,33 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
     };
     let mut s = stream;
     s.set_nodelay(true)?;
+    // Past the limit the connection is shut, which ends any read still waiting on it.
+    let done = Arc::new(AtomicBool::new(false));
+    if let Ok(watch) = s.try_clone() {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(HANDSHAKE_LIMIT);
+            if !done.load(Ordering::Acquire) {
+                let _ = watch.shutdown(std::net::Shutdown::Both);
+            }
+        });
+    }
+    struct Done(Arc<AtomicBool>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let _done = Done(done);
     s.write_all(&(msg.len() as u16).to_le_bytes())?;
     s.write_all(&msg)?;
     let mut len = [0u8; 2];
     s.read_exact(&mut len)?;
-    let mut theirs = vec![0u8; (u16::from_le_bytes(len) as usize).min(256)];
+    // Both sides' messages are the same size: anything else is not this program.
+    if u16::from_le_bytes(len) as usize != msg.len() {
+        return Err(io::Error::other("bad key exchange"));
+    }
+    let mut theirs = vec![0u8; msg.len()];
     s.read_exact(&mut theirs)?;
     let shared = state.finish(&theirs).map_err(|_| io::Error::other("bad key exchange"))?;
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, &shared);
@@ -152,7 +196,7 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
     hk.expand(b"agent to viewer", &mut a2v).map_err(|_| io::Error::other("hkdf"))?;
     let (send, recv) = if viewer { (v2a, a2v) } else { (a2v, v2a) };
     let mut w = SealedWriter { inner: s.try_clone()?, seal: Sealer::new(&send), buf: Vec::new() };
-    let mut r = SealedReader { inner: s, seal: Sealer::new(&recv), plain: Vec::new(), at: 0 };
+    let mut r = SealedReader { inner: s, seal: Sealer::new(&recv), plain: Vec::new(), at: 0, limit: CONFIRM.len() };
     // The viewer proves the password first: the agent answers only a right one, so a guess
     // cannot be checked against the agent's answer and dropped before it counts as wrong.
     let mut got = [0u8; CONFIRM.len()];
@@ -171,6 +215,7 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(Sea
     if got != CONFIRM {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
     }
+    r.limit = MAX_FRAME;
     Ok((r, w))
 }
 
@@ -183,6 +228,8 @@ pub fn handshake_agent(stream: TcpStream, password: &str) -> io::Result<(SealedR
 pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWriter), String> {
     // Dialled as remote access does: port 80 when the relay's own port is shut.
     let mut s = crate::access::dial(&addr.relay).map_err(|e| e.to_string())?;
+    // A relay that never answers does not hold the viewer.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
     writeln!(s, "viewer {}", addr.id).map_err(|e| e.to_string())?;
     match crate::access::line(&mut s).map_err(|e| e.to_string())?.as_str() {
         "ok" => {}
@@ -191,8 +238,10 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     // The agent may make a wrong guess wait its turn, but not forever.
     let _ = s.set_read_timeout(Some(Duration::from_secs(60)));
     let pair = handshake(s, password, true).map_err(|e| e.to_string())?;
+    // The agent answers a ping every second: two minutes of nothing is a dead path (a network
+    // change, a NAT mapping dropped), and the viewer reconnects instead of freezing.
     if let Ok(t) = pair.1.stream() {
-        let _ = t.set_read_timeout(None);
+        let _ = t.set_read_timeout(Some(Duration::from_secs(120)));
     }
     Ok(pair)
 }
@@ -202,6 +251,43 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    /// A write larger than a frame goes out in several, and arrives whole.
+    #[test]
+    fn a_large_write_arrives_whole() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let agent = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let (mut r, _w) = handshake_agent(s, "secret password").unwrap();
+            let mut got = vec![0u8; 3 << 19];
+            r.read_exact(&mut got).map(|()| got)
+        });
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (_r, mut w) = handshake(s, "secret password", true).unwrap();
+        let sent: Vec<u8> = (0..3usize << 19).map(|i| (i % 251) as u8).collect();
+        w.write_all(&sent).unwrap();
+        w.flush().unwrap();
+        assert_eq!(agent.join().unwrap().unwrap(), sent);
+    }
+
+    /// Before the password is proven only exact sizes are taken: a peer declaring a longer key
+    /// exchange is refused at once instead of being waited for.
+    #[test]
+    fn a_wrong_size_key_exchange_is_refused() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let agent = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            handshake_agent(s, "secret password").map(|_| ())
+        });
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(&256u16.to_le_bytes()).unwrap();
+        s.write_all(&[0u8; 8]).unwrap();
+        let started = std::time::Instant::now();
+        assert!(agent.join().unwrap().is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "refused, not waited for");
+    }
 
     #[test]
     fn addresses() {
