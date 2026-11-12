@@ -331,11 +331,7 @@ fn ssh_open(host: &str, port: Option<u16>, password: Option<String>) -> Open {
     if let Some(pw) = &password {
         // ssh asks this program for the password; a wrong one is asked once, not three times.
         argv.extend(["-o".into(), "NumberOfPasswordPrompts=1".into()]);
-        if let Ok(exe) = std::env::current_exe() {
-            env.push(("SSH_ASKPASS".into(), exe.display().to_string()));
-            env.push(("SSH_ASKPASS_REQUIRE".into(), "force".into()));
-            env.push((crate::vault::ASKPASS_SECRET.into(), pw.clone()));
-        }
+        env = crate::vault::askpass_env(host, port, pw);
     }
     argv.push(host.to_string());
     let agent = crate::transport::Target::Ssh {

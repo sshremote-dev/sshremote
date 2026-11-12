@@ -273,9 +273,9 @@ fn attach_console() {
 /// fails fast), and a new host key is accepted as `yes` would.
 fn saved_login(host: &str, argv: &[String]) -> i32 {
     let mut cmd = std::process::Command::new(&argv[0]);
-    if let (Some(secret), Ok(exe)) = (vault::get(host), std::env::current_exe()) {
+    if let Some(secret) = vault::get(host) {
         cmd.args(["-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new"]);
-        cmd.env("SSH_ASKPASS", exe).env("SSH_ASKPASS_REQUIRE", "force").env(vault::ASKPASS_SECRET, secret);
+        cmd.envs(vault::askpass_env(host, None, &secret));
     }
     cmd.args(&argv[1..]);
     #[cfg(unix)]
@@ -331,9 +331,9 @@ fn main() {
         && args.len() == 1
         && !args[0].starts_with("--")
     {
-        // Only a password or passphrase prompt gets the secret; anything else is declined.
-        let prompt = args[0].to_lowercase();
-        if !prompt.contains("password") && !prompt.contains("passphrase") {
+        // Only the destination's password prompt or a passphrase prompt gets the secret; anything
+        // else (a jump host's password, a question) is declined.
+        if !vault::askpass_answers(&args[0], std::env::var(vault::ASKPASS_FOR).ok().as_deref()) {
             std::process::exit(1);
         }
         println!("{secret}");

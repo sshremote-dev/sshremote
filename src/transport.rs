@@ -39,7 +39,6 @@ impl Drop for Link {
     }
 }
 
-pub use crate::vault::ASKPASS_SECRET;
 
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {
@@ -72,10 +71,10 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             }
             c.args(args).arg(host).arg(format!("{remote} --capture {capture}"));
             if let Some(pw) = password {
-                // ssh runs this program with the prompt as its only argument; main() prints the secret.
-                c.env("SSH_ASKPASS", std::env::current_exe().map_err(|e| e.to_string())?);
-                c.env("SSH_ASKPASS_REQUIRE", "force");
-                c.env(ASKPASS_SECRET, pw);
+                // ssh runs this program with the prompt as its only argument; main() prints the
+                // secret, to the destination's prompt only.
+                c.args(["-o", "NumberOfPasswordPrompts=1"]);
+                c.envs(crate::vault::askpass_env(host, *port, pw));
             }
             c
         }

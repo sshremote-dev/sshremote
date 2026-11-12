@@ -4,6 +4,52 @@
 
 /// Environment variable through which `sshremote` answers ssh's askpass call.
 pub const ASKPASS_SECRET: &str = "SSHREMOTE_SSH_SECRET";
+/// The destination the secret is for, "user@hostname" as ssh writes it in its password prompt:
+/// the prompt of a jump host on the way (ProxyJump) is declined.
+pub const ASKPASS_FOR: &str = "SSHREMOTE_SSH_FOR";
+
+/// ssh's environment for this program to answer the password prompt of `host`, and only its.
+pub fn askpass_env(host: &str, port: Option<u16>, secret: &str) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        env.push(("SSH_ASKPASS".to_string(), exe.display().to_string()));
+        env.push(("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string()));
+        env.push((ASKPASS_SECRET.to_string(), secret.to_string()));
+        if let Some(dest) = ssh_destination(host, port) {
+            env.push((ASKPASS_FOR.to_string(), dest));
+        }
+    }
+    env
+}
+
+/// "user@hostname" as ssh resolves `host` with its configuration (User, HostName), from `ssh -G`.
+fn ssh_destination(host: &str, port: Option<u16>) -> Option<String> {
+    let mut c = std::process::Command::new("ssh");
+    c.arg("-G");
+    if let Some(p) = port {
+        c.args(["-p", &p.to_string()]);
+    }
+    c.arg(host).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let out = c.output().ok().filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let value = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(|v| v.trim().to_string()));
+    Some(format!("{}@{}", value("user ")?, value("hostname ")?))
+}
+
+/// Whether askpass answers `prompt` (said by ssh) with the secret meant for `dest`: a password
+/// prompt of that destination (any, when it is not known), or a key's passphrase.
+pub fn askpass_answers(prompt: &str, dest: Option<&str>) -> bool {
+    let p = prompt.to_lowercase();
+    if p.contains("passphrase") {
+        return true;
+    }
+    p.contains("password") && dest.is_none_or(|d| p.contains(&format!("{}'s password", d.to_lowercase())))
+}
 
 /// The store's name, or None when this system has none sshremote can use.
 pub fn backend() -> Option<&'static str> {
@@ -253,6 +299,17 @@ fn forget_list() {
 
 #[cfg(test)]
 mod tests {
+    /// The secret answers the destination's password prompt and a key's passphrase, never a
+    /// jump host's password on the way.
+    #[test]
+    fn askpass_answers_only_the_destination() {
+        let dest = Some("dev@build.example");
+        assert!(super::askpass_answers("dev@build.example's password: ", dest));
+        assert!(super::askpass_answers("Enter passphrase for key '/home/a/.ssh/id_ed25519': ", dest));
+        assert!(!super::askpass_answers("dev@bastion.example's password: ", dest));
+        assert!(!super::askpass_answers("Are you sure you want to continue connecting (yes/no)? ", dest));
+        assert!(super::askpass_answers("dev@bastion's password: ", None), "a destination not known: as before");
+    }
     /// Writes to the real password store, so it runs only on request (cargo test -- --ignored).
     #[test]
     #[ignore]
