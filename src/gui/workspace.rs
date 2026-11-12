@@ -770,6 +770,23 @@ impl Workspace {
         if t != self.current {
             self.current = t;
             self.zoom = None;
+            self.full.zoomed = None;
+            // In full screen the tab's screen fills it alone, as the first one did.
+            self.full_zoom();
+        }
+    }
+
+    /// In full screen, a screen sharing a split tab is zoomed so it fills the monitor; that zoom
+    /// is undone on the way out.
+    fn full_zoom(&mut self) {
+        if !self.full.on {
+            return;
+        }
+        let active = self.active_id();
+        let screen = active.and_then(|id| self.index(id)).is_some_and(|i| self.mode_of_pane(i) == PaneMode::Screen);
+        if screen && self.zoom.is_none() && self.order(self.current).len() > 1 {
+            self.zoom = active;
+            self.full.zoomed = active;
         }
     }
 
@@ -790,12 +807,7 @@ impl Workspace {
         }
         if on {
             self.dock.greet(ctx.input(|i| i.time));
-            let active = self.active_id();
-            let screen = active.and_then(|id| self.index(id)).is_some_and(|i| self.mode_of_pane(i) == PaneMode::Screen);
-            if screen && self.zoom.is_none() && self.order(self.current).len() > 1 {
-                self.zoom = active;
-                self.full.zoomed = active;
-            }
+            self.full_zoom();
         } else {
             self.left_full();
         }
@@ -1152,8 +1164,11 @@ impl Workspace {
         if let Some(at) = order.iter().position(|&id| id == active) {
             let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
             self.tabs[self.current].active = order[next];
-            // In a zoomed tab, the next pane takes its place.
+            // In a zoomed tab, the next pane takes its place; a zoom full screen made stays its.
             if self.zoom.is_some() {
+                if self.full.zoomed == self.zoom {
+                    self.full.zoomed = Some(order[next]);
+                }
                 self.zoom = Some(order[next]);
             }
         }

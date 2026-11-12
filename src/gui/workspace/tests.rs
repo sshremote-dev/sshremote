@@ -143,6 +143,32 @@ fn tabs_and_panes_change_by_key_over_a_shared_screen() {
     assert_eq!(h.w.current, 1, "other keys stay the host's");
 }
 
+/// In full screen a split tab's screen fills the monitor alone, again after going to another tab
+/// and back; stepping to the other pane moves that zoom along, and leaving full screen undoes it.
+#[test]
+#[ignore]
+fn full_screen_keeps_one_screen_alone_across_tabs_and_panes() {
+    let mut h = Harness::new();
+    h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+    h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+    h.w.add(test_desktop(), Place::Split { below: false }, PaneStart::default());
+    h.until("the test desktops connect", |w| (0..3).all(|i| live(w, i)));
+    h.bar(ic::ARROWS_OUT);
+    assert!(h.w.full.on);
+    let alone = |w: &Workspace| w.zoom.is_some() && w.zoom == Some(w.tabs[w.current].active);
+    assert!(alone(&h.w), "the split tab's screen fills the monitor");
+    let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let ca = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+    h.frame(vec![key(egui::Key::PageDown, ca)]);
+    assert_eq!((h.w.current, h.w.zoom), (0, None), "the other tab has one pane");
+    h.frame(vec![key(egui::Key::PageUp, ca)]);
+    assert!(h.w.current == 1 && alone(&h.w), "back on the split tab, its screen alone again");
+    h.frame(vec![key(egui::Key::PageDown, ca | egui::Modifiers::SHIFT)]);
+    assert!(alone(&h.w) && h.w.full.zoomed == h.w.zoom, "the next pane alone, still full screen's zoom");
+    h.w.set_full(&h.ctx, false);
+    assert_eq!(h.w.zoom, None, "out of full screen the tab is split as before");
+}
+
 /// In a shared screen F11 is the remote computer's; Ctrl+Alt+Enter is the full-screen key
 /// there, and it leaves a full screen the window's button started.
 #[test]
