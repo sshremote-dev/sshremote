@@ -18,6 +18,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 EXT=${EXTENSIONS:-$HERE/../../sshremote-extensions}
 OUT=$(mktemp -d)
 trap 'rm -rf -- "$OUT"' EXIT
+# mktemp's folder is private; what goes up must be readable by the web server.
+chmod 755 "$OUT"
 
 set -- "$OUT"
 [ -n "${WINDOWS_BIN:-}" ] && set -- "$@" --download "sshremote-windows-x86_64.exe=$WINDOWS_BIN"
@@ -45,8 +47,9 @@ ssh-keygen -Y verify -f "$OUT/.signers" -I registry@sshremote.dev -n sshremote-r
 rm -f "$OUT/.signers"
 
 # Packages and downloads first, the signed index last, so the index never names a missing file.
+# Folders already there keep their owner and permissions: the web server goes on reading them.
 put() {
-  if [ "$HOST" = local ]; then tar -x -m -C "$ROOT"; else ssh "$HOST" "tar -x -m -C '$ROOT'"; fi
+  if [ "$HOST" = local ]; then tar -x -m --no-overwrite-dir -C "$ROOT"; else ssh "$HOST" "tar -x -m --no-overwrite-dir -C '$ROOT'"; fi
 }
 tar -C "$OUT" -c --exclude registry/v1/index.json --exclude registry/v1/index.json.sig . | put
 tar -C "$OUT" -c registry/v1/index.json registry/v1/index.json.sig | put
