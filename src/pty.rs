@@ -29,7 +29,7 @@ pub struct Terms {
 impl Terms {
     /// Starts a shell; returns a message to send if it failed.
     pub fn open(&mut self, id: u32, cols: u16, rows: u16) -> Option<ToClient> {
-        match sys::spawn(cols.max(2), rows.max(1), None) {
+        match sys::spawn(cols.max(2), rows.max(1), None, &[]) {
             Ok((input, output, handle)) => {
                 // Bounded, so a flood of output waits for the reader instead of filling memory.
                 let (tx, rx) = mpsc::sync_channel(64);
@@ -118,7 +118,13 @@ pub struct Local {
 impl Local {
     /// Starts `argv` (the login shell when empty); `wake` is called whenever output arrives.
     pub fn spawn(argv: &[String], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
-        let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv))?;
+        Local::spawn_with(argv, &[], cols, rows, wake)
+    }
+
+    /// Like `spawn`, with `env` added to the program's environment (never its command line, which
+    /// other users of the computer can read).
+    pub fn spawn_with(argv: &[String], env: &[(String, String)], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
+        let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv), env)?;
         let (tx, out) = mpsc::sync_channel(64);
         std::thread::spawn(move || read_loop(output, tx, wake));
         Ok(Local { input, out, sys })
@@ -169,7 +175,7 @@ mod sys {
     }
 
     /// The user's shell started as a login shell on a new pseudo-terminal.
-    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>, env: &[(String, String)]) -> Result<(File, File, Handle), String> {
         unsafe {
             let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             if m < 0 {
@@ -203,6 +209,7 @@ mod sys {
                 .current_dir(home)
                 .env("TERM", "xterm-256color")
                 .env("COLORTERM", "truecolor")
+                .envs(env.iter().map(|(k, v)| (k, v)))
                 .stdin(slave.try_clone().map_err(|e| e.to_string())?)
                 .stdout(slave.try_clone().map_err(|e| e.to_string())?)
                 .stderr(slave);
@@ -292,7 +299,7 @@ mod sys {
     use crate::sys::command_line;
 
     /// PowerShell (or cmd) attached to a new pseudo console.
-    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>) -> Result<(File, File, Handle), String> {
+    pub fn spawn(cols: u16, rows: u16, argv: Option<&[String]>, env: &[(String, String)]) -> Result<(File, File, Handle), String> {
         let user = std::env::var("USERNAME").unwrap_or_default();
         if user.eq_ignore_ascii_case("SYSTEM") || user.ends_with('$') {
             return Err("the agent runs as the Windows service; connect over SSH for a terminal".into());
@@ -351,6 +358,21 @@ mod sys {
                 Some(a) => vec![command_line(a)],
                 None => vec!["powershell.exe -NoLogo".into(), "cmd.exe".into()],
             };
+            // This program's environment with `env` over it, as a block of "K=V" strings; none
+            // given, the program inherits this one's.
+            let block: Option<Vec<u16>> = (!env.is_empty()).then(|| {
+                let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(k))).collect();
+                vars.extend(env.iter().cloned());
+                vars.sort_by_key(|(k, _)| k.to_uppercase());
+                let mut b: Vec<u16> = Vec::new();
+                for (k, v) in &vars {
+                    b.extend(format!("{k}={v}").encode_utf16());
+                    b.push(0);
+                }
+                b.push(0);
+                b
+            });
+            let block_ptr = block.as_ref().map_or(null(), |b| b.as_ptr() as *const core::ffi::c_void);
             for cmd in &wanted {
                 let mut line = wide(cmd);
                 let dir = wide(&home);
@@ -361,7 +383,7 @@ mod sys {
                     null(),
                     0,
                     EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                    null(),
+                    block_ptr,
                     dir.as_ptr(),
                     &si.StartupInfo,
                     &mut pi,
