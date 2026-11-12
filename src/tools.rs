@@ -230,9 +230,12 @@ impl KeyTool {
                     if let Some(k) = self.keys.get(i) {
                         let host = self.host.trim().to_string();
                         let key = k.public.replace('\'', "");
+                        // The name only in the message, with nothing that could end its quotes.
+                        let name: String = k.name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+                        // A file whose last line has no line break gets one first, so the key
+                        // does not join that line (and break both keys).
                         let script = format!(
-                            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys) && echo 'Key {} installed on' $(hostname)",
-                            k.name
+                            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '{key}' ~/.ssh/authorized_keys || {{ [ -z \"$(tail -c1 ~/.ssh/authorized_keys)\" ] || echo >> ~/.ssh/authorized_keys; echo '{key}' >> ~/.ssh/authorized_keys; }}) && echo 'Key {name} installed on' $(hostname)"
                         );
                         actions.push(ToolAction::Terminal { title: format!("Install key on {host}"), argv: vec!["ssh".into(), host, script] });
                     }
