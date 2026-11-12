@@ -465,12 +465,18 @@ impl FileWindow {
                             self.go(remote, DRIVES.into(), out);
                         }
                     }
+                    // As an address bar: a click selects the whole path, Enter goes there, and
+                    // leaving it any other way (Esc) puts back where the pane is.
                     let p = self.pane(remote);
-                    let edit = ui.add(egui::TextEdit::singleline(&mut p.typed).desired_width(f32::INFINITY));
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        let typed = p.typed.trim().to_string();
-                        let path = if typed == "Drives" { DRIVES.into() } else { typed };
-                        self.go(remote, path, out);
+                    let edit = crate::gui::field_selecting(ui, &mut p.typed, |t| 0..t.chars().count());
+                    if edit.lost_focus() {
+                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            let typed = p.typed.trim().to_string();
+                            let path = if typed == "Drives" { DRIVES.into() } else { typed };
+                            self.go(remote, path, out);
+                        } else {
+                            p.typed = p.path.clone();
+                        }
                     }
                 });
                 let p = self.pane(remote);
@@ -751,7 +757,11 @@ impl FileWindow {
             match d {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     ui.label(RichText::new(title).strong().size(16.0));
-                    let r = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    // The name without its extension is selected, ready to be typed over.
+                    let r = crate::gui::field_selecting(ui, name, |t| {
+                        let stem = t.rfind('.').filter(|&i| i > 0).map_or(t, |i| &t[..i]);
+                        0..stem.chars().count()
+                    });
                     if !r.has_focus() {
                         r.request_focus();
                     }

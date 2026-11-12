@@ -433,6 +433,24 @@ pub(crate) fn bad() -> Color32 {
 
 
 /// An icon button with a tooltip; `on` shows it pressed.
+/// A one-line text field that selects characters `select(text)` of its text as it takes the
+/// keyboard, as an address bar selects its whole text when clicked.
+pub(crate) fn field_selecting(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    select: impl FnOnce(&str) -> std::ops::Range<usize>,
+) -> egui::Response {
+    let mut out = egui::TextEdit::singleline(text).desired_width(f32::INFINITY).show(ui);
+    let response = out.response.response;
+    if response.gained_focus() {
+        let r = select(text);
+        let range = egui::text::CCursorRange::two(egui::text::CCursor::new(r.start), egui::text::CCursor::new(r.end));
+        out.state.cursor.set_char_range(Some(range));
+        out.state.store(ui.ctx(), response.id);
+    }
+    response
+}
+
 pub(crate) fn icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
     ui.add(tool_button(glyph, on)).on_hover_text(tip)
 }
