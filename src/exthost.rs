@@ -203,8 +203,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         s.runs
     });
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
+        for line in lossy_lines(stdout) {
             let msg = serde_json::from_str::<Value>(&line).unwrap_or_else(|e| json!({ "method": "log", "params": { "text": format!("not JSON-RPC ({e}): {line}") } }));
             if tx.send((id.clone(), run, msg)).is_err() {
                 break;
@@ -220,15 +219,22 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     });
     let id = m.id.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        for line in lossy_lines(stderr) {
             with(|s| keep_log(s, format!("{id}: {line}")));
         }
     });
-    with(|s| {
+    // One copy of an extension at a time: one started meanwhile (two reloads at once) is ended,
+    // not left running unseen.
+    let before = with(|s| {
         s.stamps.insert(m.id.clone(), stamp(m));
-        s.running.retain(|r| r.id != m.id);
+        let (old, keep): (Vec<Running>, Vec<Running>) = std::mem::take(&mut s.running).into_iter().partition(|r| r.id == m.id);
+        s.running = keep;
         s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), input, child, run });
+        old
     });
+    if !before.is_empty() {
+        std::thread::spawn(move || end_all(before));
+    }
     let params = json!({
         "api": API,
         "app": env!("CARGO_PKG_VERSION"),
@@ -239,6 +245,19 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     });
     request(&m.id, "initialize", params);
     Ok(())
+}
+
+/// The lines a program writes, whatever bytes they hold: one that is not UTF-8 is read with
+/// replacement characters rather than taken for the end of the output.
+fn lossy_lines(r: impl std::io::Read) -> impl Iterator<Item = String> {
+    let mut r = BufReader::new(r);
+    std::iter::from_fn(move || {
+        let mut buf = Vec::new();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string()),
+        }
+    })
 }
 
 /// The program copied out of the extension's folder, once for each version of it.
@@ -257,7 +276,14 @@ fn run_copy(id: &str, program: &std::path::Path) -> Result<std::path::PathBuf, S
             }
         }
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::copy(program, &copy).map_err(|e| format!("{}: {e}", copy.display()))?;
+        // Copied under another name and renamed: a launch at the same time never runs half a file.
+        let part = dir.join(format!(".{}-{name}.part", std::process::id()));
+        std::fs::copy(program, &part).map_err(|e| format!("{}: {e}", part.display()))?;
+        if std::fs::rename(&part, &copy).is_err() && !copy.is_file() {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("{}: could not be put in place", copy.display()));
+        }
+        let _ = std::fs::remove_file(&part);
     }
     Ok(copy)
 }
@@ -740,6 +766,14 @@ pub fn test_request(r: Request) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line that is not UTF-8 is read with replacement characters, and the lines after it still come.
+    #[test]
+    fn output_that_is_not_utf8_does_not_end_the_extension() {
+        let out: &[u8] = b"{\"a\":1}\r\nbad \xff\xfe here\nlast";
+        let lines: Vec<String> = super::lossy_lines(out).collect();
+        assert_eq!(lines, ["{\"a\":1}", "bad \u{FFFD}\u{FFFD} here", "last"]);
+    }
 
     /// A program that never reads its input cannot hold up the app: sending to it does not block,
     /// it is ended once its queue is full, and closing waits once, not forever.
