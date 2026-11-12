@@ -1279,15 +1279,13 @@ impl Workspace {
     }
 
     /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the
-    /// remote host; a dialog or menu keeps them too.
+    /// remote host but for Ctrl+Alt+PgUp/PgDn (tabs) and Ctrl+Alt+Shift+PgUp/PgDn (panes), keys
+    /// hosts leave alone; a dialog or menu keeps them all.
     fn shortcuts(&mut self, ctx: &egui::Context, area: Rect) {
         if self.picker.is_some() || self.confirm.is_some() || ctx.any_popup_open() {
             return;
         }
         let Some(active) = self.active_id() else { return };
-        if self.screen_has_keys() {
-            return;
-        }
         use egui::{Key, Modifiers};
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
@@ -1301,6 +1299,24 @@ impl Workspace {
             })
         };
         let panes = self.order(self.current).len();
+        let ca = Modifiers::CTRL | Modifiers::ALT;
+        let tabs = self.tabs.len().max(1);
+        if take(ca, Key::PageUp) {
+            self.select_tab((self.current + tabs - 1) % tabs);
+            return;
+        } else if take(ca, Key::PageDown) {
+            self.select_tab((self.current + 1) % tabs);
+            return;
+        } else if take(ca | Modifiers::SHIFT, Key::PageUp) {
+            self.step_pane(active, false);
+            return;
+        } else if take(ca | Modifiers::SHIFT, Key::PageDown) {
+            self.step_pane(active, true);
+            return;
+        }
+        if self.screen_has_keys() {
+            return;
+        }
         if take(Modifiers::NONE, Key::F11) {
             self.set_full(ctx, !self.full.on);
         } else if take(cs, Key::Enter) {
@@ -1327,15 +1343,23 @@ impl Workspace {
             let back = take(Modifiers::ALT, Key::ArrowLeft) || take(Modifiers::ALT, Key::ArrowUp);
             let on = take(Modifiers::ALT, Key::ArrowRight) || take(Modifiers::ALT, Key::ArrowDown);
             if back || on {
-                let order = self.order(self.current);
-                if let Some(at) = order.iter().position(|&id| id == active) {
-                    let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
-                    self.tabs[self.current].active = order[next];
-                    // In a zoomed tab, the next pane takes its place.
-                    if self.zoom.is_some() {
-                        self.zoom = Some(order[next]);
-                    }
-                }
+                self.step_pane(active, on);
+            }
+        }
+    }
+
+    /// The next pane of the tab (or the one before) becomes the active one.
+    fn step_pane(&mut self, active: u64, on: bool) {
+        let order = self.order(self.current);
+        if order.len() < 2 {
+            return;
+        }
+        if let Some(at) = order.iter().position(|&id| id == active) {
+            let next = if on { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() };
+            self.tabs[self.current].active = order[next];
+            // In a zoomed tab, the next pane takes its place.
+            if self.zoom.is_some() {
+                self.zoom = Some(order[next]);
             }
         }
     }
@@ -2189,6 +2213,36 @@ mod tests {
             ssh_cmd: None,
             mode: PaneMode::Screen,
         }
+    }
+
+    /// Over a shared screen, whose keys are the host's, Ctrl+Alt+PgUp/PgDn go between the tabs and
+    /// Ctrl+Alt+Shift+PgUp/PgDn between the panes of one.
+    #[test]
+    #[ignore]
+    fn tabs_and_panes_change_by_key_over_a_shared_screen() {
+        let mut h = Harness::new();
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+        h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+        h.w.add(test_desktop(), Place::Split { below: false }, PaneStart::default());
+        h.until("the test desktops connect", |w| (0..3).all(|i| live(w, i)));
+        assert!(h.w.screen_has_keys(), "a shared screen has the keys");
+        let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let ca = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        let cas = ca | egui::Modifiers::SHIFT;
+        assert_eq!(h.w.current, 1);
+        let order = h.w.order(1);
+        let active = h.w.tabs[1].active;
+        h.frame(vec![key(egui::Key::PageDown, cas)]);
+        assert_ne!(h.w.tabs[1].active, active, "Ctrl+Alt+Shift+PgDn: the next pane");
+        h.frame(vec![key(egui::Key::PageUp, cas)]);
+        assert_eq!(h.w.tabs[1].active, active, "Ctrl+Alt+Shift+PgUp: back");
+        assert!(order.contains(&active));
+        h.frame(vec![key(egui::Key::PageDown, ca)]);
+        assert_eq!(h.w.current, 0, "Ctrl+Alt+PgDn: the next tab, round to the first");
+        h.frame(vec![key(egui::Key::PageUp, ca)]);
+        assert_eq!(h.w.current, 1, "Ctrl+Alt+PgUp: the tab before");
+        h.frame(vec![key(egui::Key::PageDown, egui::Modifiers::CTRL)]);
+        assert_eq!(h.w.current, 1, "other keys stay the host's");
     }
 
     /// In a shared screen F11 is the remote computer's; Ctrl+Alt+Enter is the full-screen key

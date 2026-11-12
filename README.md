@@ -37,7 +37,8 @@ What is opened goes into the workspace:
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
 - **Screen sharing**: quality, fit, monitors, sharing one window or application, special keys,
   chat, screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
-  Ctrl+Alt+Enter enters and leaves full screen.
+  Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
+  Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
   windows), profiles for local shells and SSH hosts, find, schemes, mouse reporting for full-screen
   programs. Two reading views:

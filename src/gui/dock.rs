@@ -184,7 +184,7 @@ impl Dock {
                 });
                 // The whole tab is the button, and the handle.
                 let r = ui.interact(inner.response.rect, ui.scope_id().with("tab"), egui::Sense::click_and_drag());
-                let r = r.on_hover_text(format!("{}\n\nClick for the toolbar (Ctrl+Alt+Home); drag to move it along the edge", status.details));
+                let r = r.on_hover_text(format!("{}\n\nClick for the toolbar (Ctrl+Alt+Home); drag to move it along the edge.\nCtrl+Alt+PgUp/PgDn: the tab before or after; with Shift, the pane", status.details));
                 if r.dragged() {
                     self.x = (self.x + r.drag_delta().x / screen.width().max(1.0)).clamp(0.0, 1.0);
                     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
