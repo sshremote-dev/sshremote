@@ -297,7 +297,7 @@ mod pictures {
     fn menus_home() {
         for dark in [true, false] {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
-            let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), 100.0, "", None);
+            let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);
             let mut s = Shot::new("open", Vec2::new(900.0, 600.0), dark, |ui| app.connect_screen(ui));
             s.save("ssh");
             s.click(ic::DOTS, 0, PointerButton::Primary);

@@ -18,7 +18,8 @@ pub struct Options {
     pub password: Option<String>,
     /// `None` is the auto preset.
     pub preset: Option<usize>,
-    pub budget: f64,
+    /// Traffic auto stays under, in KB/s; `None` follows the link's delay alone.
+    pub budget: Option<f64>,
     pub mode: Option<Mode>,
     pub scale: Option<u8>,
     pub fps: Option<u8>,

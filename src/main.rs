@@ -116,7 +116,7 @@ usage: sshremote                       open the window: connect screen, recent h
 options:
   --local         no ssh: an agent on this computer (a synthetic desktop unless --capture)
   --preset P      auto (default), or 0 (black and white, 50%, 5 fps) .. 4 (full colour, 60 fps)
-  --budget KB/s   traffic auto stays under; default 100
+  --budget KB/s   traffic auto stays under (default: as much as the link takes without delay)
   --mode M        mono gray4 gray16 16c 256c true
   --scale P       capture scale in percent, 10-100
   --fps N         frame rate cap, 1-60
@@ -143,7 +143,7 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
         ssh_args: Vec::new(),
         password: None,
         preset: None,
-        budget: 100.0,
+        budget: None,
         mode: None,
         scale: None,
         fps: None,
@@ -177,7 +177,7 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
                 let v = val()?;
                 o.preset = if v == "auto" { None } else { Some(v.parse().map_err(|_| "bad --preset")?) };
             }
-            "--budget" => o.budget = val()?.parse().map_err(|_| "bad --budget")?,
+            "--budget" => o.budget = Some(val()?.parse().map_err(|_| "bad --budget")?),
             "--mode" => o.mode = Some(Mode::parse(&val()?).ok_or("bad --mode")?),
             "--scale" => o.scale = Some(val()?.parse().map_err(|_| "bad --scale")?),
             "--fps" => o.fps = Some(val()?.parse().map_err(|_| "bad --fps")?),

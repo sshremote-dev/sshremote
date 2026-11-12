@@ -289,22 +289,26 @@ impl Framebuffer {
 const FPS_STEPS: [u8; 7] = [1, 2, 5, 10, 20, 30, 60];
 const SETTLE: Duration = Duration::from_secs(3);
 
-/// Steps between presets from measured traffic and queueing delay.
+/// Steps between presets from the link's queueing delay, and from traffic when a budget is set.
+/// A link that answers fast and evenly gets the richest picture; one whose delay grows gets less.
 pub struct Auto {
-    budget: f64,
+    /// Traffic to stay under, in KB/s; without one only the delay counts.
+    budget: Option<f64>,
     pub level: usize,
     changed: Instant,
     over: u32,
     under: u32,
     hold: [u32; PRESETS.len()],
     calm_since: Instant,
-    rx_at_change: u64,
     climbed: bool,
     ceiling: Option<(usize, Instant)>,
 }
 
+/// A round trip this short is a local network: auto climbs at every chance.
+const LAN_RTT: f64 = 30.0;
+
 impl Auto {
-    fn new(budget: f64, level: usize) -> Auto {
+    fn new(budget: Option<f64>, level: usize) -> Auto {
         let now = Instant::now();
         Auto {
             budget,
@@ -314,35 +318,34 @@ impl Auto {
             under: 0,
             hold: [5; PRESETS.len()],
             calm_since: now,
-            rx_at_change: 0,
             climbed: false,
             ceiling: None,
         }
     }
 
-    /// Called once a second with the bytes received so far; returns the new level when it should change.
-    fn step(&mut self, kbps: f64, rtt: f64, min_rtt: f64, rx: u64) -> Option<usize> {
+    /// Called once a second with the traffic and round trips; returns the new level when it should
+    /// change.
+    fn step(&mut self, kbps: f64, rtt: f64, min_rtt: f64) -> Option<usize> {
         if self.changed.elapsed() < SETTLE {
             return None;
         }
         if self.ceiling.is_some_and(|(_, until)| Instant::now() > until) {
             self.ceiling = None;
         }
-        if std::mem::take(&mut self.climbed) {
-            // A climb that changes the colour mode resends the whole screen; if that alone
-            // blew the budget, the level stays out of reach for a while.
-            let burst = (rx - self.rx_at_change) as f64 / 1024.0;
-            if burst > self.budget * SETTLE.as_secs_f64() && self.level > 0 {
-                self.ceiling = Some((self.level - 1, Instant::now() + Duration::from_secs(600)));
-                return self.change(self.level - 1, rx);
-            }
-        }
         let slow = rtt > (3.0 * min_rtt).max(250.0);
         let quiet = rtt < (1.5 * min_rtt).max(100.0);
-        if kbps > self.budget || slow {
+        if std::mem::take(&mut self.climbed) && slow && self.level > 0 {
+            // A climb that changes the colour mode resends the whole screen; if the link queued it
+            // up, the level stays out of reach for a while.
+            self.ceiling = Some((self.level - 1, Instant::now() + Duration::from_secs(600)));
+            return self.change(self.level - 1);
+        }
+        let over_budget = self.budget.is_some_and(|b| kbps > b);
+        let under_budget = self.budget.is_none_or(|b| kbps < 0.3 * b);
+        if over_budget || slow {
             self.over += 1;
             self.under = 0;
-        } else if kbps < 0.3 * self.budget && quiet {
+        } else if under_budget && quiet {
             self.under += 1;
             self.over = 0;
         } else {
@@ -358,7 +361,7 @@ impl Auto {
             self.hold[self.level - 1] = (self.hold[self.level - 1] * 2).min(60);
             self.calm_since = Instant::now();
             self.level - 1
-        } else if self.under >= self.hold[self.level]
+        } else if (self.under >= self.hold[self.level] || self.under > 0 && min_rtt < LAN_RTT)
             && self.level + 1 < PRESETS.len()
             && self.ceiling.is_none_or(|(top, _)| self.level < top)
         {
@@ -366,12 +369,12 @@ impl Auto {
         } else {
             return None;
         };
-        self.change(next, rx)
+        self.change(next)
     }
 
-    fn change(&mut self, next: usize, rx: u64) -> Option<usize> {
+    fn change(&mut self, next: usize) -> Option<usize> {
         self.climbed = next > self.level;
-        (self.level, self.over, self.under, self.changed, self.rx_at_change) = (next, 0, 0, Instant::now(), rx);
+        (self.level, self.over, self.under, self.changed) = (next, 0, 0, Instant::now());
         Some(next)
     }
 }
@@ -396,7 +399,7 @@ pub struct Control {
     pub auto: Option<Auto>,
     /// The richest colour mode the front end can show.
     max_mode: Mode,
-    budget: f64,
+    budget: Option<f64>,
     epoch: Instant,
     ping: Option<(u32, Instant)>,
     stat_at: Instant,
@@ -548,7 +551,7 @@ impl Control {
             }
         }
         let min_rtt = if self.min_rtt == f64::MAX { self.rtt } else { self.min_rtt };
-        if let Some(level) = self.auto.as_mut().and_then(|a| a.step(self.kbps, self.rtt, min_rtt, rx)) {
+        if let Some(level) = self.auto.as_mut().and_then(|a| a.step(self.kbps, self.rtt, min_rtt)) {
             self.use_preset(level);
             sess.send(ToAgent::Settings(self.s))?;
         }
@@ -573,51 +576,65 @@ impl Control {
 mod tests {
     use super::*;
 
-    fn aged(level: usize) -> Auto {
-        let mut a = Auto::new(100.0, level);
+    fn aged(budget: Option<f64>, level: usize) -> Auto {
+        let mut a = Auto::new(budget, level);
         a.changed -= SETTLE;
         a
     }
 
     #[test]
-    fn auto_steps_down_on_traffic_and_delay() {
-        let mut a = aged(3);
-        assert_eq!(a.step(500.0, 20.0, 20.0, 0), None);
-        assert_eq!(a.step(500.0, 20.0, 20.0, 0), Some(2));
-        let mut a = aged(3);
-        assert_eq!(a.step(1.0, 900.0, 20.0, 0), None);
-        assert_eq!(a.step(1.0, 900.0, 20.0, 0), Some(2));
+    fn auto_steps_down_on_delay_and_on_traffic_over_a_budget() {
+        let mut a = aged(Some(100.0), 3);
+        assert_eq!(a.step(500.0, 40.0, 40.0), None);
+        assert_eq!(a.step(500.0, 40.0, 40.0), Some(2));
+        let mut a = aged(None, 3);
+        assert_eq!(a.step(1.0, 900.0, 40.0), None);
+        assert_eq!(a.step(1.0, 900.0, 40.0), Some(2));
+        // Without a budget, heavy traffic on a link that keeps up does not lower the picture.
+        let mut a = aged(None, PRESETS.len() - 1);
+        for _ in 0..10 {
+            assert_eq!(a.step(5000.0, 40.0, 40.0), None);
+        }
     }
 
     #[test]
     fn auto_caps_a_level_whose_climb_floods_the_link() {
-        let mut a = aged(2);
+        let mut a = aged(None, 2);
         for _ in 0..4 {
-            a.step(1.0, 20.0, 20.0, 0);
+            a.step(1.0, 40.0, 40.0);
         }
-        assert_eq!(a.step(1.0, 20.0, 20.0, 0), Some(3));
+        assert_eq!(a.step(1.0, 40.0, 40.0), Some(3));
         a.changed -= SETTLE;
-        assert_eq!(a.step(1.0, 20.0, 20.0, 3 << 20), Some(2));
+        // The whole screen resent queued up on the link.
+        assert_eq!(a.step(1.0, 600.0, 40.0), Some(2));
         a.changed -= SETTLE;
         for _ in 0..30 {
-            assert_eq!(a.step(1.0, 20.0, 20.0, 3 << 20), None);
+            assert_eq!(a.step(1.0, 40.0, 40.0), None);
         }
     }
 
     #[test]
     fn auto_climbs_slower_after_a_failure() {
-        let mut a = aged(2);
+        let mut a = aged(Some(100.0), 2);
         for _ in 0..4 {
-            assert_eq!(a.step(1.0, 20.0, 20.0, 0), None);
+            assert_eq!(a.step(1.0, 40.0, 40.0), None);
         }
-        assert_eq!(a.step(1.0, 20.0, 20.0, 0), Some(3));
+        assert_eq!(a.step(1.0, 40.0, 40.0), Some(3));
         a.changed -= SETTLE;
-        a.step(500.0, 20.0, 20.0, 0);
-        assert_eq!(a.step(500.0, 20.0, 20.0, 0), Some(2));
+        a.step(500.0, 40.0, 40.0);
+        assert_eq!(a.step(500.0, 40.0, 40.0), Some(2));
         a.changed -= SETTLE;
         for _ in 0..9 {
-            assert_eq!(a.step(1.0, 20.0, 20.0, 0), None);
+            assert_eq!(a.step(1.0, 40.0, 40.0), None);
         }
-        assert_eq!(a.step(1.0, 20.0, 20.0, 0), Some(3));
+        assert_eq!(a.step(1.0, 40.0, 40.0), Some(3));
+    }
+
+    #[test]
+    fn auto_climbs_at_once_on_a_local_network() {
+        let mut a = aged(None, 2);
+        assert_eq!(a.step(800.0, 2.0, 1.0), Some(3), "full colour on the first quiet second");
+        a.changed -= SETTLE;
+        assert_eq!(a.step(800.0, 2.0, 1.0), Some(4));
     }
 }

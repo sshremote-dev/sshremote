@@ -291,7 +291,7 @@ pub struct App {
     seen: std::collections::HashMap<String, u64>,
     search: String,
     error: Option<String>,
-    budget: f64,
+    budget: Option<f64>,
     /// System keys taken from Windows while a session is in front.
     grabbed: Option<mpsc::Receiver<(u32, bool)>>,
     /// The stand-alone terminal window (local shells and ssh sessions).
@@ -596,7 +596,7 @@ enum Source {
 
 impl App {
     /// The app a new window starts with: the style, the system keys and the extensions' helpers set up.
-    fn boot(cc: &eframe::CreationContext<'_>, form: Form, budget: f64, open: &str) -> App {
+    fn boot(cc: &eframe::CreationContext<'_>, form: Form, budget: Option<f64>, open: &str) -> App {
         style(&cc.egui_ctx);
         #[cfg(windows)]
         let grabbed = crate::keygrab::install(cc.egui_ctx.clone());
@@ -608,7 +608,7 @@ impl App {
     }
 
     /// The app on its home screen; `open` as `--open` gives it, `grabbed` the system keys caught.
-    fn new(form: Form, budget: f64, open: &str, grabbed: Option<mpsc::Receiver<(u32, bool)>>) -> App {
+    fn new(form: Form, budget: Option<f64>, open: &str, grabbed: Option<mpsc::Receiver<(u32, bool)>>) -> App {
         App {
             screen: Screen::Connect,
             form,
@@ -1052,7 +1052,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::style(&ctx);
         let opt = crate::parse_client(&["--gui".into()]).unwrap();
-        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let mut app = App::new(Form::from(&opt), None, "", None);
         let mut w = workspace::Workspace::new(app.options());
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         w.add(
@@ -1086,7 +1086,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::style(&ctx);
         let opt = crate::parse_client(&["--gui".into()]).unwrap();
-        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let mut app = App::new(Form::from(&opt), None, "", None);
         let shell = |name: &str| {
             let mut profile = crate::termwin::local_profiles().into_iter().next().unwrap();
             profile.name = name.into();
@@ -1142,7 +1142,7 @@ mod tests {
             let ctx = egui::Context::default();
             theme::style(&ctx);
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
-            let mut app = App::new(Form::from(&opt), 100.0, "", None);
+            let mut app = App::new(Form::from(&opt), None, "", None);
             let mut w = workspace::Workspace::new(app.options());
             w.picker = Some(Place::Tab);
             let mut snap = snapshot::Snap::default();
@@ -1200,7 +1200,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::style(&ctx);
         let opt = crate::parse_client(&["--gui".into()]).unwrap();
-        let mut app = App::new(Form::from(&opt), 100.0, "", None);
+        let mut app = App::new(Form::from(&opt), None, "", None);
         let mut w = workspace::Workspace::new(app.options());
         w.picker = Some(Place::Tab);
         app.section = home::Section::New;
