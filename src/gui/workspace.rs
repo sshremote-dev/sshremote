@@ -128,6 +128,10 @@ fn reached_as(target: &Target, label: &str) -> String {
     }
 }
 
+/// Pane ids, one count for every window of the program, so extensions told of panes never see one
+/// id twice.
+static NEXT_PANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Seconds a lost connection is tried again before the pane asks.
 const GIVE_UP: f64 = 30.0;
 
@@ -182,16 +186,6 @@ enum Node {
 }
 
 impl Node {
-    fn renumber(&mut self, map: &std::collections::HashMap<u64, u64>) {
-        match self {
-            Node::Leaf(id) => *id = map.get(id).copied().unwrap_or(*id),
-            Node::Split { a, b, .. } => {
-                a.renumber(map);
-                b.renumber(map);
-            }
-        }
-    }
-
     fn leaves(&self, out: &mut Vec<u64>) {
         match self {
             Node::Leaf(id) => out.push(*id),
@@ -441,7 +435,6 @@ pub(super) struct Workspace {
     /// The open dialog is asked for: where its choice goes.
     pub(super) picker: Option<Place>,
     opt: Options,
-    next_id: u64,
     /// One pane fills the tab, the others wait (a layout, not full screen).
     zoom: Option<u64>,
     /// The window on the whole monitor, and the dock that stands in for its title bar there.
@@ -514,7 +507,6 @@ impl Workspace {
             current: 0,
             picker: None,
             opt,
-            next_id: 1,
             zoom: None,
             full: Default::default(),
             dock: Default::default(),
@@ -575,8 +567,7 @@ impl Workspace {
             }
             return None;
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = NEXT_PANE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pane = match launch {
             Launch::Shell { profile, label, target, ssh_cmd } => Pane {
                 id,
@@ -700,8 +691,6 @@ impl Workspace {
         self.panes = kept;
         w.panes = moved;
         w.tabs.push(tab);
-        // Ids stay unique in each: the new one numbers its panes after these.
-        w.next_id = self.next_id;
         if self.zoom.is_some_and(|z| ids.contains(&z)) {
             self.zoom = None;
         }
@@ -710,17 +699,9 @@ impl Workspace {
     }
 
     /// Takes in the tab of a workspace from another window (one `take_tab` made), at `at`, and
-    /// shows it. Its panes are numbered again after this one's.
+    /// shows it. Its panes keep their ids: those are unique in the whole program.
     pub(super) fn put_tab(&mut self, mut from: Workspace, at: usize) {
-        let Some(mut tab) = from.tabs.pop() else { return };
-        let mut map = std::collections::HashMap::new();
-        for p in &mut from.panes {
-            map.insert(p.id, self.next_id);
-            p.id = self.next_id;
-            self.next_id += 1;
-        }
-        tab.root.renumber(&map);
-        tab.active = map.get(&tab.active).copied().unwrap_or(tab.active);
+        let Some(tab) = from.tabs.pop() else { return };
         self.panes.append(&mut from.panes);
         let at = at.min(self.tabs.len());
         self.tabs.insert(at, tab);
@@ -786,7 +767,7 @@ impl Workspace {
             }
         }
         super::extui::question(ctx, &mut self.side);
-        if self.palette.is_none() && self.picker.is_none() {
+        if self.palette.is_none() && self.picker.is_none() && !self.screen_has_keys() {
             super::extui::keys(ctx);
         }
         if let Some((filter, at)) = &mut self.palette {
@@ -1192,7 +1173,13 @@ impl Workspace {
                         }
                     }
                 }
-                State::Down(d) => match down_view(&mut child, *rect, d, &pane.label) {
+                State::Down(d) => match {
+                    // Its shells, kept while it connects, go on taking their output meanwhile.
+                    if let Some(t) = pane.terms.as_mut() {
+                        let _ = t.background(&ctx);
+                    }
+                    down_view(&mut child, *rect, d, &pane.label)
+                } {
                     Some(DownAct::Close) => closing.push(*id),
                     // A shell that was reaching for the agent stays the shell it was.
                     Some(DownAct::Cancel) if !d.again && pane.terms.is_some() => to_shell.push(*id),
@@ -1208,7 +1195,12 @@ impl Workspace {
                 },
             }
             // In a terminal, what the computer it runs on is doing (its SSH host's, or this one's).
-            if matches!(pane.state, State::Shell(_)) || pane.mode == PaneMode::Terminal {
+            let terminal = match &pane.state {
+                State::Shell(_) => true,
+                State::Live(r) => r.mode() == PaneMode::Terminal,
+                State::Down(_) => pane.mode == PaneMode::Terminal,
+            };
+            if terminal {
                 crate::gui::look::pane_overlay(ui, *rect, pane.ssh_cmd.as_deref(), &pane.label, is_active);
             }
             if several && is_active && self.zoom.is_none() {
@@ -1279,6 +1271,11 @@ impl Workspace {
         Out { empty: self.tabs.is_empty(), grab }
     }
 
+    /// The active pane shows a remote screen, whose keys all go to its host.
+    fn screen_has_keys(&self) -> bool {
+        self.active_id().and_then(|id| self.index(id)).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen))
+    }
+
     /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the
     /// remote host; a dialog or menu keeps them too.
     fn shortcuts(&mut self, ctx: &egui::Context, area: Rect) {
@@ -1286,8 +1283,7 @@ impl Workspace {
             return;
         }
         let Some(active) = self.active_id() else { return };
-        let screen = self.index(active).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen));
-        if screen {
+        if self.screen_has_keys() {
             return;
         }
         use egui::{Key, Modifiers};
@@ -2742,6 +2738,33 @@ mod tests {
         h.w.select_tab(0);
         h.until("pictures again when shown", |w| frames(w) > hidden + 2);
         h.w.close_all();
+    }
+
+    /// Panes in different windows never share an id, so extensions told of them never see one
+    /// twice, or a "closed" for a pane still open elsewhere.
+    #[test]
+    fn pane_ids_are_unique_across_windows() {
+        let profile = || crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = || Launch::Shell { label: "s".into(), profile: profile(), target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
+        let opt = crate::parse_client(&["--gui".into(), "--local".into()]).unwrap();
+        let mut a = Workspace::new(opt.clone());
+        a.add(shell(), Place::Tab, PaneStart::default());
+        a.add(shell(), Place::Tab, PaneStart::default());
+        let mut b = a.take_tab(1).expect("a tab");
+        a.add(shell(), Place::Tab, PaneStart::default());
+        b.add(shell(), Place::Tab, PaneStart::default());
+        let mut ids: Vec<u64> = a.panes.iter().chain(&b.panes).map(|p| p.id).collect();
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "all different: {ids:?}");
+        a.put_tab(b.take_tab(0).unwrap(), 0);
+        let mut back: Vec<u64> = a.panes.iter().map(|p| p.id).collect();
+        back.sort();
+        back.dedup();
+        assert_eq!(back.len(), a.panes.len());
+        a.close_all();
+        b.close_all();
     }
 
     /// A shell in a tab not shown keeps taking its output, so it does not stall.
