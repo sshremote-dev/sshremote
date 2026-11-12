@@ -184,11 +184,24 @@ impl Session {
         self.backend = backend;
     }
 
-    /// Writes a chunk of a download and acknowledges the progress to the agent.
+    /// Starts writing a download; one that cannot be written is called off at the agent too, so
+    /// its queue moves on.
+    pub fn fetch_start(&mut self, inbox: &mut crate::files::Inbox, id: u32, size: u64, dir: &std::path::Path, name: &str) -> io::Result<Option<crate::files::Note>> {
+        let note = inbox.start_in(id, size, dir, name);
+        if note.is_some() {
+            self.send(ToAgent::FetchCancel { id, tag: 0 })?;
+        }
+        Ok(note)
+    }
+
+    /// Writes a chunk of a download and acknowledges the progress to the agent; a download that
+    /// failed here (a full disk) is called off there.
     pub fn fetch_data(&mut self, inbox: &mut crate::files::Inbox, id: u32, data: &[u8]) -> io::Result<Option<crate::files::Note>> {
         let note = inbox.data(id, data);
-        if let Some(crate::files::Note::Progress { id, received }) = note {
-            self.send(ToAgent::FetchAck { id, received })?;
+        match note {
+            Some(crate::files::Note::Progress { id, received }) => self.send(ToAgent::FetchAck { id, received })?,
+            Some(crate::files::Note::Done { .. }) => self.send(ToAgent::FetchCancel { id, tag: 0 })?,
+            None => {}
         }
         Ok(note)
     }

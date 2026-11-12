@@ -103,6 +103,9 @@ pub(super) struct Remote {
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
+    /// Uploads and downloads finished since the last notice about them.
+    sent: Settled,
+    got: Settled,
 }
 
 /// A file being sent to the remote host.
@@ -114,11 +117,36 @@ struct Upload {
     cancelled: bool,
     /// Why the local file could not be read to the end.
     error: Option<String>,
-    file: std::fs::File,
+    path: std::path::PathBuf,
+    /// Open while it is the one being sent: they go one after another.
+    file: Option<std::fs::File>,
     size: u64,
     sent: u64,
     acked: u64,
     ended: bool,
+}
+
+/// Files that arrived whole, told as one notice once the transfers settle: a folder of a
+/// thousand files is one line, not a thousand.
+#[derive(Default)]
+struct Settled {
+    count: usize,
+    /// The last file's name, and the folder they went into.
+    name: String,
+    folder: String,
+    at: Option<Instant>,
+}
+
+impl Settled {
+    fn add(&mut self, name: String, folder: String) {
+        self.count += 1;
+        (self.name, self.folder, self.at) = (name, folder, Some(Instant::now()));
+    }
+
+    /// Done and quiet for a moment.
+    fn due(&self) -> bool {
+        self.at.is_some_and(|t| t.elapsed() > Duration::from_millis(800))
+    }
 }
 
 /// Unacknowledged upload bytes; more would only queue in ssh and delay the screen.
@@ -222,6 +250,8 @@ impl Remote {
             files: None,
             fetch_dirs: Default::default(),
             next_tag: 1,
+            sent: Settled::default(),
+            got: Settled::default(),
             ssh_cmd,
         }
     }
@@ -260,7 +290,29 @@ impl Remote {
         result
     }
 
-    /// The file manager filling the pane.
+    /// One notice for the files that arrived whole, once their transfers have settled.
+    fn tell_settled(&mut self) {
+        if self.uploads.is_empty() && self.sent.due() {
+            let s = std::mem::take(&mut self.sent);
+            let text = if s.count == 1 {
+                format!("{} saved on the SSH host in {}", s.name, s.folder)
+            } else {
+                format!("{} files saved on the SSH host in {}", s.count, s.folder)
+            };
+            self.notify(&text);
+        }
+        if self.downloads.is_empty() && self.got.due() {
+            let s = std::mem::take(&mut self.got);
+            let text = if s.count == 1 {
+                format!("Downloaded {} to {}", s.name, s.folder)
+            } else {
+                format!("{} files downloaded to {}", s.count, s.folder)
+            };
+            self.notify(&text);
+        }
+    }
+
+    /// The file manager filling the pane, with the notices over it.
     fn files_view(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
         let host = self.host().to_string();
         let transfers = self.transfers();
@@ -273,7 +325,10 @@ impl Remote {
         for c in cmds {
             self.file_cmd(c)?;
         }
-        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        self.tell_settled();
+        let ctx = ui.ctx().clone();
+        self.toasts.draw(&ctx, ui.max_rect());
+        ctx.request_repaint_after(Duration::from_millis(500));
         Ok(())
     }
 
@@ -352,6 +407,7 @@ impl Remote {
         };
         let chat_rect = chat_rect.or(term_area);
         self.upload_overlay(&ctx, screen);
+        self.tell_settled();
         self.toasts.draw(&ctx, screen);
         self.term_window(&ctx)?;
         self.share_picker(&ctx)?;
@@ -504,7 +560,8 @@ impl Remote {
                 },
                 Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => {
                     let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
-                    if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start_in(id, size, &dir, &name) {
+                    let started = self.sess.fetch_start(&mut self.inbox, id, size, &dir, &name).map_err(|e| format!("connection lost: {e}"))?;
+                    if let Some(crate::files::Note::Done { text, .. }) = started {
                         self.notify(&format!("{name}: {text}"));
                     } else {
                         self.downloads.push((id, name, tag));
@@ -516,50 +573,57 @@ impl Remote {
                     .map_err(|e| format!("connection lost: {e}"))?
                 {
                     Some(crate::files::Note::Done { text, .. }) => {
+                        let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
                         self.downloads.retain(|d| d.0 != id);
-                        self.notify(&text);
+                        self.notify(&format!("{name} failed: {text}"));
                     }
                     _ => {}
                 },
                 Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
                     if id != 0 && !self.downloads.iter().any(|d| d.0 == id) {
-                        // Already cancelled here.
+                        // Already cancelled or failed here; one that could not even be opened
+                        // there says why.
+                        if !ok && text != "cancelled" {
+                            self.notify(&format!("Download failed: {text}"));
+                        }
                         continue;
                     }
                     let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
-                    let tagged = self.downloads.iter().any(|d| d.0 == id && d.2 != 0);
+                    let tag = self.downloads.iter().find(|d| d.0 == id).map_or(0, |d| d.2);
                     self.downloads.retain(|d| d.0 != id);
-                    let msg = match self.inbox.end(id, ok, &text) {
-                        Some(crate::files::Note::Done { ok: true, text, .. }) => format!("Downloaded {name} to {text}"),
-                        Some(crate::files::Note::Done { text, .. }) => format!("{name} failed: {text}"),
-                        _ => format!("Download failed: {text}"),
-                    };
+                    match self.inbox.end(id, ok, &text) {
+                        Some(crate::files::Note::Done { ok: true, .. }) => {
+                            let folder = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
+                            self.got.add(name, folder.display().to_string());
+                        }
+                        Some(crate::files::Note::Done { text, .. }) => self.notify(&format!("{name} failed: {text}")),
+                        _ => self.notify(&format!("Download failed: {text}")),
+                    }
                     // After the file is closed, so the listing shows its full size.
-                    if tagged && let Some(f) = self.files.as_mut() {
+                    if tag != 0 && let Some(f) = self.files.as_mut() {
                         f.refresh_local();
                     }
-                    self.notify(&msg);
                 }
                 Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
                     let name = self.uploads.iter().find(|u| u.id == id).map(|u| u.name.clone()).unwrap_or_default();
                     let cancelled = self.uploads.iter().any(|u| u.id == id && u.cancelled);
                     let error = self.uploads.iter().find(|u| u.id == id).and_then(|u| u.error.clone());
-                    let into_folder = self.uploads.iter().any(|u| u.id == id && u.dir.is_some());
+                    let dir = self.uploads.iter().find(|u| u.id == id).and_then(|u| u.dir.clone());
                     self.uploads.retain(|u| u.id != id);
-                    if into_folder && let Some(f) = self.files.as_ref() {
+                    if dir.is_some() && let Some(f) = self.files.as_ref() {
                         let cmd = f.refresh_remote();
                         self.file_cmd(cmd)?;
                     }
-                    let msg = if let Some(e) = error {
-                        format!("{name} failed: {e}")
-                    } else if cancelled {
-                        format!("{name}: upload cancelled")
-                    } else if ok {
-                        format!("{name} saved on the SSH host: {text}")
-                    } else {
-                        format!("{name} failed: {text}")
-                    };
-                    self.notify(&msg);
+                    match (error, cancelled, ok) {
+                        (Some(e), ..) => self.notify(&format!("{name} failed: {e}")),
+                        (None, true, _) => self.notify(&format!("{name}: upload cancelled")),
+                        (None, false, true) => {
+                            // The host's own path for one in its Downloads folder.
+                            let folder = dir.unwrap_or_else(|| text.rsplit_once(['/', '\\']).map_or(text.clone(), |(d, _)| d.to_string()));
+                            self.sent.add(name, folder);
+                        }
+                        (None, false, false) => self.notify(&format!("{name} failed: {text}")),
+                    }
                 }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     let log = self.sess.log();
@@ -622,18 +686,17 @@ impl Remote {
         name: String,
         dir: Option<String>,
     ) -> Result<(), String> {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
+        let size = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
             Err(e) => {
                 self.notify(&format!("{name}: {e}"));
                 return Ok(());
             }
         };
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let id = self.next_upload;
         self.next_upload += 1;
-        self.send(ToAgent::FileStart { id, size, dir: dir.clone().unwrap_or_default(), name: name.clone() })?;
-        self.uploads.push_back(Upload { id, name, dir, cancelled: false, error: None, file, size, sent: 0, acked: 0, ended: false });
+        let path = path.to_path_buf();
+        self.uploads.push_back(Upload { id, name, dir, cancelled: false, error: None, path, file: None, size, sent: 0, acked: 0, ended: false });
         Ok(())
     }
 
@@ -641,6 +704,25 @@ impl Remote {
     pub(super) fn feed_uploads(&mut self) -> Result<(), String> {
         use std::io::Read;
         let Some(i) = self.uploads.iter().position(|u| !u.ended) else { return Ok(()) };
+        // Each file starts once the one before it is sent, so the host has one open at a time
+        // however many were dropped.
+        if self.uploads[i].file.is_none() {
+            let u = &mut self.uploads[i];
+            match std::fs::File::open(&u.path) {
+                Ok(f) => {
+                    u.size = f.metadata().map_or(u.size, |m| m.len());
+                    u.file = Some(f);
+                    let start = ToAgent::FileStart { id: u.id, size: u.size, dir: u.dir.clone().unwrap_or_default(), name: u.name.clone() };
+                    self.send(start)?;
+                }
+                Err(e) => {
+                    let text = format!("{} failed: {e}", u.name);
+                    self.uploads.remove(i);
+                    self.notify(&text);
+                    return Ok(());
+                }
+            }
+        }
         let mut buf = vec![0u8; UPLOAD_CHUNK];
         loop {
             let u = &mut self.uploads[i];
@@ -648,21 +730,33 @@ impl Remote {
                 return Ok(());
             }
             let id = u.id;
-            let n = match u.file.read(&mut buf) {
-                Ok(n) => n,
-                // A file that cannot be read on (a network drive gone) ends its upload, cancelled
-                // so the host drops what it has, not the connection.
-                Err(e) => {
-                    (u.error, u.ended) = (Some(e.to_string()), true);
+            // The size it had when it started: a file that grows meanwhile still arrives whole.
+            let want = (u.size - u.sent).min(UPLOAD_CHUNK as u64) as usize;
+            let read = match u.file.as_mut() {
+                Some(f) if want > 0 => f.read(&mut buf[..want]),
+                _ => Ok(0),
+            };
+            let n = match read {
+                Ok(0) if want > 0 => Err("it got shorter while being sent".to_string()),
+                Ok(n) => Ok(n),
+                Err(e) => Err(e.to_string()),
+            };
+            match n {
+                Ok(0) => {
+                    (u.ended, u.file) = (true, None);
                     return self.send(ToAgent::FileEnd { id });
                 }
-            };
-            if n == 0 {
-                u.ended = true;
-                return self.send(ToAgent::FileEnd { id });
+                Ok(n) => {
+                    u.sent += n as u64;
+                    self.send(ToAgent::FileData { id, data: buf[..n].to_vec() })?;
+                }
+                // A file that cannot be read on (a network drive gone) ends short, so the host
+                // drops what it has; the connection goes on.
+                Err(e) => {
+                    (u.error, u.ended, u.file) = (Some(e), true, None);
+                    return self.send(ToAgent::FileEnd { id });
+                }
             }
-            u.sent += n as u64;
-            self.send(ToAgent::FileData { id, data: buf[..n].to_vec() })?;
         }
     }
 
@@ -1048,11 +1142,19 @@ impl Remote {
                 }
             }
             Cmd::Cancel(true, id) => {
-                if let Some(u) = self.uploads.iter_mut().find(|u| u.id == id) {
-                    u.cancelled = true;
-                    if !u.ended {
-                        u.ended = true;
-                        self.send(ToAgent::FileEnd { id })?;
+                if let Some(i) = self.uploads.iter().position(|u| u.id == id) {
+                    let u = &mut self.uploads[i];
+                    if u.file.is_none() && !u.ended {
+                        // Not started: the host never heard of it.
+                        let text = format!("{}: upload cancelled", u.name);
+                        self.uploads.remove(i);
+                        self.notify(&text);
+                    } else {
+                        u.cancelled = true;
+                        if !u.ended {
+                            (u.ended, u.file) = (true, None);
+                            self.send(ToAgent::FileEnd { id })?;
+                        }
                     }
                 }
             }
@@ -1073,15 +1175,27 @@ impl Remote {
     pub(super) fn upload_overlay(&self, ctx: &egui::Context, screen: Rect) {
         // Dropped files go to the active pane: only it says so.
         let hovering = self.active && ctx.input(|i| !i.raw.hovered_files.is_empty());
-        let mut lines: Vec<String> = self
-            .uploads
+        // The files under way, and how many wait after them (a dropped folder can hold thousands).
+        let sending: Vec<&Upload> = self.uploads.iter().filter(|u| !u.cancelled).collect();
+        let mut lines: Vec<String> = sending
             .iter()
+            .take(3)
             .map(|u| format!("Sending {}  {}%", u.name, (u.acked * 100).checked_div(u.size).unwrap_or(100)))
             .collect();
-        for (id, name, _) in &self.downloads {
-            if let Some((got, size)) = self.inbox.received(*id) {
-                lines.push(format!("Receiving {name}  {}%", (got * 100).checked_div(size).unwrap_or(100)));
-            }
+        if sending.len() > 3 {
+            lines.push(format!("and {} more to send", sending.len() - 3));
+        }
+        let receiving: Vec<String> = self
+            .downloads
+            .iter()
+            .filter_map(|(id, name, _)| {
+                let (got, size) = self.inbox.received(*id)?;
+                Some(format!("Receiving {name}  {}%", (got * 100).checked_div(size).unwrap_or(100)))
+            })
+            .collect();
+        lines.extend(receiving.iter().take(3).cloned());
+        if receiving.len() > 3 {
+            lines.push(format!("and {} more being received", receiving.len() - 3));
         }
         if hovering {
             lines.push(format!("Drop to send to the Downloads folder on {}", self.host()));
@@ -1090,10 +1204,7 @@ impl Remote {
             return;
         }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("uploads")));
-        let text = lines.join(
-            "
-",
-        );
+        let text = lines.join("\n");
         let galley = painter.layout_no_wrap(text, FontId::proportional(14.0), Color32::WHITE);
         let pos = Pos2::new(screen.left() + 16.0, screen.bottom() - 16.0 - galley.size().y);
         let bg = Rect::from_min_size(pos, galley.size()).expand(8.0);

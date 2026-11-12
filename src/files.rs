@@ -26,12 +26,30 @@ pub fn home() -> PathBuf {
     downloads().parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir)
 }
 
-/// One path component made safe: no separators, drive letters or reserved characters.
+/// Names Windows keeps for devices, whatever their extension: "aux.c" opens the AUX device.
+const RESERVED: [&str; 24] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
+    "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$", "CONOUT$",
+];
+
+/// One path component made safe: no separators, drive letters, reserved characters or device
+/// names. A leading dot stays (".gitignore"); trailing dots and spaces go, as Windows drops them.
 fn clean(name: &str) -> String {
     let s: String = name.chars().filter(|c| !c.is_control() && !":*?\"<>|/\\".contains(*c)).collect();
-    let s = s.trim().trim_matches('.').to_string();
-    if s.is_empty() { "file".into() } else { s }
+    let s = s.trim().trim_end_matches(['.', ' ']);
+    if s.is_empty() || s.chars().all(|c| c == '.') {
+        return "file".into();
+    }
+    let stem = s.split('.').next().unwrap_or(s).trim_end();
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        return format!("{stem}_{}", &s[stem.len()..]);
+    }
+    s.to_string()
 }
+
+/// Longest relative name taken, in bytes and in folders; a longer one is refused.
+const MAX_NAME: usize = 4096;
+const MAX_DEPTH: usize = 64;
 
 /// A relative name such as "folder/sub/file.txt" as components that cannot climb out of the target folder.
 fn clean_relative(name: &str) -> Vec<String> {
@@ -40,15 +58,22 @@ fn clean_relative(name: &str) -> Vec<String> {
     if parts.is_empty() { vec!["file".into()] } else { parts }
 }
 
-/// `name`, or `name (2)`, `name (3)`... whichever does not exist yet in `dir`.
-fn free_path(dir: &Path, name: &str) -> PathBuf {
-    let (stem, ext) = match name.rfind('.') {
+/// `name` split before its extension: "a.tar" is ("a", ".tar"), ".bashrc" has none.
+fn stem_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
         _ => (name, ""),
-    };
+    }
+}
+
+/// `name`, or `name (2)`, `name (3)`... whichever is not taken yet in `dir` (a dangling link
+/// takes its name too).
+#[cfg(test)]
+fn free_path(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = stem_ext(name);
     let mut p = dir.join(name);
     let mut n = 2;
-    while p.exists() {
+    while std::fs::symlink_metadata(&p).is_ok() {
         p = dir.join(format!("{stem} ({n}){ext}"));
         n += 1;
     }
@@ -58,18 +83,23 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
 /// Creates a new file named `name` in `dir`, or "name (2)" and so on: the name is claimed when
 /// the file is created, so two transfers at once cannot take the same one.
 fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, PathBuf)> {
-    loop {
-        let path = free_path(dir, name);
+    let (stem, ext) = stem_ext(name);
+    for n in 1..10_000 {
+        let path = if n == 1 { dir.join(name) } else { dir.join(format!("{stem} ({n}){ext}")) };
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Ok((f, path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
         }
     }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{}: no free name left", dir.join(name).display())))
 }
 
 /// Transfers open at once; more are refused rather than holding ever more files open.
 const MAX_OPEN: usize = 64;
+
+/// What a file being received is called until it is whole.
+const PART: &str = ".part";
 
 /// What the receiving side has to tell the sender.
 pub enum Note {
@@ -89,16 +119,38 @@ impl Note {
 
 struct Incoming {
     file: File,
-    path: PathBuf,
+    /// Where it is written: "name.part" beside where it goes.
+    part: PathBuf,
+    /// The folder and name it takes once whole.
+    dir: PathBuf,
+    name: String,
     size: u64,
     received: u64,
     reported: u64,
 }
 
-/// Receiving side, writing under the local Downloads folder.
+impl Incoming {
+    /// Lets go of the file and deletes what arrived of it.
+    fn discard(self) {
+        drop(self.file);
+        let _ = std::fs::remove_file(&self.part);
+    }
+}
+
+/// Receiving side, writing under the local Downloads folder. A file is written as "name.part"
+/// and takes its name once whole, so a broken transfer never looks finished; one still open when
+/// the inbox goes (the connection ended) is deleted.
 #[derive(Default)]
 pub struct Inbox {
     open: HashMap<u32, Incoming>,
+}
+
+impl Drop for Inbox {
+    fn drop(&mut self) {
+        for (_, u) in self.open.drain() {
+            u.discard();
+        }
+    }
 }
 
 impl Inbox {
@@ -108,35 +160,39 @@ impl Inbox {
 
     /// Like `start`, into `dir` instead of Downloads.
     pub fn start_in(&mut self, id: u32, size: u64, dir: &Path, name: &str) -> Option<Note> {
-        let parts = clean_relative(name);
-        let mut dir = dir.to_path_buf();
-        for p in &parts[..parts.len() - 1] {
-            dir.push(p);
-        }
-        let _ = std::fs::create_dir_all(&dir);
+        let refuse = |text: String| Some(Note::Done { id, ok: false, text });
         if self.open.len() >= MAX_OPEN {
-            return Some(Note::Done { id, ok: false, text: "too many transfers at once".into() });
+            return refuse("too many transfers at once".into());
         }
-        match create_free(&dir, &parts[parts.len() - 1]) {
-            Ok((file, path)) => {
-                self.open.insert(id, Incoming { file, path, size, received: 0, reported: 0 });
+        if name.len() > MAX_NAME || name.split(['/', '\\']).count() > MAX_DEPTH {
+            return refuse("the name is too long".into());
+        }
+        let mut parts = clean_relative(name);
+        let leaf = parts.pop().unwrap_or_else(|| "file".into());
+        let mut dir = dir.to_path_buf();
+        dir.extend(&parts);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return refuse(format!("{}: {e}", dir.display()));
+        }
+        match create_free(&dir, &format!("{leaf}{PART}")) {
+            Ok((file, part)) => {
+                self.open.insert(id, Incoming { file, part, dir, name: leaf, size, received: 0, reported: 0 });
                 None
             }
-            Err(e) => Some(Note::Done { id, ok: false, text: e.to_string() }),
+            Err(e) => refuse(e.to_string()),
         }
     }
 
     pub fn data(&mut self, id: u32, data: &[u8]) -> Option<Note> {
         let u = self.open.get_mut(&id)?;
         if u.received + data.len() as u64 > u.size {
-            let u = self.open.remove(&id)?;
-            let _ = std::fs::remove_file(&u.path);
+            self.open.remove(&id)?.discard();
             return Some(Note::Done { id, ok: false, text: "more data than the file's size".into() });
         }
         if let Err(e) = u.file.write_all(data) {
-            let u = self.open.remove(&id)?;
-            let _ = std::fs::remove_file(&u.path);
-            return Some(Note::Done { id, ok: false, text: format!("{}: {e}", u.path.display()) });
+            let text = format!("{}: {e}", u.dir.join(&u.name).display());
+            self.open.remove(&id)?.discard();
+            return Some(Note::Done { id, ok: false, text });
         }
         u.received += data.len() as u64;
         (u.received - u.reported >= REPORT).then(|| {
@@ -145,21 +201,36 @@ impl Inbox {
         })
     }
 
-    /// Closes a transfer; `sent_ok` is false when the sender gave up.
+    /// Closes a transfer; `sent_ok` is false when the sender gave up. A whole file takes its
+    /// name, or "name (2)" and so on when that is taken.
     pub fn end(&mut self, id: u32, sent_ok: bool, why: &str) -> Option<Note> {
         let mut u = self.open.remove(&id)?;
-        let ok = sent_ok && u.file.flush().is_ok() && u.received == u.size;
-        if !ok {
-            let _ = std::fs::remove_file(&u.path);
+        let whole = sent_ok && u.file.flush().is_ok() && u.received == u.size;
+        if !whole {
+            let text = if !sent_ok { why.to_string() } else { format!("incomplete: {} of {} bytes", u.received, u.size) };
+            u.discard();
+            return Some(Note::Done { id, ok: false, text });
         }
-        let text = if ok {
-            u.path.display().to_string()
-        } else if !sent_ok {
-            why.to_string()
-        } else {
-            format!("incomplete: {} of {} bytes", u.received, u.size)
-        };
-        Some(Note::Done { id, ok, text })
+        let Incoming { file, part, dir, name, .. } = u;
+        drop(file);
+        // The name is claimed by creating it, then the whole file replaces that empty one.
+        let done = create_free(&dir, &name).and_then(|(claim, path)| {
+            drop(claim);
+            match std::fs::rename(&part, &path) {
+                Ok(()) => Ok(path),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    Err(e)
+                }
+            }
+        });
+        Some(match done {
+            Ok(path) => Note::Done { id, ok: true, text: path.display().to_string() },
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                Note::Done { id, ok: false, text: e.to_string() }
+            }
+        })
     }
 
     pub fn received(&self, id: u32) -> Option<(u64, u64)> {
@@ -176,13 +247,34 @@ struct Outgoing {
     size: u64,
     sent: u64,
     acked: u64,
+    /// Since when the window has been full with no acknowledgement coming.
+    stalled: Option<std::time::Instant>,
 }
+
+/// What waits to be sent: a file, or a folder whose files are found when it comes up.
+enum Queued {
+    File(Outgoing),
+    Folder { path: PathBuf, name: String, tag: u32 },
+}
+
+impl Queued {
+    fn tag(&self) -> u32 {
+        match self {
+            Queued::File(o) => o.tag,
+            Queued::Folder { tag, .. } => *tag,
+        }
+    }
+}
+
+/// A receiver that has taken nothing for this long is gone; its file is given up.
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Agent side of downloads: queued files sent one after another.
 #[derive(Default)]
 pub struct Outbox {
-    queue: VecDeque<Outgoing>,
+    queue: VecDeque<Queued>,
     next_id: u32,
+    buf: Vec<u8>,
 }
 
 /// Every file under `dir`, with names relative to `base`; links are not followed.
@@ -205,42 +297,62 @@ impl Outbox {
     pub fn fetch(&mut self, path: &str, tag: u32) -> Option<ToClient> {
         let p = PathBuf::from(path);
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-        let mut files = Vec::new();
         if p.is_dir() {
-            walk(&p, &name, &mut files);
+            self.queue.push_back(Queued::Folder { path: p, name, tag });
         } else if p.is_file() {
-            files.push((p.clone(), name));
+            self.push_file(p, name, tag, false);
         } else {
             return Some(ToClient::FetchEnd { id: 0, ok: false, text: format!("{path}: not found") });
-        }
-        for (path, name) in files {
-            self.next_id += 1;
-            self.queue.push_back(Outgoing {
-                id: self.next_id,
-                tag,
-                path,
-                name,
-                file: None,
-                size: 0,
-                sent: 0,
-                acked: 0,
-            });
         }
         None
     }
 
+    fn push_file(&mut self, path: PathBuf, name: String, tag: u32, front: bool) {
+        self.next_id += 1;
+        let o = Outgoing { id: self.next_id, tag, path, name, file: None, size: 0, sent: 0, acked: 0, stalled: None };
+        if front { self.queue.push_front(Queued::File(o)) } else { self.queue.push_back(Queued::File(o)) }
+    }
+
+    /// Puts the folder's files and folders at the front of the queue, in their order.
+    fn open_folder(&mut self, path: &Path, name: &str, tag: u32) {
+        let Ok(rd) = std::fs::read_dir(path) else { return };
+        let mut items: Vec<(bool, PathBuf, String)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let t = e.file_type().ok()?;
+                let sub = format!("{name}/{}", e.file_name().to_string_lossy());
+                (t.is_dir() || t.is_file()).then(|| (t.is_dir(), e.path(), sub))
+            })
+            .collect();
+        items.sort_by(|a, b| a.2.cmp(&b.2));
+        for (dir, path, sub) in items.into_iter().rev() {
+            if dir {
+                self.queue.push_front(Queued::Folder { path, name: sub, tag });
+            } else {
+                self.push_file(path, sub, tag, true);
+            }
+        }
+    }
+
     pub fn ack(&mut self, id: u32, received: u64) {
-        if let Some(o) = self.queue.iter_mut().find(|o| o.id == id) {
-            o.acked = received;
+        for q in &mut self.queue {
+            if let Queued::File(o) = q
+                && o.id == id
+            {
+                (o.acked, o.stalled) = (received, None);
+            }
         }
     }
 
     /// Drops a download, or every queued file of its request when `tag` is not 0.
     pub fn cancel(&mut self, id: u32, tag: u32) -> Vec<ToClient> {
         let mut out = Vec::new();
-        self.queue.retain(|o| {
-            let hit = o.id == id || (tag != 0 && o.tag == tag);
-            if hit && o.file.is_some() {
+        self.queue.retain(|q| {
+            let hit = match q {
+                Queued::File(o) => o.id == id || (tag != 0 && o.tag == tag),
+                Queued::Folder { .. } => tag != 0 && q.tag() == tag,
+            };
+            if hit && let Queued::File(o) = q && o.file.is_some() {
                 out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "cancelled".into() });
             }
             !hit
@@ -248,16 +360,30 @@ impl Outbox {
         out
     }
 
+    /// Whether there is something to send now (not only acknowledgements to wait for).
     pub fn busy(&self) -> bool {
-        !self.queue.is_empty()
+        match self.queue.front() {
+            Some(Queued::File(o)) => o.file.is_none() || o.sent - o.acked.min(o.sent) < WINDOW,
+            Some(Queued::Folder { .. }) => true,
+            None => false,
+        }
     }
 
-    /// Up to `budget` bytes of the current download, as messages to send.
+    /// Up to `budget` bytes of the current download, as messages to send. A file is sent at the
+    /// size it had when it started, so one that grows meanwhile still arrives whole.
     pub fn pump(&mut self, budget: usize) -> Vec<ToClient> {
         let mut out = Vec::new();
         let mut spent = 0;
         while spent < budget {
-            let Some(o) = self.queue.front_mut() else { break };
+            let o = match self.queue.front_mut() {
+                None => break,
+                Some(Queued::Folder { .. }) => {
+                    let Some(Queued::Folder { path, name, tag }) = self.queue.pop_front() else { unreachable!() };
+                    self.open_folder(&path, &name, tag);
+                    continue;
+                }
+                Some(Queued::File(o)) => o,
+            };
             if o.file.is_none() {
                 match File::open(&o.path) {
                     Ok(f) => {
@@ -266,33 +392,44 @@ impl Outbox {
                         out.push(ToClient::FetchStart { id: o.id, size: o.size, tag: o.tag, name: o.name.clone() });
                     }
                     Err(e) => {
-                        out.push(ToClient::FetchEnd {
-                            id: o.id,
-                            ok: false,
-                            text: format!("{}: {e}", o.path.display()),
-                        });
+                        out.push(ToClient::FetchEnd { id: o.id, ok: false, text: format!("{}: {e}", o.path.display()) });
                         self.queue.pop_front();
                         continue;
                     }
                 }
             }
             if o.sent - o.acked.min(o.sent) >= WINDOW {
+                let since = *o.stalled.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > STALL {
+                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "the other side stopped taking the file".into() });
+                    self.queue.pop_front();
+                    continue;
+                }
                 break;
             }
-            let mut buf = vec![0u8; CHUNK];
-            match o.file.as_mut().unwrap().read(&mut buf) {
-                Ok(0) => {
-                    out.push(ToClient::FetchEnd { id: o.id, ok: o.sent == o.size, text: String::new() });
+            let want = (o.size - o.sent).min(CHUNK as u64) as usize;
+            if want == 0 {
+                out.push(ToClient::FetchEnd { id: o.id, ok: true, text: String::new() });
+                self.queue.pop_front();
+                continue;
+            }
+            self.buf.resize(want, 0);
+            match o.file.as_mut().map(|f| f.read(&mut self.buf[..want])) {
+                Some(Ok(0)) => {
+                    let text = format!("{}: it got shorter while being sent", o.path.display());
+                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text });
                     self.queue.pop_front();
                 }
-                Ok(n) => {
-                    buf.truncate(n);
+                Some(Ok(n)) => {
                     o.sent += n as u64;
                     spent += n;
-                    out.push(ToClient::FetchData { id: o.id, data: buf });
+                    out.push(ToClient::FetchData { id: o.id, data: self.buf[..n].to_vec() });
                 }
-                Err(e) => {
-                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text: e.to_string() });
+                Some(Err(e)) => {
+                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text: format!("{}: {e}", o.path.display()) });
+                    self.queue.pop_front();
+                }
+                None => {
                     self.queue.pop_front();
                 }
             }
@@ -411,6 +548,102 @@ mod tests {
         assert_eq!(clean_relative("a:b?.txt"), ["ab.txt"]);
         assert_eq!(clean_relative(".."), ["file"]);
         assert_eq!(clean_relative("photos/2026/a.jpg"), ["photos", "2026", "a.jpg"]);
+        // A repository's dot files keep their names.
+        assert_eq!(clean_relative("repo/.gitignore"), ["repo", ".gitignore"]);
+        assert_eq!(clean_relative(".git/config"), [".git", "config"]);
+        // Windows drops trailing dots and spaces itself; all dots is no name.
+        assert_eq!(clean("notes. . "), "notes");
+        assert_eq!(clean("..."), "file");
+        // Device names, which Windows opens whatever the extension, get an underscore.
+        assert_eq!(clean("aux.c"), "aux_.c");
+        assert_eq!(clean("NUL"), "NUL_");
+        assert_eq!(clean("com1.tar.gz"), "com1_.tar.gz");
+        assert_eq!(clean("console.log"), "console.log");
+    }
+
+    /// A file is written as "name.part" and takes its name only once whole; a transfer cut off
+    /// leaves nothing behind, and a name already taken gets " (2)".
+    #[test]
+    fn a_file_takes_its_name_only_when_whole() {
+        let dir = std::env::temp_dir().join(format!("sshremote-inbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let listing = || {
+            let mut v: Vec<String> =
+                std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        let mut inbox = Inbox::default();
+        assert!(inbox.start_in(1, 4, &dir, "a.txt").is_none());
+        assert!(inbox.data(1, b"ab").is_none());
+        assert_eq!(listing(), ["a.txt.part"], "under way");
+        assert!(inbox.data(1, b"cd").is_none());
+        assert!(matches!(inbox.end(1, true, ""), Some(Note::Done { ok: true, .. })));
+        assert_eq!(listing(), ["a.txt"], "whole");
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"abcd");
+
+        // The same name again does not overwrite.
+        assert!(inbox.start_in(2, 1, &dir, "a.txt").is_none());
+        inbox.data(2, b"x");
+        assert!(matches!(inbox.end(2, true, ""), Some(Note::Done { ok: true, .. })));
+        assert_eq!(listing(), ["a (2).txt", "a.txt"]);
+
+        // Cut off: short, or the connection gone with it open.
+        assert!(inbox.start_in(3, 10, &dir, "b.bin").is_none());
+        inbox.data(3, b"123");
+        assert!(matches!(inbox.end(3, true, ""), Some(Note::Done { ok: false, .. })));
+        assert!(inbox.start_in(4, 10, &dir, "c.bin").is_none());
+        inbox.data(4, b"123");
+        drop(inbox);
+        assert_eq!(listing(), ["a (2).txt", "a.txt"], "nothing left of the broken ones");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A dangling link with the name wanted is passed over, not tried forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_does_not_hold_up_a_download() {
+        let dir = std::env::temp_dir().join(format!("sshremote-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone"), dir.join("r.pdf")).unwrap();
+        assert_eq!(free_path(&dir, "r.pdf"), dir.join("r (2).pdf"));
+        let (_, path) = create_free(&dir, "r.pdf").unwrap();
+        assert_eq!(path, dir.join("r (2).pdf"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file sent is the size it was announced at, even if it grows meanwhile; and the sender
+    /// waits for acknowledgements rather than spin while the window is full.
+    #[test]
+    fn a_growing_file_is_sent_at_its_starting_size() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("sshremote-grow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.txt");
+        std::fs::write(&path, vec![b'a'; 3 * CHUNK]).unwrap();
+        let mut out = Outbox::default();
+        assert!(out.fetch(path.to_str().unwrap(), 0).is_none());
+        let first = out.pump(CHUNK);
+        assert!(matches!(first[0], ToClient::FetchStart { size, .. } if size == 3 * CHUNK as u64));
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[b'b'; 1000]).unwrap();
+        let (mut sent, mut ended) = (0, None);
+        for m in first.into_iter().chain(out.pump(1 << 20)) {
+            match m {
+                ToClient::FetchData { data, .. } => sent += data.len(),
+                ToClient::FetchEnd { ok, .. } => ended = Some(ok),
+                _ => {}
+            }
+        }
+        assert_eq!((sent, ended), (3 * CHUNK, Some(true)));
+        assert!(!out.busy());
+
+        // A large one stops at the window until acknowledged.
+        std::fs::write(&path, vec![0u8; 2 * WINDOW as usize]).unwrap();
+        out.fetch(path.to_str().unwrap(), 0);
+        let sent: usize = out.pump(4 << 20).iter().map(|m| if let ToClient::FetchData { data, .. } = m { data.len() } else { 0 }).sum();
+        assert_eq!(sent as u64, WINDOW);
+        assert!(!out.busy(), "nothing to do until the other side takes some");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

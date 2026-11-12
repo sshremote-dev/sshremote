@@ -1307,19 +1307,25 @@ impl Viewer {
         let mut finished = Vec::new();
         let mut failed = Vec::new();
         let mut buf = vec![0u8; 64 << 10];
-        for (id, file, _, sent) in &mut self.uploads {
+        for (id, file, size, sent) in &mut self.uploads {
             while budget > 0 {
-                let n = match file.read(&mut buf) {
+                // The size it had when it started: a file that grows meanwhile still arrives whole.
+                let want = (*size - *sent).min(buf.len() as u64) as usize;
+                if want == 0 {
+                    finished.push(*id);
+                    break;
+                }
+                let n = match file.read(&mut buf[..want]) {
+                    Ok(0) => {
+                        failed.push((*id, "it got shorter while being sent".to_string()));
+                        break;
+                    }
                     Ok(n) => n,
                     Err(e) => {
                         failed.push((*id, e.to_string()));
                         break;
                     }
                 };
-                if n == 0 {
-                    finished.push(*id);
-                    break;
-                }
                 self.sess.send(ToAgent::FileData { id: *id, data: buf[..n].to_vec() })?;
                 *sent += n as u64;
                 budget = budget.saturating_sub(n);
@@ -1447,6 +1453,8 @@ impl Viewer {
                 self.out.flush()?;
             }
             ToClient::FileDone { id, ok, text } => {
+                // A refused upload (the host's disk full) stops being sent too.
+                self.uploads.retain(|u| u.0 != id);
                 self.transfers.retain(|t| !(t.upload && t.id == id));
                 let t = if ok { format!("Sent: {text}") } else { format!("Send failed: {text}") };
                 self.notify(&t)?;
@@ -1456,14 +1464,14 @@ impl Viewer {
                 }
             }
             ToClient::FetchStart { id, size, name, .. } => {
-                if let Some(crate::files::Note::Done { text, .. }) = self.inbox.start(id, size, &name) {
+                if let Some(crate::files::Note::Done { text, .. }) = self.sess.fetch_start(&mut self.inbox, id, size, &crate::files::downloads(), &name)? {
                     self.notify(&format!("Download of {name} failed: {text}"))?;
                 } else {
                     self.transfers.push(Transfer { id, name, done: 0, size, upload: false });
                 }
             }
-            ToClient::FetchData { id, data } => {
-                if let Some(crate::files::Note::Progress { id, received }) = self.sess.fetch_data(&mut self.inbox, id, &data)? {
+            ToClient::FetchData { id, data } => match self.sess.fetch_data(&mut self.inbox, id, &data)? {
+                Some(crate::files::Note::Progress { id, received }) => {
                     if let Some(t) = self.transfers.iter_mut().find(|t| !t.upload && t.id == id) {
                         t.done = received;
                     }
@@ -1471,12 +1479,21 @@ impl Viewer {
                         self.status()?;
                     }
                 }
-            }
+                Some(crate::files::Note::Done { text, .. }) => {
+                    self.transfers.retain(|t| t.upload || t.id != id);
+                    self.notify(&format!("Download failed: {text}"))?;
+                }
+                None => {}
+            },
             ToClient::FetchEnd { id, ok, text } => {
                 self.transfers.retain(|t| t.upload || t.id != id);
-                // One that never started was reported when it failed.
-                if let Some(crate::files::Note::Done { ok, text, .. }) = self.inbox.end(id, ok, &text) {
-                    self.notify(&if ok { format!("Saved {text}") } else { format!("Download failed: {text}") })?;
+                match self.inbox.end(id, ok, &text) {
+                    Some(crate::files::Note::Done { ok, text, .. }) => {
+                        self.notify(&if ok { format!("Saved {text}") } else { format!("Download failed: {text}") })?
+                    }
+                    // One that could not even be opened there says why here.
+                    _ if !ok && text != "cancelled" => self.notify(&format!("Download failed: {text}"))?,
+                    _ => {}
                 }
             }
             _ => {}
