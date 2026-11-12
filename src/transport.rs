@@ -13,6 +13,9 @@ pub struct Link {
     /// Diagnostics such as ssh errors; drained into the session log.
     pub errors: Box<dyn Read + Send>,
     child: Option<Child>,
+    /// A direct link's socket: shut on close, so the other end stops at once (the reader thread
+    /// holds a copy, which would keep it open).
+    socket: Option<std::net::TcpStream>,
 }
 
 impl Link {
@@ -20,6 +23,9 @@ impl Link {
         if let Some(c) = self.child.as_mut() {
             let _ = c.kill();
             let _ = c.wait();
+        }
+        if let Some(s) = self.socket.take() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
         }
     }
 
@@ -43,7 +49,8 @@ impl Drop for Link {
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {
         let (r, w) = crate::net::connect(addr, password)?;
-        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None });
+        let socket = w.stream().ok();
+        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, socket });
     }
     let mut cmd = match target {
         Target::Direct { .. } => unreachable!(),
@@ -95,5 +102,35 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         writer: Box::new(child.stdin.take().unwrap()),
         errors: Box::new(child.stderr.take().unwrap()),
         child: Some(child),
+        socket: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    /// Closing a direct link tells the other end at once, though a reader still holds the socket.
+    #[test]
+    fn closing_a_direct_link_ends_it_for_the_other_side() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let s = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut far, _) = l.accept().unwrap();
+        let reader = s.try_clone().unwrap();
+        let mut link = super::Link {
+            reader: Box::new(reader),
+            writer: Box::new(s.try_clone().unwrap()),
+            errors: Box::new(std::io::empty()),
+            child: None,
+            socket: Some(s),
+        };
+        link.close();
+        far.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let started = Instant::now();
+        let mut b = [0u8; 1];
+        assert_eq!(far.read(&mut b).unwrap(), 0, "the other side sees the end");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
