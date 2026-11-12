@@ -85,6 +85,15 @@ impl Harness {
     /// Clicks a toolbar button: `what` in the title bar, drawn first (a window shown inside this
     /// test's single viewport, such as the file manager, may lie over it).
     fn tool(&mut self, what: &str) -> Result<(), String> {
+        self.tool_with(what, PointerButton::Primary)
+    }
+
+    /// Right-clicks a toolbar control, for its menu.
+    fn tool_menu(&mut self, what: &str) -> Result<(), String> {
+        self.tool_with(what, PointerButton::Secondary)
+    }
+
+    fn tool_with(&mut self, what: &str, button: PointerButton) -> Result<(), String> {
         // What the last state change shows, drawn before looking.
         self.frame(Vec::new())?;
         let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(self.size.x, super::super::chrome::HEIGHT));
@@ -93,7 +102,7 @@ impl Harness {
             collect(&c.shape, what, &mut hits);
         }
         let at = hits.into_iter().find(|r| bar.contains(r.center())).unwrap_or_else(|| panic!("no {what:?} in the toolbar")).center();
-        self.click_at(at)
+        self.click_with(at, button)
     }
 
     /// Moves to and clicks the text `what`, then lets two frames pass.
@@ -103,8 +112,12 @@ impl Harness {
     }
 
     fn click_at(&mut self, at: Pos2) -> Result<(), String> {
+        self.click_with(at, PointerButton::Primary)
+    }
+
+    fn click_with(&mut self, at: Pos2, button: PointerButton) -> Result<(), String> {
         self.frame(vec![Event::PointerMoved(at)])?;
-        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let press = |pressed| Event::PointerButton { pos: at, button, pressed, modifiers: Default::default() };
         self.frame(vec![press(true)])?;
         self.frame(vec![press(false)])?;
         self.frame(Vec::new())?;
@@ -187,6 +200,13 @@ fn toolbar_actions() {
     h.frame(vec![typed]).unwrap();
     h.tool(ic::TERMINAL).unwrap();
     assert!(!h.r.term_split && h.r.terms.is_some(), "hidden, the shell still running");
+    // In place of the screen the picture pauses; the toolbar's way back starts it again.
+    h.tool_menu(ic::TERMINAL).unwrap();
+    h.click("Terminal in place of the screen").unwrap();
+    assert!(h.r.term_inline && h.r.paused, "the terminal in place: the picture pauses");
+    h.tool(ic::MONITOR).unwrap();
+    assert!(!h.r.term_inline && h.r.term_split && !h.r.paused, "back on the screen, running, the terminal under it");
+    h.tool(ic::TERMINAL).unwrap();
 
     h.tool(ic::CHAT).unwrap();
     assert!(h.r.chat.is_some(), "chat opens");

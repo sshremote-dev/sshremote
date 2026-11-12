@@ -300,7 +300,8 @@ impl Remote {
         keys.on_hover_text("Send special keys");
         ui.separator();
         }
-        // The terminal under the screen, in a pane too, as with the chat.
+        // The terminal under the screen, in a pane too, as with the chat; files have none.
+        if self.mode() != crate::gui::workspace::PaneMode::Files {
         let (glyph, tip) = if self.term_inline && self.terms.is_some() {
             (ic::MONITOR, "Back to the remote screen, with the terminal under it")
         } else {
@@ -315,8 +316,9 @@ impl Remote {
                     r.term_split = false;
                 }
                 if r.term_inline || r.term_detached {
-                    // Back under the picture.
-                    (r.term_inline, r.term_detached, r.term_split) = (false, false, true);
+                    // Back under the picture, which starts again (the mode change does that).
+                    r.set_mode(crate::gui::workspace::PaneMode::Screen)?;
+                    (r.term_detached, r.term_split) = (false, true);
                 } else {
                     r.term_split = !r.term_split;
                 }
@@ -327,12 +329,10 @@ impl Remote {
         term.context_menu(|ui| {
             crate::gui::menu_look(ui);
             if ui.button(format!("{}  Terminal in place of the screen", ic::CORNERS_OUT)).clicked() {
+                // The pane's Terminal mode: the picture pauses while it is not seen.
                 *action = Some(Box::new(|r, _| {
-                    if r.terms.is_none() {
-                        r.terms = Some(crate::termwin::TermWindow::new(r.ssh_cmd.clone()));
-                    }
-                    (r.term_inline, r.term_detached, r.term_split) = (true, false, false);
-                    r.release_all()
+                    (r.term_detached, r.term_split) = (false, false);
+                    r.set_mode(crate::gui::workspace::PaneMode::Terminal)
                 }));
                 ui.close();
             }
@@ -348,6 +348,10 @@ impl Remote {
             }
             if self.terms.is_some() && ui.button(format!("{}  Close all shells", ic::X)).clicked() {
                 *action = Some(Box::new(|r, _| {
+                    // From the terminal in place of the screen, back to the screen, which starts again.
+                    if r.term_inline {
+                        r.set_mode(crate::gui::workspace::PaneMode::Screen)?;
+                    }
                     if let Some(t) = r.terms.take() {
                         for c in t.close_all() {
                             if let crate::termwin::Cmd::Send(m) = c {
@@ -361,6 +365,7 @@ impl Remote {
                 ui.close();
             }
         });
+        }
         let chat_glyph = if self.unread > 0 { format!("{} {}", ic::CHAT, self.unread) } else { ic::CHAT.into() };
         let chat_tip = "Chat with the person at the SSH host's screen";
         let shot_tip = "Screenshot: save the SSH host's screen as a PNG in Pictures";
