@@ -85,7 +85,6 @@ pub(crate) mod ic {
     pub const TEXT_T: &str = "\u{E48A}";
     pub const DOTS: &str = "\u{E1FE}";
     pub const CURSOR_CLICK: &str = "\u{E7C8}";
-    pub const GRIP: &str = "\u{EAE2}";
     pub const DOWNLOAD: &str = "\u{E20C}";
     pub const EYE: &str = "\u{E220}";
     pub const EYE_SLASH: &str = "\u{E224}";

@@ -1,10 +1,11 @@
 //! Full screen for a workspace window, and the dock that stands in for its title bar there.
 //!
-//! The dock is a small pill hanging from the top edge: the active pane's state and a caret. It
-//! shows for a moment when full screen begins, then only while the pointer is at the top edge or
-//! on it, so the picture is whole. Its caret drops a band with the title bar's tabs and controls
-//! down below it, and folds it up again; unpinned, the band also folds up by itself a moment after
-//! the pointer leaves. The pill is dragged along the top edge by its grip.
+//! Folded, the dock is a tiny tab hanging from the top edge: the active pane's state and a caret.
+//! It shows for a moment when full screen begins, then only while the pointer is at the top edge or
+//! on it, so the picture is whole. A click on it unfolds it: the tab gives way to a band in its
+//! place with the title bar's tabs and controls, whose own caret folds it back into the tab;
+//! unpinned, the band also folds by itself a moment after the pointer leaves. Dragging the tab
+//! moves the dock along the top edge.
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Vec2, ViewportCommand};
 
@@ -76,13 +77,13 @@ pub(super) struct Status {
 }
 
 pub(super) struct Dock {
-    /// The band with the bar's controls hangs below the pill.
+    /// Unfolded: the band with the bar's controls stands in for the tab.
     pub open: bool,
     /// The band stays down; remembered.
     pub pinned: bool,
-    /// The pill's middle along the top edge, 0 left to 1 right; remembered.
+    /// The dock's middle along the top edge, 0 left to 1 right; remembered.
     x: f32,
-    /// The pill's width last frame, to keep it on the screen.
+    /// The tab's width last frame, to keep it on the screen.
     w: f32,
     /// Until when an unpinned band stays after the pointer left the dock (in `ctx` time).
     until: f64,
@@ -98,7 +99,7 @@ impl Default for Dock {
             open: false,
             pinned: crate::hosts::setting("toolbar_pinned").is_some_and(|v| v == "yes"),
             x: crate::hosts::setting("toolbar_x").and_then(|v| v.parse().ok()).unwrap_or(0.5),
-            w: 220.0,
+            w: 160.0,
             until: 0.0,
             shown_until: 0.0,
             rect: Rect::NOTHING,
@@ -108,14 +109,17 @@ impl Default for Dock {
 
 /// How long an unpinned band waits after the pointer left the dock before it folds up.
 const LINGER: f64 = 2.0;
-/// How long the pill shows when full screen begins, and after the pointer left it.
+/// How long the tab shows when full screen begins, and after the pointer left it.
 const GREET: f64 = 3.0;
 const STAY: f64 = 1.0;
 /// The band's bar height.
 const BAR_H: f32 = 36.0;
+/// The folded tab's text size and the longest name it shows.
+const TAB_TEXT: f32 = 11.0;
+const TAB_NAME_W: f32 = 150.0;
 
 impl Dock {
-    /// Full screen began: the pill shows a moment (with the band if pinned), then steps aside.
+    /// Full screen began: the tab shows a moment (the band, if pinned), then steps aside.
     pub fn greet(&mut self, now: f64) {
         self.open = self.pinned;
         self.shown_until = now + GREET;
@@ -129,10 +133,9 @@ impl Dock {
         self.shown_until = self.shown_until.max(now + STAY);
     }
 
-    /// Draws the dock over the top of `screen` when it is to be seen: the pill at the top edge
-    /// and, unfolded, the band below it, where `bar` draws the controls into a bar `bar_w` wide
-    /// (narrower if the screen is). The pill never moves or changes width, so its caret stays
-    /// under the pointer. Returns the dock's rectangle.
+    /// Draws the dock over the top of `screen` when it is to be seen: folded the tab, unfolded the
+    /// band in its place, where `bar` draws the controls into a bar `bar_w` wide (narrower if the
+    /// screen is). Returns the dock's rectangle.
     pub fn show(&mut self, ctx: &egui::Context, screen: Rect, status: &Status, bar_w: f32, bar: impl FnOnce(&mut egui::Ui)) -> Option<Rect> {
         let now = ctx.input(|i| i.time);
         let pointer = ctx.input(|i| i.pointer.hover_pos());
@@ -153,11 +156,7 @@ impl Dock {
             self.rect = Rect::NOTHING;
             return None;
         }
-        let pill = self.pill(ctx, screen, status, now);
-        let mut rect = pill;
-        if self.open {
-            rect = rect.union(self.band(ctx, screen, pill, bar_w, bar));
-        }
+        let rect = if self.open { self.band(ctx, screen, bar_w, bar, now) } else { self.tab(ctx, screen, status, now) };
         self.rect = rect;
         // Wakes up to fold or step aside on time, with no input to wake it.
         let next = if self.open && !self.pinned { self.until } else { self.shown_until };
@@ -167,47 +166,60 @@ impl Dock {
         Some(rect)
     }
 
-    /// The pill hanging from the top edge: the grip, the active pane's state and the caret.
-    fn pill(&mut self, ctx: &egui::Context, screen: Rect, status: &Status, now: f64) -> Rect {
+    /// The folded tab at the top edge: the active pane's state and a caret, all small. A click
+    /// unfolds the band; a drag moves the dock along the edge, and where it was let go is kept.
+    fn tab(&mut self, ctx: &egui::Context, screen: Rect, status: &Status, now: f64) -> Rect {
         let left = self.left(screen);
-        let resp = egui::Area::new(egui::Id::unique("full-screen-dock-pill"))
+        let resp = egui::Area::new(egui::Id::unique("full-screen-dock-tab"))
             .fixed_pos(Pos2::new(left, screen.top()))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                let radius = CornerRadius { nw: 0, ne: 0, sw: crate::gui::theme::R_MD, se: crate::gui::theme::R_MD };
-                frame(ui, radius, egui::Margin { left: 4, right: 4, top: 1, bottom: 2 }).show(ui, |ui| {
+                let radius = CornerRadius { nw: 0, ne: 0, sw: crate::gui::theme::R_SM, se: crate::gui::theme::R_SM };
+                let inner = frame(ui, radius, egui::Margin { left: 7, right: 5, top: 1, bottom: 2 }).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        self.grip(ui, screen);
+                        ui.spacing_mut().item_spacing.x = 5.0;
                         status_chip(ui, status);
-                        let (glyph, tip) = if self.open {
-                            (ic::CARET_UP, "Fold the toolbar up (Ctrl+Alt+Home)")
-                        } else {
-                            (ic::CARET_DOWN, "Drop the toolbar down (Ctrl+Alt+Home)")
-                        };
-                        let b = egui::Button::new(RichText::new(glyph).size(14.0)).frame_when_inactive(self.open).selected(self.open).min_size(Vec2::new(26.0, 26.0));
-                        if ui.add(b).on_hover_text(tip).clicked() {
-                            self.toggle(now);
-                        }
+                        ui.label(RichText::new(ic::CARET_DOWN).size(TAB_TEXT).weak());
                     });
                 });
+                // The whole tab is the button, and the handle.
+                let r = ui.interact(inner.response.rect, ui.scope_id().with("tab"), egui::Sense::click_and_drag());
+                let r = r.on_hover_text(format!("{}\n\nClick for the toolbar (Ctrl+Alt+Home); drag to move it along the edge", status.details));
+                if r.dragged() {
+                    self.x = (self.x + r.drag_delta().x / screen.width().max(1.0)).clamp(0.0, 1.0);
+                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if r.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if r.drag_stopped() {
+                    crate::hosts::set_setting("toolbar_x", &format!("{:.3}", self.x));
+                }
+                if r.clicked() {
+                    self.toggle(now);
+                }
+                if r.hovered() || r.dragged() {
+                    ui.painter().rect_stroke(inner.response.rect, radius, egui::Stroke::new(1.0, super::ACCENT), egui::StrokeKind::Inside);
+                }
             });
         let rect = resp.response.rect;
         self.w = rect.width();
         rect
     }
 
-    /// The band below the pill: the title bar's tabs and controls, and the pin.
-    fn band(&mut self, ctx: &egui::Context, screen: Rect, pill: Rect, bar_w: f32, bar: impl FnOnce(&mut egui::Ui)) -> Rect {
-        let w = bar_w.min(screen.width() - 80.0).max(320.0);
-        // Its full width: the bar, the pin and the frame's margins.
-        let full = w + 26.0 + 4.0 + 12.0;
-        let left = (pill.center().x - full / 2.0).clamp(screen.left() + 4.0, (screen.right() - full - 4.0).max(screen.left() + 4.0));
+    /// The band in the tab's place: the title bar's tabs and controls, the pin and the caret that
+    /// folds it back into the tab.
+    fn band(&mut self, ctx: &egui::Context, screen: Rect, bar_w: f32, bar: impl FnOnce(&mut egui::Ui), now: f64) -> Rect {
+        let w = bar_w.min(screen.width() - 100.0).max(320.0);
+        // Its full width: the bar, the pin, the caret and the frame's margins.
+        let full = w + 2.0 * 26.0 + 2.0 * 4.0 + 12.0;
+        let centre = screen.left() + self.x * screen.width();
+        let left = (centre - full / 2.0).clamp(screen.left() + 4.0, (screen.right() - full - 4.0).max(screen.left() + 4.0));
         egui::Area::new(egui::Id::unique("full-screen-dock-band"))
-            .fixed_pos(Pos2::new(left, pill.bottom() + 4.0))
+            .fixed_pos(Pos2::new(left, screen.top()))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                frame(ui, CornerRadius::same(crate::gui::theme::R_MD), egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                let radius = CornerRadius { nw: 0, ne: 0, sw: crate::gui::theme::R_MD, se: crate::gui::theme::R_MD };
+                frame(ui, radius, egui::Margin { left: 6, right: 6, top: 0, bottom: 2 }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.allocate_ui_with_layout(Vec2::new(w, BAR_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -217,6 +229,10 @@ impl Dock {
                             bar(ui);
                         });
                         self.pin(ui);
+                        let fold = egui::Button::new(RichText::new(ic::CARET_UP).size(14.0)).frame_when_inactive(false).min_size(Vec2::splat(26.0));
+                        if ui.add(fold).on_hover_text("Fold the toolbar into the tab (Ctrl+Alt+Home)").clicked() {
+                            self.toggle(now);
+                        }
                     });
                 });
             })
@@ -224,25 +240,10 @@ impl Dock {
             .rect
     }
 
-    /// The dock's left edge for its remembered place, kept inside the screen.
+    /// The tab's left edge for its remembered place, kept inside the screen.
     fn left(&self, screen: Rect) -> f32 {
         let centre = screen.left() + self.x * screen.width();
         (centre - self.w / 2.0).clamp(screen.left() + 4.0, (screen.right() - self.w - 4.0).max(screen.left() + 4.0))
-    }
-
-    /// The handle that moves the dock along the top edge; where it was let go is remembered.
-    fn grip(&mut self, ui: &mut egui::Ui, screen: Rect) {
-        let g = ui.add(egui::Label::new(RichText::new(ic::GRIP).size(15.0).weak()).sense(egui::Sense::click_and_drag()).selectable(false));
-        let g = g.on_hover_text("Drag to move the toolbar along the top edge");
-        if g.dragged() {
-            self.x = (self.x + g.drag_delta().x / screen.width().max(1.0)).clamp(0.0, 1.0);
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        } else if g.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        if g.drag_stopped() {
-            crate::hosts::set_setting("toolbar_x", &format!("{:.3}", self.x));
-        }
     }
 
     /// Pinned: the band stays down. The pin is filled while on.
@@ -271,36 +272,32 @@ fn frame(ui: &egui::Ui, radius: CornerRadius, margin: egui::Margin) -> egui::Fra
         .inner_margin(margin)
 }
 
-/// The active pane at a glance: a dot coloured by the round trip (for a screen), its name, the
-/// round trip, and an eye while it only watches. Details on hover.
+/// The active pane at a glance, small: a dot coloured by the round trip (for a screen), its name,
+/// the round trip, and an eye while it only watches.
 fn status_chip(ui: &mut egui::Ui, s: &Status) {
-    let resp = ui
-        .scope(|ui| {
-            // A long name is cut short with an ellipsis.
-            ui.set_max_width(260.0);
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.add_space(2.0);
-            match s.rtt {
-                Some(rtt) => {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.0, rtt_colour(rtt));
-                }
-                None => {
-                    ui.label(RichText::new(s.glyph).size(14.0));
-                }
-            }
-            ui.add(egui::Label::new(RichText::new(&s.name).size(13.0)).truncate());
-            if let Some(rtt) = s.rtt {
-                // A fixed width, so the caret stays put as the round trip changes.
-                let text = if rtt >= 999.5 { "999+ ms".to_string() } else { format!("{rtt:.0} ms") };
-                ui.add_sized([46.0, 18.0], egui::Label::new(RichText::new(text).size(12.0).weak()));
-            }
-            if s.view_only {
-                ui.label(RichText::new(ic::EYE).size(14.0).weak());
-            }
-        })
-        .response;
-    resp.on_hover_text(&s.details);
+    ui.spacing_mut().item_spacing.x = 4.0;
+    match s.rtt {
+        Some(rtt) => {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 3.0, rtt_colour(rtt));
+        }
+        None => {
+            ui.label(RichText::new(s.glyph).size(TAB_TEXT));
+        }
+    }
+    // A long name is cut short with an ellipsis.
+    ui.scope(|ui| {
+        ui.set_max_width(TAB_NAME_W);
+        ui.add(egui::Label::new(RichText::new(&s.name).size(TAB_TEXT)).truncate().selectable(false));
+    });
+    if let Some(rtt) = s.rtt {
+        let text = if rtt >= 999.5 { "999+ ms".to_string() } else { format!("{rtt:.0} ms") };
+        // A fixed width, so the tab does not jitter as the round trip changes.
+        ui.add_sized([38.0, 14.0], egui::Label::new(RichText::new(text).size(TAB_TEXT - 1.0).weak()).selectable(false));
+    }
+    if s.view_only {
+        ui.label(RichText::new(ic::EYE).size(TAB_TEXT).weak());
+    }
 }
 
 /// Green below 80 ms, amber below 250 ms, red above.

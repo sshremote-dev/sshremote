@@ -3087,11 +3087,15 @@ mod tests {
         h.frame(vec![Event::PointerMoved(Pos2::new(900.0, 1.0))]);
         h.frame(Vec::new());
         let caret = h.snap.find(ic::CARET_DOWN).into_iter().next().expect("back at the top edge");
-        assert!(caret.top() < 40.0, "at the top edge");
-        assert!(!h.snap.find("shell").is_empty(), "the pane's name in the dock");
-        // The caret unfolds it: the tabs and the controls.
-        h.click_at(caret.center(), PointerButton::Primary);
+        assert!(caret.top() < 20.0 && caret.height() < 16.0, "a small tab at the top edge: {caret:?}");
+        let name = h.snap.find("shell").into_iter().next().expect("the pane's name in the tab");
+        assert!(name.height() < 16.0, "in small type: {name:?}");
+        // A click on the tab unfolds it: the band takes its place at the top edge.
+        h.click_at(name.center(), PointerButton::Primary);
         assert!(h.w.dock.open && tabs_shown(&h), "unfolded");
+        let plus = h.snap.find(ic::PLUS).into_iter().next().unwrap();
+        assert!(plus.top() < 20.0, "the band hangs from the top edge, not below the tab: {plus:?}");
+        assert!(h.snap.find("shell").iter().all(|r| r.height() > 12.0), "the tab gave way to the band");
         // Away from it, it folds by itself after a moment.
         for _ in 0..60 {
             h.frame(vec![Event::PointerMoved(away)]);
@@ -3102,13 +3106,15 @@ mod tests {
         h.frame(vec![home(true)]);
         h.frame(vec![home(false)]);
         assert!(h.w.dock.open, "Ctrl+Alt+Home unfolds it");
-        // The pill stays where it was: a second click on its caret folds the band up.
-        let again = h.snap.find(ic::CARET_UP).into_iter().next().expect("the caret, turned");
-        assert!((again.center().x - caret.center().x).abs() < 1.0, "the caret did not move");
-        h.click_at(again.center(), PointerButton::Primary);
-        assert!(!h.w.dock.open, "folded up by the same spot");
+        // The band's own caret folds it back into the tab.
+        let fold = h.snap.find(ic::CARET_UP).into_iter().next().expect("the band's fold caret");
+        h.click_at(fold.center(), PointerButton::Primary);
+        assert!(!h.w.dock.open && !tabs_shown(&h), "folded into the tab");
+        assert!(!h.snap.find(ic::CARET_DOWN).is_empty(), "the tab is back");
         // Leaving full screen from the band.
-        h.click_at(caret.center(), PointerButton::Primary);
+        h.frame(vec![Event::PointerMoved(Pos2::new(900.0, 1.0))]);
+        let name = h.snap.find("shell").into_iter().next().expect("the tab");
+        h.click_at(name.center(), PointerButton::Primary);
         let leave = h.snap.find(ic::ARROWS_IN).into_iter().next().expect("leave full screen in the band");
         h.click_at(leave.center(), PointerButton::Primary);
         assert!(!h.w.full.on, "left full screen");
