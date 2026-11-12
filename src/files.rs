@@ -516,7 +516,10 @@ pub fn op(op: FileOp, path: &str, arg: &str) -> ToClient {
         FileOp::Rename => {
             let name = clean(arg);
             let to = p.with_file_name(&name);
-            if to.exists() {
+            // Taken by another file (a dangling link included); the same file under another case
+            // ("report" to "Report" where case does not count) is a rename all the same.
+            let same = matches!((std::fs::canonicalize(p), std::fs::canonicalize(&to)), (Ok(a), Ok(b)) if a == b);
+            if std::fs::symlink_metadata(&to).is_ok() && !same {
                 Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{name} already exists")))
             } else {
                 std::fs::rename(p, &to).map(|_| format!("Renamed to {name}"))
@@ -553,6 +556,16 @@ mod tests {
         let a = dir.join("a.txt");
         assert!(matches!(op(FileOp::Rename, a.to_str().unwrap(), "b.txt"), ToClient::OpDone { ok: true, .. }));
         assert!(dir.join("b.txt").exists());
+        // Another file's name is refused, a dangling link's too; the file's own under another
+        // case is a rename.
+        std::fs::write(dir.join("c.txt"), b"c").unwrap();
+        assert!(matches!(op(FileOp::Rename, dir.join("b.txt").to_str().unwrap(), "c.txt"), ToClient::OpDone { ok: false, .. }));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("gone"), dir.join("link")).unwrap();
+            assert!(matches!(op(FileOp::Rename, dir.join("c.txt").to_str().unwrap(), "link"), ToClient::OpDone { ok: false, .. }));
+        }
+        assert!(matches!(op(FileOp::Rename, dir.join("c.txt").to_str().unwrap(), "C.txt"), ToClient::OpDone { ok: true, .. }));
         assert!(matches!(op(FileOp::Mkdir, d, ""), ToClient::OpDone { ok: false, .. }));
         assert!(matches!(op(FileOp::Delete, d, ""), ToClient::OpDone { ok: true, .. }));
         assert!(!dir.exists());
