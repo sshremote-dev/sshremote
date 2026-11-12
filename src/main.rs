@@ -434,9 +434,13 @@ fn run(args: &[String]) -> Result<(), String> {
             let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).map(String::as_str);
             let pipe = get("--pipe");
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
-            // A relay helper has no visible stderr; keep its failure where it can be found.
-            if let (Err(e), Some(_)) = (&r, pipe) {
-                let _ = std::fs::write(std::env::temp_dir().join("sshremote-agent.log"), e);
+            // A relay helper has no visible stderr; keep its failure where it can be found: beside
+            // the program (the service's copy is in a folder only administrators can write), never
+            // under a fixed name in a shared temporary folder another user could plant a link at.
+            if let (Err(e), Some(_)) = (&r, pipe)
+                && let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            {
+                let _ = std::fs::write(dir.join("sshremote-agent.log"), e);
             }
             r
         }
