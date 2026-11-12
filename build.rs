@@ -16,9 +16,15 @@ fn main() {
     // The icon, and the manifest that keeps a double click from opening a console window.
     std::fs::write(&rc, format!("1 ICON \"{}\"\n1 24 \"{}\"\n", path(&ico), path(&manifest))).unwrap();
     let obj = out.join("sshremote-icon.o");
-    let windres = std::env::var("WINDRES").unwrap_or_else(|_| "windres".into());
-    match std::process::Command::new(&windres).arg("-O").arg("coff").arg("-i").arg(&rc).arg("-o").arg(&obj).status() {
-        Ok(s) if s.success() => println!("cargo:rustc-link-arg-bins={}", obj.display()),
-        _ => println!("cargo:warning=windres not found; sshremote.exe is built without an icon"),
+    // WINDRES when set; else the native one, or MinGW's when building for Windows elsewhere.
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let candidates = std::env::var("WINDRES").map_or_else(|_| vec!["windres".to_string(), format!("{arch}-w64-mingw32-windres")], |w| vec![w]);
+    let built = candidates.iter().any(|w| {
+        std::process::Command::new(w).arg("-O").arg("coff").arg("-i").arg(&rc).arg("-o").arg(&obj).status().is_ok_and(|s| s.success())
+    });
+    if built {
+        println!("cargo:rustc-link-arg-bins={}", obj.display());
+    } else {
+        println!("cargo:warning=windres not found; sshremote.exe is built without its icon and manifest");
     }
 }
