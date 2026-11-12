@@ -1,12 +1,12 @@
 //! The web gateway: `sshremote web` serves a page to browsers and, over a WebSocket, joins it to
-//! a shell on this computer or to `ssh HOST` for the hosts this computer knows (behind the
-//! gateway's password), or to any computer's screen by its remote access ID and password, through
-//! the relay. Put it behind HTTPS (nginx, Caddy) when it faces the internet.
+//! a computer as the app does: its terminal, screen and files on one session. A computer by its
+//! remote access ID needs only its own password (it is reached through the relay); SSH hosts and
+//! this computer's own shells need the gateway's password, or a sign-in it gave the browser to
+//! remember. Put it behind HTTPS (nginx, Caddy) when it faces the internet.
 //!
-//! On the socket, text frames carry JSON (sign-in, host list, opening, resizing, the end) and
-//! binary frames carry the terminal's bytes both ways. A computer opened by ID is a whole client
-//! (terminal, screen, files) on one session; its binary frames start with a type byte: 1 terminal
-//! bytes, 2 a JPEG picture, 3 a download chunk and 4 an upload chunk (both after a u32 LE id).
+//! On the socket, text frames carry JSON (sign-in, what to open, the views, files, the end) and
+//! binary frames start with a type byte: 1 terminal bytes, 2 a JPEG picture, 3 a download chunk
+//! and 4 an upload chunk (both after a u32 LE id).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -264,18 +264,10 @@ fn send_json(w: &Mutex<TcpStream>, v: serde_json::Value) -> Result<(), String> {
 
 // ----- A session -------------------------------------------------------------------------------------
 
-/// The hosts a browser may open: this computer, and the hosts of this computer's ~/.ssh/config.
+/// The hosts a signed-in browser is offered: this computer, and the hosts of its ~/.ssh/config.
 fn hosts() -> Vec<String> {
     let mut out = vec![HERE.to_string()];
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
-    if let Some(text) = home.and_then(|h| std::fs::read_to_string(h.join(".ssh").join("config")).ok()) {
-        for line in text.lines() {
-            let mut w = line.split_whitespace();
-            if w.next().is_some_and(|k| k.eq_ignore_ascii_case("host")) {
-                out.extend(w.filter(|h| !h.contains(['*', '?', '!'])).map(str::to_string));
-            }
-        }
-    }
+    out.extend(crate::hosts::ssh_config_hosts());
     out.dedup();
     out
 }
@@ -284,6 +276,78 @@ fn equal(a: &str, b: &str) -> bool {
     use sha2::Digest;
     let (x, y) = (sha2::Sha256::digest(a.as_bytes()), sha2::Sha256::digest(b.as_bytes()));
     x.iter().zip(y.iter()).fold(0u8, |acc, (p, q)| acc | (p ^ q)) == 0
+}
+
+/// How long a sign-in a browser remembers lasts.
+const TOKEN_DAYS: u64 = 30;
+
+/// A remembered sign-in: random bytes, when it ends, and a MAC over both keyed by the gateway's
+/// password. Nothing is stored here, and a new password ends every one of them.
+fn token_new(password: &str) -> String {
+    use base64::Engine;
+    use hmac::Mac;
+    let mut r = [0u8; 16];
+    let _ = getrandom::getrandom(&mut r);
+    let until = crate::sys::now_secs() + TOKEN_DAYS * 86_400;
+    let mut body = r.to_vec();
+    body.extend_from_slice(&until.to_le_bytes());
+    let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(password.as_bytes()).expect("any key length").chain_update(&body).finalize().into_bytes();
+    body.extend_from_slice(&mac[..16]);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body)
+}
+
+fn token_ok(password: &str, token: &str) -> bool {
+    use base64::Engine;
+    use hmac::Mac;
+    let Ok(b) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.trim()) else { return false };
+    if b.len() != 40 {
+        return false;
+    }
+    let until = u64::from_le_bytes(b[16..24].try_into().expect("8 bytes"));
+    let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(password.as_bytes()).expect("any key length").chain_update(&b[..24]);
+    until > crate::sys::now_secs() && mac.verify_truncated_left(&b[24..]).is_ok()
+}
+
+/// What a browser opens: its name, the agent for the screen and files (reached at once for an
+/// ID, when first wanted otherwise), and where its shell runs.
+struct Open {
+    name: String,
+    agent: crate::transport::Target,
+    lazy: bool,
+    /// A program in a terminal here (`ssh HOST`, or this computer's shell, when empty) with what
+    /// to add to its environment; None: the agent's own shell.
+    shell: Option<(Vec<String>, Vec<(String, String)>)>,
+}
+
+/// An SSH host typed in the browser (`user@host`, a port, a password) or one of the gateway's
+/// own: reached from this computer, its shell by `ssh` here and its screen and files by the
+/// agent over ssh.
+fn ssh_open(host: &str, port: Option<u16>, password: Option<String>) -> Open {
+    let mut argv = vec!["ssh".to_string(), "-o".into(), "StrictHostKeyChecking=accept-new".into()];
+    if let Some(p) = port {
+        argv.extend(["-p".into(), p.to_string()]);
+    }
+    let mut env = Vec::new();
+    if let Some(pw) = &password {
+        // ssh asks this program for the password; a wrong one is asked once, not three times.
+        argv.extend(["-o".into(), "NumberOfPasswordPrompts=1".into()]);
+        if let Ok(exe) = std::env::current_exe() {
+            env.push(("SSH_ASKPASS".into(), exe.display().to_string()));
+            env.push(("SSH_ASKPASS_REQUIRE".into(), "force".into()));
+            env.push((crate::vault::ASKPASS_SECRET.into(), pw.clone()));
+        }
+    }
+    argv.push(host.to_string());
+    let agent = crate::transport::Target::Ssh {
+        host: host.to_string(),
+        port,
+        args: Vec::new(),
+        remote: crate::options::REMOTE.into(),
+        capture: "auto".into(),
+        password,
+        unattended: true,
+    };
+    Open { name: host.to_string(), agent, lazy: true, shell: Some((argv, env)) }
 }
 
 fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) -> Result<(), String> {
@@ -304,246 +368,111 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
         *e = (if e.1.elapsed() > Duration::from_secs(900) { 1 } else { e.0 + 1 }, Instant::now());
         Ok(())
     };
+    let size = |k: &str, d: u64, lo: u64, hi: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(lo, hi) as u16;
+    let view = (size("w", 1280, 64, 7680), size("h", 720, 64, 4320));
+    let term = (size("cols", 80, 2, 500), size("rows", 24, 1, 500));
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     // A computer by its remote access ID: its own password is the sign-in, checked by the computer.
-    if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
-        let id: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+    if v.get("id").is_some() {
+        let id: String = text("id").chars().filter(|c| c.is_ascii_digit()).collect();
         if blocked {
             return send_json(&w, serde_json::json!({ "error": "Too many failed tries; try again later." }));
         }
         if !crate::access::valid_id(&id) {
             return send_json(&w, serde_json::json!({ "error": "An ID is 9 digits." }));
         }
-        let password = v.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string();
-        let target = match &gate.local {
+        let agent = match &gate.local {
             Some(capture) => crate::transport::Target::Local { capture: capture.clone() },
             None => {
                 let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
-                crate::transport::Target::Direct { addr, password }
+                crate::transport::Target::Direct { addr, password: text("password") }
             }
         };
-        let size = |k: &str, d: u64, lo: u64, hi: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(lo, hi) as u16;
-        let view = (size("w", 1280, 64, 7680), size("h", 720, 64, 4320));
-        let term = (size("cols", 80, 2, 500), size("rows", 24, 1, 500));
-        if remote(r, w, target, &crate::access::spaced(&id), view, term)? {
-            gate.failures.lock().map_err(|e| e.to_string())?.remove(&who);
-        } else {
-            failed()?;
+        let open = Open { name: format!("ID {}", crate::access::spaced(&id)), agent, lazy: false, shell: None };
+        match client(r, w, open, view, term)? {
+            true => drop(gate.failures.lock().map_err(|e| e.to_string())?.remove(&who)),
+            false => failed()?,
         }
         return Ok(());
     }
+    // Everything else runs from this computer, for whoever holds the gateway's password (or a
+    // sign-in it gave): its own shells and hosts, and SSH to any host.
     if gate.id_only {
         return send_json(&w, serde_json::json!({ "error": "This gateway opens computers by ID only." }));
     }
-    if blocked || !equal(v.get("password").and_then(|p| p.as_str()).unwrap_or(""), &gate.password) {
+    let signed = v.get("gateway").cloned().unwrap_or_default();
+    let field = |k: &str| signed.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ok = !blocked && (equal(&field("password"), &gate.password) || (!field("token").is_empty() && token_ok(&gate.password, &field("token"))));
+    if !ok {
         if !blocked {
             failed()?;
         }
-        let text = if blocked { "Too many wrong passwords; try again later." } else { "Wrong password." };
-        let _ = send_json(&w, serde_json::json!({ "error": text }));
-        return Ok(());
+        let text = if blocked {
+            "Too many wrong passwords; try again later."
+        } else if field("password").is_empty() {
+            "Signed out: sign in to this gateway again."
+        } else {
+            "Wrong password for this gateway."
+        };
+        return send_json(&w, serde_json::json!({ "error": text, "signin": true }));
     }
     gate.failures.lock().map_err(|e| e.to_string())?.remove(&who);
     let list = hosts();
-    send_json(&w, serde_json::json!({ "hosts": list }))?;
-    // Then which host, at what size.
-    let Frame::Text(open) = read_frame(&mut r, &w)? else { return Err("expected a host".into()) };
-    let v: serde_json::Value = serde_json::from_str(&open).unwrap_or_default();
-    let host = v.get("open").and_then(|h| h.as_str()).unwrap_or("");
-    if !list.iter().any(|h| h == host) {
-        return send_json(&w, serde_json::json!({ "error": "That host is not offered here." }));
+    // Only signing in: the hosts, and a sign-in to remember when asked for.
+    if v.get("open").is_none() {
+        let token = (signed.get("remember").and_then(|x| x.as_bool()) == Some(true)).then(|| token_new(&gate.password));
+        return send_json(&w, serde_json::json!({ "signedIn": { "hosts": list, "token": token, "days": TOKEN_DAYS } }));
     }
-    if v.get("screen").and_then(|x| x.as_bool()) == Some(true) {
-        let size = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(1280).clamp(64, 7680) as u16;
-        let target = if host == HERE {
-            crate::transport::Target::Local { capture: "auto".into() }
-        } else {
-            crate::transport::Target::Ssh {
-                host: host.to_string(),
-                port: None,
-                args: Vec::new(),
-                remote: crate::options::REMOTE.into(),
-                capture: "auto".into(),
-                password: None,
-                unattended: false,
-            }
-        };
-        return screen(r, w, target, host, (size("w"), size("h"))).map(|_| ());
-    }
-    let size = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d).clamp(2, 500) as u16;
-    let argv: Vec<String> = if host == HERE { Vec::new() } else { vec!["ssh".into(), "-tt".into(), host.to_string()] };
-    let (wake_tx, wake) = mpsc::sync_channel::<()>(1);
-    let term = pty_spawn(&argv, size("cols", 80), size("rows", 24), wake_tx)?;
-    // Taken out when the browser goes, which hangs up the shell (or ssh) at once.
-    let term = Arc::new(Mutex::new(Some(term)));
-    // Output to the browser as it comes, until the terminal is taken away or ends.
-    let (t2, w2) = (term.clone(), w.clone());
-    let out = std::thread::spawn(move || {
-        loop {
-            let _ = wake.recv_timeout(Duration::from_millis(500));
-            let (data, end) = match t2.lock().as_deref_mut() {
-                Ok(Some(t)) => t.drain(),
-                _ => return,
-            };
-            if !data.is_empty() && send(&w2, 0x2, &data).is_err() {
-                return;
-            }
-            if let Some(why) = end {
-                let _ = send_json(&w2, serde_json::json!({ "end": why }));
-                let _ = send(&w2, 0x8, &[]);
-                if let Ok(s) = w2.lock() {
-                    let _ = s.shutdown(std::net::Shutdown::Both);
-                }
-                return;
-            }
+    let o = v.get("open").cloned().unwrap_or_default();
+    let host = o.get("host").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let open = if host == HERE {
+        Open {
+            name: HERE.into(),
+            agent: crate::transport::Target::Local { capture: gate.local.clone().unwrap_or_else(|| "auto".into()) },
+            lazy: true,
+            shell: Some((Vec::new(), Vec::new())),
         }
-    });
-    // Input and resizes from the browser until it goes.
-    let with_term = |f: &mut dyn FnMut(&mut _)| {
-        if let Ok(mut t) = term.lock()
-            && let Some(t) = t.as_mut()
-        {
-            f(t);
+    } else {
+        // Anything ssh takes as a destination, never an option.
+        if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
+            return send_json(&w, serde_json::json!({ "error": "Enter a host, for example user@192.168.1.20" }));
         }
+        let port = o.get("port").and_then(|x| x.as_u64()).filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
+        let password = o.get("password").and_then(|x| x.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
+        ssh_open(&host, port, password)
     };
-    loop {
-        match read_frame(&mut r, &w) {
-            Ok(Frame::Binary(data)) => with_term(&mut |t| t.write(&data)),
-            Ok(Frame::Text(t)) => {
-                let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-                if let Some([c, r]) = v
-                    .get("resize")
-                    .and_then(|x| x.as_array())
-                    .map(|a| a.iter().filter_map(|n| n.as_u64()).collect::<Vec<_>>())
-                    .as_deref()
-                {
-                    let (c, r) = ((*c).clamp(2, 500) as u16, (*r).clamp(1, 500) as u16);
-                    with_term(&mut |t| t.resize(c, r));
-                }
-            }
-            Ok(Frame::Close) | Err(_) => break,
-        }
-    }
-    if let Ok(s) = w.lock() {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-    }
-    // The terminal ends with the session: taken from the output thread too, it is dropped here,
-    // which hangs up the shell.
-    let gone = term.lock().ok().and_then(|mut t| t.take());
-    drop(gone);
-    let _ = out.join();
-    Ok(())
+    client(r, w, open, view, term).map(|_| ())
 }
 
 /// What the browser sends while it shows a screen.
 enum Input {
     Agent(crate::proto::ToAgent),
     View(u16, u16),
-    Gone,
-}
-
-/// The host's screen in the browser: the session's frames kept here and sent on as JPEG pictures
-/// (at most 12 a second, only when something changed); pointer, buttons, wheel and keys back.
-/// False when the connection could not be made.
-fn screen(
-    mut r: BufReader<TcpStream>,
-    w: Arc<Mutex<TcpStream>>,
-    target: crate::transport::Target,
-    host: &str,
-    view: (u16, u16),
-) -> Result<bool, String> {
-    use crate::proto::{Settings, ToAgent, ToClient};
-    use crate::session::{Ev, Session};
-    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
-    let (mut sess, _tx, rx) = match Session::open(&target, true) {
-        Ok(x) => x,
-        Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
-    };
-    let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
-    sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
-    send_json(&w, serde_json::json!({ "screen": [sess.desk.0, sess.desk.1] }))?;
-    // The browser's input on its own thread, handed over here.
-    let (in_tx, input) = mpsc::channel();
-    let w_in = w.clone();
-    std::thread::spawn(move || {
-        loop {
-            let msg = match read_frame(&mut r, &w_in) {
-                Ok(Frame::Text(t)) => serde_json::from_str::<serde_json::Value>(&t).ok().and_then(|v| browser_input(&v)),
-                Ok(Frame::Binary(_)) => None,
-                Ok(Frame::Close) | Err(_) => Some(Input::Gone),
-            };
-            if let Some(m) = msg {
-                let gone = matches!(m, Input::Gone);
-                if in_tx.send(m).is_err() || gone {
-                    return;
-                }
-            }
-        }
-    });
-    let mut fb = crate::session::Framebuffer::default();
-    let (mut dirty, mut sent) = (false, Instant::now() - Duration::from_secs(1));
-    let end = loop {
-        match rx.recv_timeout(Duration::from_millis(15)) {
-            Ok(Ev::Net(ToClient::Frame(f))) => {
-                fb.apply(&f).map_err(|e| e.to_string())?;
-                sess.send(ToAgent::Ack(f.id)).map_err(|e| e.to_string())?;
-                dirty = true;
-            }
-            Ok(Ev::Net(ToClient::Error(e))) | Ok(Ev::Closed(e)) => break e,
-            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break "the session ended".into(),
-        }
-        let mut gone = false;
-        for m in input.try_iter() {
-            match m {
-                Input::Agent(a) => sess.send(a).map_err(|e| e.to_string())?,
-                Input::View(vw, vh) => sess.send(ToAgent::Settings(settings((vw, vh)))).map_err(|e| e.to_string())?,
-                Input::Gone => gone = true,
-            }
-        }
-        if gone {
-            break String::new();
-        }
-        if dirty && fb.w > 0 && sent.elapsed() >= Duration::from_millis(80) {
-            let mut jpeg = Vec::new();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 82)
-                .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
-                .map_err(|e| e.to_string())?;
-            if send(&w, 0x2, &jpeg).is_err() {
-                break String::new();
-            }
-            (dirty, sent) = (false, Instant::now());
-        }
-    };
-    sess.close();
-    if !end.is_empty() {
-        let _ = send_json(&w, serde_json::json!({ "end": end }));
-    }
-    if let Ok(s) = w.lock() {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-    }
-    Ok(true)
 }
 
 /// A download or an upload as large as a browser is let to take (it holds a download whole).
 const MAX_TRANSFER: u64 = 2 << 30;
 
-/// What the browser sends to a computer opened by ID.
+/// What the browser sends to a computer it opened.
 enum Ask {
     Agent(crate::proto::ToAgent),
     View(u16, u16),
-    /// Which view shows: the picture is only made while it is the screen.
-    Show(bool),
+    /// Which view shows: the picture is only made while it is the screen; the files want the
+    /// agent too.
+    Show(String),
     /// A new shell, after the last one ended.
     Shell(u16, u16),
     Upload { id: u32, size: u64, dir: String, name: String },
     Chunk(u32, Vec<u8>),
     UploadEnd(u32),
+    /// How the picture is sent: JPEG quality and the least time between pictures.
+    Quality(u8, u64),
     Gone,
 }
 
-/// One message of a browser's ID session: JSON in text frames, typed bytes in binary ones.
+/// One message of a browser's session: JSON in text frames, typed bytes in binary ones.
 fn ask(frame: Frame) -> Option<Ask> {
-    use crate::proto::ToAgent;
+    use crate::proto::{FileOp, ToAgent};
     let v: serde_json::Value = match frame {
         Frame::Close => return Some(Ask::Gone),
         Frame::Binary(b) => {
@@ -564,7 +493,7 @@ fn ask(frame: Frame) -> Option<Ask> {
         Some((a.first()?.as_u64()?, a.get(1)?.as_u64()?))
     };
     if let Some(view) = s("show") {
-        return Some(Ask::Show(view == "screen"));
+        return Some(Ask::Show(view));
     }
     if let Some((c, r)) = pair("resize") {
         return Some(Ask::Agent(ToAgent::TermResize { id: 0, cols: c.clamp(2, 500) as u16, rows: r.clamp(1, 500) as u16 }));
@@ -576,10 +505,41 @@ fn ask(frame: Frame) -> Option<Ask> {
         return Some(Ask::Agent(ToAgent::ListDir { path }));
     }
     if let Some(path) = s("download") {
-        return Some(Ask::Agent(ToAgent::Fetch { tag: 0, path }));
+        let tag = n("tag").unwrap_or(0) as u32;
+        return Some(Ask::Agent(ToAgent::Fetch { tag, path }));
     }
     if let Some(id) = n("cancel") {
-        return Some(Ask::Agent(ToAgent::FetchCancel { id: id as u32, tag: 0 }));
+        let tag = n("tag").unwrap_or(0) as u32;
+        return Some(Ask::Agent(ToAgent::FetchCancel { id: id as u32, tag }));
+    }
+    if let Some(a) = v.get("op").and_then(|x| x.as_array()) {
+        let text = |i: usize| a.get(i).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let op = match text(0).as_str() {
+            "mkdir" => FileOp::Mkdir,
+            "rename" => FileOp::Rename,
+            "delete" => FileOp::Delete,
+            _ => return None,
+        };
+        return Some(Ask::Agent(ToAgent::FileOp { op, path: text(1), arg: text(2) }));
+    }
+    if let Some(t) = s("clipboard") {
+        return Some(Ask::Agent(ToAgent::Clipboard(t)));
+    }
+    if v.get("sas").is_some() {
+        return Some(Ask::Agent(ToAgent::SecureAttention));
+    }
+    if let Some(m) = n("monitor") {
+        return Some(Ask::Agent(ToAgent::SelectMonitor(m.min(255) as u8)));
+    }
+    if v.get("refresh").is_some() {
+        return Some(Ask::Agent(ToAgent::Refresh));
+    }
+    if let Some(q) = s("quality") {
+        return Some(match q.as_str() {
+            "best" => Ask::Quality(90, 60),
+            "fast" => Ask::Quality(60, 150),
+            _ => Ask::Quality(80, 80),
+        });
     }
     if let Some(u) = v.get("upload") {
         let id = u.get("id")?.as_u64()? as u32;
@@ -593,35 +553,74 @@ fn ask(frame: Frame) -> Option<Ask> {
     match browser_input(&v)? {
         Input::Agent(a) => Some(Ask::Agent(a)),
         Input::View(w, h) => Some(Ask::View(w, h)),
-        Input::Gone => Some(Ask::Gone),
     }
 }
 
-/// A computer in the browser as in the app, on one session: a shell first, its screen (made only
-/// while shown) and its files. False when the connection could not be made.
-fn remote(
+/// What the picture is asked to be: the browser's view, all colours, 15 pictures a second at most.
+fn settings((vw, vh): (u16, u16)) -> crate::proto::Settings {
+    crate::proto::Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 }
+}
+
+/// Reaches the agent, with no picture until the screen shows.
+fn reach(target: crate::transport::Target, view: (u16, u16)) -> Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String> {
+    use crate::proto::ToAgent;
+    let (mut sess, _tx, rx) = crate::session::Session::open(&target, true)?;
+    sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
+    sess.send(ToAgent::Settings(settings(view))).map_err(|e| e.to_string())?;
+    Ok((sess, rx))
+}
+
+/// The agent of a session, or where it stands.
+enum Agent {
+    Up(crate::session::Session, mpsc::Receiver<crate::session::Ev>),
+    Connecting(mpsc::Receiver<Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String>>),
+    /// Not wanted yet (an SSH host's screen and files are reached when first shown).
+    Idle,
+    Failed(String),
+}
+
+/// A computer in the browser as in the app: a shell first, its screen (made only while shown) and
+/// its files. False when it could not be reached at all.
+fn client(
     mut r: BufReader<TcpStream>,
     w: Arc<Mutex<TcpStream>>,
-    target: crate::transport::Target,
-    host: &str,
+    open: Open,
     view: (u16, u16),
     (cols, rows): (u16, u16),
 ) -> Result<bool, String> {
-    use crate::proto::{Settings, ToAgent, ToClient};
-    use crate::session::{Ev, Session};
-    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {host}\u{2026}") }));
-    let (mut sess, _tx, rx) = match Session::open(&target, true) {
-        Ok(x) => x,
-        Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
-    };
-    let settings = |(vw, vh): (u16, u16)| Settings { view_w: vw, view_h: vh, scale: 100, mode: crate::color::Mode::True, fps: 15 };
+    use crate::proto::{ToAgent, ToClient};
+    use crate::session::Ev;
     let io = |e: std::io::Error| e.to_string();
-    // No picture until the screen shows.
-    sess.send(ToAgent::Pause(true)).map_err(io)?;
-    sess.send(ToAgent::Settings(settings(view))).map_err(io)?;
+    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {}\u{2026}", open.name) }));
+    let start = reach;
+    let mut agent = if open.lazy {
+        Agent::Idle
+    } else {
+        match start(open.agent.clone(), view) {
+            Ok((s, rx)) => Agent::Up(s, rx),
+            Err(e) => return send_json(&w, serde_json::json!({ "error": plain(&e) })).map(|_| false),
+        }
+    };
+    // The shell: the agent's, or a program in a terminal here.
     let mut shell = 1u32;
-    sess.send(ToAgent::TermOpen { id: shell, cols, rows }).map_err(io)?;
-    send_json(&w, serde_json::json!({ "ready": { "host": host, "screen": [sess.desk.0, sess.desk.1], "backend": sess.backend } }))?;
+    let mut pty: Option<crate::pty::Local> = None;
+    let spawn = |cols: u16, rows: u16| -> Result<crate::pty::Local, String> {
+        let (argv, env) = open.shell.as_ref().expect("a shell here");
+        crate::pty::Local::spawn_with(argv, env, cols, rows, Box::new(|| {}))
+    };
+    match (&open.shell, &mut agent) {
+        (Some(_), _) => match spawn(cols, rows) {
+            Ok(p) => pty = Some(p),
+            Err(e) => return send_json(&w, serde_json::json!({ "error": e })).map(|_| false),
+        },
+        (None, Agent::Up(sess, _)) => sess.send(ToAgent::TermOpen { id: shell, cols, rows }).map_err(io)?,
+        (None, _) => {}
+    }
+    let desk = match &agent {
+        Agent::Up(sess, _) => serde_json::json!([sess.desk.0, sess.desk.1]),
+        _ => serde_json::Value::Null,
+    };
+    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk } }))?;
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
     let w_in = w.clone();
@@ -640,26 +639,85 @@ fn remote(
         }
     });
     let mut fb = crate::session::Framebuffer::default();
-    let (mut dirty, mut sent, mut shown) = (false, Instant::now() - Duration::from_secs(1), false);
+    let (mut dirty, mut sent, mut shown) = (false, Instant::now(), false);
+    let (mut jpeg_q, mut gap) = (80u8, Duration::from_millis(80));
+    let mut view = view;
+    // Asks waiting for the agent to be reached.
+    let mut waiting: Vec<ToAgent> = Vec::new();
     // Downloads under way: bytes passed on to the browser and bytes acknowledged to the agent.
     let mut downloads: HashMap<u32, (u64, u64)> = HashMap::new();
     // Uploads under way: declared size and bytes passed on.
     let mut uploads: HashMap<u32, (u64, u64)> = HashMap::new();
     let end = 'run: loop {
-        match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(Ev::Net(m)) => match m {
+        // The agent's messages, or a short wait when there is no agent to hear from.
+        let mut msgs = Vec::new();
+        match &mut agent {
+            Agent::Up(_, rx) => match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(m) => {
+                    msgs.push(m);
+                    msgs.extend(rx.try_iter().take(256));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => msgs.push(Ev::Closed("the session ended".into())),
+            },
+            Agent::Connecting(c) => match c.try_recv() {
+                Ok(Ok((mut sess, rx))) => {
+                    // Reached: what was asked meanwhile goes now.
+                    let _ = send_json(&w, serde_json::json!({ "agent": { "screen": [sess.desk.0, sess.desk.1] } }));
+                    if shown {
+                        let _ = sess.send(ToAgent::Pause(false));
+                    }
+                    for m in waiting.drain(..) {
+                        sess.send(m).map_err(io)?;
+                    }
+                    agent = Agent::Up(sess, rx);
+                }
+                Ok(Err(e)) => {
+                    let text = plain(&e);
+                    let _ = send_json(&w, serde_json::json!({ "agentError": text }));
+                    waiting.clear();
+                    agent = Agent::Failed(text);
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            },
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+        for m in msgs {
+            let m = match m {
+                Ev::Net(m) => m,
+                Ev::Closed(e) => {
+                    // An ID's agent is the whole session; another's only its screen and files.
+                    if open.shell.is_none() {
+                        break 'run plain(&e);
+                    }
+                    let text = plain(&e);
+                    let _ = send_json(&w, serde_json::json!({ "agentError": text }));
+                    agent = Agent::Failed(text);
+                    break;
+                }
+                #[allow(unreachable_patterns)]
+                _ => continue,
+            };
+            let Agent::Up(sess, _) = &mut agent else { break };
+            match m {
                 ToClient::Frame(f) => {
                     fb.apply(&f).map_err(io)?;
                     sess.send(ToAgent::Ack(f.id)).map_err(io)?;
+                    if std::mem::take(&mut fb.need_key) {
+                        sess.send(ToAgent::Refresh).map_err(io)?;
+                    }
                     dirty = true;
                 }
-                ToClient::Error(e) => break plain(&e),
-                ToClient::TermOutput { id, data } if id == shell => {
+                ToClient::Hello { w: dw, h: dh, .. } => {
+                    let _ = send_json(&w, serde_json::json!({ "screen": [dw, dh] }));
+                }
+                ToClient::Error(e) => break 'run plain(&e),
+                ToClient::TermOutput { id, data } if id == shell && pty.is_none() => {
                     if send(&w, 0x2, &[&[1u8][..], &data].concat()).is_err() {
-                        break String::new();
+                        break 'run String::new();
                     }
                 }
-                ToClient::TermExit { id, text } if id == shell => {
+                ToClient::TermExit { id, text } if id == shell && pty.is_none() => {
                     let _ = send_json(&w, serde_json::json!({ "exit": text }));
                 }
                 ToClient::DirList { path, entries, error } => {
@@ -669,21 +727,24 @@ fn remote(
                         .collect();
                     let _ = send_json(&w, serde_json::json!({ "dir": { "path": path, "entries": list, "error": error } }));
                 }
-                ToClient::FetchStart { id, size, name, .. } => {
+                ToClient::OpDone { ok, text } => {
+                    let _ = send_json(&w, serde_json::json!({ "opDone": { "ok": ok, "text": text } }));
+                }
+                ToClient::FetchStart { id, size, tag, name } => {
                     if size > MAX_TRANSFER {
                         sess.send(ToAgent::FetchCancel { id, tag: 0 }).map_err(io)?;
                         let text = "Larger than 2 GB: too large for a browser download.";
-                        let _ = send_json(&w, serde_json::json!({ "fetched": { "id": id, "ok": false, "name": name, "text": text } }));
+                        let _ = send_json(&w, serde_json::json!({ "fetched": { "id": id, "ok": false, "name": name, "text": text, "tag": tag } }));
                     } else {
                         downloads.insert(id, (0, 0));
-                        let _ = send_json(&w, serde_json::json!({ "fetch": { "id": id, "size": size, "name": name } }));
+                        let _ = send_json(&w, serde_json::json!({ "fetch": { "id": id, "size": size, "name": name, "tag": tag } }));
                     }
                 }
                 ToClient::FetchData { id, data } => {
                     let Some(d) = downloads.get_mut(&id) else { continue };
                     // Passed on before acknowledged: the browser's pace limits the agent's.
                     if send(&w, 0x2, &[&[3u8][..], &id.to_le_bytes(), &data].concat()).is_err() {
-                        break String::new();
+                        break 'run String::new();
                     }
                     d.0 += data.len() as u64;
                     if d.0 - d.1 >= crate::files::REPORT {
@@ -695,6 +756,9 @@ fn remote(
                     downloads.remove(&id);
                     let _ = send_json(&w, serde_json::json!({ "fetched": { "id": id, "ok": ok, "text": text } }));
                 }
+                ToClient::FetchDone { tag } => {
+                    let _ = send_json(&w, serde_json::json!({ "fetchDone": tag }));
+                }
                 ToClient::FileProgress { id, received } => {
                     let _ = send_json(&w, serde_json::json!({ "progress": [id, received] }));
                 }
@@ -702,19 +766,63 @@ fn remote(
                     uploads.remove(&id);
                     let _ = send_json(&w, serde_json::json!({ "uploaded": { "id": id, "ok": ok, "text": text } }));
                 }
+                ToClient::Clipboard(t) => {
+                    let _ = send_json(&w, serde_json::json!({ "clipboard": t }));
+                }
+                ToClient::Monitors { list, current } => {
+                    let list: Vec<_> = list.iter().map(|m| serde_json::json!({ "name": m.name, "w": m.w, "h": m.h, "primary": m.primary })).collect();
+                    let _ = send_json(&w, serde_json::json!({ "monitors": { "list": list, "current": current } }));
+                }
                 ToClient::Notice(t) => {
                     let _ = send_json(&w, serde_json::json!({ "notice": t }));
                 }
                 _ => {}
-            },
-            Ok(Ev::Closed(e)) => break plain(&e),
-            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break "the session ended".into(),
+            }
+        }
+        // The shell here: its output, and its end.
+        if let Some(p) = pty.as_mut() {
+            let (data, ended) = p.drain();
+            if !data.is_empty() && send(&w, 0x2, &[&[1u8][..], &data].concat()).is_err() {
+                break 'run String::new();
+            }
+            if let Some(text) = ended {
+                pty = None;
+                let _ = send_json(&w, serde_json::json!({ "exit": text }));
+            }
         }
         while let Ok(m) = input.try_recv() {
-            match m {
-                Ask::Agent(ToAgent::TermInput { data, .. }) => sess.send(ToAgent::TermInput { id: shell, data }),
-                Ask::Agent(ToAgent::TermResize { cols, rows, .. }) => sess.send(ToAgent::TermResize { id: shell, cols, rows }),
+            let to_agent: Option<ToAgent> = match m {
+                Ask::Agent(ToAgent::TermInput { data, .. }) => match pty.as_mut() {
+                    Some(p) => {
+                        p.write(&data);
+                        None
+                    }
+                    None if open.shell.is_some() => None,
+                    None => Some(ToAgent::TermInput { id: shell, data }),
+                },
+                Ask::Agent(ToAgent::TermResize { cols, rows, .. }) => match pty.as_ref() {
+                    Some(p) => {
+                        p.resize(cols, rows);
+                        None
+                    }
+                    None if open.shell.is_some() => None,
+                    None => Some(ToAgent::TermResize { id: shell, cols, rows }),
+                },
+                Ask::Shell(c, r) => {
+                    if open.shell.is_some() {
+                        match spawn(c, r) {
+                            Ok(p) => pty = Some(p),
+                            Err(e) => drop(send_json(&w, serde_json::json!({ "exit": e }))),
+                        }
+                        None
+                    } else {
+                        if let Agent::Up(sess, _) = &mut agent {
+                            let _ = sess.send(ToAgent::TermClose { id: shell });
+                        }
+                        shell += 1;
+                        Some(ToAgent::TermOpen { id: shell, cols: c, rows: r })
+                    }
+                }
                 // Pointer and keys reach the screen only while it shows.
                 Ask::Agent(
                     ToAgent::Pointer { .. }
@@ -722,45 +830,78 @@ fn remote(
                     | ToAgent::Scroll { .. }
                     | ToAgent::HScroll { .. }
                     | ToAgent::KeyState { .. },
-                ) if !shown => Ok(()),
-                Ask::Agent(a) => sess.send(a),
-                Ask::View(vw, vh) => sess.send(ToAgent::Settings(settings((vw, vh)))),
-                Ask::Show(on) if on == shown => Ok(()),
-                Ask::Show(on) => {
-                    (shown, dirty) = (on, on && fb.w > 0);
-                    sess.send(ToAgent::Pause(!on)).and_then(|_| if on { sess.send(ToAgent::Refresh) } else { Ok(()) })
+                ) if !shown => None,
+                Ask::Agent(a) => Some(a),
+                Ask::View(vw, vh) => {
+                    view = (vw, vh);
+                    Some(ToAgent::Settings(settings(view)))
                 }
-                Ask::Shell(c, r) => {
-                    let _ = sess.send(ToAgent::TermClose { id: shell });
-                    shell += 1;
-                    sess.send(ToAgent::TermOpen { id: shell, cols: c, rows: r })
+                Ask::Quality(q, ms) => {
+                    (jpeg_q, gap, dirty) = (q, Duration::from_millis(ms), fb.w > 0);
+                    None
+                }
+                Ask::Show(v) => {
+                    let on = v == "screen";
+                    // The screen or the files: an agent not reached yet is reached now.
+                    if v != "terminal" && matches!(agent, Agent::Idle) {
+                        let _ = send_json(&w, serde_json::json!({ "status": "Connecting for the screen and files\u{2026}" }));
+                        let (tx, rx) = mpsc::channel();
+                        let (target, at) = (open.agent.clone(), view);
+                        std::thread::spawn(move || drop(tx.send(start(target, at))));
+                        agent = Agent::Connecting(rx);
+                    }
+                    if on == shown {
+                        None
+                    } else {
+                        (shown, dirty) = (on, on && fb.w > 0);
+                        if let Agent::Up(sess, _) = &mut agent {
+                            sess.send(ToAgent::Pause(!on)).map_err(io)?;
+                        }
+                        on.then_some(ToAgent::Refresh)
+                    }
                 }
                 Ask::Upload { id, size, dir, name } => {
                     if size > MAX_TRANSFER || uploads.len() >= 8 || uploads.contains_key(&id) {
                         let text = if size > MAX_TRANSFER { "Larger than 2 GB: too large to send from a browser." } else { "Too many uploads at once." };
                         let _ = send_json(&w, serde_json::json!({ "uploaded": { "id": id, "ok": false, "text": text } }));
-                        continue;
+                        None
+                    } else {
+                        uploads.insert(id, (size, 0));
+                        Some(ToAgent::FileStart { id, size, dir, name })
                     }
-                    uploads.insert(id, (size, 0));
-                    sess.send(ToAgent::FileStart { id, size, dir, name })
                 }
                 // Never more than the size it announced.
                 Ask::Chunk(id, data) => match uploads.get_mut(&id) {
                     Some(u) if u.1 + data.len() as u64 <= u.0 => {
                         u.1 += data.len() as u64;
-                        sess.send(ToAgent::FileData { id, data })
+                        Some(ToAgent::FileData { id, data })
                     }
-                    _ => Ok(()),
+                    _ => None,
                 },
-                Ask::UploadEnd(id) if uploads.contains_key(&id) => sess.send(ToAgent::FileEnd { id }),
-                Ask::UploadEnd(_) => Ok(()),
+                Ask::UploadEnd(id) if uploads.contains_key(&id) => Some(ToAgent::FileEnd { id }),
+                Ask::UploadEnd(_) => None,
                 Ask::Gone => break 'run String::new(),
+            };
+            let Some(m) = to_agent else { continue };
+            match &mut agent {
+                Agent::Up(sess, _) => sess.send(m).map_err(io)?,
+                Agent::Connecting(_) => waiting.push(m),
+                // Files asked for before any view wanted them reach for the agent too.
+                Agent::Idle => {
+                    let (tx, rx) = mpsc::channel();
+                    let (target, at) = (open.agent.clone(), view);
+                    std::thread::spawn(move || drop(tx.send(start(target, at))));
+                    agent = Agent::Connecting(rx);
+                    waiting.push(m);
+                }
+                Agent::Failed(why) => {
+                    let _ = send_json(&w, serde_json::json!({ "agentError": why.clone() }));
+                }
             }
-            .map_err(io)?;
         }
-        if shown && dirty && fb.w > 0 && sent.elapsed() >= Duration::from_millis(80) {
+        if shown && dirty && fb.w > 0 && sent.elapsed() >= gap {
             let mut jpeg = vec![2u8];
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 82)
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, jpeg_q)
                 .encode(&fb.rgb, fb.w as u32, fb.h as u32, image::ExtendedColorType::Rgb8)
                 .map_err(|e| e.to_string())?;
             if send(&w, 0x2, &jpeg).is_err() {
@@ -769,7 +910,11 @@ fn remote(
             (dirty, sent) = (false, Instant::now());
         }
     };
-    sess.close();
+    if let Agent::Up(mut sess, _) = agent {
+        sess.close();
+    }
+    // A shell here hangs up as it goes.
+    drop(pty);
     if !end.is_empty() {
         let _ = send_json(&w, serde_json::json!({ "end": end }));
     }
@@ -823,17 +968,6 @@ fn browser_input(v: &serde_json::Value) -> Option<Input> {
         return Some(Input::View(vw.clamp(64, 7680) as u16, vh.clamp(64, 4320) as u16));
     }
     None
-}
-
-fn pty_spawn(argv: &[String], cols: u16, rows: u16, wake: mpsc::SyncSender<()>) -> Result<crate::pty::Local, String> {
-    crate::pty::Local::spawn(
-        argv,
-        cols,
-        rows,
-        Box::new(move || {
-            let _ = wake.try_send(());
-        }),
-    )
 }
 
 // ----- SHA-1, for the WebSocket handshake only ----------------------------------------------------
@@ -949,11 +1083,7 @@ Host: x
             }
             (s, r)
         };
-        let put = |s: &mut TcpStream, op: u8, data: &[u8]| {
-            let mut f = vec![0x80 | op, 0x80 | data.len() as u8, 1, 2, 3, 4];
-            f.extend(data.iter().enumerate().map(|(i, b)| b ^ [1, 2, 3, 4][i % 4]));
-            s.write_all(&f).unwrap();
-        };
+        let put = |s: &mut TcpStream, op: u8, data: &[u8]| s.write_all(&masked(true, op, data)).unwrap();
         let get = |r: &mut BufReader<TcpStream>| -> (u8, Vec<u8>) {
             let mut h = [0u8; 2];
             r.read_exact(&mut h).unwrap();
@@ -978,22 +1108,33 @@ Host: x
             said = String::from_utf8(get(&mut r).1).unwrap();
         }
 
+        // Everything else needs the gateway's password, or a sign-in it gave.
         let (mut s, mut r) = open();
-        put(&mut s, 1, br#"{"password":"wrong"}"#);
+        put(&mut s, 1, br#"{"gateway":{"password":"wrong"}}"#);
         assert!(String::from_utf8(get(&mut r).1).unwrap().contains("Wrong password"));
+        let (mut s, mut r) = open();
+        put(&mut s, 1, br#"{"open":{"host":"x@y"},"gateway":{"token":"forged"}}"#);
+        assert!(String::from_utf8(get(&mut r).1).unwrap().contains("sign in"));
 
         let (mut s, mut r) = open();
-        put(&mut s, 1, br#"{"password":"secret-word"}"#);
-        assert!(String::from_utf8(get(&mut r).1).unwrap().contains(HERE));
-        put(&mut s, 1, format!(r#"{{"open":"{HERE}","cols":80,"rows":24}}"#).as_bytes());
-        put(&mut s, 2, b"echo web-42\r");
+        put(&mut s, 1, br#"{"gateway":{"password":"secret-word","remember":true}}"#);
+        let signed: serde_json::Value = serde_json::from_slice(&get(&mut r).1).unwrap();
+        assert!(signed["signedIn"]["hosts"].as_array().unwrap().iter().any(|h| h == HERE), "{signed}");
+        let token = signed["signedIn"]["token"].as_str().expect("a sign-in to remember").to_string();
+
+        // This computer's shell with the sign-in remembered: the client's frames, type 1 the
+        // terminal's bytes.
+        let (mut s, mut r) = open();
+        let first = serde_json::json!({ "gateway": { "token": token }, "open": { "host": HERE }, "cols": 80, "rows": 24 });
+        put(&mut s, 1, first.to_string().as_bytes());
+        put(&mut s, 2, b"\x01echo web-42\r");
         let mut seen = Vec::new();
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(15) && String::from_utf8_lossy(&seen).matches("web-42").count() < 2
         {
             let (op, d) = get(&mut r);
-            if op == 2 {
-                seen.extend(d);
+            if op == 2 && d.first() == Some(&1) {
+                seen.extend(&d[1..]);
             }
         }
         // Typed, then printed.
@@ -1001,12 +1142,12 @@ Host: x
         // Closing the tab hangs up its shell at once, rather than leave it for the gateway's life.
         #[cfg(unix)]
         {
-            put(&mut s, 2, b"echo PID=$$=\r");
+            put(&mut s, 2, b"\x01echo PID=$$=\r");
             let mut out = String::new();
             let pid = loop {
                 let (op, d) = get(&mut r);
-                if op == 2 {
-                    out.push_str(&String::from_utf8_lossy(&d));
+                if op == 2 && d.first() == Some(&1) {
+                    out.push_str(&String::from_utf8_lossy(&d[1..]));
                 }
                 // The echo of the command shows "$$"; the shell's answer shows digits.
                 if let Some(p) = out.split("PID=").filter_map(|t| t.split('=').next()?.parse::<u32>().ok()).next() {
@@ -1044,6 +1185,34 @@ Host: x
         f
     }
 
+    /// A remembered sign-in is the gateway's to give: it ends when it says, and with a new
+    /// password, and cannot be made up or changed.
+    #[test]
+    fn sign_ins_to_remember() {
+        let t = token_new("pw");
+        assert!(token_ok("pw", &t));
+        assert!(!token_ok("new pw", &t), "a new password ends it");
+        assert!(!token_ok("pw", "forged") && !token_ok("pw", ""));
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut b = b64.decode(&t).unwrap();
+        b[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(!token_ok("pw", &b64.encode(&b)), "its end cannot be moved");
+    }
+
+    /// A host typed in the browser is only ever ssh's destination, and its password goes in the
+    /// environment, never on the command line.
+    #[test]
+    fn ssh_from_the_browser() {
+        let o = ssh_open("dev@build", Some(2222), Some("s3cret".into()));
+        let (argv, env) = o.shell.unwrap();
+        assert_eq!(argv.last().unwrap(), "dev@build");
+        assert!(argv.windows(2).any(|w| w == ["-p", "2222"]));
+        assert!(!argv.iter().any(|a| a.contains("s3cret")));
+        assert!(env.iter().any(|(k, v)| k == crate::vault::ASKPASS_SECRET && v == "s3cret"));
+        assert!(o.lazy && matches!(o.agent, crate::transport::Target::Ssh { port: Some(2222), .. }));
+    }
+
     #[test]
     fn frames_of_every_length_and_in_pieces() {
         let sink = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1068,8 +1237,14 @@ Host: x
     fn id_session_messages() {
         use crate::proto::ToAgent;
         let a = |t: &str| ask(Frame::Text(t.into()));
-        assert!(matches!(a(r#"{"show":"screen"}"#), Some(Ask::Show(true))));
-        assert!(matches!(a(r#"{"show":"files"}"#), Some(Ask::Show(false))));
+        assert!(matches!(a(r#"{"show":"screen"}"#), Some(Ask::Show(v)) if v == "screen"));
+        assert!(matches!(a(r#"{"show":"files"}"#), Some(Ask::Show(v)) if v == "files"));
+        assert!(matches!(a(r#"{"op":["rename","/a/b","c"]}"#), Some(Ask::Agent(ToAgent::FileOp { path, arg, .. })) if path == "/a/b" && arg == "c"));
+        assert!(a(r#"{"op":["chmod","/a"]}"#).is_none());
+        assert!(matches!(a(r#"{"download":"/d","tag":2147483649}"#), Some(Ask::Agent(ToAgent::Fetch { tag: 0x8000_0001, .. }))));
+        assert!(matches!(a(r#"{"clipboard":"hi"}"#), Some(Ask::Agent(ToAgent::Clipboard(t))) if t == "hi"));
+        assert!(matches!(a(r#"{"sas":1}"#), Some(Ask::Agent(ToAgent::SecureAttention))));
+        assert!(matches!(a(r#"{"quality":"fast"}"#), Some(Ask::Quality(60, 150))));
         assert!(matches!(a(r#"{"list":""}"#), Some(Ask::Agent(ToAgent::ListDir { .. }))));
         assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
         assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));

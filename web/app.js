@@ -1,105 +1,445 @@
+"use strict";
+// SSH Remote in a browser: the open page (an ID or an SSH host, saved connections, this gateway's
+// own hosts) and one connection at a time with its terminal, screen and files, as in the app.
+
 const $ = id => document.getElementById(id);
-let ws, term, fit;
 const base = location.pathname.replace(/[^/]*$/, "");
-const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "ws";
+const WS = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "ws";
+// A download request with this bit in its tag is told when its last file has been sent.
+const DONE_TAG = 0x80000000;
+const MAX_TRANSFER = 2 * 1024 ** 3, CHUNK = 64 * 1024, WINDOW = 1024 * 1024;
 
-function fail(text) { $("error").textContent = text; }
+// ----- Small helpers -------------------------------------------------------------------------------
 
-$("id").oninput = () => {
-  // Spaced in threes as the app shows it.
-  const d = $("id").value.replace(/\D/g, "").slice(0, 9);
-  $("id").value = d.replace(/(\d{3})(?=\d)/g, "$1 ");
+const ICONS = {
+  terminal: "M4 5h16v14H4z|M7.5 9.5 10 12l-2.5 2.5|M12.5 15h4",
+  monitor: "M3 4h18v12H3z|M8 20h8|M12 16v4",
+  folder: "M3 6.5h6l2 2h10V19H3z",
+  file: "M6 3h8l5 5v13H6z|M14 3v5h5",
+  up: "M12 19V5|M6 11l6-6 6 6",
+  home: "M3.5 11 12 3.5l8.5 7.5|M5.5 9.5V20h13V9.5",
+  reload: "M20 12a8 8 0 1 1-2.4-5.7|M20 4v5h-5",
+  upload: "M12 15V4|M7 9l5-5 5 5|M4 15v5h16v-5",
+  download: "M12 4v11|M7 10l5 5 5-5|M4 15v5h16v-5",
+  newfolder: "M3 6.5h6l2 2h10V19H3z|M12 11v6|M9 14h6",
+  rename: "M4 20h4L19 9l-4-4L4 16z|M13.5 6.5l4 4",
+  trash: "M4 7h16|M10 11v6|M14 11v6|M6 7l1 13h10l1-13|M9 7V4h6v3",
+  keyboard: "M3 6h18v12H3z|M7 10h.01|M11 10h.01|M15 10h.01|M7.5 14h9",
+  clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
+  eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z|M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
+  camera: "M4 8h3.5l2-3h5l2 3H20v11H4z|M12 10a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6z",
+  sliders: "M4 7h9|M17 7h3|M15 5v4|M4 12h3|M11 12h9|M9 10v4|M4 17h11|M19 17h1|M17 15v4",
+  screens: "M2 5h13v9H2z|M9 14v4|M5 18h8|M18 8h4v10h-6",
+  full: "M4 9V4h5|M20 9V4h-5|M4 15v5h5|M20 15v5h-5",
+  unfull: "M9 4v5H4|M15 4v5h5|M9 20v-5H4|M15 20v-5h5",
+  caretup: "M6 15l6-6 6 6",
+  caretdown: "M6 9l6 6 6-6",
+  logout: "M10 4H5v16h5|M15 8l4 4-4 4|M19 12H9",
+  x: "M6 6l12 12|M18 6 6 18",
+  dots: "M5 12h.01|M12 12h.01|M19 12h.01",
+  server: "M4 4h16v6H4z|M4 14h16v6H4z|M8 7h.01|M8 17h.01",
+  lock: "M6 11h12v9H6z|M8 11V7.5a4 4 0 0 1 8 0V11",
+  open: "M5 12h14|M13 6l6 6-6 6",
 };
-$("gateway").onclick = e => {
-  e.preventDefault();
-  const gate = $("signin").style.display === "none";
-  $("signin").style.display = gate ? "" : "none";
-  $("byid").style.display = gate ? "none" : "";
-  $("gateway").textContent = gate ? "Connect by ID" : "Terminals on this gateway";
-  (gate ? $("password") : $("id")).focus();
-  fail("");
-};
-$("byid").onsubmit = e => {
-  e.preventDefault();
-  fail("");
-  const id = $("id").value.replace(/\D/g, "");
-  if (id.length !== 9) { fail("An ID is 9 digits."); return; }
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-  ws.onerror = () => fail("The gateway could not be reached.");
-  openClient($("id").value, id, $("idpw").value);
-};
-
-$("signin").onsubmit = e => {
-  e.preventDefault();
-  fail("");
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ password: $("password").value }));
-  ws.onerror = () => fail("The gateway could not be reached.");
-  ws.onmessage = m => {
-    if (typeof m.data !== "string") return;
-    const v = JSON.parse(m.data);
-    if (v.error) { fail(v.error); return; }
-    if (v.hosts) {
-      $("signin").style.display = "none";
-      $("toggle").style.display = "none";
-      $("pick").style.display = "";
-      const sel = $("host");
-      sel.textContent = "";
-      for (const h of v.hosts) { const o = document.createElement("option"); o.textContent = h; sel.append(o); }
-      sel.focus();
-    }
-  };
-};
-
-$("pick").onsubmit = e => {
-  e.preventDefault();
-  const host = $("host").value;
-  chrome(host, "terminal");
-  $("term").style.display = "block";
-  term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000,
-    fontFamily: "'Cascadia Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace",
-    theme: { background: "#0b1220" } });
-  fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open($("term"));
-  fit.fit();
-  const enc = new TextEncoder();
-  ws.onmessage = m => {
-    if (typeof m.data === "string") {
-      const v = JSON.parse(m.data);
-      if (v.error) term.write("\r\n\x1b[31m" + v.error + "\x1b[0m\r\n");
-      if (v.end) term.write("\r\n\x1b[2m[" + v.end + "]\x1b[0m\r\n");
-    } else {
-      term.write(new Uint8Array(m.data));
-    }
-  };
-  ws.onclose = () => term.write("\r\n\x1b[2m[closed]\x1b[0m\r\n");
-  ws.send(JSON.stringify({ open: host, cols: term.cols, rows: term.rows }));
-  term.onData(d => ws.readyState === 1 && ws.send(enc.encode(d)));
-  term.onResize(s => ws.readyState === 1 && ws.send(JSON.stringify({ resize: [s.cols, s.rows] })));
-  addEventListener("resize", () => fit.fit());
-  term.focus();
-};
-
-function chrome(host, what) {
-  $("card").style.display = "none";
-  $("bar").style.display = "flex";
-  $("title").textContent = host + " · " + what;
-  document.title = host + " - SSH Remote Web";
+const SVG = "http://www.w3.org/2000/svg";
+function icon(name) {
+  const s = document.createElementNS(SVG, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "i");
+  s.setAttribute("aria-hidden", "true");
+  for (const d of ICONS[name].split("|")) {
+    const p = document.createElementNS(SVG, "path");
+    p.setAttribute("d", d);
+    s.append(p);
+  }
+  return s;
 }
+
+// An element: h("div", { class: "x", onclick }, child...).
+function h(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e[k] = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k);
+  return e;
+}
+// A button with an icon and, if given, a label.
+function button(ic, label, props) {
+  const b = h("button", { type: "button", class: "btn" + (label ? "" : " icon"), ...props });
+  if (ic) b.append(icon(ic));
+  if (label) b.append(h("span", { text: label }));
+  return b;
+}
+function setButton(b, ic, label) { b.textContent = ""; if (ic) b.append(icon(ic)); if (label) b.append(h("span", { class: "tx", text: label })); }
+
+function size(n) {
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
+}
+function ago(ms) {
+  const s = (Date.now() - ms) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  if (s < 172800) return "yesterday";
+  return Math.floor(s / 86400) + " days ago";
+}
+const spaced = id => id.replace(/(\d{3})(?=\d)/g, "$1 ");
+const when = t => t ? new Date(t * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+
+function toast(text, opts = {}) {
+  const t = h("div", { class: "toast" + (opts.bad ? " bad" : ""), role: "status" }, h("span", { text }));
+  if (opts.action) t.append(button(null, opts.action[0], { class: "btn solid", onclick: () => { opts.action[1](); t.remove(); } }));
+  $("toasts").append(t);
+  setTimeout(() => t.remove(), opts.ms || (opts.action ? 12000 : 5000));
+}
+
+// A menu of [label, action, {on, kbd, danger}] items (null for a rule, a string for a heading),
+// under `anchor` or at a point.
+let openMenu = null;
+function menu(items, at) {
+  closeMenu();
+  const m = h("div", { class: "menu", role: "menu" });
+  for (const it of items) {
+    if (it === null) { m.append(h("hr")); continue; }
+    if (typeof it === "string") { m.append(h("div", { class: "lab", text: it })); continue; }
+    const [label, act, o = {}] = it;
+    const b = h("button", { type: "button", role: "menuitem", class: o.on ? "on" : "", disabled: o.disabled },
+      o.icon ? icon(o.icon) : null, h("span", { text: label }), o.kbd ? h("kbd", { text: o.kbd }) : null);
+    b.onclick = () => { closeMenu(); act(); };
+    m.append(b);
+  }
+  document.body.append(m);
+  const r = at instanceof Element ? at.getBoundingClientRect() : { left: at[0], bottom: at[1], top: at[1] };
+  const w = m.offsetWidth, hh = m.offsetHeight;
+  m.style.left = Math.max(4, Math.min(r.left, innerWidth - w - 4)) + "px";
+  m.style.top = (r.bottom + hh + 4 > innerHeight ? Math.max(4, r.top - hh - 4) : r.bottom + 4) + "px";
+  openMenu = m;
+  m.querySelector("button:not([disabled])")?.focus();
+  setTimeout(() => addEventListener("pointerdown", outside, true), 0);
+}
+function outside(e) { if (openMenu && !openMenu.contains(e.target)) closeMenu(); }
+function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; removeEventListener("pointerdown", outside, true); } }
+addEventListener("keydown", e => { if (e.key === "Escape" && openMenu) { e.preventDefault(); closeMenu(); } }, true);
+
+// A dialog: a title, a line of text, an optional field, and its buttons; resolves with the
+// field's text (or true), or null when cancelled.
+function ask({ title, text, field, area, value, select, ok = "OK", danger }) {
+  return new Promise(done => {
+    const box = $("modal").firstElementChild;
+    box.textContent = "";
+    const input = field || area ? h(area ? "textarea" : "input", { placeholder: field || area, spellcheck: "false" }) : null;
+    if (input) input.value = value || "";
+    const finish = v => { $("modal").hidden = true; removeEventListener("keydown", keys, true); done(v); };
+    const yes = h("button", { type: "button", class: "btn " + (danger ? "solid danger" : "primary"), text: ok });
+    yes.onclick = () => finish(input ? input.value : true);
+    const keys = e => {
+      if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      if (e.key === "Enter" && !area) { e.preventDefault(); yes.click(); }
+    };
+    box.append(...[h("h2", { text: title }), text ? h("p", { text }) : null, input,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: () => finish(null) }), yes)].filter(Boolean));
+    $("modal").hidden = false;
+    addEventListener("keydown", keys, true);
+    if (input) { input.focus(); if (select) input.setSelectionRange(...select(input.value)); } else yes.focus();
+  });
+}
+
+// ----- What this browser keeps ----------------------------------------------------------------------
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("sshremote." + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { if (v === null) localStorage.removeItem("sshremote." + k); else localStorage.setItem("sshremote." + k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+const b64 = u => btoa(String.fromCharCode(...u));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+// Passwords are kept sealed with a key this browser made and cannot export: it lives in
+// IndexedDB, usable by this page only, so the saved text alone gives nothing away.
+let keyPromise = null;
+function secretKey() {
+  if (keyPromise) return keyPromise;
+  keyPromise = new Promise((ok, no) => {
+    if (!window.indexedDB || !window.crypto?.subtle) { no(new Error("no safe store")); return; }
+    const req = indexedDB.open("sshremote", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("keys");
+    req.onerror = () => no(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const get = db.transaction("keys").objectStore("keys").get("passwords");
+      get.onerror = () => no(get.error);
+      get.onsuccess = async () => {
+        if (get.result) { ok(get.result); return; }
+        try {
+          const k = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+          const put = db.transaction("keys", "readwrite").objectStore("keys").put(k, "passwords");
+          put.onsuccess = () => ok(k);
+          put.onerror = () => no(put.error);
+        } catch (e) { no(e); }
+      };
+    };
+  });
+  keyPromise.catch(() => { keyPromise = null; });
+  return keyPromise;
+}
+const canKeep = !!(window.isSecureContext && window.crypto?.subtle && window.indexedDB);
+async function seal(text) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await secretKey(), new TextEncoder().encode(text));
+  return { iv: b64(iv), data: b64(new Uint8Array(data)) };
+}
+async function unseal(s) {
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(s.iv) }, await secretKey(), unb64(s.data));
+  return new TextDecoder().decode(plain);
+}
+
+// Saved connections: { key, kind: "id" | "ssh" | "gw", address, port, name, last, view, pw }.
+const saved = () => store.get("saved", []);
+const keyOf = t => t.kind + ":" + t.address + (t.port ? ":" + t.port : "");
+function title(t) { return t.name || (t.kind === "id" ? "ID " + spaced(t.address) : t.address + (t.port ? ":" + t.port : "")); }
+function save(entry) {
+  const list = saved().filter(e => e.key !== entry.key);
+  list.unshift(entry);
+  store.set("saved", list.slice(0, 40));
+}
+function update(key, change) {
+  const list = saved();
+  const e = list.find(x => x.key === key);
+  if (e) { Object.assign(e, change); store.set("saved", list); }
+}
+
+// The gateway sign-in this browser remembers.
+const gateway = { token: null, until: 0, hosts: null, password: null };
+{
+  const g = store.get("gateway", null);
+  if (g && g.until > Date.now()) Object.assign(gateway, g);
+}
+const signedIn = () => !!(gateway.token || gateway.password);
+const gatewayAuth = () => gateway.token ? { token: gateway.token } : { password: gateway.password };
+
+// ----- The open page --------------------------------------------------------------------------------
+
+function parse(text) {
+  const t = text.trim();
+  const digits = t.replace(/[\s-]/g, "");
+  if (/^\d{9}$/.test(digits)) return { kind: "id", address: digits };
+  if (/^\d[\d\s-]*$/.test(t)) return { kind: "id", address: digits, partial: true };
+  if (!t) return null;
+  // user@host:port, [v6]:port, or a plain alias.
+  let host = t, port = "";
+  const v6 = /^(.*\[[^\]]+\]):(\d{1,5})$/.exec(t);
+  const v4 = /^([^:]*):(\d{1,5})$/.exec(t);
+  if (v6) [, host, port] = v6; else if (v4) [, host, port] = v4;
+  return { kind: "ssh", address: host.replace(/[[\]]/g, ""), port };
+}
+
+function fail(text) { $("error").textContent = text || ""; }
+
+function refreshForm() {
+  const p = parse($("addr").value);
+  const ssh = p?.kind === "ssh";
+  $("port").hidden = !ssh;
+  $("gatebox").hidden = !ssh || signedIn();
+  const match = p && saved().find(e => e.key === keyOf({ ...p, port: ssh ? $("port").value.trim() : "" }));
+  $("pw").placeholder = match?.pw ? "Saved password (type to change)" : ssh ? "Password (none with SSH keys)" : "Password set on that computer";
+  $("keep").parentElement.hidden = !canKeep;
+}
+
+$("addr").addEventListener("input", () => {
+  // An ID is spaced in threes as the app shows it.
+  const v = $("addr").value;
+  if (/^[\d\s]+$/.test(v)) {
+    const d = v.replace(/\D/g, "").slice(0, 9);
+    $("addr").value = spaced(d);
+  }
+  const p = parse($("addr").value);
+  if (p?.kind === "ssh" && p.port) $("port").value = p.port;
+  fail("");
+  refreshForm();
+});
+$("port").addEventListener("input", refreshForm);
+$("keep").checked = store.get("keep", true) && canKeep;
+$("keep").onchange = () => store.set("keep", $("keep").checked);
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  fail("");
+  const p = parse($("addr").value);
+  if (!p) { fail("Enter a remote access ID, or an SSH host such as user@192.168.1.20."); $("addr").focus(); return; }
+  if (p.kind === "id" && p.address.length !== 9) { fail("An ID is 9 digits."); $("addr").focus(); return; }
+  const port = p.kind === "ssh" ? ($("port").value.trim() || p.port || "") : "";
+  if (port && !(+port >= 1 && +port <= 65535)) { fail("A port is a number from 1 to 65535."); $("port").focus(); return; }
+  const t = { kind: p.kind, address: p.address, port, key: keyOf({ ...p, port }) };
+  const typed = $("pw").value;
+  const known = saved().find(x => x.key === t.key);
+  let password = typed;
+  if (!typed && known?.pw) {
+    try { password = await unseal(known.pw); } catch { fail("The saved password could not be read on this browser; type it again."); $("pw").focus(); return; }
+  }
+  if (p.kind === "id" && !password) { fail("Enter the password set on that computer."); $("pw").focus(); return; }
+  if (p.kind === "ssh" && !signedIn()) {
+    const gp = $("gatepw").value;
+    if (!gp) { $("gatebox").hidden = false; fail("Sign in to this gateway first: its password."); $("gatepw").focus(); return; }
+    $("go").disabled = true;
+    try { await signIn(gp, $("gatekeep").checked); } catch (err) { $("go").disabled = false; fail(err.message); $("gatepw").focus(); return; }
+    $("go").disabled = false;
+  }
+  // A password typed without "Remember" replaces the kept one with none.
+  connect({ ...t, name: known?.name, view: known?.view, password, keep: $("keep").checked && !!typed, kept: typed ? null : known?.pw });
+};
+
+function renderSaved() {
+  const list = saved();
+  const box = $("saved");
+  box.textContent = "";
+  $("savedn").textContent = list.length ? list.length : "";
+  if (!list.length) { box.append(h("div", { class: "empty", text: "Connections you open are kept here, on this browser only." })); return; }
+  for (const e of list) {
+    const sub = [e.kind === "id" ? "Remote access by ID" : e.kind === "gw" ? "On this gateway" : "SSH" + (e.port ? " · port " + e.port : ""),
+      e.pw ? "password kept" : null, e.last ? ago(e.last) : null].filter(Boolean).join(" · ");
+    const go = () => openSaved(e);
+    const more = button("dots", null, { title: "More", class: "btn icon" });
+    more.onclick = ev => {
+      ev.stopPropagation();
+      menu([
+        ["Connect", go, { icon: "open" }],
+        ["Rename…", async () => {
+          const name = await ask({ title: "Rename", field: title(e), value: title(e), ok: "Rename" });
+          if (name !== null) { update(e.key, { name: name.trim() || null }); renderSaved(); }
+        }, { icon: "rename" }],
+        ["Forget the password", () => { update(e.key, { pw: null }); renderSaved(); refreshForm(); }, { icon: "lock", disabled: !e.pw }],
+        null,
+        ["Remove", () => { store.set("saved", saved().filter(x => x.key !== e.key)); renderSaved(); }, { icon: "trash" }],
+      ], more);
+    };
+    const row = h("div", { class: "item", tabindex: "0", title: "Click to fill in, double-click to connect" },
+      h("div", { class: "ico" }, icon(e.kind === "id" || e.address === "This computer" ? "monitor" : e.kind === "gw" ? "server" : "terminal")),
+      h("div", { class: "what" }, h("b", { text: title(e) }), h("span", { text: sub })),
+      h("div", { class: "acts" }, button(null, "Connect", { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } }), more));
+    row.onclick = () => {
+      for (const r of box.children) r.classList.remove("sel");
+      row.classList.add("sel");
+      if (e.kind === "gw") return;
+      $("addr").value = e.kind === "id" ? spaced(e.address) : e.address;
+      $("port").value = e.port || "";
+      $("pw").value = "";
+      fail("");
+      refreshForm();
+      (e.pw || e.kind === "ssh" ? $("go") : $("pw")).focus();
+    };
+    row.ondblclick = go;
+    row.onkeydown = ev => { if (ev.key === "Enter") go(); };
+    box.append(row);
+  }
+}
+
+async function openSaved(e) {
+  fail("");
+  let password = "";
+  if (e.pw) {
+    try { password = await unseal(e.pw); } catch { password = ""; }
+  }
+  if (e.kind === "id" && !password) {
+    $("addr").value = spaced(e.address);
+    refreshForm();
+    fail("Enter the password set on that computer.");
+    $("pw").focus();
+    return;
+  }
+  if ((e.kind === "ssh" || e.kind === "gw") && !signedIn()) {
+    $("addr").value = e.address;
+    $("port").value = e.port || "";
+    refreshForm();
+    $("gatebox").hidden = false;
+    fail("Sign in to this gateway first: its password.");
+    $("gatepw").focus();
+    return;
+  }
+  connect({ ...e, password, keep: false, kept: e.pw });
+}
+
+function renderGateway() {
+  $("gatesec").hidden = !signedIn() || !gateway.hosts;
+  $("gatelink").textContent = signedIn() ? "Signed in to this gateway" : "Sign in to this gateway";
+  const box = $("ghosts");
+  box.textContent = "";
+  for (const host of gateway.hosts || []) {
+    const t = { kind: "gw", address: host, port: "", key: "gw:" + host };
+    const go = () => connect({ ...t, ...(saved().find(x => x.key === t.key) || {}), password: "" });
+    const row = h("div", { class: "item", tabindex: "0" },
+      h("div", { class: "ico" }, icon(host === "This computer" ? "monitor" : "server")),
+      h("div", { class: "what" }, h("b", { text: host }), h("span", { text: host === "This computer" ? "The gateway's own computer" : "From the gateway's ~/.ssh/config" })),
+      h("div", { class: "acts" }, button(null, "Connect", { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } })));
+    row.ondblclick = go;
+    row.onkeydown = ev => { if (ev.key === "Enter") go(); };
+    box.append(row);
+  }
+}
+
+// Signs in to the gateway; resolves with its hosts, keeping a sign-in when asked to.
+function signIn(password, remember, token) {
+  return new Promise((ok, no) => {
+    const ws = new WebSocket(WS);
+    let settled = false;
+    const end = (f, v) => { if (!settled) { settled = true; f(v); try { ws.close(); } catch { /* gone */ } } };
+    ws.onopen = () => ws.send(JSON.stringify({ gateway: token ? { token } : { password, remember } }));
+    ws.onerror = () => end(no, new Error("The gateway could not be reached."));
+    ws.onclose = () => end(no, new Error("The gateway closed the connection."));
+    ws.onmessage = m => {
+      const v = JSON.parse(m.data);
+      if (v.error) { end(no, Object.assign(new Error(v.error), { signin: !!v.signin })); return; }
+      if (!v.signedIn) return;
+      gateway.hosts = v.signedIn.hosts;
+      if (v.signedIn.token) {
+        Object.assign(gateway, { token: v.signedIn.token, until: Date.now() + v.signedIn.days * 864e5, password: null });
+        store.set("gateway", { token: gateway.token, until: gateway.until });
+      } else if (!token) {
+        gateway.password = password;
+      }
+      renderGateway();
+      refreshForm();
+      end(ok, v.signedIn.hosts);
+    };
+  });
+}
+function signOut() {
+  Object.assign(gateway, { token: null, until: 0, hosts: null, password: null });
+  store.set("gateway", null);
+  renderGateway();
+  refreshForm();
+}
+$("signout").onclick = signOut;
+$("gatelink").onclick = async e => {
+  e.preventDefault();
+  if (signedIn()) { signOut(); return; }
+  const pw = await ask({ title: "Sign in to this gateway", text: "Its password lets this browser reach SSH hosts and the gateway's own computers.", field: "Gateway password", ok: "Sign in" });
+  if (pw === null) return;
+  try { await signIn(pw, true); toast("Signed in to this gateway for 30 days."); } catch (err) { toast(err.message, { bad: true }); }
+};
+
+// ----- A connection ---------------------------------------------------------------------------------
+
+let current = null;
 
 // Keys as X keysyms, which the agent takes on every system.
 const NAMED = { Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b, Delete: 0xffff, Home: 0xff50,
   ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54, PageUp: 0xff55, PageDown: 0xff56,
-  End: 0xff57, Insert: 0xff63, ContextMenu: 0xff67, Pause: 0xff13, PrintScreen: 0xff61, CapsLock: 0xffe5 };
-const SIDED = { Shift: [0xffe1, 0xffe2], Control: [0xffe3, 0xffe4], Alt: [0xffe9, 0xffea], Meta: [0xffeb, 0xffec], AltGraph: [0xfe03, 0xfe03] };
+  End: 0xff57, Insert: 0xff63, ContextMenu: 0xff67, Pause: 0xff13, PrintScreen: 0xff61, CapsLock: 0xffe5, NumLock: 0xff7f, ScrollLock: 0xff14 };
+const SIDED = { Shift: [0xffe1, 0xffe2], Control: [0xffe3, 0xffe4], Alt: [0xffe9, 0xffea], Meta: [0xffeb, 0xffec], OS: [0xffeb, 0xffec], AltGraph: [0xffea, 0xffea] };
+const K = { ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, tab: 0xff09, esc: 0xff1b, del: 0xffff, f4: 0xffc1, prt: 0xff61, enter: 0xff0d };
 function keysym(e) {
   if (NAMED[e.key]) return NAMED[e.key];
   if (SIDED[e.key]) return SIDED[e.key][e.location === 2 ? 1 : 0];
   const f = /^F(\d{1,2})$/.exec(e.key);
-  if (f) return 0xffbe + Number(f[1]) - 1;
+  if (f && +f[1] >= 1 && +f[1] <= 24) return 0xffbe + Number(f[1]) - 1;
   if ([...e.key].length === 1) {
     // With Ctrl or Alt the key's own letter, not what the layout made of it.
     let c = e.key.codePointAt(0);
@@ -109,14 +449,8 @@ function keysym(e) {
   return 0;
 }
 
-$("openScreen").onclick = () => {
-  const host = $("host").value;
-  showScreen(host, size => ({ open: host, screen: true, w: size[0], h: size[1] }));
-};
-
-
 // Draws JPEG pictures on `canvas`, the newest only, each when the last is done.
-function drawer(canvas) {
+function drawer(canvas, first) {
   const ctx = canvas.getContext("2d");
   let busy = false, next = null;
   const draw = () => {
@@ -128,347 +462,900 @@ function drawer(canvas) {
       if (canvas.width !== b.width || canvas.height !== b.height) { canvas.width = b.width; canvas.height = b.height; }
       ctx.drawImage(b, 0, 0);
       b.close();
+      first();
       draw();
     }, () => draw());
   };
   return data => { next = data; if (!busy) draw(); };
 }
 
-// Pointer, buttons, wheel and keys on `canvas` sent as the gateway's JSON messages.
-function screenInput(canvas, send) {
-  // Pointer positions in the picture's pixels, past the letterbox around it.
-  const point = e => {
-    const r = canvas.getBoundingClientRect();
-    const k = Math.min(r.width / canvas.width, r.height / canvas.height);
-    const ox = (r.width - canvas.width * k) / 2, oy = (r.height - canvas.height * k) / 2;
-    const x = Math.floor((e.clientX - r.left - ox) / k), y = Math.floor((e.clientY - r.top - oy) / k);
-    return x >= 0 && y >= 0 && x < canvas.width && y < canvas.height ? [x, y] : null;
-  };
-  const BUTTON = [1, 2, 3, 8, 9];
-  canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
-  canvas.onpointerdown = e => {
-    canvas.focus();
-    const p = point(e); if (!p) return;
-    canvas.setPointerCapture(e.pointerId);
-    send({ move: p }); send({ button: [BUTTON[e.button] || 1, 1] });
-    e.preventDefault();
-  };
-  canvas.onpointerup = e => send({ button: [BUTTON[e.button] || 1, 0] });
-  canvas.oncontextmenu = e => e.preventDefault();
-  let wheel = [0, 0];
-  canvas.onwheel = e => {
-    e.preventDefault();
-    const unit = e.deltaMode === 0 ? 40 : e.deltaMode === 1 ? 1 : 0.1;
-    wheel[0] += e.deltaX / unit; wheel[1] += e.deltaY / unit;
-    const sx = Math.trunc(wheel[0]), sy = Math.trunc(wheel[1]);
-    if (sx || sy) { send({ wheel: [sx, sy] }); wheel = [wheel[0] - sx, wheel[1] - sy]; }
-  };
-  const held = new Set();
-  canvas.onkeydown = e => {
-    const k = keysym(e); if (!k) return;
-    e.preventDefault(); held.add(k); send({ key: [k, 1] });
-  };
-  canvas.onkeyup = e => {
-    const k = keysym(e); if (!k) return;
-    e.preventDefault(); held.delete(k); send({ key: [k, 0] });
-  };
-  // Keys still down when the page loses focus come up, so none sticks on the host.
-  canvas.onblur = () => { for (const k of held) send({ key: [k, 0] }); held.clear(); };
+// A ZIP file (stored, not compressed: what is sent is already as small as it gets over the
+// link) built from parts as they arrive, so a folder downloads as one file.
+const CRC = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+function crc32(crc, bytes) { crc = ~crc >>> 0; for (let i = 0; i < bytes.length; i++) crc = CRC[(crc ^ bytes[i]) & 255] ^ (crc >>> 8); return ~crc >>> 0; }
+function zipBlob(entries) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  const d = new Date(), time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name);
+    const head = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, time, 2], [12, date, 2], [14, e.crc, 4], [18, e.size, 4], [22, e.size, 4], [26, name.length, 2], [28, 0, 2]]
+      .forEach(([at, v, n]) => n === 4 ? head.setUint32(at, v, true) : head.setUint16(at, v, true));
+    parts.push(head, name, ...e.parts);
+    const c = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, time, 2], [14, date, 2], [16, e.crc, 4], [20, e.size, 4], [24, e.size, 4],
+      [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, offset, 4]]
+      .forEach(([at, v, n]) => n === 4 ? c.setUint32(at, v, true) : c.setUint16(at, v, true));
+    central.push(c, name);
+    offset += 30 + name.length + e.size;
+  }
+  const cdSize = central.reduce((n, p) => n + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, entries.length, 2], [10, entries.length, 2], [12, cdSize, 4], [16, offset, 4], [20, 0, 2]]
+    .forEach(([at, v, n]) => n === 4 ? end.setUint32(at, v, true) : end.setUint16(at, v, true));
+  return new Blob([...parts, ...central, end], { type: "application/zip" });
+}
+function saveBlob(blob, name) {
+  const a = h("a", { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 
-// The screen on the canvas; `first` is what to ask the gateway for, given the canvas's size.
-function showScreen(host, first) {
-  chrome(host, "screen");
-  $("screen").style.display = "block";
-  const canvas = $("canvas");
-  const want = () => [Math.round(canvas.clientWidth * devicePixelRatio), Math.round(canvas.clientHeight * devicePixelRatio)];
-  const send = v => ws.readyState === 1 && ws.send(JSON.stringify(v));
-  const [w, h] = want();
-  const show = drawer(canvas);
-  let shown = false;
-  // Refused before anything showed (a wrong ID or password): back to the form, saying why.
-  const back = text => {
-    $("screen").style.display = "none";
-    $("bar").style.display = "none";
-    $("card").style.display = "";
-    document.title = "SSH Remote Web";
-    fail(text);
-  };
-  ws.onmessage = m => {
-    if (typeof m.data === "string") {
-      const v = JSON.parse(m.data);
-      if (v.status) $("title").textContent = v.status;
-      if (v.screen) $("title").textContent = host + " · screen " + v.screen[0] + "×" + v.screen[1];
-      if (v.error && !shown) { back(v.error); return; }
-      if (v.error || v.end) $("title").textContent = host + " · " + (v.error || v.end);
-      return;
-    }
-    shown = true;
-    show(m.data);
-  };
-  ws.onclose = () => { if (shown) $("title").textContent = host + " · closed"; };
-  const start = () => ws.send(JSON.stringify(first([w, h])));
-  if (ws.readyState === 1) start(); else ws.onopen = start;
-  screenInput(canvas, send);
-  let t;
-  addEventListener("resize", () => { clearTimeout(t); t = setTimeout(() => send({ view: want() }), 250); });
-  canvas.focus();
+// Opens `t` ({ kind, address, port, password, ... }) and shows it.
+function connect(t) {
+  if (current) current.close();
+  current = new Client(t);
 }
 
-$("leave").onclick = () => { if (ws) ws.close(); location.reload(); };
+class Client {
+  constructor(t) {
+    this.t = t;
+    this.ready = false;
+    this.ended = false;
+    this.view = null;
+    this.viewOnly = false;
+    this.agent = t.kind === "id" ? "up" : "idle";
+    this.files = { cwd: null, entries: [], sel: new Set(), anchor: null, sort: ["name", 1], wanted: false };
+    this.jobs = new Map();       // download requests by tag
+    this.byId = new Map();       // downloads by file id: { job, entry }
+    this.nextTag = 1;
+    this.uploads = [];           // waiting to be sent, one at a time
+    this.sending = null;
+    this.nextUpload = 1;
+    this.monitors = null;
+    this.hostClip = null;
+    $("home").hidden = true;
+    $("client").hidden = false;
+    $("banner").hidden = true;
+    $("name").textContent = $("tabname").textContent = title(t);
+    document.title = title(t) + " - SSH Remote Web";
+    this.state("Connecting…");
+    this.chrome();
+    this.terminal();
+    this.screen();
+    this.filesView();
+    this.pick(t.view || (t.kind === "id" ? "screen" : "term"), true);
+    this.open();
+  }
 
-// ----- A computer by ID: terminal, screen and files on one connection --------------------------------
+  state(text, dot) {
+    $("state").textContent = text;
+    $("dot").className = $("tabdot").className = "dot" + (dot ? " " + dot : "");
+  }
+  // Before the session is up, what is asked waits: the gateway reads the sign-in first, and a
+  // refused one must not have more queued behind it.
+  send(v) {
+    if (!this.ready) { (this.queued ||= []).push(v); return; }
+    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(v));
+  }
 
-const MAX_TRANSFER = 2 * 1024 ** 3, CHUNK = 64 * 1024, WINDOW = 1024 * 1024;
-
-function size(n) {
-  if (n < 1024) return n + " B";
-  const u = ["KB", "MB", "GB", "TB"];
-  let i = -1;
-  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
-  return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
-}
-
-// A binary frame: type byte, then (for transfers) a little-endian u32 id, then the bytes.
-function framed(type, id, bytes) {
-  const head = id === null ? 1 : 5;
-  const f = new Uint8Array(head + bytes.length);
-  f[0] = type;
-  if (id !== null) new DataView(f.buffer).setUint32(1, id, true);
-  f.set(bytes, head);
-  return f;
-}
-
-function openClient(label, id, password) {
-  $("card").style.display = "none";
-  $("client").style.display = "block";
-  $("name").textContent = $("pillname").textContent = label;
-  document.title = label + " - SSH Remote Web";
-  const send = v => ws.readyState === 1 && ws.send(JSON.stringify(v));
-  const state = (text, dot) => { $("state").textContent = text; $("dot").className = dot || ""; };
-  let ready = false, view = "term";
-
-  // The terminal, first.
-  const term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000,
-    fontFamily: "'Cascadia Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace",
-    theme: { background: "#0b1220" } });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open($("cterm"));
-  fit.fit();
-  const enc = new TextEncoder();
-  let ended = false;
-  term.onData(d => {
-    if (!ready) return;
-    // After the shell ended, a key starts another.
-    if (ended) { ended = false; term.reset(); send({ shell: [term.cols, term.rows] }); return; }
-    ws.send(framed(1, null, enc.encode(d)));
-  });
-  term.onResize(s => send({ resize: [s.cols, s.rows] }));
-
-  // The screen, drawn only while it shows.
-  const canvas = $("ccanvas");
-  const want = () => [Math.max(64, Math.round(canvas.clientWidth * devicePixelRatio)) || 1280,
-    Math.max(64, Math.round(canvas.clientHeight * devicePixelRatio)) || 720];
-  const show = drawer(canvas);
-  screenInput(canvas, send);
-
-  // Views: the gateway makes pictures only for the screen.
-  const views = { term: "cterm", screen: "cscreen", files: "cfiles" };
-  const pick = v => {
-    view = v;
-    for (const b of document.querySelectorAll("#tools [data-view]")) b.classList.toggle("on", b.dataset.view === v);
-    for (const [k, el] of Object.entries(views)) $(el).classList.toggle("on", k === v);
-    send({ show: v === "term" ? "terminal" : v });
-    if (v === "term") { fit.fit(); term.focus(); }
-    if (v === "screen") { send({ view: want() }); canvas.focus(); }
-    if (v === "files" && !cwd) list("");
-  };
-  for (const b of document.querySelectorAll("#tools [data-view]")) b.onclick = () => pick(b.dataset.view);
-
-
-  // Full screen folds the toolbar into a pill that unfolds it again.
-  const fold = on => { $("client").classList.toggle("folded", on); setTimeout(relayout, 0); };
-  $("full").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
-  document.onfullscreenchange = () => {
-    $("full").classList.toggle("on", !!document.fullscreenElement);
-    fold(!!document.fullscreenElement);
-  };
-  $("fold").onclick = () => fold(true);
-  $("pill").onclick = () => fold(false);
-  $("bye").onclick = () => { if (ws) ws.close(); location.reload(); };
-  let rt;
-  const relayout = () => {
-    if (view === "term") fit.fit();
-    clearTimeout(rt);
-    rt = setTimeout(() => { if (view === "screen") send({ view: want() }); }, 250);
-  };
-  addEventListener("resize", relayout);
-
-  // Files.
-  let cwd = "";
-  const toast = text => { const t = $("toast"); t.textContent = text; t.style.display = "block"; clearTimeout(t.timer); t.timer = setTimeout(() => t.style.display = "none", 4000); };
-  const sep = p => p.includes("\\") || /^[A-Za-z]:/.test(p) ? "\\" : "/";
-  const join = (p, n) => p === "::" ? n : p.endsWith(sep(p)) ? p + n : p + sep(p) + n;
-  const list = p => { send({ list: p }); };
-  const FILE_ICON = '<svg viewBox="0 0 256 256" aria-hidden="true"><path d="m213.7 82.3-56-56A8 8 0 0 0 152 24H56a16 16 0 0 0-16 16v176a16 16 0 0 0 16 16h144a16 16 0 0 0 16-16V88a8 8 0 0 0-2.3-5.7ZM160 51.3 188.7 80H160ZM200 216H56V40h88v48a8 8 0 0 0 8 8h48v120Z"/></svg>';
-  const showDir = d => {
-    cwd = d.path;
-    $("path").value = d.path === "::" ? "" : d.path;
-    const box = $("list");
-    box.textContent = "";
-    if (d.error) { const n = document.createElement("div"); n.className = "note bad"; n.textContent = d.error; box.append(n); return; }
-    if (!d.entries.length) { const n = document.createElement("div"); n.className = "note"; n.textContent = "This folder is empty."; box.append(n); }
-    for (const e of d.entries) {
-      const row = document.createElement("div");
-      row.className = "row" + (e.dir ? " dir" : "");
-      if (e.dir) row.append($("tools").querySelector("[data-view=files] svg").cloneNode(true));
-      else row.insertAdjacentHTML("beforeend", FILE_ICON);
-      const name = document.createElement("span"); name.textContent = e.name;
-      const when = document.createElement("span"); when.className = "meta";
-      when.textContent = e.mtime ? new Date(e.mtime * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
-      const big = document.createElement("span"); big.className = "meta"; big.textContent = e.dir ? "" : size(e.size);
-      row.append(name, when, big);
-      row.title = e.dir ? "Open" : "Download";
-      row.onclick = () => e.dir ? list(join(d.path, e.name)) : download(join(d.path, e.name), e.size);
-      box.append(row);
-    }
-  };
-  $("fup").onclick = () => {
-    // A root goes up to the drives (or stays at / elsewhere).
-    if (!cwd || cwd === "/" || /^[A-Za-z]:\\?$/.test(cwd)) list("::"); else list(join(cwd, ".."));
-  };
-  $("fhome").onclick = () => list("");
-  $("freload").onclick = () => list(cwd);
-  $("path").onkeydown = e => { if (e.key === "Enter") list($("path").value.trim()); };
-
-  // Transfers, with progress.
-  const transfer = (label, total) => {
-    const el = document.createElement("div"); el.className = "xfer";
-    const name = document.createElement("span"); name.textContent = label;
-    const st = document.createElement("span"); st.className = "state";
-    const bar = document.createElement("progress"); bar.max = Math.max(total, 1); bar.value = 0;
-    el.append(name, st, bar);
-    $("transfers").prepend(el);
-    const t = {
-      set(n) { bar.value = n; st.textContent = size(n) + " of " + size(total); },
-      done(ok, text) {
-        bar.value = bar.max; el.classList.toggle("bad", !ok); st.textContent = ok ? "Done" : text || "Failed";
-        setTimeout(() => el.remove(), ok ? 5000 : 15000);
-      },
+  open() {
+    const t = this.t;
+    const ws = this.ws = new WebSocket(WS);
+    ws.binaryType = "arraybuffer";
+    const [w, hh] = this.want();
+    const size = { w, h: hh, cols: this.term.cols, rows: this.term.rows };
+    ws.onopen = () => {
+      if (t.kind === "id") ws.send(JSON.stringify({ id: t.address, password: t.password, ...size }));
+      else ws.send(JSON.stringify({ gateway: gatewayAuth(), open: { host: t.address, port: t.port ? +t.port : undefined, password: t.password || undefined }, ...size }));
     };
-    t.set(0);
-    return t;
-  };
-  const downloads = {};
-  const download = (path, n) => {
-    if (n > MAX_TRANSFER) { toast("Larger than 2 GB: too large for a browser download."); return; }
-    send({ download: path });
-  };
-  const uploads = {};
-  let nextUpload = 1;
-  const upload = async file => {
-    const t = transfer("↑ " + file.name, file.size);
-    if (file.size > MAX_TRANSFER) { t.done(false, "Larger than 2 GB"); return; }
-    const id = nextUpload++, u = uploads[id] = { acked: 0, wake: null, t };
-    send({ upload: { id, size: file.size, dir: cwd === "::" ? "" : cwd, name: file.name } });
-    let off = 0;
-    while (off < file.size && uploads[id]) {
-      // A bounded amount unacknowledged, so neither the gateway nor the socket piles it up.
-      if (off - u.acked >= WINDOW || ws.bufferedAmount > 2 * WINDOW) {
-        await new Promise(r => { u.wake = r; setTimeout(r, 200); });
-        continue;
-      }
-      const bytes = new Uint8Array(await file.slice(off, off + CHUNK).arrayBuffer());
-      if (ws.readyState !== 1) return;
-      ws.send(framed(4, id, bytes));
-      off += bytes.length;
-      t.set(off);
-    }
-    if (uploads[id]) send({ uploadEnd: id });
-  };
-  const sendFiles = files => {
-    if (!cwd || cwd === "::") { toast("Open a folder first."); return; }
-    for (const f of files) upload(f);
-  };
-  $("fsend").onclick = () => $("fpick").click();
-  $("fpick").onchange = () => { sendFiles([...$("fpick").files]); $("fpick").value = ""; };
-  const drop = $("cfiles");
-  let depth = 0;
-  drop.ondragenter = e => { e.preventDefault(); depth++; drop.classList.add("dragging"); };
-  drop.ondragover = e => e.preventDefault();
-  drop.ondragleave = () => { if (--depth <= 0) { depth = 0; drop.classList.remove("dragging"); } };
-  drop.ondrop = e => {
-    e.preventDefault();
-    depth = 0; drop.classList.remove("dragging");
-    sendFiles([...e.dataTransfer.files]);
-  };
+    ws.onmessage = m => this.message(m);
+    ws.onerror = () => {};
+    ws.onclose = () => this.closed();
+  }
 
-  // The gateway's messages.
-  ws.onopen = () => {
-    const [w, h] = want();
-    ws.send(JSON.stringify({ id, password, w, h, cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = m => {
+  // The connection went: back to the page if it never came up, else say so and offer to try again.
+  closed(why) {
+    if (this.ended || this.lost) return;
+    if (!this.ready) { this.leave(why || "The connection could not be made."); return; }
+    this.lost = true;
+    this.ready = false;
+    this.state("Disconnected", "down");
+    this.releaseKeys?.();
+    $("bannertext").textContent = why || "The connection was lost.";
+    $("banner").hidden = false;
+    $("again").focus();
+  }
+  leave(error, password) {
+    const t = this.t;
+    this.close();
+    current = null;
+    $("client").hidden = true;
+    $("home").hidden = false;
+    document.title = "SSH Remote Web";
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    renderSaved();
+    if (password) {
+      $("addr").value = t.kind === "id" ? spaced(t.address) : t.address;
+      $("port").value = t.port || "";
+      refreshForm();
+    }
+    fail(error || "");
+    (error ? $("pw") : $("addr")).focus();
+  }
+  close() {
+    this.ended = true;
+    try { this.ws?.close(); } catch { /* gone */ }
+    this.term?.dispose();
+    this.unbind?.();
+    $("stools").textContent = "";
+    $("xfers").textContent = "";
+    $("ftable").textContent = "";
+    $("fsel").textContent = "";
+  }
+
+  message(m) {
     if (typeof m.data !== "string") {
       const b = new Uint8Array(m.data);
-      if (b[0] === 1) term.write(b.subarray(1));
-      else if (b[0] === 2) show(m.data.slice(1));
-      else if (b[0] === 3) {
-        const d = downloads[new DataView(m.data).getUint32(1, true)];
-        if (d) { d.parts.push(b.slice(5)); d.got += b.length - 5; d.t.set(d.got); }
+      if (b[0] === 1) {
+        this.term.write(b.subarray(1));
+        // The last of what was printed, to tell why a shell ended.
+        this.tail = ((this.tail || "") + new TextDecoder().decode(b.subarray(1))).slice(-2000);
       }
+      else if (b[0] === 2) this.show(m.data.slice(1));
+      else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       return;
     }
     const v = JSON.parse(m.data);
-    if (v.status) state(v.status);
-    if (v.error && !ready) {
-      // Refused (a wrong ID or password): back to the form, saying why.
-      $("client").style.display = "none";
-      $("card").style.display = "";
-      document.title = "SSH Remote Web";
-      term.dispose();
-      fail(v.error);
+    if (v.status) this.state(v.status);
+    if (v.error && !this.ready) {
+      // Signed out: the gateway forgot this browser.
+      if (v.signin) signOut();
+      this.ended = true;
+      this.leave(v.error);
       return;
     }
     if (v.ready) {
-      ready = true;
-      state(v.ready.screen[0] + "×" + v.ready.screen[1], "up");
-      term.focus();
+      this.ready = true;
+      for (const q of this.queued?.splice(0) || []) this.send(q);
+      this.state(v.ready.screen ? v.ready.screen[0] + "×" + v.ready.screen[1] : "Connected", "up");
+      this.connected = true;
+      if (v.ready.screen) this.agentUp(v.ready.screen);
+      // An ID is in once ready; an SSH host once its shell stays up or its agent answers.
+      if (this.t.kind === "id") this.remember();
+      else this.keepTimer = setTimeout(() => this.remember(), 5000);
+      if (this.view === "term") this.term.focus();
     }
+    if (v.agent) this.agentUp(v.agent.screen);
+    if (v.agentError) this.agentDown(v.agentError);
+    if (v.screen) this.state(v.screen[0] + "×" + v.screen[1], "up");
     if (v.exit !== undefined) {
-      ended = true;
-      term.write("\r\n\x1b[2m[" + (v.exit || "the shell ended") + " — press a key for a new one]\x1b[0m\r\n");
-    }
-    if (v.dir) showDir(v.dir);
-    if (v.fetch) downloads[v.fetch.id] = { name: v.fetch.name, parts: [], got: 0, t: transfer("↓ " + v.fetch.name, v.fetch.size) };
-    if (v.fetched) {
-      const d = downloads[v.fetched.id];
-      delete downloads[v.fetched.id];
-      if (!d) { if (!v.fetched.ok) toast((v.fetched.name ? v.fetched.name + ": " : "") + v.fetched.text); return; }
-      d.t.done(v.fetched.ok, v.fetched.text);
-      if (v.fetched.ok) {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob(d.parts));
-        a.download = d.name.split(/[\\/]/).pop();
-        document.body.append(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      this.shellEnded = true;
+      this.term.write("\r\n\x1b[2m[" + (v.exit || "the shell ended") + " — press a key for a new one]\x1b[0m\r\n");
+      // ssh refused the sign-in: said plainly, with the way back to the password.
+      if (this.t.kind !== "id" && !this.kept && /permission denied|authentication failed|too many authentication/i.test(this.tail || "")) {
+        clearTimeout(this.keepTimer);
+        this.lost = true;
+        $("bannertext").textContent = "The SSH host refused the sign-in: check the user name and the password.";
+        $("again").textContent = "Change the password";
+        $("again").onclick = () => this.leave("The SSH host refused the sign-in: check the user name and the password.", true);
+        $("banner").hidden = false;
       }
     }
-    if (v.progress) {
-      const u = uploads[v.progress[0]];
-      if (u) { u.acked = v.progress[1]; if (u.wake) u.wake(); }
+    if (v.dir) this.dir(v.dir);
+    if (v.opDone) this.opDone(v.opDone);
+    if (v.fetch) this.fetchStart(v.fetch);
+    if (v.fetched) this.fetchEnd(v.fetched);
+    if (v.fetchDone !== undefined) this.fetchDone(v.fetchDone);
+    if (v.progress) this.progress(v.progress[0], v.progress[1]);
+    if (v.uploaded) this.uploaded(v.uploaded);
+    if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
+    if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
+    if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied/i.test(v.notice) });
+    if (v.end || v.error) {
+      const why = v.end || v.error;
+      this.term.write("\r\n\x1b[31m[" + why + "]\x1b[0m\r\n");
+      this.closed(why);
     }
-    if (v.uploaded) {
-      const u = uploads[v.uploaded.id];
-      delete uploads[v.uploaded.id];
-      if (u) { u.t.done(v.uploaded.ok, v.uploaded.text); if (u.wake) u.wake(); }
-      if (v.uploaded.ok && view === "files") list(cwd);
+  }
+
+  // Kept on the page's list once it worked, with the password if asked to.
+  async remember() {
+    if (this.kept) return;
+    this.kept = true;
+    clearTimeout(this.keepTimer);
+    const t = this.t;
+    // It worked: what was typed does not wait in the form for the next person at this browser.
+    $("pw").value = "";
+    $("gatepw").value = "";
+    const entry = { key: t.key || keyOf(t), kind: t.kind, address: t.address, port: t.port || "", name: t.name || null, last: Date.now(), view: this.view, pw: t.kept || null };
+    if (t.keep && t.password) {
+      try { entry.pw = await seal(t.password); } catch { toast("This browser cannot keep the password safely; it was not saved.", { bad: true }); }
     }
-    if (v.notice) toast(v.notice);
-    if (v.end || v.error) { state(v.end || v.error, "down"); term.write("\r\n\x1b[31m[" + (v.end || v.error) + "]\x1b[0m\r\n"); }
-  };
-  ws.onclose = () => { if (ready) state("Disconnected", "down"); ready = false; };
+    save(entry);
+  }
+
+  // ----- The toolbar, full screen and the folded tab
+  chrome() {
+    setButton($("full"), "full");
+    setButton($("fold"), "caretup");
+    setButton($("bye"), "logout", "Disconnect");
+    for (const b of document.querySelectorAll("#bar [data-view]")) {
+      b.onclick = () => this.pick(b.dataset.view);
+      if (!b.querySelector("svg")) b.prepend(icon({ term: "terminal", screen: "monitor", files: "folder" }[b.dataset.view]));
+    }
+    if (!$("tab").querySelector("svg")) $("tab").append(icon("caretdown"));
+    const fold = on => {
+      $("client").classList.toggle("folded", on);
+      setTimeout(() => this.relayout(), 0);
+    };
+    $("full").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+    const fs = () => {
+      const on = !!document.fullscreenElement;
+      setButton($("full"), on ? "unfull" : "full");
+      $("full").title = on ? "Leave full screen" : "Full screen";
+      fold(on);
+      // Esc, Win and Alt+Tab go to the host while its screen fills this one.
+      if (on && this.view === "screen") navigator.keyboard?.lock?.().catch(() => {});
+      else navigator.keyboard?.unlock?.();
+    };
+    document.addEventListener("fullscreenchange", fs);
+    $("fold").onclick = () => fold(true);
+    $("tab").onclick = () => fold(false);
+    $("bye").onclick = () => this.leave();
+    $("again").textContent = "Reconnect";
+    $("again").onclick = () => connect({ ...this.t, view: this.view });
+    $("home2").onclick = () => this.leave();
+    const resize = () => this.relayout();
+    addEventListener("resize", resize);
+    const old = this.unbind;
+    this.unbind = () => { old?.(); document.removeEventListener("fullscreenchange", fs); removeEventListener("resize", resize); $("client").classList.remove("folded"); };
+  }
+
+  pick(view, first) {
+    this.view = view;
+    for (const b of document.querySelectorAll("#bar [data-view]")) b.classList.toggle("on", b.dataset.view === view);
+    for (const [k, id] of [["term", "vterm"], ["screen", "vscreen"], ["files", "vfiles"]]) $(id).classList.toggle("on", k === view);
+    $("stools").hidden = view !== "screen";
+    if (!first || view !== "term") this.send({ show: view === "term" ? "terminal" : view });
+    if (view === "term") { this.fit.fit(); this.term.focus(); }
+    if (view === "screen") { this.send({ view: this.want() }); $("canvas").focus(); this.screenWait(); }
+    if (view === "files") { if (!this.files.wanted) { this.files.wanted = true; this.list(""); } else $("ftable").focus(); this.filesWait(); }
+    if (this.ready) update(this.t.key || keyOf(this.t), { view });
+  }
+  relayout() {
+    if (this.view === "term") this.fit.fit();
+    clearTimeout(this.rt);
+    this.rt = setTimeout(() => { if (this.view === "screen") this.send({ view: this.want() }); }, 250);
+  }
+
+  agentUp(screen) {
+    if (this.ready && this.t.kind !== "id") this.remember();
+    this.agent = "up";
+    this.agentWhy = null;
+    if (screen) this.state(screen[0] + "×" + screen[1], "up");
+    this.screenWait();
+    this.filesWait();
+  }
+  agentDown(why) {
+    this.agent = "failed";
+    this.agentWhy = why;
+    if (this.ready) this.state("Terminal only", "up");
+    this.screenWait();
+    this.filesWait();
+  }
+
+  // ----- Terminal
+  terminal() {
+    $("vterm").textContent = "";
+    const term = this.term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 10000, allowProposedApi: false,
+      fontFamily: "'Cascadia Mono', 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace",
+      theme: { background: "#0b0d11", selectionBackground: "#2b59c380" } });
+    this.fit = new FitAddon.FitAddon();
+    term.loadAddon(this.fit);
+    term.open($("vterm"));
+    this.fit.fit();
+    const enc = new TextEncoder();
+    // Ctrl+Shift+C and V copy and paste, as in a terminal; Ctrl+C stays the shell's.
+    term.attachCustomKeyEventHandler(e => {
+      if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
+      if (e.code === "KeyC") { const s = term.getSelection(); if (s) navigator.clipboard?.writeText(s).catch(() => {}); return false; }
+      if (e.code === "KeyV") { navigator.clipboard?.readText().then(t => t && term.paste(t), () => toast("This browser did not let the page read the clipboard: use Ctrl+V.", { bad: true })); return false; }
+      return true;
+    });
+    term.onData(d => {
+      if (!this.ready) return;
+      // After the shell ended, a key starts another.
+      if (this.shellEnded) { this.shellEnded = false; term.reset(); this.send({ shell: [term.cols, term.rows] }); return; }
+      const bytes = enc.encode(d), f = new Uint8Array(bytes.length + 1);
+      f[0] = 1; f.set(bytes, 1);
+      this.ws.send(f);
+    });
+    term.onResize(s => this.send({ resize: [s.cols, s.rows] }));
+  }
+
+  // ----- Screen
+  want() {
+    const c = $("canvas");
+    return [Math.max(64, Math.round(c.clientWidth * devicePixelRatio)) || 1280, Math.max(64, Math.round(c.clientHeight * devicePixelRatio)) || 720];
+  }
+  screenWait() {
+    const w = $("swait");
+    w.textContent = "";
+    if (this.pictured) { w.hidden = true; return; }
+    w.hidden = false;
+    if (this.agent === "failed") {
+      w.append(h("div", {}, h("div", { class: "bad", text: "The screen could not be reached." }), h("div", { text: this.agentWhy || "" })));
+    } else {
+      w.append(h("div", {}, h("div", { class: "spin" }), h("div", { text: this.agent === "up" ? "Waiting for the picture…" : "Connecting for the screen…" })));
+    }
+  }
+  screen() {
+    const canvas = $("canvas");
+    this.pictured = false;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    this.show = drawer(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } });
+    const send = v => { if (!this.viewOnly) this.send(v); };
+    // Pointer positions in the picture's pixels, past the letterbox around it.
+    const point = e => {
+      const r = canvas.getBoundingClientRect();
+      const k = Math.min(r.width / canvas.width, r.height / canvas.height);
+      const ox = (r.width - canvas.width * k) / 2, oy = (r.height - canvas.height * k) / 2;
+      const x = Math.floor((e.clientX - r.left - ox) / k), y = Math.floor((e.clientY - r.top - oy) / k);
+      return x >= 0 && y >= 0 && x < canvas.width && y < canvas.height ? [x, y] : null;
+    };
+    const BUTTON = [1, 2, 3, 8, 9];
+    canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
+    canvas.onpointerdown = e => {
+      canvas.focus();
+      const p = point(e); if (!p) return;
+      canvas.setPointerCapture(e.pointerId);
+      send({ move: p }); send({ button: [BUTTON[e.button] || 1, 1] });
+      e.preventDefault();
+    };
+    canvas.onpointerup = e => send({ button: [BUTTON[e.button] || 1, 0] });
+    canvas.oncontextmenu = e => e.preventDefault();
+    let wheel = [0, 0];
+    canvas.onwheel = e => {
+      e.preventDefault();
+      const unit = e.deltaMode === 0 ? 40 : e.deltaMode === 1 ? 1 : 0.1;
+      wheel[0] += e.deltaX / unit; wheel[1] += e.deltaY / unit;
+      const sx = Math.trunc(wheel[0]), sy = Math.trunc(wheel[1]);
+      if (sx || sy) { send({ wheel: [sx, sy] }); wheel = [wheel[0] - sx, wheel[1] - sy]; }
+    };
+    const held = new Set();
+    canvas.onkeydown = e => {
+      const k = keysym(e); if (!k) return;
+      e.preventDefault(); held.add(k); send({ key: [k, 1] });
+    };
+    canvas.onkeyup = e => {
+      const k = keysym(e); if (!k) return;
+      e.preventDefault(); held.delete(k); send({ key: [k, 0] });
+    };
+    // Keys still down when the page loses focus come up, so none sticks on the host.
+    this.releaseKeys = () => { for (const k of held) this.send({ key: [k, 0] }); held.clear(); };
+    canvas.onblur = () => this.releaseKeys();
+    // What was copied here goes to the host as the screen takes the keyboard, once the browser
+    // lets the page read the clipboard (asked the first time "Paste my clipboard" is used).
+    canvas.onfocus = async () => {
+      if (this.viewOnly || !navigator.clipboard?.readText || !navigator.permissions) return;
+      try {
+        const p = await navigator.permissions.query({ name: "clipboard-read" });
+        if (p.state !== "granted") return;
+        const text = await navigator.clipboard.readText();
+        if (text && text !== this.sentClip && text !== this.hostClip) { this.sentClip = text; this.send({ clipboard: text }); }
+      } catch { /* not this browser */ }
+    };
+    this.screenTools();
+  }
+  combo(keys) {
+    if (this.viewOnly) { toast("View only: nothing is sent to the host."); return; }
+    for (const k of keys) this.send({ key: [k, 1] });
+    for (const k of [...keys].reverse()) this.send({ key: [k, 0] });
+    $("canvas").focus();
+  }
+  screenTools() {
+    const bar = $("stools");
+    bar.textContent = "";
+    bar.append(h("span", { class: "sep" }));
+    const keys = button("keyboard", "Keys", { title: "Keys this browser keeps for itself" });
+    keys.onclick = () => menu([
+      ["Ctrl+Alt+Del", () => { if (!this.viewOnly) this.send({ sas: 1 }); }],
+      ["Lock the screen", () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
+      ["Start menu", () => this.combo([K.win]), { kbd: "Win" }],
+      ["Switch windows", () => this.combo([K.alt, K.tab]), { kbd: "Alt+Tab" }],
+      ["Close the window", () => this.combo([K.alt, K.f4]), { kbd: "Alt+F4" }],
+      ["Task Manager", () => this.combo([K.ctrl, K.shift, K.esc]), { kbd: "Ctrl+Shift+Esc" }],
+      ["Run", () => this.combo([K.win, 0x72]), { kbd: "Win+R" }],
+      ["File Explorer", () => this.combo([K.win, 0x65]), { kbd: "Win+E" }],
+      ["Print Screen", () => this.combo([K.prt]), { kbd: "PrtSc" }],
+    ], keys);
+    const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
+    clip.onclick = () => menu([
+      ["Paste my clipboard into the host", () => this.pasteHere()],
+      ["Type or paste text for the host…", async () => {
+        const text = await ask({ title: "Send text to the host", text: "It goes on the host's clipboard; paste it there.", area: "Text", ok: "Send" });
+        if (text) { this.send({ clipboard: text }); toast("On the host's clipboard."); }
+      }],
+      null,
+      ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
+    ], clip);
+    const quality = button("sliders", null, { title: "Picture quality" });
+    const q = store.get("quality", "balanced");
+    const setQ = v => { store.set("quality", v); this.send({ quality: v }); };
+    quality.onclick = () => menu(["Picture",
+      ["Best (sharpest, more data)", () => setQ("best"), { on: store.get("quality", "balanced") === "best" }],
+      ["Balanced", () => setQ("balanced"), { on: store.get("quality", "balanced") === "balanced" }],
+      ["Fast (for slow links)", () => setQ("fast"), { on: store.get("quality", "balanced") === "fast" }],
+      null,
+      ["Repaint the whole screen", () => this.send({ refresh: 1 })],
+    ], quality);
+    if (q !== "balanced") setTimeout(() => this.send({ quality: q }), 0);
+    bar.append(keys, clip, quality);
+    if (this.monitors && this.monitors.list.length > 1) {
+      const mon = button("screens", null, { title: "Which of the host's screens" });
+      mon.onclick = () => menu(this.monitors.list.map((m, i) =>
+        [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), mon);
+      bar.append(mon);
+    }
+    const eye = button("eye", null, { title: "View only: watch without sending keys or clicks" });
+    eye.classList.toggle("on", this.viewOnly);
+    eye.onclick = () => {
+      this.viewOnly = !this.viewOnly;
+      if (this.viewOnly) this.releaseKeys();
+      eye.classList.toggle("on", this.viewOnly);
+      $("vscreen").classList.toggle("viewonly", this.viewOnly);
+      toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
+    };
+    const shot = button("camera", null, { title: "Save a picture of the screen" });
+    shot.onclick = () => $("canvas").toBlob(b => b && saveBlob(b, "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png"));
+    bar.append(eye, shot);
+  }
+  async pasteHere() {
+    if (!navigator.clipboard?.readText) { toast("This browser does not let the page read the clipboard; use “Type or paste text”.", { bad: true }); return; }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) { toast("The clipboard has no text."); return; }
+      this.sentClip = text;
+      this.send({ clipboard: text });
+      // Then Ctrl+V there, once the text is on its clipboard.
+      setTimeout(() => this.combo([K.ctrl, 0x76]), 150);
+    } catch { toast("The page was not allowed to read the clipboard.", { bad: true }); }
+  }
+  clipboardIn(text) {
+    this.hostClip = text;
+    navigator.clipboard?.writeText(text).then(() => {}, () => toast("Copied on the host.", { action: ["Copy here", () => this.copyHostClip()] }));
+  }
+  copyHostClip() {
+    if (this.hostClip === null) return;
+    navigator.clipboard?.writeText(this.hostClip).then(() => toast("Copied here."), () => toast("This browser did not allow copying.", { bad: true }));
+  }
+
+  // ----- Files
+  filesView() {
+    setButton($("fup"), "up"); setButton($("fhome"), "home"); setButton($("freload"), "reload");
+    setButton($("fnew"), "newfolder", "New folder"); setButton($("fsend"), "upload", "Upload");
+    setButton($("fhidden"), "eye");
+    const hiddenState = () => { const on = store.get("hidden", false); $("fhidden").classList.toggle("on", on); $("fhidden").title = on ? "Hide hidden files" : "Show hidden files (names starting with a dot)"; };
+    hiddenState();
+    $("fhidden").onclick = () => { store.set("hidden", !store.get("hidden", false)); hiddenState(); this.renderFiles(); };
+    const f = this.files;
+    $("fup").onclick = () => this.up();
+    $("fhome").onclick = () => this.list("");
+    $("freload").onclick = () => this.list(f.cwd ?? "");
+    $("path").onkeydown = e => { if (e.key === "Enter") { this.list($("path").value.trim()); $("ftable").focus(); } if (e.key === "Escape") { $("path").value = f.cwd === "::" ? "" : f.cwd || ""; $("ftable").focus(); } };
+    $("path").onfocus = () => $("path").select();
+    $("fnew").onclick = () => this.newFolder();
+    $("fsend").onclick = () => menu([["Files…", () => $("fpick").click(), { icon: "file" }], ["A folder…", () => $("fpickdir").click(), { icon: "folder" }]], $("fsend"));
+    $("fpick").onchange = () => { this.queueUploads([...$("fpick").files].map(file => ({ file, name: file.name }))); $("fpick").value = ""; };
+    $("fpickdir").onchange = () => { this.queueUploads([...$("fpickdir").files].map(file => ({ file, name: file.webkitRelativePath || file.name }))); $("fpickdir").value = ""; };
+    const drop = $("vfiles");
+    let depth = 0;
+    drop.ondragenter = e => { e.preventDefault(); depth++; drop.classList.add("dragging"); };
+    drop.ondragover = e => e.preventDefault();
+    drop.ondragleave = () => { if (--depth <= 0) { depth = 0; drop.classList.remove("dragging"); } };
+    drop.ondrop = async e => {
+      e.preventDefault();
+      depth = 0; drop.classList.remove("dragging");
+      this.queueUploads(await dropped(e.dataTransfer));
+    };
+    $("ftable").onkeydown = e => this.fileKeys(e);
+    $("ftable").textContent = "";
+    $("fsel").textContent = "";
+  }
+  filesWait() {
+    if (this.agent === "failed" && !this.files.entries.length) {
+      const t = $("ftable");
+      t.textContent = "";
+      t.append(h("div", { class: "msg bad", text: "The files could not be reached: " + (this.agentWhy || "") }));
+    }
+  }
+  sep(p) { return p.includes("\\") || /^[A-Za-z]:/.test(p) ? "\\" : "/"; }
+  join(p, n) { return p === "::" ? n : p.endsWith(this.sep(p)) ? p + n : p + this.sep(p) + n; }
+  list(p) {
+    if (this.files.cwd === null && this.agent !== "up") {
+      const t = $("ftable");
+      t.textContent = "";
+      t.append(h("div", { class: "msg" }, h("div", { class: "spin" }), "Connecting for the files…"));
+    }
+    this.send({ list: p });
+  }
+  up() {
+    const c = this.files.cwd;
+    // A root goes up to the drives (or stays at / elsewhere).
+    if (!c || c === "/" || /^[A-Za-z]:\\?$/.test(c)) this.list("::"); else this.list(this.join(c, ".."));
+  }
+  dir(d) {
+    const f = this.files;
+    const same = f.cwd === d.path;
+    f.cwd = d.path;
+    f.error = d.error;
+    f.entries = d.entries || [];
+    $("path").value = d.path === "::" ? "" : d.path;
+    // A reload keeps what was selected, where it still is.
+    if (!same) { f.sel.clear(); f.anchor = null; }
+    const names = new Set(f.entries.map(e => e.name));
+    for (const n of [...f.sel]) if (!names.has(n)) f.sel.delete(n);
+    this.renderFiles();
+    if (this.view === "files" && document.activeElement !== $("path")) $("ftable").focus();
+  }
+  sorted() {
+    const [key, dir] = this.files.sort;
+    const hidden = store.get("hidden", false);
+    return this.files.entries.filter(e => hidden || !e.name.startsWith(".")).sort((a, b) => (b.dir - a.dir) ||
+      dir * (key === "size" ? a.size - b.size : key === "mtime" ? a.mtime - b.mtime : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })));
+  }
+  renderFiles() {
+    const f = this.files, t = $("ftable");
+    t.textContent = "";
+    const [key, dir] = f.sort;
+    const head = h("div", { class: "head" });
+    for (const [k, label, cls] of [["name", "Name"], ["size", "Size", "r"], ["mtime", "Modified", "when"]]) {
+      head.append(h("span", { class: cls, text: label + (key === k ? (dir > 0 ? " ▲" : " ▼") : ""), onclick: () => { f.sort = [k, key === k ? -dir : 1]; this.renderFiles(); } }));
+    }
+    t.append(head);
+    if (f.error) { t.append(h("div", { class: "msg bad", text: f.error })); this.renderSel(); return; }
+    const rows = this.sorted();
+    if (!rows.length) t.append(h("div", { class: "msg", text: f.entries.length ? "Only hidden files here." : "This folder is empty." }));
+    for (const e of rows) {
+      const row = h("div", { class: "f" + (e.dir ? " dir" : "") + (f.sel.has(e.name) ? " sel" : ""), title: e.name },
+        h("div", { class: "n" }, icon(e.dir ? "folder" : "file"), h("span", { text: e.name })),
+        h("div", { class: "m r", text: e.dir ? "" : size(e.size) }),
+        h("div", { class: "m when", text: when(e.mtime) }));
+      row.onclick = ev => this.click(e, ev, rows);
+      row.ondblclick = () => this.activate(e);
+      row.oncontextmenu = ev => {
+        ev.preventDefault();
+        if (!f.sel.has(e.name)) { f.sel = new Set([e.name]); f.anchor = e.name; this.renderFiles(); }
+        menu(this.actions(), [ev.clientX, ev.clientY]);
+      };
+      t.append(row);
+    }
+    this.renderSel();
+  }
+  click(e, ev, rows) {
+    const f = this.files;
+    if (ev.shiftKey && f.anchor) {
+      const names = rows.map(r => r.name);
+      const [a, b] = [names.indexOf(f.anchor), names.indexOf(e.name)].sort((x, y) => x - y);
+      f.sel = new Set(names.slice(a, b + 1));
+    } else if (ev.ctrlKey || ev.metaKey) {
+      if (f.sel.has(e.name)) f.sel.delete(e.name); else f.sel.add(e.name);
+      f.anchor = e.name;
+    } else {
+      f.sel = new Set([e.name]);
+      f.anchor = e.name;
+    }
+    $("ftable").focus();
+    this.renderFiles();
+  }
+  // Double-click or Enter: a folder opens, a file downloads.
+  activate(e) {
+    if (e.dir) this.list(this.join(this.files.cwd, e.name)); else this.download([e]);
+  }
+  selected() { return this.sorted().filter(e => this.files.sel.has(e.name)); }
+  actions() {
+    const s = this.selected(), one = s.length === 1 ? s[0] : null;
+    const items = [];
+    if (one?.dir) items.push(["Open", () => this.activate(one), { icon: "open", kbd: "Enter" }]);
+    items.push(
+      ["Download" + (s.length > 1 || one?.dir ? " as ZIP" : ""), () => this.download(s), { icon: "download", disabled: !s.length }],
+      ["Rename…", () => this.rename(one), { icon: "rename", kbd: "F2", disabled: !one }],
+      null,
+      ["Delete…", () => this.remove(s), { icon: "trash", kbd: "Del", disabled: !s.length }]);
+    return items;
+  }
+  renderSel() {
+    const bar = $("fsel"), s = this.selected();
+    bar.textContent = "";
+    const what = h("div", { class: "what" });
+    if (!s.length) {
+      const n = this.sorted().length, hid = this.files.entries.length - n;
+      what.textContent = this.files.cwd === null ? "" : n + (n === 1 ? " item" : " items") + (hid ? " (" + hid + " hidden)" : "") + " · click to select, double-click to open";
+      bar.append(what);
+      return;
+    }
+    if (s.length === 1) {
+      const e = s[0];
+      what.append(h("b", { text: e.name }), " · " + (e.dir ? "folder" : size(e.size)) + (e.mtime ? " · modified " + when(e.mtime) : ""));
+    } else {
+      const files = s.filter(e => !e.dir), dirs = s.length - files.length;
+      what.append(h("b", { text: s.length + " selected" }),
+        " · " + [files.length ? files.length + (files.length === 1 ? " file, " : " files, ") + size(files.reduce((n, e) => n + e.size, 0)) : null,
+          dirs ? dirs + (dirs === 1 ? " folder" : " folders") : null].filter(Boolean).join(" and "));
+    }
+    const one = s.length === 1 ? s[0] : null;
+    bar.append(what);
+    if (one?.dir) bar.append(button("open", "Open", { class: "btn solid", onclick: () => this.activate(one) }));
+    bar.append(
+      button("download", s.length > 1 || one?.dir ? "Download ZIP" : "Download", { class: "btn primary", onclick: () => this.download(s) }),
+      button("rename", "Rename", { class: "btn solid", disabled: !one, onclick: () => this.rename(one) }),
+      button("trash", "Delete", { class: "btn solid danger", onclick: () => this.remove(s) }));
+  }
+  fileKeys(e) {
+    const f = this.files, rows = this.sorted();
+    if (e.target !== $("ftable")) return;
+    const names = rows.map(r => r.name);
+    const at = f.anchor ? names.indexOf(f.anchor) : -1;
+    const move = i => { if (!rows.length) return; i = Math.max(0, Math.min(rows.length - 1, i)); f.sel = new Set([names[i]]); f.anchor = names[i]; this.renderFiles(); $("ftable").children[i + 1]?.scrollIntoView({ block: "nearest" }); };
+    if (e.key === "ArrowDown") { e.preventDefault(); move(at + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(at < 0 ? 0 : at - 1); }
+    else if (e.key === "Home") { e.preventDefault(); move(0); }
+    else if (e.key === "End") { e.preventDefault(); move(rows.length - 1); }
+    else if (e.key === "Enter") { const s = this.selected(); if (s.length === 1) this.activate(s[0]); else if (s.length) this.download(s); }
+    else if (e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) { e.preventDefault(); this.up(); }
+    else if (e.key === "Delete") { const s = this.selected(); if (s.length) this.remove(s); }
+    else if (e.key === "F2") { e.preventDefault(); const s = this.selected(); if (s.length === 1) this.rename(s[0]); }
+    else if (e.key === "F5") { e.preventDefault(); this.list(f.cwd ?? ""); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); f.sel = new Set(names); this.renderFiles(); }
+    else if (e.key === "Escape") { f.sel.clear(); this.renderFiles(); }
+  }
+  async newFolder() {
+    if (this.files.cwd === null || this.files.cwd === "::") { toast("Open a folder first."); return; }
+    const name = await ask({ title: "New folder", field: "Name", value: "New folder", select: v => [0, v.length], ok: "Create" });
+    if (!name?.trim()) return;
+    this.ops = 1;
+    this.send({ op: ["mkdir", this.join(this.files.cwd, name.trim()), ""] });
+  }
+  async rename(e) {
+    if (!e) return;
+    const stem = e.dir ? e.name.length : (e.name.lastIndexOf(".") > 0 ? e.name.lastIndexOf(".") : e.name.length);
+    const name = await ask({ title: "Rename", field: "New name", value: e.name, select: () => [0, stem], ok: "Rename" });
+    if (!name?.trim() || name.trim() === e.name) return;
+    this.ops = 1;
+    this.files.sel = new Set([name.trim()]);
+    this.send({ op: ["rename", this.join(this.files.cwd, e.name), name.trim()] });
+  }
+  async remove(s) {
+    if (!s.length) return;
+    const what = s.length === 1 ? "“" + s[0].name + "”" : s.length + " items";
+    const ok = await ask({ title: "Delete " + what + "?", text: "Folders go with everything in them. This cannot be undone.", ok: "Delete", danger: true });
+    if (!ok) return;
+    this.ops = s.length;
+    this.opErrors = [];
+    for (const e of s) this.send({ op: ["delete", this.join(this.files.cwd, e.name), ""] });
+  }
+  opDone(d) {
+    if (!d.ok) (this.opErrors ||= []).push(d.text);
+    if (--this.ops > 0) return;
+    if (this.opErrors?.length) toast(this.opErrors.length === 1 ? this.opErrors[0] : this.opErrors.length + " could not be done: " + this.opErrors[0], { bad: true });
+    this.opErrors = [];
+    this.list(this.files.cwd);
+  }
+
+  // ----- Downloads: one file as itself, a folder or several items as one ZIP
+  download(items) {
+    if (!items.length) return;
+    const single = items.length === 1 && !items[0].dir ? items[0] : null;
+    if (single && single.size > MAX_TRANSFER) { toast("Larger than 2 GB: too large for a browser download.", { bad: true }); return; }
+    const cwdName = (this.files.cwd || "").split(/[\\/]/).filter(Boolean).pop() || "files";
+    const name = single ? single.name : (items.length === 1 ? items[0].name : cwdName) + ".zip";
+    const job = { name, zip: !single, tags: new Set(), done: new Set(), entries: [], open: 0, failed: [], bytes: 0, last: Date.now(), cancelled: false };
+    job.ui = this.xferRow("download", name, single ? single.size : 0, () => this.cancelJob(job));
+    for (const e of items) {
+      const tag = (DONE_TAG | this.nextTag++) >>> 0;
+      job.tags.add(tag);
+      this.jobs.set(tag, job);
+      this.send({ download: this.join(this.files.cwd, e.name), tag });
+    }
+    // An older agent never says a folder is complete: quiet for a while after its last file is.
+    job.timer = setInterval(() => { if (job.open === 0 && Date.now() - job.last > 6000) this.finishJob(job); }, 1000);
+  }
+  fetchStart(f) {
+    const job = this.jobs.get(f.tag >>> 0);
+    if (!job || job.cancelled) { this.send({ cancel: f.id }); return; }
+    const entry = { name: f.name, size: f.size, parts: [], got: 0, crc: 0 };
+    this.byId.set(f.id, { job, entry });
+    job.open++;
+    job.last = Date.now();
+    if (job.bytes + f.size > MAX_TRANSFER) { this.cancelJob(job, "More than 2 GB in all: too large for a browser download."); return; }
+    job.ui.label(job.zip ? job.name + " · " + (job.entries.length + 1) + " files" : job.name);
+  }
+  chunk(id, bytes) {
+    const d = this.byId.get(id);
+    if (!d || d.job.cancelled) return;
+    d.entry.parts.push(bytes);
+    d.entry.got += bytes.length;
+    if (d.job.zip) d.entry.crc = crc32(d.entry.crc, bytes);
+    d.job.bytes += bytes.length;
+    d.job.last = Date.now();
+    d.job.ui.set(d.job.zip ? d.job.bytes : d.entry.got, d.job.zip ? 0 : d.entry.size);
+  }
+  fetchEnd(f) {
+    const d = this.byId.get(f.id);
+    if (!d) {
+      // Could not even be opened there.
+      const job = this.jobs.get((f.tag ?? 0) >>> 0);
+      if (job) { job.failed.push(f.text || f.name); job.last = Date.now(); }
+      else if (!f.ok && f.text && f.text !== "cancelled") toast(f.text, { bad: true });
+      return;
+    }
+    this.byId.delete(f.id);
+    const { job, entry } = d;
+    job.open--;
+    job.last = Date.now();
+    if (job.cancelled) return;
+    if (f.ok) job.entries.push(entry); else job.failed.push(entry.name + ": " + (f.text || "failed"));
+    if (!job.zip) this.finishJob(job);
+  }
+  fetchDone(tag) {
+    const job = this.jobs.get(tag >>> 0);
+    if (!job) return;
+    job.done.add(tag >>> 0);
+    if (job.done.size === job.tags.size && job.open === 0) this.finishJob(job);
+  }
+  finishJob(job) {
+    if (job.finished) return;
+    job.finished = true;
+    clearInterval(job.timer);
+    for (const t of job.tags) this.jobs.delete(t);
+    if (job.cancelled) return;
+    if (!job.entries.length) { job.ui.done(false, job.failed[0] || "Nothing to download"); return; }
+    const blob = job.zip ? zipBlob(job.entries) : new Blob(job.entries[0].parts);
+    saveBlob(blob, job.zip ? job.name : job.entries[0].name.split(/[\\/]/).pop());
+    const failed = job.failed.length ? " · " + job.failed.length + " could not be read" : "";
+    job.ui.done(true, (job.zip ? job.entries.length + " files, " : "") + size(blob.size) + failed);
+    if (job.failed.length) toast(job.failed.length + " could not be downloaded: " + job.failed[0], { bad: true });
+  }
+  cancelJob(job, why) {
+    if (job.finished) return;
+    job.cancelled = true;
+    for (const tag of job.tags) this.send({ cancel: 0, tag });
+    for (const [id, d] of this.byId) if (d.job === job) { this.send({ cancel: id }); this.byId.delete(id); }
+    job.ui.done(false, why || "Cancelled");
+    this.finishJob(job);
+  }
+
+  // ----- Uploads, one file at a time
+  queueUploads(list) {
+    const f = this.files;
+    if (!list.length) return;
+    if (f.cwd === null || f.cwd === "::") { toast("Open a folder first."); return; }
+    const big = list.filter(u => u.file.size > MAX_TRANSFER);
+    if (big.length) toast(big.length + " larger than 2 GB left out: too large to send from a browser.", { bad: true });
+    const items = list.filter(u => u.file.size <= MAX_TRANSFER);
+    if (!items.length) return;
+    const total = items.reduce((n, u) => n + u.file.size, 0);
+    const batch = { dir: f.cwd, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false };
+    batch.ui = this.xferRow("upload", items.length === 1 ? items[0].name : items.length + " files", total, () => { batch.cancelled = true; });
+    for (const u of items) this.uploads.push({ ...u, batch });
+    this.pump();
+  }
+  async pump() {
+    if (this.sending || !this.uploads.length) return;
+    const u = this.uploads.shift();
+    const b = u.batch;
+    if (b.cancelled) { this.batchStep(b); this.pump(); return; }
+    const id = this.nextUpload++;
+    const s = this.sending = { id, u, acked: 0, wake: null };
+    this.send({ upload: { id, size: u.file.size, dir: b.dir, name: u.name } });
+    let off = 0;
+    while (off < u.file.size && this.sending === s && !b.cancelled) {
+      // A bounded amount unacknowledged, so neither the gateway nor the socket piles it up.
+      if (off - s.acked >= WINDOW || this.ws.bufferedAmount > 2 * WINDOW) {
+        await new Promise(r => { s.wake = r; setTimeout(r, 200); });
+        continue;
+      }
+      const bytes = new Uint8Array(await u.file.slice(off, off + CHUNK).arrayBuffer());
+      if (this.ws.readyState !== 1) return;
+      const fr = new Uint8Array(bytes.length + 5);
+      fr[0] = 4; new DataView(fr.buffer).setUint32(1, id, true); fr.set(bytes, 5);
+      this.ws.send(fr);
+      off += bytes.length;
+      b.ui.set(b.bytes + off, b.total);
+    }
+    if (this.sending === s) this.send({ uploadEnd: id });
+  }
+  progress(id, received) { const s = this.sending; if (s?.id === id) { s.acked = received; s.wake?.(); } }
+  uploaded(d) {
+    const s = this.sending;
+    if (!s || s.id !== d.id) return;
+    this.sending = null;
+    s.wake?.();
+    const b = s.u.batch;
+    if (!d.ok && !b.cancelled) b.failed.push(s.u.name + ": " + d.text);
+    b.bytes += s.u.file.size;
+    this.batchStep(b);
+    this.pump();
+  }
+  batchStep(b) {
+    b.sent++;
+    if (b.sent < b.count) { b.ui.label(b.count + " files · " + b.sent + " of " + b.count); return; }
+    if (b.cancelled) b.ui.done(false, "Cancelled");
+    else if (b.failed.length) { b.ui.done(false, b.failed.length + " failed: " + b.failed[0]); }
+    else b.ui.done(true, size(b.total) + " sent");
+    if (this.files.cwd === b.dir) this.list(b.dir);
+  }
+
+  // A row in the transfers list.
+  xferRow(kind, label, total, cancel) {
+    const name = h("span", { class: "name", text: label });
+    const state = h("span", { class: "state" });
+    const bar = h("progress", { max: Math.max(total, 1), value: 0 });
+    const x = button("x", null, { title: "Cancel", class: "btn icon" });
+    const row = h("div", { class: "xfer" }, icon(kind), name, state, x, bar);
+    x.onclick = () => cancel();
+    $("xfers").prepend(row);
+    const ui = {
+      label(t) { name.textContent = t; },
+      set(n, of) { if (of) { bar.max = of; bar.value = n; state.textContent = size(n) + " of " + size(of); } else { bar.removeAttribute("value"); state.textContent = size(n); } },
+      done(ok, text) {
+        bar.max = 1; bar.value = 1; row.classList.add(ok ? "ok" : "bad"); state.textContent = text;
+        x.onclick = () => row.remove(); x.title = "Dismiss";
+        setTimeout(() => row.remove(), ok ? 6000 : 20000);
+      },
+    };
+    ui.set(0, total);
+    return ui;
+  }
 }
+
+// Files and folders dropped on the page, with names relative to what was dropped.
+async function dropped(dt) {
+  const out = [];
+  const entries = [...dt.items].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...dt.files].map(file => ({ file, name: file.name }));
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((ok, no) => entry.file(ok, no)).catch(() => null);
+      if (file) out.push({ file, name: prefix + entry.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((ok, no) => reader.readEntries(ok, no)).catch(() => []);
+        if (!batch.length) break;
+        for (const e of batch) await walk(e, prefix + entry.name + "/");
+      }
+    }
+  };
+  for (const e of entries) await walk(e, "");
+  return out;
+}
+
+// ----- Start ------------------------------------------------------------------------------------------
+
+// A link can name what to open: #id=123456789 or #ssh=user@host.
+{
+  const m = /^#(id|ssh)=(.+)$/.exec(location.hash);
+  if (m) $("addr").value = m[1] === "id" ? spaced(decodeURIComponent(m[2]).replace(/\D/g, "").slice(0, 9)) : decodeURIComponent(m[2]);
+}
+renderSaved();
+refreshForm();
+renderGateway();
+// A remembered sign-in: checked, and the gateway's hosts listed.
+if (gateway.token) signIn(null, false, gateway.token).catch(e => { if (e.signin) signOut(); });
