@@ -372,6 +372,9 @@ impl Remote {
                     self.upload(ctx, resized, &f);
                     self.ctl.frame_done(f.covered() * 2 >= self.fb.w * self.fb.h);
                     self.send(ToAgent::Ack(f.id))?;
+                    if std::mem::take(&mut self.fb.need_key) {
+                        self.send(ToAgent::Refresh)?;
+                    }
                 }
                 Ok(Ev::Net(ToClient::Pong(t))) => self.ctl.pong(t),
                 Ok(Ev::Net(ToClient::Audio(p))) => {

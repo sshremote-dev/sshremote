@@ -222,6 +222,9 @@ pub struct Framebuffer {
     pub mode: Option<Mode>,
     pal: Vec<[u8; 3]>,
     player: crate::video::Player,
+    /// The video could not be decoded (a decoder started over met frames of the stream before
+    /// it): the viewer asks the agent to start the picture over, with a fresh stream.
+    pub need_key: bool,
 }
 
 impl Framebuffer {
@@ -244,15 +247,28 @@ impl Framebuffer {
         }
         if let Some(v) = &f.video {
             let r = (v.x as usize, v.y as usize, v.w as usize, v.h as usize);
-            if let Some(px) = self.player.decode(r, &v.data).map_err(io::Error::other)? {
-                for row in 0..r.3 {
-                    let o = ((r.1 + row) * w + r.0) * 3;
-                    self.rgb[o..o + r.2 * 3].copy_from_slice(&px[row * r.2 * 3..(row + 1) * r.2 * 3]);
+            if r.0 + r.2 > w || r.1 + r.3 > h {
+                return Err(io::Error::other("a video region outside the picture"));
+            }
+            match self.player.decode(r, &v.data) {
+                Ok(Some(px)) => {
+                    for row in 0..r.3 {
+                        let o = ((r.1 + row) * w + r.0) * 3;
+                        self.rgb[o..o + r.2 * 3].copy_from_slice(&px[row * r.2 * 3..(row + 1) * r.2 * 3]);
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    self.player = crate::video::Player::default();
+                    self.need_key = true;
                 }
             }
         }
         for t in &f.tiles {
             let (tx, ty, tw, th) = (t.x as usize, t.y as usize, t.w as usize, t.h as usize);
+            if tx + tw > w || ty + th > h {
+                return Err(io::Error::other("a tile outside the picture"));
+            }
             let px = unpack(&t.data, f.mode, tw, th).ok_or_else(|| io::Error::other("short tile"))?;
             for row in 0..th {
                 let o = ((ty + row) * w + tx) * 3;

@@ -257,6 +257,15 @@ impl Viewer {
     }
 
     fn apply(&mut self, f: Frame) -> io::Result<()> {
+        let result = self.show_frame(f);
+        // A video stream the decoder could not join: the agent starts it over.
+        if std::mem::take(&mut self.fb.need_key) {
+            self.sess.send(ToAgent::Refresh)?;
+        }
+        result
+    }
+
+    fn show_frame(&mut self, f: Frame) -> io::Result<()> {
         if self.view != View::Screen || self.overlay != Overlay::None || self.prompt.is_some() {
             // Not in view (another mode, or something over it): kept, and drawn when it is again.
             if self.view == View::Screen {

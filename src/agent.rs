@@ -36,11 +36,21 @@ fn send_sized(w: &mut Wire, m: &ToClient) -> io::Result<usize> {
     Ok(p.len())
 }
 
+/// The picture's size for the viewer's area: the host's shape kept, never larger than the host,
+/// then the preset's scale. The limiting side is exact and the other rounded, so a 1920x1080
+/// desktop in a 1280x720 view is 1280x720, not a pixel short to be resampled.
 fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
-    let (dw, dh) = (desk.0 as f64, desk.1 as f64);
-    let fit = (s.view_w.max(16) as f64 / dw).min(s.view_h.max(16) as f64 / dh).min(1.0);
-    let k = fit * s.scale as f64 / 100.0;
-    (((dw * k) as usize).max(16), ((dh * k) as usize).max(16))
+    let (dw, dh) = (desk.0.max(1) as f64, desk.1.max(1) as f64);
+    let (vw, vh) = (s.view_w.max(16) as f64, s.view_h.max(16) as f64);
+    let (w, h) = if vw * dh <= vh * dw {
+        let w = vw.min(dw);
+        (w, (dh * w / dw).round())
+    } else {
+        let h = vh.min(dh);
+        ((dw * h / dh).round(), h)
+    };
+    let k = s.scale.clamp(1, 100) as f64 / 100.0;
+    (((w * k).round() as usize).max(16), ((h * k).round() as usize).max(16))
 }
 
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
@@ -114,6 +124,49 @@ pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>
 
 fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(), String> {
     let mut cap = capture::open(backend)?;
+    let mut held = Held::default();
+    let result = serve_with(enc, input, &mut cap, &mut held);
+    // What the viewer still held down at the host is let go, however the session ended.
+    held.release(cap.as_mut());
+    result
+}
+
+/// Keys and buttons the viewer holds down at the host. Windows keeps injected keys down after
+/// the program that pressed them is gone, so a dropped link would leave Ctrl or a drag held.
+#[derive(Default)]
+struct Held {
+    keys: std::collections::BTreeSet<u32>,
+    buttons: std::collections::BTreeSet<u8>,
+}
+
+impl Held {
+    fn key(&mut self, keysym: u32, down: bool) {
+        if down {
+            self.keys.insert(keysym);
+        } else {
+            self.keys.remove(&keysym);
+        }
+    }
+
+    fn button(&mut self, button: u8, pressed: bool) {
+        if pressed {
+            self.buttons.insert(button);
+        } else {
+            self.buttons.remove(&button);
+        }
+    }
+
+    fn release(&mut self, cap: &mut dyn capture::Capture) {
+        for keysym in std::mem::take(&mut self.keys) {
+            let _ = cap.input(Input::KeyState { keysym, down: false });
+        }
+        for button in std::mem::take(&mut self.buttons) {
+            let _ = cap.input(Input::Button { button, pressed: false });
+        }
+    }
+}
+
+fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn capture::Capture>, held: &mut Held) -> Result<(), String> {
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
@@ -178,7 +231,9 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut inbox = crate::files::Inbox::default();
     let mut terms = crate::pty::Terms::default();
     let mut ui = crate::ui::Ui::new();
-    let mut told_outside = Instant::now() - Duration::from_secs(60);
+    // When the viewer was last told its click fell outside the shared window (not before boot:
+    // an `Instant` a minute back does not exist on a Windows host up for less than that).
+    let mut told_outside: Option<Instant> = None;
     // Keys an accessibility action leaves to be typed, handled like the viewer's own.
     let mut queued: Vec<ToAgent> = Vec::new();
     let mut outbox = crate::files::Outbox::default();
@@ -293,10 +348,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                     report(cap.input(Input::Move { x: sx, y: sy }));
                 }
                 ToAgent::Button { button, pressed } => {
+                    held.button(button, pressed);
                     // A click the shared window does not take: say once in a while how to get out.
                     if let Err(e) = cap.input(Input::Button { button, pressed }) {
-                        if e == crate::capture::OUTSIDE && told_outside.elapsed() > Duration::from_secs(4) {
-                            told_outside = Instant::now();
+                        if e == crate::capture::OUTSIDE && told_outside.is_none_or(|t| t.elapsed() > Duration::from_secs(4)) {
+                            told_outside = Some(Instant::now());
                             send(enc, &ToClient::Notice(e)).map_err(io_err)?;
                         } else {
                             report(Err(e));
@@ -305,7 +361,10 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
                 }
                 ToAgent::Scroll { steps } => report(cap.input(Input::Scroll { steps: steps as i32 })),
                 ToAgent::HScroll { steps } => report(cap.input(Input::HScroll { steps: steps as i32 })),
-                ToAgent::KeyState { keysym, down } => report(cap.input(Input::KeyState { keysym, down })),
+                ToAgent::KeyState { keysym, down } => {
+                    held.key(keysym, down);
+                    report(cap.input(Input::KeyState { keysym, down }));
+                }
                 ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
                 ToAgent::Clipboard(text) => clip.set(text),
                 ToAgent::FileStart { id, size, dir, name } => {
@@ -608,5 +667,26 @@ fn announce(
 fn report(r: Result<(), String>) {
     if let Err(e) = r {
         eprintln!("sshremote agent: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(w: u16, h: u16, scale: u8) -> Settings {
+        Settings { view_w: w, view_h: h, scale, mode: Mode::True, fps: 30 }
+    }
+
+    /// The picture keeps the host's shape at the viewer's size exactly on the limiting side, is
+    /// never larger than the host, and the scale rounds rather than drops a pixel.
+    #[test]
+    fn the_picture_size_is_exact_on_the_limiting_side() {
+        assert_eq!(target((1920, 1080), &view(1280, 720, 100)), (1280, 720));
+        assert_eq!(target((1920, 1080), &view(1366, 768, 100)), (1365, 768));
+        assert_eq!(target((1920, 1080), &view(1920, 1200, 100)), (1920, 1080));
+        assert_eq!(target((1920, 1080), &view(4000, 3000, 100)), (1920, 1080), "never enlarged");
+        assert_eq!(target((1920, 1080), &view(1280, 720, 50)), (640, 360));
+        assert_eq!(target((1920, 1080), &view(1280, 720, 255)), (1280, 720), "a scale above 100 is 100");
     }
 }
