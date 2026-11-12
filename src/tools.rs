@@ -16,6 +16,13 @@ pub struct KeyPair {
     pub public: String,
 }
 
+/// Whether a .pub file holds a public key line (a private key saved under a .pub name does not).
+fn is_public_key(text: &str) -> bool {
+    let kind = text.split_whitespace().next().unwrap_or("");
+    let known = ["ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-sha2-"].iter().any(|p| kind.starts_with(p));
+    known && text.split_whitespace().count() >= 2 && !text.contains("PRIVATE KEY")
+}
+
 pub fn list_keys() -> Vec<KeyPair> {
     let mut out: Vec<KeyPair> = std::fs::read_dir(ssh_dir())
         .into_iter()
@@ -28,7 +35,7 @@ pub fn list_keys() -> Vec<KeyPair> {
                     name: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
                     public: std::fs::read_to_string(&p).unwrap_or_default().trim().to_string(),
                 })
-                .filter(|k| !k.public.is_empty())
+                .filter(|k| is_public_key(&k.public))
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -84,6 +91,11 @@ impl KeyTool {
         let name = self.name.trim();
         if name.is_empty() || name.contains(['/', '\\']) {
             self.status = Some((false, "Give the key a file name, such as id_ed25519_work.".into()));
+            return;
+        }
+        // The private key takes the name itself; ".pub" would make it look like a public key.
+        if name.ends_with(".pub") {
+            self.status = Some((false, "The name is the private key's: leave out .pub (ssh-keygen adds it for the public one).".into()));
             return;
         }
         let dir = ssh_dir();
@@ -999,6 +1011,17 @@ pub fn open_path(p: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use crate::gui::snapshot::RunTest;
+    /// A private key under a .pub name is never taken for a public key.
+    #[test]
+    fn only_public_key_lines_count_as_public_keys() {
+        assert!(super::is_public_key("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB me@pc"));
+        assert!(super::is_public_key("ecdsa-sha2-nistp521 AAAAE2VjZHNh"));
+        assert!(super::is_public_key("sk-ssh-ed25519@openssh.com AAAAGnNr"));
+        assert!(!super::is_public_key("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----"));
+        assert!(!super::is_public_key(""));
+        assert!(!super::is_public_key("ssh-ed25519"));
+    }
+
     #[test]
     fn config_blocks_are_read() {
         let text = "Host web1
