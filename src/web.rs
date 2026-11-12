@@ -43,6 +43,9 @@ struct Gate {
 /// Connections served at once, and sockets from one address: enough for many tabs, not for a flood.
 const MOST_CONNECTIONS: usize = 512;
 const MOST_SOCKETS_EACH: usize = 32;
+/// Wrong gateway passwords from all addresses together in a quarter of an hour before every
+/// password try waits.
+const MOST_FAILURES: u32 = 50;
 /// A request or header line longer than this is no browser's.
 const MOST_LINE: u64 = 8192;
 
@@ -472,10 +475,34 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     }
     let signed = v.get("gateway").cloned().unwrap_or_default();
     let field = |k: &str| signed.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let ok = !blocked && (equal(&field("password"), &gate.password) || (!field("token").is_empty() && token_ok(&gate.password, &field("token"))));
+    // A sign-in this gateway gave cannot be guessed: it works even while guessing is held off, so
+    // someone trying passwords does not lock the owner out.
+    let by_token = !field("token").is_empty() && token_ok(&gate.password, &field("token"));
+    // A password try is counted before it is checked, under one lock: tries made at the same time
+    // all count, and none slips past the limit.
+    let mut blocked = blocked;
+    // No password at all (a remembered sign-in that ran out) is no guess, and is not counted.
+    let ok = by_token || !field("password").is_empty() && {
+        let reserved = {
+            let mut f = gate.failures.lock().map_err(|e| e.to_string())?;
+            f.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(900));
+            // All addresses together: one that changes its X-Real-IP is held off as well.
+            let everyone: u32 = f.values().map(|(n, _)| *n).sum();
+            let mine = f.get(&who).is_some_and(|(n, _)| *n >= 5);
+            if mine || everyone >= MOST_FAILURES {
+                false
+            } else {
+                let e = f.entry(who).or_insert((0, Instant::now()));
+                *e = (e.0 + 1, Instant::now());
+                true
+            }
+        };
+        blocked = !reserved;
+        reserved && equal(&field("password"), &gate.password)
+    };
     if !ok {
         if !blocked {
-            failed()?;
+            std::thread::sleep(Duration::from_secs(2));
         }
         let text = if blocked {
             "Too many wrong passwords; try again later."
@@ -1285,6 +1312,59 @@ Host: x
         f.extend_from_slice(&[9, 8, 7, 6]);
         f.extend(data.iter().enumerate().map(|(i, b)| b ^ [9, 8, 7, 6][i % 4]));
         f
+    }
+
+    /// Wrong passwords tried at the same time all count: no more than five get checked, and a
+    /// remembered sign-in still works while guessing is held off.
+    #[test]
+    fn guesses_at_once_all_count() {
+        let dir = std::env::temp_dir().join(format!("sshremote-web-guess-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pw = dir.join("pw");
+        std::fs::write(&pw, "secret-word").unwrap();
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let args: Vec<String> = ["--listen", &format!("127.0.0.1:{port}"), "--password-file", pw.to_str().unwrap()].iter().map(|s| s.to_string()).collect();
+        std::thread::spawn(move || run(&args));
+        std::thread::sleep(Duration::from_millis(300));
+        let addr = format!("127.0.0.1:{port}");
+        // One sign-in, its answer as text.
+        let try_once = move |first: String| -> String {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            s.write_all(format!("GET /ws HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            while line != "\r\n" {
+                line.clear();
+                r.read_line(&mut line).unwrap();
+            }
+            s.write_all(&masked(true, 1, first.as_bytes())).unwrap();
+            let mut h = [0u8; 2];
+            r.read_exact(&mut h).unwrap();
+            let mut len = (h[1] & 0x7f) as usize;
+            if len == 126 {
+                let mut b = [0u8; 2];
+                r.read_exact(&mut b).unwrap();
+                len = u16::from_be_bytes(b) as usize;
+            }
+            let mut d = vec![0u8; len];
+            r.read_exact(&mut d).unwrap();
+            String::from_utf8_lossy(&d).into_owned()
+        };
+        let signed: serde_json::Value = serde_json::from_str(&try_once(r#"{"gateway":{"password":"secret-word","remember":true}}"#.into())).unwrap();
+        let token = signed["signedIn"]["token"].as_str().unwrap().to_string();
+        let tries: Vec<_> = (0..8)
+            .map(|_| {
+                let t = try_once.clone();
+                std::thread::spawn(move || t(r#"{"gateway":{"password":"wrong"}}"#.into()))
+            })
+            .collect();
+        let answers: Vec<String> = tries.into_iter().map(|t| t.join().unwrap()).collect();
+        let checked = answers.iter().filter(|a| a.contains("Wrong password")).count();
+        assert!(checked <= 5, "only five checked: {answers:?}");
+        assert!(answers.iter().filter(|a| a.contains("Too many")).count() >= 3, "{answers:?}");
+        assert!(try_once(r#"{"gateway":{"password":"secret-word"}}"#.into()).contains("Too many"), "held off, even the right one");
+        let by_token = try_once(serde_json::json!({ "gateway": { "token": token } }).to_string());
+        assert!(by_token.contains("signedIn"), "the owner's remembered sign-in still works: {by_token}");
     }
 
     /// A remembered sign-in is the gateway's to give: it ends when it says, and with a new
