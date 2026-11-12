@@ -1,3 +1,5 @@
+// Builds with only some parts (the extensions' helpers) leave the others' code unused.
+#![cfg_attr(not(all(feature = "gui", feature = "remote", feature = "web", feature = "mcp")), allow(dead_code))]
 #[cfg(feature = "remote")]
 mod access;
 mod admin;

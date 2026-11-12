@@ -938,6 +938,8 @@ impl Workspace {
     }
 
     /// The pane's connection broke: its shells are kept and it starts trying again.
+    // Without the remote part a pane is never live, and what follows `prefs` cannot run.
+    #[cfg_attr(not(feature = "remote"), allow(unreachable_code))]
     fn lost(&mut self, i: usize, why: String) {
         let p = &mut self.panes[i];
         if let State::Live(r) = &mut p.state {
