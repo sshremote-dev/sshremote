@@ -1092,7 +1092,13 @@ impl ExtTool {
             ExtTab::Browse => self.browse_tab(ui, &installed, &mut act),
             ExtTab::Manage => self.manage_tab(ui, &mut act),
         }
-        // Work runs in the background and the list stays where it is, the card showing its state.
+        // Work runs in the background and the list stays where it is, the card showing its state;
+        // one change at a time, so a second click never replaces the first one's result.
+        if act.is_some() && self.working.is_some() {
+            act = None;
+            self.pending = None;
+            self.status = Some((false, "Another change is still going on; try again once it is done.".into()));
+        }
         if let Some(f) = act {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
