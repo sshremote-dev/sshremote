@@ -364,19 +364,55 @@ pub fn online(id: &str, relay: &str) -> Result<bool, String> {
     }
 }
 
+/// Wrong passwords in a row past which no password is checked for a day, or until the password
+/// is changed: a guesser gets this many tries, not thousands.
+const LOCK_AFTER: u32 = 20;
+const LOCK_FOR: Duration = Duration::from_secs(24 * 3600);
+/// Calls answered at once; more (a flood from a relay or someone on the path) are dropped.
+const MOST_CALLS: usize = 8;
+
 /// Wrong passwords seen lately, and one password check at a time: guesses wait their turn and
 /// cost more time each, and the count fades after a quiet quarter of an hour, so wrong guesses
-/// slow an attacker without locking the owner out.
+/// slow an attacker without locking the owner out. Many in a row stop the checking altogether.
 #[derive(Default)]
 struct Guard {
     failures: Mutex<(u32, Option<std::time::Instant>)>,
+    /// Wrong passwords since the last right one, and when the last was.
+    strikes: Mutex<(u32, Option<std::time::Instant>)>,
     turn: Mutex<()>,
     /// Calls waiting for the turn: past two, more are turned away at once, so a queue of guesses
     /// cannot keep the owner's own call waiting until it gives up.
     waiting: std::sync::atomic::AtomicUsize,
+    /// Calls being answered now.
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+/// Wrong passwords in a row in this process's remote access, for the window.
+static STRIKES: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this process's remote access stopped taking passwords after too many wrong ones.
+pub fn locked() -> bool {
+    STRIKES.load(Ordering::Relaxed) >= LOCK_AFTER
 }
 
 impl Guard {
+    /// No password is checked: too many wrong ones in a row, not long ago.
+    fn locked(&self) -> bool {
+        let mut s = self.strikes.lock().unwrap_or_else(|e| e.into_inner());
+        if s.1.is_some_and(|t| t.elapsed() > LOCK_FOR) {
+            *s = (0, None);
+            STRIKES.store(0, Ordering::Relaxed);
+        }
+        s.0 >= LOCK_AFTER
+    }
+
+    /// A new password: what was guessed against the old one no longer counts.
+    fn reset(&self) {
+        *self.strikes.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+        *self.failures.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+        STRIKES.store(0, Ordering::Relaxed);
+    }
+
     fn delay(&self) -> Duration {
         let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
         if f.1.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
@@ -386,12 +422,18 @@ impl Guard {
     }
 
     fn failed(&self) {
+        let now = Some(std::time::Instant::now());
         let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        *f = (f.0 + 1, Some(std::time::Instant::now()));
+        *f = (f.0 + 1, now);
+        let mut s = self.strikes.lock().unwrap_or_else(|e| e.into_inner());
+        *s = (s.0 + 1, now);
+        STRIKES.store(s.0, Ordering::Relaxed);
     }
 
     fn passed(&self) {
         *self.failures.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+        *self.strikes.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+        STRIKES.store(0, Ordering::Relaxed);
     }
 }
 
@@ -400,7 +442,12 @@ impl Guard {
 pub fn run(keep: impl Fn() -> Option<Config>) {
     let guard = Arc::new(Guard::default());
     let mut wait = 2;
+    let mut password = None;
     while let Some(mut cfg) = keep() {
+        if password.as_ref().is_some_and(|p| *p != cfg.password) {
+            guard.reset();
+        }
+        password = Some(cfg.password.clone());
         set_state(State::Connecting);
         let mut s = match dial(&cfg.relay) {
             Ok(s) => s,
@@ -473,8 +520,20 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                         break 'line;
                     }
                 } else if let Some(nonce) = l.strip_prefix("call ") {
+                    // A flood of calls is not answered past a handful at once, nor at all while
+                    // no password is taken.
+                    if guard.locked() {
+                        continue;
+                    }
+                    if guard.calls.fetch_add(1, Ordering::AcqRel) >= MOST_CALLS {
+                        guard.calls.fetch_sub(1, Ordering::AcqRel);
+                        continue;
+                    }
                     let (cfg, nonce, guard) = (cfg.clone(), nonce.to_string(), guard.clone());
-                    thread::spawn(move || answer_call(&cfg, &nonce, &guard));
+                    thread::spawn(move || {
+                        answer_call(&cfg, &nonce, &guard);
+                        guard.calls.fetch_sub(1, Ordering::AcqRel);
+                    });
                 }
             }
         }
@@ -503,28 +562,25 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
     }
-    if guard.waiting.fetch_add(1, Ordering::AcqRel) >= 2 {
-        guard.waiting.fetch_sub(1, Ordering::AcqRel);
-        return;
-    }
-    let checked = {
+    // The exchange runs at the viewer's pace with nobody waiting on it; only checking its proof
+    // of the password takes the turn, after the delay wrong ones have earned.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
+    let judge = |check: &mut dyn FnMut() -> bool| -> io::Result<bool> {
+        if guard.locked() {
+            return Err(io::Error::other("no passwords taken now"));
+        }
+        if guard.waiting.fetch_add(1, Ordering::AcqRel) >= 2 {
+            guard.waiting.fetch_sub(1, Ordering::AcqRel);
+            return Err(io::Error::other("busy"));
+        }
         let _turn = guard.turn.lock().unwrap_or_else(|e| e.into_inner());
         guard.waiting.fetch_sub(1, Ordering::AcqRel);
         thread::sleep(guard.delay());
-        // A viewer that goes quiet in the middle of the check does not hold the turn.
-        let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
-        crate::net::handshake_agent(s, &cfg.password)
+        let right = check();
+        if right { guard.passed() } else { guard.failed() }
+        Ok(right)
     };
-    let (r, w) = match checked {
-        Ok(p) => p,
-        Err(e) => {
-            if e.kind() == io::ErrorKind::PermissionDenied || e.to_string().contains("key exchange") {
-                guard.failed();
-            }
-            return;
-        }
-    };
-    guard.passed();
+    let Ok((r, w)) = crate::net::handshake_agent(s, &cfg.password, &judge) else { return };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     if let Ok(socket) = w.stream() {
@@ -845,6 +901,33 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twenty_wrong_passwords_in_a_row_stop_the_checking() {
+        let g = Guard::default();
+        for _ in 0..LOCK_AFTER - 1 {
+            g.failed();
+        }
+        assert!(!g.locked(), "not yet");
+        g.passed();
+        for _ in 0..LOCK_AFTER - 1 {
+            g.failed();
+        }
+        assert!(!g.locked(), "a right password starts the count again");
+        g.failed();
+        assert!(g.locked() && locked(), "{LOCK_AFTER} in a row");
+        // A day later, or a new password, opens it again.
+        // (A day back exists only on a computer up for longer than that.)
+        if let Some(day) = std::time::Instant::now().checked_sub(LOCK_FOR + Duration::from_secs(1)) {
+            g.strikes.lock().unwrap().1 = Some(day);
+            assert!(!g.locked(), "a day on");
+        }
+        for _ in 0..LOCK_AFTER {
+            g.failed();
+        }
+        g.reset();
+        assert!(!g.locked() && !locked(), "a new password");
+    }
 
     #[test]
     fn ids_passwords_and_addresses() {

@@ -147,6 +147,9 @@ impl App {
         if !cfg.enabled {
             return (weak, "Off: nobody can connect by ID".into());
         }
+        if !svc.runs && access::locked() {
+            return (bad(), "Too many wrong passwords in a row: none is taken for a day, or until you set a new one".into());
+        }
         match (&local, online) {
             (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
             (access::State::Failed(e), _) => (bad(), e.clone()),

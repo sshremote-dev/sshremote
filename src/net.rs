@@ -6,7 +6,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -110,25 +110,35 @@ pub struct SealedReader {
     limit: usize,
 }
 
+impl SealedReader {
+    /// The next frame as it came, still sealed; None at the end of the stream.
+    fn sealed_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let mut len = [0u8; 4];
+        match self.inner.read_exact(&mut len) {
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            r => r?,
+        }
+        let len = u32::from_le_bytes(len) as usize;
+        if len > self.limit + 16 {
+            return Err(io::Error::other("oversized frame"));
+        }
+        let mut ct = vec![0u8; len];
+        self.inner.read_exact(&mut ct)?;
+        Ok(Some(ct))
+    }
+
+    /// Opens a frame `sealed_frame` read, the next in order.
+    fn open(&mut self, ct: &[u8]) -> io::Result<Vec<u8>> {
+        let nonce = self.seal.nonce();
+        self.seal.cipher.decrypt(&nonce, ct).map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "wrong password or tampered stream"))
+    }
+}
+
 impl Read for SealedReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         while self.at == self.plain.len() {
-            let mut len = [0u8; 4];
-            match self.inner.read_exact(&mut len) {
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
-                r => r?,
-            }
-            let len = u32::from_le_bytes(len) as usize;
-            if len > self.limit + 16 {
-                return Err(io::Error::other("oversized frame"));
-            }
-            let mut ct = vec![0u8; len];
-            self.inner.read_exact(&mut ct)?;
-            let nonce = self.seal.nonce();
-            self.plain =
-                self.seal.cipher.decrypt(&nonce, ct.as_slice()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::PermissionDenied, "wrong password or tampered stream")
-                })?;
+            let Some(ct) = self.sealed_frame()? else { return Ok(0) };
+            self.plain = self.open(&ct)?;
             self.at = 0;
         }
         let n = out.len().min(self.plain.len() - self.at);
@@ -140,18 +150,27 @@ impl Read for SealedReader {
 
 const CONFIRM: &[u8] = b"sshremote/1 ready";
 
+/// Decides whether the viewer's proof of the password is checked now: given the check, it runs it
+/// in its own time (its turn, a delay) and says whether the password was right; an error turns
+/// the call away unchecked.
+pub type Judge<'a> = &'a dyn Fn(&mut dyn FnMut() -> bool) -> io::Result<bool>;
+
+/// How long a viewer waits for the computer's verdict on its password: the computer may make a
+/// guess wait its turn and a delay first.
+const VERDICT_LIMIT: Duration = Duration::from_secs(75);
+
 /// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here. On
 /// a failure the connection is shut at once, so the other side hears it without waiting.
-fn handshake(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(SealedReader, SealedWriter)> {
+fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
     let closer = stream.try_clone()?;
-    let result = handshake_on(stream, password, viewer);
+    let result = handshake_on(stream, password, viewer, judge);
     if result.is_err() {
         let _ = closer.shutdown(std::net::Shutdown::Both);
     }
     result
 }
 
-fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(SealedReader, SealedWriter)> {
+fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
     let (a, b) = (Identity::new(b"sshremote viewer"), Identity::new(b"sshremote agent"));
     let pw = Password::new(password.trim().as_bytes());
     let (state, msg) = if viewer {
@@ -161,17 +180,25 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
     };
     let mut s = stream;
     s.set_nodelay(true)?;
-    // Past the limit the connection is shut, which ends any read still waiting on it.
+    // Past the deadline the connection is shut, which ends any read still waiting on it. The
+    // network's part has the deadline; the wait for a verdict is not the peer's to drag out.
+    let started = std::time::Instant::now();
+    let deadline = Arc::new(AtomicU64::new(HANDSHAKE_LIMIT.as_millis() as u64));
     let done = Arc::new(AtomicBool::new(false));
     if let Ok(watch) = s.try_clone() {
-        let done = done.clone();
+        let (done, deadline) = (done.clone(), deadline.clone());
         std::thread::spawn(move || {
-            std::thread::sleep(HANDSHAKE_LIMIT);
-            if !done.load(Ordering::Acquire) {
-                let _ = watch.shutdown(std::net::Shutdown::Both);
+            while !done.load(Ordering::Acquire) {
+                if started.elapsed().as_millis() as u64 > deadline.load(Ordering::Acquire) {
+                    let _ = watch.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
         });
     }
+    let extend = |d: Duration| deadline.store(started.elapsed().as_millis() as u64 + d.as_millis() as u64, Ordering::Release);
+    let late = || started.elapsed().as_millis() as u64 >= deadline.load(Ordering::Acquire);
     struct Done(Arc<AtomicBool>);
     impl Drop for Done {
         fn drop(&mut self) {
@@ -179,11 +206,17 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
         }
     }
     let _done = Done(done);
-    let started = std::time::Instant::now();
     s.write_all(&(msg.len() as u16).to_le_bytes())?;
     s.write_all(&msg)?;
     let mut len = [0u8; 2];
-    s.read_exact(&mut len)?;
+    if let Err(e) = s.read_exact(&mut len) {
+        // A computer that will not check a password now hangs up before the exchange.
+        return Err(if viewer && e.kind() == io::ErrorKind::UnexpectedEof {
+            io::Error::new(io::ErrorKind::ConnectionRefused, "the computer turned the call away: it is busy, or it stopped taking passwords after too many wrong ones")
+        } else {
+            e
+        });
+    }
     // Both sides' messages are the same size: anything else is not this program.
     if u16::from_le_bytes(len) as usize != msg.len() {
         return Err(io::Error::other("bad key exchange"));
@@ -204,12 +237,11 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
     if viewer {
         w.write_all(CONFIRM)?;
         w.flush()?;
+        extend(VERDICT_LIMIT);
         // A computer that did not take the password closes the connection without a word.
         if let Err(e) = r.read_exact(&mut got) {
             return Err(match e.kind() {
-                _ if started.elapsed() >= HANDSHAKE_LIMIT => {
-                    io::Error::new(io::ErrorKind::TimedOut, "the computer did not answer the password in time")
-                }
+                _ if late() => io::Error::new(io::ErrorKind::TimedOut, "the computer did not answer the password in time"),
                 io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
                     io::Error::new(io::ErrorKind::PermissionDenied, "wrong password")
                 }
@@ -217,10 +249,16 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
             });
         }
     } else {
-        r.read_exact(&mut got)?;
-        if got != CONFIRM {
+        // The proof is read as it comes; checking it waits on the judge, with no deadline
+        // meanwhile (the network's part is over).
+        let ct = r.sealed_frame()?.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        deadline.store(u64::MAX, Ordering::Release);
+        let right = judge(&mut || r.open(&ct).is_ok_and(|p| p == CONFIRM))?;
+        extend(HANDSHAKE_LIMIT);
+        if !right {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
         }
+        got.copy_from_slice(CONFIRM);
         w.write_all(CONFIRM)?;
         w.flush()?;
     }
@@ -231,9 +269,15 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool) -> io::Result<(
     Ok((r, w))
 }
 
-/// The agent's side of the handshake, for remote access by ID.
-pub fn handshake_agent(stream: TcpStream, password: &str) -> io::Result<(SealedReader, SealedWriter)> {
-    handshake(stream, password, false)
+/// The agent's side of the handshake, for remote access by ID; `judge` checks the viewer's proof
+/// of the password when it allows.
+pub fn handshake_agent(stream: TcpStream, password: &str, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
+    handshake(stream, password, false, judge)
+}
+
+/// A judge that checks at once.
+fn now(check: &mut dyn FnMut() -> bool) -> io::Result<bool> {
+    Ok(check())
 }
 
 /// Viewer side: reaches the ID through its relay and runs the handshake.
@@ -247,9 +291,9 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
         "ok" => {}
         other => return Err(format!("relay: {other}")),
     }
-    // The agent may make a wrong guess wait its turn, but not forever.
-    let _ = s.set_read_timeout(Some(Duration::from_secs(60)));
-    let pair = handshake(s, password, true).map_err(|e| e.to_string())?;
+    // The agent may make a wrong guess wait its turn and a delay, but not forever.
+    let _ = s.set_read_timeout(Some(VERDICT_LIMIT + Duration::from_secs(15)));
+    let pair = handshake(s, password, true, &now).map_err(|e| e.to_string())?;
     // The agent answers a ping every second: two minutes of nothing is a dead path (a network
     // change, a NAT mapping dropped), and the viewer reconnects instead of freezing.
     if let Ok(t) = pair.1.stream() {
@@ -271,12 +315,12 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let agent = thread::spawn(move || {
             let (s, _) = l.accept().unwrap();
-            let (mut r, _w) = handshake_agent(s, "secret password").unwrap();
+            let (mut r, _w) = handshake_agent(s, "secret password", &now).unwrap();
             let mut got = vec![0u8; 3 << 19];
             r.read_exact(&mut got).map(|()| got)
         });
         let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let (_r, mut w) = handshake(s, "secret password", true).unwrap();
+        let (_r, mut w) = handshake(s, "secret password", true, &now).unwrap();
         let sent: Vec<u8> = (0..3usize << 19).map(|i| (i % 251) as u8).collect();
         w.write_all(&sent).unwrap();
         w.flush().unwrap();
@@ -291,7 +335,7 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let agent = thread::spawn(move || {
             let (s, _) = l.accept().unwrap();
-            handshake_agent(s, "secret password").map(|_| ())
+            handshake_agent(s, "secret password", &now).map(|_| ())
         });
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.write_all(&256u16.to_le_bytes()).unwrap();
@@ -320,18 +364,56 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let agent = thread::spawn(move || -> io::Result<()> {
             let (s, _) = l.accept()?;
-            let (_r, mut w) = handshake(s, pw_agent, false)?;
+            let (_r, mut w) = handshake(s, pw_agent, false, &now)?;
             w.write_all(b"hello over the sealed stream")?;
             w.flush()
         });
         let viewer = (|| {
             let s = TcpStream::connect(("127.0.0.1", port))?;
-            let (mut r, _w) = handshake(s, pw_viewer, true)?;
+            let (mut r, _w) = handshake(s, pw_viewer, true, &now)?;
             let mut buf = [0u8; 28];
             r.read_exact(&mut buf)?;
             Ok(String::from_utf8_lossy(&buf).into_owned())
         })();
         (viewer, agent.join().unwrap())
+    }
+
+    /// A viewer that stops halfway through the exchange holds nothing: only checking a proof
+    /// takes the agent's turn, so the next viewer gets in at once.
+    #[test]
+    fn a_stalled_viewer_does_not_hold_the_turn() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let turn = Arc::new(std::sync::Mutex::new(()));
+        let agent = {
+            let turn = turn.clone();
+            thread::spawn(move || {
+                let mut done = Vec::new();
+                for _ in 0..2 {
+                    let (s, _) = l.accept().unwrap();
+                    let turn = turn.clone();
+                    done.push(thread::spawn(move || {
+                        let judge = |check: &mut dyn FnMut() -> bool| -> io::Result<bool> {
+                            let _t = turn.lock().unwrap();
+                            Ok(check())
+                        };
+                        handshake_agent(s, "123456789", &judge).map(|_| ())
+                    }));
+                }
+                done
+            })
+        };
+        // The first sends a key exchange message's length and nothing more.
+        let mut stall = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stall.write_all(&[32, 0]).unwrap();
+        let started = std::time::Instant::now();
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        assert!(handshake(s, "123456789", true, &now).is_ok());
+        assert!(started.elapsed() < Duration::from_secs(3), "in at once: {:?}", started.elapsed());
+        drop(stall);
+        for h in agent.join().unwrap() {
+            let _ = h.join();
+        }
     }
 
     #[test]
