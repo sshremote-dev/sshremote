@@ -79,6 +79,9 @@ pub(super) struct Remote {
     monitor: usize,
     /// The monitor the user picked, if any, to pick again after a reconnect.
     chosen_monitor: Option<u8>,
+    /// Every monitor of the host was asked for, each in a window of its own (taken by the
+    /// workspace, which opens them).
+    pub(super) spread_asked: bool,
     /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
     wheel: Vec2,
     inbox: crate::files::Inbox,
@@ -252,6 +255,7 @@ impl Remote {
             monitors: Vec::new(),
             monitor: 0,
             chosen_monitor: None,
+            spread_asked: false,
             wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
@@ -872,6 +876,18 @@ impl Remote {
         self.ctl.auto = None;
         let s = self.ctl.s;
         self.send(ToAgent::Settings(s))
+    }
+
+    /// The host's monitors, and the one shown here.
+    pub(super) fn monitors(&self) -> (usize, usize) {
+        (self.monitors.len(), self.monitor)
+    }
+
+    /// What the user chose here, for another connection to the host that shows its monitor `m`.
+    pub(super) fn prefs_on(&self, m: u8) -> Prefs {
+        let mut p = self.prefs();
+        p.monitor = Some(m);
+        p
     }
 
     /// What the user chose here, to carry into the connection made after this one drops.

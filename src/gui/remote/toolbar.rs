@@ -240,9 +240,13 @@ impl Remote {
                     pick(ui, Fit::Fixed(p), &format!("{p}%"));
                 }
             });
-            if self.monitors.len() > 1 {
-                ui.separator();
-                ui.label(RichText::new("Screen").strong());
+        });
+        display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
+
+        // The host's screens, when it has several: which one shows here, or all, a window each.
+        if self.monitors.len() > 1 {
+            let screens = icon_menu(ui, ic::SQUARES_FOUR, |ui| {
+                ui.label(RichText::new("Its screens").strong());
                 for (i, m) in self.monitors.iter().enumerate() {
                     let primary = if m.primary { ", primary" } else { "" };
                     let text = format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h);
@@ -254,9 +258,23 @@ impl Remote {
                         ui.close();
                     }
                 }
-            }
-        });
-        display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
+                ui.separator();
+                let locals = crate::sys::monitors().len();
+                let tip = if locals > 1 {
+                    "Each of the host's screens in a window of its own, full screen on one of this computer's monitors each, as Remote Desktop's \"use all my monitors\""
+                } else {
+                    "Each of the host's screens in a window of its own"
+                };
+                if ui.button(format!("{}  All its screens, a window each", ic::APP_WINDOW)).on_hover_text(tip).clicked() {
+                    *action = Some(Box::new(|r, _| {
+                        r.spread_asked = true;
+                        Ok(())
+                    }));
+                    ui.close();
+                }
+            });
+            screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));
+        }
 
         if icon(ui, ic::APP_WINDOW, "Share: the entire screen, one window or one application", self.sharing.0 != 0)
             .clicked()

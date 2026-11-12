@@ -1,6 +1,5 @@
 //! Without the remote feature the workspace holds terminals only: these stand-ins have no
-//! values, so the screen and files code paths compile but are never reached. The Remote desktop
-//! extension opens screens and files in a window of its own.
+//! values, so the screen and files code paths compile but are never reached.
 
 use super::*;
 
@@ -20,6 +19,7 @@ pub(super) struct Remote {
     pub(super) filling: bool,
     pub(super) grab_wanted: bool,
     pub(super) pane_closed: bool,
+    pub(super) spread_asked: bool,
     never: Session,
 }
 
@@ -75,6 +75,12 @@ impl Remote {
         match self.never {}
     }
     pub(super) fn prefs(&self) -> Prefs {
+        match self.never {}
+    }
+    pub(super) fn prefs_on(&self, _: u8) -> Prefs {
+        match self.never {}
+    }
+    pub(super) fn monitors(&self) -> (usize, usize) {
         match self.never {}
     }
     pub(super) fn restore(&mut self, _: Prefs) -> Result<(), String> {

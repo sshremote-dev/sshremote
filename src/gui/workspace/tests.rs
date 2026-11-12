@@ -1296,3 +1296,36 @@ fn a_failed_connection_offers_reconnect_or_close() {
     h.item("Close");
     assert!(h.w.panes.is_empty(), "Close closes the pane");
 }
+
+/// All of a host's screens: the display menu asks, and each other screen opens with that screen
+/// picked, in a workspace of its own (a window, which the app places).
+#[test]
+#[ignore]
+fn all_screens_open_each_in_a_window_of_its_own() {
+    let mut h = Harness::new();
+    let launch = Launch::Agent { target: Target::Local { capture: "synthetic2".into() }, label: "Two screens".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(launch, Place::Tab, PaneStart::default());
+    h.until("connected", |w| live(w, 0));
+    let screens = |w: &Workspace| match &w.panes[0].state {
+        State::Live(r) => r.monitors(),
+        _ => (0, 0),
+    };
+    h.until("its two screens known", |w| screens(w).0 == 2);
+    // A menu of its screens in the title bar.
+    h.bar(ic::SQUARES_FOUR);
+    // A menu takes its full height over a few frames.
+    for _ in 0..3 {
+        h.frame(Vec::new());
+    }
+    h.item("All its screens, a window each");
+    assert_eq!(h.w.spread.len(), 1, "one other screen");
+    assert_eq!((h.w.spread[0].screen, h.w.spread_from), (1, Some(0)));
+    let s = h.w.spread.pop().unwrap();
+    let mut other = Harness::new();
+    other.w.add_with(s.launch, s.prefs, PaneStart::default());
+    other.until("connected", |w| live(w, 0));
+    other.until("showing the second screen", |w| screens(w).1 == 1);
+    assert!(other.w.panes[0].label.ends_with("screen 2"));
+    h.w.close_all();
+    other.w.close_all();
+}

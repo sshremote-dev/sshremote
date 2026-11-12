@@ -1,5 +1,6 @@
 //! Deterministic test desktop: text-like rows, a ticking progress bar, a pointer
-//! and typed characters. Lets the whole pipeline run without a real desktop.
+//! and typed characters. Lets the whole pipeline run without a real desktop. Opened as
+//! "synthetic2" it has two screens, the second with a bar of another colour.
 
 use std::time::Instant;
 
@@ -20,6 +21,9 @@ pub struct Synthetic {
     /// Frames of the moving picture started by typing `v`, like a playing video.
     playing: Option<u32>,
     dirty: bool,
+    /// How many screens it has, and the one shown.
+    screens: usize,
+    screen: usize,
 }
 
 impl Synthetic {
@@ -34,7 +38,14 @@ impl Synthetic {
             scrolled: 0,
             playing: None,
             dirty: true,
+            screens: 1,
+            screen: 0,
         }
+    }
+
+    /// The test desktop with `n` screens.
+    pub fn with_screens(n: usize) -> Synthetic {
+        Synthetic { screens: n.max(1), ..Synthetic::new() }
     }
 
     fn render(&self) -> Vec<u8> {
@@ -47,7 +58,11 @@ impl Synthetic {
             }
         };
         fill(0, 0, W, H, [40, 44, 52]);
-        let bar = if self.clicks.is_multiple_of(2) { [60, 64, 72] } else { [30, 90, 160] };
+        let bar = match (self.screen, self.clicks.is_multiple_of(2)) {
+            (0, true) => [60, 64, 72],
+            (0, false) => [30, 90, 160],
+            _ => [150, 60, 40],
+        };
         fill(0, 0, W, 40, bar);
         for row in 0..24 {
             let y = 60 + row * 22;
@@ -95,6 +110,26 @@ impl Capture for Synthetic {
 
     fn desktop_size(&self) -> (usize, usize) {
         (W, H)
+    }
+
+    fn monitors(&self) -> Vec<super::Monitor> {
+        if self.screens < 2 {
+            return Vec::new();
+        }
+        (0..self.screens).map(|i| super::Monitor { name: format!("Synthetic {}", i + 1), w: W, h: H, primary: i == 0 }).collect()
+    }
+
+    fn current(&self) -> usize {
+        self.screen
+    }
+
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.screens {
+            return Err("no such screen".into());
+        }
+        self.screen = index;
+        self.dirty = true;
+        Ok(())
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {

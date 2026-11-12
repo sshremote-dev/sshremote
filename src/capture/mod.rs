@@ -107,6 +107,7 @@ pub fn ensure_session_env() {
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
     match name {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),
+        "synthetic2" => Ok(Box::new(synthetic::Synthetic::with_screens(2))),
         #[cfg(target_os = "linux")]
         "gnome" | "auto" => Ok(Box::new(gnome::Gnome::open()?)),
         #[cfg(windows)]

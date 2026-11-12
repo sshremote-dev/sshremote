@@ -2,8 +2,9 @@
 # A private headless GNOME session for capture and window tests that must leave the desktop of
 # whoever is signed in alone: its own runtime folder, session bus, settings, PipeWire and a
 # virtual monitor, all under $GNOME_TEST_DIR (default /tmp/sshremote-gnome).
-#   scripts/gnome-session.sh up [WxH]     start it, with the sshremote helper extension enabled and
-#                                         a password store of its own
+#   scripts/gnome-session.sh up [WxH,...] start it, with a virtual monitor of each size given, the
+#                                         sshremote helper extension enabled and a password store
+#                                         of its own
 #   scripts/gnome-session.sh run CMD...   run a program in it
 #   scripts/gnome-session.sh env          the variables that point a program at it
 #   scripts/gnome-session.sh shot FILE    a PNG of its screen, through `sshremote mcp`
@@ -42,6 +43,8 @@ down() {
 case "${1:-}" in
 up)
   size=${2:-1280x800}
+  monitors=""
+  for m in $(echo "$size" | tr ',' ' '); do monitors="$monitors --virtual-monitor $m"; done
   down
   sleep 1
   # Only what this script makes there, whatever $GNOME_TEST_DIR names.
@@ -57,7 +60,7 @@ wireplumber > "$DIR/wireplumber.log" 2>&1 &
 gsettings set org.gnome.shell enabled-extensions "['$HELPER']"
 # A password store of its own (unlocked with a throwaway password), for tests that save passwords.
 printf test | gnome-keyring-daemon --unlock --components=secrets --foreground > "$DIR/keyring.log" 2>&1 &
-gnome-shell --headless --virtual-monitor $size --wayland-display=gnome-test > "$DIR/shell.log" 2>&1 &
+gnome-shell --headless$monitors --wayland-display=gnome-test > "$DIR/shell.log" 2>&1 &
 mv "$DIR/bus.new" "$DIR/bus"
 wait
 EOF

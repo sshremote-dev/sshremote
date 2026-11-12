@@ -855,6 +855,7 @@ impl eframe::App for App {
                 self.error = Some(e);
             }
             self.quick_open(&ctx, &mut w);
+            self.spread_screens(&ctx, None, &mut w);
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
@@ -950,6 +951,38 @@ impl App {
     }
 
     /// A window of its own for a tab dragged out, its tab under the screen point `at`.
+    /// Opens the host's other screens workspace `w` asked for, each in a window of its own. With
+    /// several monitors here, each window goes full screen on the monitor numbered as its screen
+    /// is (the asking window too), as Remote Desktop's "use all my monitors"; with one, they open
+    /// side by side.
+    fn spread_screens(&mut self, ctx: &egui::Context, from: Option<egui::ViewportId>, w: &mut workspace::Workspace) {
+        if w.spread.is_empty() {
+            return;
+        }
+        let locals = crate::sys::monitors();
+        let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
+        // A window's top left for the middle of monitor `n` here, in points.
+        let on = |n: usize| locals.get(n).map(|&(x, y, wd, h)| Pos2::new((x + wd / 2) as f32 / ppp - 550.0, (y + h / 2) as f32 / ppp - 360.0));
+        let full = locals.len() > 1;
+        if let Some(shown) = w.spread_from.take()
+            && full
+            && let Some(at) = on(shown)
+        {
+            ctx.send_viewport_cmd_to(from.unwrap_or(egui::ViewportId::ROOT), ViewportCommand::OuterPosition(at));
+            w.full_screen_soon();
+        }
+        for (k, s) in w.spread.drain(..).enumerate() {
+            let mut screen = workspace::Workspace::new(self.options());
+            screen.set_preset(self.form.preset);
+            let start = PaneStart { fullscreen: full && s.screen < locals.len(), ..Default::default() };
+            screen.add_with(s.launch, s.prefs, start);
+            let at = on(s.screen).unwrap_or(Pos2::new(140.0 + 48.0 * k as f32, 120.0 + 48.0 * k as f32));
+            self.windows_made += 1;
+            let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
+            self.windows.push((id, Box::new(screen), at));
+        }
+    }
+
     fn tear_off(&mut self, w: workspace::Workspace, at: Pos2) {
         self.windows_made += 1;
         let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
@@ -1084,6 +1117,7 @@ impl App {
                     grab = Some(*id);
                 }
                 self.quick_open(&ctx, w);
+                self.spread_screens(&ctx, Some(*id), w);
             });
             keep
         });

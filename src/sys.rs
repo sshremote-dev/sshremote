@@ -53,6 +53,36 @@ pub fn pointer_on_screen() -> Option<(i32, i32)> {
     None
 }
 
+/// This computer's monitors as the system places them, in pixels (left, top, width, height):
+/// the primary first, then from left to right, as the agent numbers a host's. Windows only (a
+/// Wayland session does not let a program place its windows); empty elsewhere.
+pub fn monitors() -> Vec<(i32, i32, i32, i32)> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{LPARAM, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+        use windows_sys::core::BOOL;
+        unsafe extern "system" fn add(m: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
+            // SAFETY: `list` is the vector handed to EnumDisplayMonitors below, alive for its call.
+            let list = unsafe { &mut *(list as *mut Vec<(bool, i32, i32, i32, i32)>) };
+            let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
+            mi.cbSize = size_of::<MONITORINFO>() as u32;
+            if unsafe { GetMonitorInfoW(m, &mut mi) } != 0 {
+                let r = mi.rcMonitor;
+                list.push((mi.dwFlags & 1 != 0, r.left, r.top, r.right - r.left, r.bottom - r.top));
+            }
+            1
+        }
+        let mut list: Vec<(bool, i32, i32, i32, i32)> = Vec::new();
+        // SAFETY: the callback only writes into `list`, which outlives the call.
+        unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(add), &mut list as *mut _ as LPARAM) };
+        list.sort_by_key(|m| (!m.0, m.1, m.2));
+        list.into_iter().map(|m| (m.1, m.2, m.3, m.4)).collect()
+    }
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
 /// Now, in seconds since 1970.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())

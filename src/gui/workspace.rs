@@ -76,6 +76,14 @@ pub(super) enum Place {
     Split { below: bool },
 }
 
+/// Another of a host's screens to open in a window of its own: its connection, what the user
+/// chose for the one it came from with that screen picked, and the screen's number.
+pub(super) struct Spread {
+    pub(super) launch: Launch,
+    pub(super) prefs: remote::Prefs,
+    pub(super) screen: usize,
+}
+
 /// What a new pane opens with (--open): the terminal panel, the chat beside the screen, full screen.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub(super) struct PaneStart {
@@ -235,6 +243,12 @@ pub(super) struct Workspace {
     measured_for: Option<(u64, PaneMode)>,
     /// The dragged tab is away from this bar: where the pointer is on the screen.
     pub(super) drag_out: Option<Pos2>,
+    /// The host's other screens asked for, for the app to open in windows of their own; and the
+    /// screen this window shows, to put it on the matching monitor here.
+    pub(super) spread: Vec<Spread>,
+    pub(super) spread_from: Option<usize>,
+    /// Frames to wait before full screen (the window is being moved to its monitor first).
+    full_later: Option<u32>,
     /// A tab let go away from this bar, and where on the screen: the app moves it into the
     /// window whose tabs it was dropped on, or into a window of its own.
     pub(super) dropped: Option<(usize, Pos2)>,
@@ -292,6 +306,9 @@ impl Workspace {
             drag_last: None,
             measured_for: None,
             drag_out: None,
+            spread: Vec::new(),
+            spread_from: None,
+            full_later: None,
             dropped: None,
             strip_screen: Rect::NOTHING,
             tabs_screen: Vec::new(),
@@ -306,6 +323,19 @@ impl Workspace {
             closing_window: false,
             scrolled_for: None,
         }
+    }
+
+    /// Opens one of a host's screens with what was chosen for another connection to it.
+    pub(super) fn add_with(&mut self, launch: Launch, prefs: remote::Prefs, start: PaneStart) {
+        self.add(launch, Place::Tab, start);
+        if let Some(p) = self.panes.last_mut() {
+            p.prefs = Some(prefs);
+        }
+    }
+
+    /// Goes full screen in a few frames, once the window stands on the monitor it was moved to.
+    pub(super) fn full_screen_soon(&mut self) {
+        self.full_later = Some(3);
     }
 
     /// Opens what the home window or Quick open chose, in a new tab or beside the active pane.
@@ -1027,6 +1057,28 @@ impl Workspace {
             && let Err(e) = f(r, &ctx)
         {
             lost.push((i, e));
+        }
+        // All of a host's screens: the others, each to open in a window of its own.
+        for p in &mut self.panes {
+            if let State::Live(r) = &mut p.state
+                && std::mem::take(&mut r.spread_asked)
+            {
+                let (n, shown) = r.monitors();
+                for m in (0..n).filter(|m| *m != shown) {
+                    let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
+                    self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
+                }
+                self.spread_from = Some(shown);
+            }
+        }
+        if let Some(n) = self.full_later.as_mut() {
+            if *n == 0 {
+                self.full_later = None;
+                self.set_full(&ctx, true);
+            } else {
+                *n -= 1;
+                ctx.request_repaint();
+            }
         }
         for (i, e) in lost {
             self.lost(i, e);
