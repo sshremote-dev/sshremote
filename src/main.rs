@@ -229,8 +229,21 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
     if let Some(h) = o.host.as_deref().filter(|_| !o.local && o.probe.is_none()) {
         hosts::remember(h);
     }
+    // A password handed over by the window that started this one, through the environment (a
+    // command line can be read by other users); taken out of it, so nothing started from here
+    // inherits it.
+    if let Some(p) = std::env::var_os(PASSWORD_VAR) {
+        if o.password.is_none() {
+            o.password = Some(p.to_string_lossy().into_owned());
+        }
+        // SAFETY: read and removed while the command line is read, before other threads start.
+        unsafe { std::env::remove_var(PASSWORD_VAR) };
+    }
     Ok(o)
 }
+
+/// The variable a password for a computer's ID comes in, from the window that started this one.
+pub const PASSWORD_VAR: &str = "SSHREMOTE_PASSWORD";
 
 /// Gives command-line use a console: the parent's, or a new one, with the standard handles on it.
 #[cfg(windows)]
@@ -431,12 +444,12 @@ fn run(args: &[String]) -> Result<(), String> {
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
         // Built without them, the registry's extension brings the gateway and the MCP server.
         #[cfg(not(feature = "web"))]
-        "web" => modules::need("web").and_then(|()| ext::run_provided("web", &args[1..])),
+        "web" => modules::need("web").and_then(|()| ext::run_provided("web", args)),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         #[cfg(feature = "mcp")]
         "mcp" => modules::need("mcp").and_then(|()| parse_client(&args[1..])).and_then(|o| mcp::run(&o)),
         #[cfg(not(feature = "mcp"))]
-        "mcp" => modules::need("mcp").and_then(|()| ext::run_provided("mcp", &args[1..])),
+        "mcp" => modules::need("mcp").and_then(|()| ext::run_provided("mcp", args)),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
         #[cfg(feature = "remote")]

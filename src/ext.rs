@@ -461,11 +461,12 @@ pub fn provider(cmd: &str) -> Option<(PathBuf, String)> {
     })
 }
 
-/// Runs a command through the extension that serves it, as if built in; its exit code is ours.
+/// Runs a command line through the extension that serves `cmd`, as if built in, its arguments
+/// as typed (`web --listen ...`, `remote-access status`); its exit code is ours.
 #[cfg_attr(all(feature = "web", feature = "mcp"), allow(dead_code))]
 pub fn run_provided(cmd: &str, args: &[String]) -> Result<(), String> {
     let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
-    let status = std::process::Command::new(&program).arg(cmd).args(args).status().map_err(|e| format!("{name}: {}: {e}", program.display()))?;
+    let status = std::process::Command::new(&program).args(args).status().map_err(|e| format!("{name}: {}: {e}", program.display()))?;
     match status.code() {
         Some(0) => Ok(()),
         Some(c) => std::process::exit(c),
@@ -484,11 +485,18 @@ pub fn call_provided(cmd: &str, args: &[String]) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("sshremote: ").to_string())
 }
 
-/// Starts a command of the extension that serves `cmd` (a window of its own) without waiting.
+/// Starts a command of the extension that serves `cmd` (a window of its own) without waiting,
+/// with `env` added to its environment (a password, never on its command line, which other users
+/// of the computer can read).
 #[cfg_attr(feature = "remote", allow(dead_code))]
-pub fn spawn_provided(cmd: &str, args: &[String]) -> Result<(), String> {
+pub fn spawn_provided(cmd: &str, args: &[String], env: &[(&str, String)]) -> Result<(), String> {
     let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
-    std::process::Command::new(&program).args(args).spawn().map(|_| ()).map_err(|e| format!("{name}: {e}"))
+    let mut c = std::process::Command::new(&program);
+    c.args(args);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.spawn().map(|_| ()).map_err(|e| format!("{name}: {e}"))
 }
 
 /// What to install for a command neither built in nor installed.
@@ -1460,6 +1468,37 @@ mod tests {
     /// A pack made, installed from the file, its layer found; then the registry offers a newer
     /// one (a local index), the update installs it after the checksum, and roll-back and remove
     /// work; a package with a wrong checksum is refused.
+    /// A command line goes to the extension that serves it as typed: `web --listen x` as such,
+    /// `remote-access status` without the name of the part that serves it put in front.
+    #[cfg(unix)]
+    #[test]
+    fn provided_commands_reach_the_extension_as_typed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sshremote-ext-run-{}", std::process::id()));
+        TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
+        let ext = dir.join("dev.sshremote.test-parts");
+        std::fs::create_dir_all(&ext).unwrap();
+        let said = dir.join("said");
+        std::fs::write(ext.join("run.sh"), format!("#!/bin/sh\necho \"$*\" >> '{}'\n", said.display())).unwrap();
+        std::fs::set_permissions(ext.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            ext.join("extension.json"),
+            format!(
+                r#"{{"id":"dev.sshremote.test-parts","name":"Parts","version":"1.0.0","api":1,"permissions":["native"],
+                "programs":{{"{}":"run.sh"}},"contributes":{{"provides":["remote","web"]}}}}"#,
+                platform()
+            ),
+        )
+        .unwrap();
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        run_provided("remote", &args(&["remote-access", "status"])).unwrap();
+        run_provided("web", &args(&["web", "--listen", "x"])).unwrap();
+        call_provided("remote", &args(&["remote-access", "id"])).unwrap();
+        assert_eq!(std::fs::read_to_string(&said).unwrap(), "remote-access status\nweb --listen x\nremote-access id\n");
+        TEST_ROOT.with(|r| *r.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Ids that would name the extensions folder or its parent are refused everywhere.
     #[test]
     fn ids_never_name_a_folder_above() {
