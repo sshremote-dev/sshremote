@@ -757,11 +757,14 @@ mod tests {
         for _ in 0..INPUT_QUEUE + 200 {
             send(&id, "event", json!({ "data": big }), None);
         }
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "sending never blocks");
+        // Before, the first send past the pipe's room waited for good; a debug build sharing the
+        // machine with the other tests takes a few seconds for all of them.
+        let limit = std::time::Duration::from_secs(15);
+        assert!(started.elapsed() < limit, "sending never blocks: {:?}", started.elapsed());
         assert!(!running(&id), "ended once it stopped reading");
         let started = std::time::Instant::now();
         stop_all();
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "closing does not hang");
+        assert!(started.elapsed() < limit, "closing does not hang");
     }
 
     #[test]
