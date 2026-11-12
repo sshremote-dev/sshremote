@@ -4,7 +4,7 @@
 //! Nothing is stored.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(feature = "gui")]
 use std::time::Duration;
@@ -33,16 +33,59 @@ pub fn unescape(s: &str) -> String {
     out
 }
 
-/// Agent side: the chat window on the remote desktop, started on the first message.
+/// What the chat window writes when the person at the screen ends the connection (a typed
+/// message cannot hold a NUL).
+pub const END: &str = "\u{0}end";
+
+/// The chat window's program: one started here, or one started as the person signed in at the
+/// screen (an agent run as SYSTEM).
+enum Proc {
+    Here(Child),
+    #[cfg(windows)]
+    AsUser(crate::console_user::Process),
+}
+
+impl Proc {
+    fn alive(&mut self) -> bool {
+        match self {
+            Proc::Here(c) => matches!(c.try_wait(), Ok(None)),
+            #[cfg(windows)]
+            Proc::AsUser(p) => p.alive(),
+        }
+    }
+
+    fn end(&mut self) {
+        match self {
+            Proc::Here(c) => {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            #[cfg(windows)]
+            Proc::AsUser(p) => p.kill(),
+        }
+    }
+}
+
+/// Agent side: the chat window on the remote desktop, started on the first message, or at once
+/// for a viewer who came by the computer's ID, to say so.
 #[derive(Default)]
 pub struct Window {
-    child: Option<(Child, ChildStdin)>,
+    child: Option<(Proc, Box<dyn Write + Send>)>,
     replies: Option<Receiver<String>>,
+    /// It says that someone is connected by this computer's ID, with a button to end that.
+    by_id: bool,
 }
 
 impl Window {
     fn alive(&mut self) -> bool {
-        matches!(self.child.as_mut().map(|(c, _)| c.try_wait()), Some(Ok(None)))
+        self.child.as_mut().is_some_and(|(c, _)| c.alive())
+    }
+
+    /// Tells the person at the screen that someone connected by this computer's ID: the window
+    /// opens at once, with a button to end the connection.
+    pub fn notice(&mut self) -> Result<(), String> {
+        self.by_id = true;
+        self.open()
     }
 
     /// Shows a message from the viewer, opening the window if the user closed it.
@@ -55,8 +98,26 @@ impl Window {
     }
 
     fn open(&mut self) -> Result<(), String> {
-        let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-        cmd.arg("--chat-window").arg(viewer_name()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let name = if self.by_id { "Someone connected by this computer's ID".to_string() } else { viewer_name() };
+        // An agent run as SYSTEM shows it as the person signed in at the screen, never as SYSTEM.
+        #[cfg(windows)]
+        match crate::console_user::acting() {
+            crate::console_user::Acting::User(u) => {
+                let line = format!("\"{}\" --chat-window \"{}\"{}", exe.display(), name, if self.by_id { " --by-id" } else { "" });
+                let (proc, stdin, stdout) = crate::console_user::spawn_piped(&u, &line)?;
+                self.listen(Box::new(stdout));
+                self.child = Some((Proc::AsUser(proc), Box::new(stdin)));
+                return Ok(());
+            }
+            crate::console_user::Acting::Nobody => return Err("nobody is signed in at that computer's screen".into()),
+            crate::console_user::Acting::Myself => {}
+        }
+        let mut cmd = Command::new(exe);
+        cmd.arg("--chat-window").arg(&name).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        if self.by_id {
+            cmd.arg("--by-id");
+        }
         #[cfg(target_os = "linux")]
         {
             // An agent started over ssh has no display variables; the desktop session uses the defaults.
@@ -78,17 +139,24 @@ impl Window {
         crate::sys::tie(&child);
         let stdin = child.stdin.take().ok_or("chat window stdin")?;
         let stdout = child.stdout.take().ok_or("chat window stdout")?;
+        self.listen(Box::new(stdout));
+        self.child = Some((Proc::Here(child), Box::new(stdin)));
+        Ok(())
+    }
+
+    /// What the window says comes in on a thread of its own.
+    fn listen(&mut self, stdout: Box<dyn std::io::Read + Send>) {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(unescape(&line)).is_err() {
+                // The end of the connection comes as is; a message is unescaped.
+                let m = if line == END { line } else { unescape(&line) };
+                if tx.send(m).is_err() {
                     break;
                 }
             }
         });
-        self.child = Some((child, stdin));
         self.replies = Some(rx);
-        Ok(())
     }
 
     /// Replies typed at the remote screen since the last call.
@@ -100,8 +168,7 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         if let Some((mut c, _)) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+            c.end();
         }
     }
 }
@@ -116,7 +183,7 @@ fn viewer_name() -> String {
 
 /// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
 #[cfg(feature = "gui")]
-pub fn run_window(name: String) -> Result<(), String> {
+pub fn run_window(name: String, by_id: bool) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -144,7 +211,7 @@ pub fn run_window(name: String) -> Result<(), String> {
                     ctx.request_repaint();
                 }
             });
-            Ok(Box::new(ChatApp { incoming: wake_rx, lines: Vec::new(), input: String::new(), ended: None, name }))
+            Ok(Box::new(ChatApp { incoming: wake_rx, lines: Vec::new(), input: String::new(), ended: None, name, by_id }))
         }),
     )
     .map_err(|e| e.to_string())
@@ -160,6 +227,8 @@ struct ChatApp {
     ended: Option<std::time::Instant>,
     /// Who is viewing: "Viewer (address)".
     name: String,
+    /// Someone came by this computer's ID: the window says so and can end it.
+    by_id: bool,
 }
 
 #[cfg(feature = "gui")]
@@ -195,12 +264,25 @@ impl eframe::App for ChatApp {
                     ui.label(RichText::new(&self.name).strong().size(15.0));
                     let state = if self.ended.is_some() {
                         "the connection closed; this window closes shortly"
+                    } else if self.by_id {
+                        "sees this screen and can use it, with this computer's ID and password"
                     } else {
                         "viewing this screen over SSH Remote"
                     };
                     ui.label(RichText::new(state).small().weak());
                 });
             });
+            // The person at the screen can end it at any time.
+            if self.by_id && self.ended.is_none() {
+                ui.add_space(6.0);
+                let end = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE).strong()).fill(crate::gui::bad());
+                if ui.add(end).on_hover_text("End this connection now").clicked() {
+                    println!("{END}");
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    self.ended = Some(std::time::Instant::now());
+                }
+            }
         });
         let footer = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(12, 10));
         egui::Panel::bottom("chat-input").frame(footer).show(ui, |ui| {
@@ -216,7 +298,7 @@ impl eframe::App for ChatApp {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
-                .show(ui, |ui| show_lines(ui, &self.lines, &self.name, "You"));
+                .show(ui, |ui| show_lines(ui, &self.lines, if self.by_id { "Viewer" } else { &self.name }, "You"));
         });
         if self.ended.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -503,6 +585,22 @@ pub fn input_row(ui: &mut egui::Ui, input: &mut String, enabled: bool) -> Option
 
 #[cfg(test)]
 mod tests {
+    /// What the window writes reaches the agent: messages unescaped, and the end of the
+    /// connection as itself, which no typed message can be.
+    #[test]
+    fn the_window_can_end_the_connection() {
+        let mut w = super::Window::default();
+        let said = format!("{}\n{}\n", super::escape("two\nlines"), super::END);
+        w.listen(Box::new(std::io::Cursor::new(said.into_bytes())));
+        let mut got = Vec::new();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while got.len() < 2 && std::time::Instant::now() < until {
+            got.extend(w.replies());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(got, ["two\nlines".to_string(), super::END.to_string()]);
+    }
+
     /// A huge message is cut where a chat stops being one, and many keep the file small: it is
     /// written again with half its room, not rewritten for every message after.
     #[test]

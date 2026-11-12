@@ -599,7 +599,7 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
     let _ = socket.set_read_timeout(Some(Duration::from_secs(120)));
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
-    cmd.args(["--agent", "--capture", "auto"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["--agent", "--capture", "auto", "--by-id"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -284,6 +284,11 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
     let mut outbox = crate::files::Outbox::default();
     let mut sound: Option<crate::audio::Capture> = None;
     let mut chat = crate::chat::Window::default();
+    // Someone who came by this computer's ID is made known to the person at the screen, who can
+    // end it (nobody signed in: nobody to tell).
+    if by_id() {
+        let _ = chat.notice();
+    }
     let mut pending = String::new();
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
@@ -570,6 +575,10 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
         }
         paste(&mut pending, &mut clip, cap.as_mut());
         for text in chat.replies() {
+            // The person at the screen ended it.
+            if text == crate::chat::END {
+                return Err("The person at that computer's screen ended the connection.".into());
+            }
             send(enc, &ToClient::Chat(text)).map_err(io_err)?;
         }
         if let Some(c) = &sound {

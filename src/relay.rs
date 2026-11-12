@@ -98,12 +98,15 @@ pub fn run(backend: &str) -> Result<(), String> {
 
     // The sshremote service starts the helper as SYSTEM, which also works at the sign-in and lock screens;
     // without it a one-shot scheduled task starts it as the logged-on user.
-    match crate::service::ask(&format!("spawn {base} {backend}")) {
+    // A viewer by ID is said to the person at the screen by the helper, which is there.
+    let request = if crate::agent::by_id() { format!("spawn {base} {backend} id") } else { format!("spawn {base} {backend}") };
+    match crate::service::ask(&request) {
         Some(Ok(())) => {}
         service => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // A headless console host keeps a console window from appearing on the remote screen.
-            let cmd = format!("conhost.exe --headless \"{}\" --agent --capture {backend} --pipe {base}", exe.display());
+            let by_id = if crate::agent::by_id() { " --by-id" } else { "" };
+            let cmd = format!("conhost.exe --headless \"{}\" --agent --capture {backend} --pipe {base}{by_id}", exe.display());
             let task = format!("sshremote-agent-{}", std::process::id());
             schtasks(&["/create", "/tn", &task, "/tr", &cmd, "/sc", "once", "/st", "00:00", "/it", "/f"])?;
             let started = schtasks(&["/run", "/tn", &task]);
