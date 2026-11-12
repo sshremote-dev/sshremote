@@ -88,6 +88,13 @@ pub fn app_name(exe: &str) -> String {
     file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file).to_string()
 }
 
+/// A pop-up of its program (a menu, a dialog, a drop-down list) rather than a window of its own.
+fn transient(hwnd: HWND, style: u32) -> bool {
+    let ex = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    let owned = !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null();
+    owned || (style & WS_POPUP != 0 && ex & WS_EX_TOOLWINDOW != 0) || class(hwnd) == "#32768"
+}
+
 unsafe extern "system" fn collect(hwnd: HWND, list: LPARAM) -> BOOL {
     let list = unsafe { &mut *(list as *mut Vec<Win>) };
     unsafe {
@@ -99,10 +106,7 @@ unsafe extern "system" fn collect(hwnd: HWND, list: LPARAM) -> BOOL {
         if rect.empty() {
             return 1;
         }
-        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let owned = !GetWindow(hwnd, GW_OWNER).is_null();
-        let transient = owned || (style & WS_POPUP != 0 && ex & WS_EX_TOOLWINDOW != 0) || class(hwnd) == "#32768";
-        list.push(Win { hwnd, rect, pid: pid_of(hwnd), transient, title: text(hwnd) });
+        list.push(Win { hwnd, rect, pid: pid_of(hwnd), transient: transient(hwnd, style), title: text(hwnd) });
     }
     1
 }
@@ -209,7 +213,13 @@ pub fn focus_inside(scope: &Scope) -> bool {
     }
     match scope {
         Scope::Screen => true,
-        Scope::Window(h) => fg == *h || unsafe { GetAncestor(fg, GA_ROOTOWNER) } == *h || pid_of(fg) == pid_of(*h),
+        // As for what is shown: the window, what it owns, and its program's pop-ups, never the
+        // program's other windows (Explorer's desktop and taskbar, another Chrome window).
+        Scope::Window(h) => {
+            fg == *h
+                || unsafe { GetAncestor(fg, GA_ROOTOWNER) } == *h
+                || (pid_of(fg) == pid_of(*h) && transient(fg, unsafe { GetWindowLongW(fg, GWL_STYLE) } as u32))
+        }
         Scope::App(exe) => exe_of(pid_of(fg)).eq_ignore_ascii_case(exe),
     }
 }
