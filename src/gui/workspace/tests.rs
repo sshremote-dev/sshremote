@@ -1,15 +1,6 @@
 use crate::gui::snapshot::RunTest;
 use super::*;
 
-/// A terminal-only core hands screens and files to the Remote desktop extension's window.
-#[cfg(not(feature = "remote"))]
-#[test]
-fn remote_launches_become_extension_command_lines() {
-    let here = Target::Local { capture: "auto".into() };
-    assert_eq!(remote_args(&here, PaneMode::Screen), ["--gui", "--here"]);
-    let ssh = Target::Ssh { host: "a@b".into(), port: Some(2222), args: vec!["-A".into()], remote: String::new(), capture: String::new(), password: None, unattended: false };
-    assert_eq!(remote_args(&ssh, PaneMode::Files), ["--gui", "--ssh", "-p", "--ssh", "2222", "--ssh", "-A", "a@b", "--open", "files"]);
-}
 use egui::{Event, PointerButton};
 
 struct Harness {

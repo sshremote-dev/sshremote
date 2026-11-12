@@ -249,7 +249,7 @@ fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
         #[cfg(not(feature = "remote"))]
         let r = {
             let _ = target;
-            Err(crate::ext::missing("remote"))
+            Err(crate::not_built("screens and files"))
         };
         let _ = tx.send(r);
         ctx.request_repaint();

@@ -23,9 +23,6 @@ pub(super) struct AccessUi {
     /// Why the stored settings could not be read or kept, shown instead of an ID.
     #[cfg(feature = "remote")]
     problem: Option<String>,
-    /// What the Remote desktop extension's program says of remote access (the Terminal edition).
-    #[cfg(not(feature = "remote"))]
-    by_extension: Shared<Option<Option<serde_json::Value>>>,
 }
 
 type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
@@ -78,17 +75,7 @@ impl App {
                 #[cfg(feature = "remote")]
                 self.access_body(ui);
                 #[cfg(not(feature = "remote"))]
-                if crate::ext::provider("remote").is_some() {
-                    self.access_by_extension(ui);
-                } else {
-                    ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
-                    ui.label(RichText::new("Lets others reach this computer's screen with an ID and a password, through a relay: for computers on Wi-Fi or without a fixed address. It comes with the Remote desktop extension.").weak().size(12.0));
-                    if ui.add(theme::primary(format!("{}  Get the Remote desktop extension", ic::PUZZLE_PIECE))).clicked() {
-                        self.section = super::home::Section::Extensions;
-                        let t = self.exts.get_or_insert_with(crate::ext::ExtTool::new);
-                        t.tab = crate::ext::ExtTab::Browse;
-                    }
-                }
+                ui.label(RichText::new(crate::not_built("remote access by ID")).weak());
             });
     }
 
@@ -385,134 +372,4 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
     ui.painter().circle_filled(egui::pos2(x, rect.center().y), 7.0, egui::Color32::WHITE);
     r
-}
-
-/// What the Remote desktop extension's program says of remote access, as JSON.
-#[cfg(not(feature = "remote"))]
-fn ext_settings() -> Option<serde_json::Value> {
-    let (program, _) = crate::ext::provider("remote")?;
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(["remote-access", "json"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let out = cmd.output().ok()?;
-    serde_json::from_slice(&out.stdout).ok()
-}
-
-#[cfg(not(feature = "remote"))]
-static EXT_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(not(feature = "remote"))]
-impl App {
-    /// The card when the Remote desktop extension brings remote access: its program changes the
-    /// settings and keeps the line to the relay while this window is open.
-    fn access_by_extension(&mut self, ui: &mut egui::Ui) {
-        let call = |args: &[&str]| crate::ext::call_provided("remote", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
-        if self.access.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
-            self.access.looked = Some(std::time::Instant::now());
-            in_background(&self.access.by_extension, &EXT_BUSY, ui.ctx(), || {
-                // The first time, `status` makes the settings.
-                ext_settings().or_else(|| {
-                    let _ = crate::ext::call_provided("remote", &["remote-access".into(), "status".into()]);
-                    ext_settings()
-                })
-            });
-        }
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
-        let v = self.access.by_extension.lock().unwrap_or_else(|e| e.into_inner()).clone().flatten();
-        let get = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let on = v.as_ref().and_then(|v| v.get("enabled")).and_then(|x| x.as_bool()).unwrap_or(false);
-        // While on, the extension's program keeps the line to the relay; it ends with this
-        // window (`--parent`), and leaves it to the service when one runs.
-        static CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
-        {
-            let mut c = CHILD.lock().unwrap_or_else(|e| e.into_inner());
-            if c.as_mut().is_some_and(|ch| ch.try_wait().ok().flatten().is_some()) {
-                *c = None;
-            }
-            // Versions before 1.6.1 do not end with the window: they are not started from here.
-            let fit = crate::ext::installed().iter().any(|m| m.provides.iter().any(|p| p == "remote") && !crate::ext::newer("1.6.1", &m.version));
-            if on && c.is_none()
-                && fit
-                && let Some((program, _)) = crate::ext::provider("remote")
-            {
-                let mut cmd = std::process::Command::new(program);
-                cmd.args(["remote-access", "run", "--parent", &std::process::id().to_string()]);
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x0800_0000);
-                }
-                *c = cmd.spawn().ok();
-                if let Some(child) = c.as_ref() {
-                    crate::sys::tie(child);
-                }
-            }
-        }
-        let mut result: Option<Result<(), String>> = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut want = on;
-                if toggle(ui, &mut want).clicked() {
-                    result = Some(call(&["remote-access", if want { "on" } else { "off" }]));
-                }
-            });
-        });
-        ui.label(RichText::new("Anyone with this ID and password can see and control this computer through the relay. Brought by the Remote desktop extension.").weak().size(12.0));
-        // Off, only the switch; the ID, the password and the service show once it is on.
-        if on {
-            ui.add_space(6.0);
-            let id = get("id");
-            let spaced: String = id.as_bytes().chunks(3).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" ");
-            egui::Grid::new("access-ext").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-                ui.label(RichText::new("ID").weak());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(spaced).size(22.0).strong().monospace());
-                    if icon(ui, ic::COPY, "Copy the ID", false).clicked() {
-                        ui.ctx().copy_text(id.clone());
-                    }
-                });
-                ui.end_row();
-                ui.label(RichText::new("Password").weak());
-                ui.horizontal(|ui| {
-                    let pw = get("password");
-                    let shown = if self.access.show_password { pw.clone() } else { "\u{2022}".repeat(pw.chars().count()) };
-                    ui.label(RichText::new(shown).size(18.0).monospace());
-                    if icon(ui, if self.access.show_password { ic::EYE_SLASH } else { ic::EYE }, "Show or hide", false).clicked() {
-                        self.access.show_password = !self.access.show_password;
-                    }
-                    if icon(ui, ic::COPY, "Copy the password", false).clicked() {
-                        ui.ctx().copy_text(pw);
-                    }
-                    if icon(ui, ic::ARROWS_CLOCKWISE, "A new random password", false).clicked() {
-                        result = Some(call(&["remote-access", "password"]));
-                    }
-                });
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{}  Start with the computer", ic::SHIELD_CHECK)).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let admin = !cfg!(windows) || crate::admin::elevated();
-                    if ui.add_enabled(admin, egui::Button::new("Remove")).on_disabled_hover_text("Needs administrator rights").clicked() {
-                        result = Some(call(&["remote-access", "uninstall"]));
-                    }
-                    if ui.add_enabled(admin, theme::primary(format!("{}  Install", ic::DOWNLOAD))).on_disabled_hover_text("Needs administrator rights").clicked() {
-                        result = Some(call(&["remote-access", "install"]));
-                    }
-                });
-            });
-        }
-        if let Some(r) = result {
-            self.access.looked = None;
-            if let Err(e) = r {
-                self.error = Some(format!("Remote access: {e}"));
-            }
-        }
-    }
 }

@@ -442,14 +442,13 @@ fn run(args: &[String]) -> Result<(), String> {
         // The gateway browsers reach terminals through (sshremote.dev/web).
         #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
-        // Built without them, the registry's extension brings the gateway and the MCP server.
         #[cfg(not(feature = "web"))]
-        "web" => modules::need("web").and_then(|()| ext::run_provided("web", args)),
+        "web" => Err(not_built("the web gateway")),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         #[cfg(feature = "mcp")]
         "mcp" => modules::need("mcp").and_then(|()| parse_client(&args[1..])).and_then(|o| mcp::run(&o)),
         #[cfg(not(feature = "mcp"))]
-        "mcp" => modules::need("mcp").and_then(|()| ext::run_provided("mcp", args)),
+        "mcp" => Err(not_built("the MCP server")),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
         #[cfg(feature = "remote")]
@@ -473,17 +472,20 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         #[cfg(feature = "remote")]
         _ => parse_client(args).and_then(|o| if o.gui { open_window(o) } else { client::run(o) }),
-        // Without them here, the Remote desktop extension brings screens, files, the agent and
-        // the terminal viewer; the window itself opens here.
+        // A build for the window alone: it opens, and the rest says what is missing.
         #[cfg(not(feature = "remote"))]
-        _ => {
-            // The agent and the service go to the extension as they are.
-            if let Some(opt) = parse_client(args).ok().filter(|o| o.gui && o.host.is_none() && !o.local) {
-                return open_window(opt);
-            }
-            ext::run_provided("remote", args)
-        }
+        _ => match parse_client(args) {
+            Ok(opt) if opt.gui && opt.host.is_none() && !opt.local => open_window(opt),
+            _ => Err(not_built("screens, files and the agent")),
+        },
     }
+}
+
+/// What a build made without a part says when the part is asked for (`cargo build` with fewer
+/// features, for a smaller program).
+#[cfg_attr(all(feature = "remote", feature = "web", feature = "mcp"), allow(dead_code))]
+fn not_built(what: &str) -> String {
+    format!("this sshremote was built without {what}")
 }
 
 /// What a build without windows says when one is asked for.

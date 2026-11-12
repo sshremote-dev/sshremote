@@ -84,32 +84,6 @@ pub(super) struct PaneStart {
     pub(super) fullscreen: bool,
 }
 
-/// The command line that opens `target` in the Remote desktop extension's window.
-#[cfg(not(feature = "remote"))]
-fn remote_args(target: &Target, mode: PaneMode) -> Vec<String> {
-    let mut a = vec!["--gui".to_string()];
-    match target {
-        // This computer's own screen (--local alone is the synthetic test desktop).
-        Target::Local { capture } if capture == "synthetic" => a.push("--local".into()),
-        Target::Local { .. } => a.push("--here".into()),
-        Target::Ssh { host, port, args, .. } => {
-            if let Some(p) = port {
-                a.extend(["--ssh".into(), "-p".into(), "--ssh".into(), p.to_string()]);
-            }
-            for x in args {
-                a.extend(["--ssh".into(), x.clone()]);
-            }
-            a.push(host.clone());
-        }
-    }
-    match mode {
-        PaneMode::Files => a.extend(["--open".into(), "files".into()]),
-        PaneMode::Terminal => a.extend(["--open".into(), "terminal".into()]),
-        PaneMode::Screen => {}
-    }
-    a
-}
-
 /// A pane as extensions are told of it: its label, what it shows, and the host.
 fn pane_info(p: &Pane) -> serde_json::Value {
     let host = match &p.target {
@@ -354,17 +328,10 @@ impl Workspace {
 
     /// A pane for `launch`, not yet in any tab; None when it opens elsewhere.
     fn new_pane(&mut self, launch: Launch, start: PaneStart) -> Option<u64> {
-        // Screens and files come from the Remote desktop extension, in a window of its own.
+        // A build without screens and files says so.
         #[cfg(not(feature = "remote"))]
-        if let Launch::Agent { target, mode, .. } = &launch {
-            // A computer by its ID takes its password through the environment.
-            let password = match target {
-                Target::Ssh { host, password: Some(p), .. } if host.starts_with("sshremote://") => vec![(crate::PASSWORD_VAR, p.clone())],
-                _ => Vec::new(),
-            };
-            if let Err(e) = crate::ext::spawn_provided("remote", &remote_args(target, *mode), &password) {
-                self.failed = Some(e);
-            }
+        if let Launch::Agent { .. } = &launch {
+            self.failed = Some(crate::not_built("screens and files"));
             return None;
         }
         let id = NEXT_PANE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

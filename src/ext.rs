@@ -10,7 +10,7 @@
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
 //!
 //! The registry is a static index (build.py in the sshremote-extensions repository writes it):
-//!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size", "provides" } ] }
+//!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size" } ] }
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -43,7 +43,6 @@ pub struct Manifest {
     pub permissions: Vec<String>,
     /// Its own programs, by platform ("windows-x86_64"), and the commands they serve ("web").
     pub programs: Vec<(String, String)>,
-    pub provides: Vec<String>,
     /// "startup": its program runs beside the app, talking with the extension host.
     pub activation: Option<String>,
 }
@@ -113,15 +112,6 @@ pub struct Offer {
     pub description: String,
     pub url: String,
     pub sha256: String,
-    /// Commands its program serves ("remote", "web").
-    pub provides: Vec<String>,
-}
-
-impl Offer {
-    /// Whether this sshremote already has what it brings.
-    pub fn built_in(&self) -> bool {
-        !self.provides.is_empty() && self.provides.iter().all(|p| crate::modules::built_in(p))
-    }
 }
 
 fn root() -> Option<PathBuf> {
@@ -233,11 +223,6 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         .and_then(|x| x.as_object())
         .map(|o| o.iter().filter_map(|(k, f)| f.as_str().filter(|f| inside(f)).map(|f| (k.clone(), f.to_string()))).collect())
         .unwrap_or_default();
-    let provides: Vec<String> = v
-        .pointer("/contributes/provides")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|p| p.as_str()).filter(|p| *p == "remote" || crate::modules::ALL.iter().any(|m| m.0 == *p)).map(str::to_string).collect())
-        .unwrap_or_default();
     if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
         return Err("extension.json brings programs without the \"native\" permission".into());
     }
@@ -250,7 +235,6 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         settings,
         activation,
         programs,
-        provides,
         name: if s("name").is_empty() { id.clone() } else { s("name") },
         id,
         version: s("version"),
@@ -460,71 +444,6 @@ pub fn platform() -> String {
         o => o,
     };
     format!("{os}-{}", std::env::consts::ARCH)
-}
-
-/// The installed program that serves a command (`web`, `mcp`) here, and its extension's name.
-pub fn provider(cmd: &str) -> Option<(PathBuf, String)> {
-    let root = root()?;
-    let here = platform();
-    installed().into_iter().find_map(|m| {
-        let file = m.programs.iter().find(|(p, _)| *p == here)?.1.clone();
-        let installed = root.join(&m.id).join(file);
-        // Run from a copy, as extensions beside the app are: the installed folder is never held
-        // by a running program, so an update can always replace it.
-        #[cfg(not(test))]
-        let program = crate::exthost::run_copy(&m.id, &installed).unwrap_or(installed);
-        #[cfg(test)]
-        let program = installed;
-        m.provides.iter().any(|p| p == cmd).then(|| (program, m.name.clone()))
-    })
-}
-
-/// Runs a command line through the extension that serves `cmd`, as if built in, its arguments
-/// as typed (`web --listen ...`, `remote-access status`); its exit code is ours.
-#[cfg_attr(all(feature = "web", feature = "mcp"), allow(dead_code))]
-pub fn run_provided(cmd: &str, args: &[String]) -> Result<(), String> {
-    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
-    let status = std::process::Command::new(&program).args(args).status().map_err(|e| format!("{name}: {}: {e}", program.display()))?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(c) => std::process::exit(c),
-        None => Err(format!("{name} stopped")),
-    }
-}
-
-/// Runs a command of the extension that serves `cmd` and waits; its error output if it fails.
-#[cfg_attr(feature = "remote", allow(dead_code))]
-pub fn call_provided(cmd: &str, args: &[String]) -> Result<(), String> {
-    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
-    let out = std::process::Command::new(&program).args(args).output().map_err(|e| format!("{name}: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("sshremote: ").to_string())
-}
-
-/// Starts a command of the extension that serves `cmd` (a window of its own) without waiting,
-/// with `env` added to its environment (a password, never on its command line, which other users
-/// of the computer can read).
-#[cfg_attr(feature = "remote", allow(dead_code))]
-pub fn spawn_provided(cmd: &str, args: &[String], env: &[(&str, String)]) -> Result<(), String> {
-    let (program, name) = provider(cmd).ok_or_else(|| missing(cmd))?;
-    let mut c = std::process::Command::new(&program);
-    c.args(args);
-    for (k, v) in env {
-        c.env(k, v);
-    }
-    c.spawn().map(|_| ()).map_err(|e| format!("{name}: {e}"))
-}
-
-/// What to install for a command neither built in nor installed.
-pub fn missing(cmd: &str) -> String {
-    let (name, id) = match cmd {
-        "web" => ("The web gateway comes", "dev.sshremote.web-gateway"),
-        "mcp" => ("The MCP server comes", "dev.sshremote.mcp-server"),
-        _ => ("Remote screens, files and the agent come", "dev.sshremote.remote-desktop"),
-    };
-    format!("{name} with an extension: sshremote ext install {id}, or Extensions in the open dialog")
 }
 
 /// Removes an installed extension (its layers in use show nothing from then on).
@@ -768,7 +687,6 @@ pub fn offers() -> Result<Vec<Offer>, String> {
                         // Relative to the index, as the registry lays packages out beside it.
                         url: if url.contains("://") { url } else { format!("{base}/{url}") },
                         sha256: p("sha256")?.to_lowercase(),
-                        provides: e.get("provides").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -868,7 +786,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         Some("available") => {
             for o in offers()? {
-                println!("{}  {}  {}{}", o.id, o.version, o.name, if o.built_in() { "  (built in here)" } else { "" });
+                println!("{}  {}  {}", o.id, o.version, o.name);
             }
             Ok(())
         }
@@ -972,10 +890,6 @@ pub fn how_to_use(m: &Manifest) -> Vec<String> {
     }
     if m.activation.is_some() {
         out.push("Shows what it has in the status bar and the side panel".into());
-    }
-    if !m.provides.is_empty() {
-        let cmds: Vec<String> = m.provides.iter().map(|c| format!("sshremote {c}")).collect();
-        out.push(format!("Adds {}", cmds.join(", ")));
     }
     if !m.layers.is_empty() {
         out.push("Changes the look while it is installed".into());
@@ -1127,13 +1041,9 @@ impl ExtTool {
     fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
         self.added_list(ui, installed, offers, act);
         ui.add_space(12.0);
-        let wanting = crate::modules::ALL
-            .iter()
-            .any(|(id, _, _)| !crate::modules::built_in(id) && provider(crate::modules::served_by(id)).is_none());
         egui::CollapsingHeader::new(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong())
             .id_salt("ext-parts")
-            .default_open(wanting)
-            .show(ui, |ui| self.parts_card(ui, act));
+            .show(ui, |ui| self.parts_card(ui));
     }
 
     /// The extensions you added, with their updates; a way to find some when there are none.
@@ -1365,9 +1275,6 @@ impl ExtTool {
                             Some(_) => {
                                 ui.label(RichText::new(format!("{}  Installed", ic::CHECK)).color(crate::gui::good()));
                             }
-                            None if o.built_in() => {
-                                ui.label(RichText::new(format!("{}  Built into this edition", ic::CHECK)).weak()).on_hover_text("This app already has what it brings");
-                            }
                             None => {
                                 if ui.add(crate::gui::theme::primary(format!("{}  Install", ic::DOWNLOAD))).clicked() {
                                     let o = o.clone();
@@ -1382,10 +1289,6 @@ impl ExtTool {
                     ui.add_space(2.0);
                     ui.label(&o.description);
                 }
-                if !o.provides.is_empty() {
-                    let cmds: Vec<String> = o.provides.iter().map(|c| format!("sshremote {c}")).collect();
-                    ui.label(RichText::new(format!("Adds {}", cmds.join(", "))).weak().size(12.0));
-                }
             });
             ui.add_space(6.0);
         }
@@ -1394,13 +1297,12 @@ impl ExtTool {
         }
     }
 
-    /// What this app is made of: the core, always here; and each part beyond it, built in or
-    /// brought by an extension, which can be turned off.
-    fn parts_card(&mut self, ui: &mut egui::Ui, act: &mut Act) {
-        let offers: Vec<Offer> = self.offers.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
+    /// What this app is made of: the core, always here; and each part beyond it, which can be
+    /// turned off.
+    fn parts_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.label(
-                RichText::new("Built in: inside the program you downloaded, never removed. Extension: brought by an added extension above. Untick a part to hide it from the menus.")
+                RichText::new("Every part is inside the program you downloaded. Untick a part to hide it from the menus and the command line.")
                     .weak()
                     .size(12.0),
             );
@@ -1416,18 +1318,10 @@ impl ExtTool {
                         crate::modules::set(id, on);
                     }
                     ui.label(RichText::new(what.replace('`', "")).weak().size(12.0));
-                    let serves = crate::modules::served_by(id);
                     if crate::modules::built_in(id) {
                         tag(ui, "Built in", crate::gui::good());
-                    } else if let Some((_, by)) = provider(serves) {
-                        tag(ui, &format!("Extension: {by}"), crate::gui::brand());
-                    } else if let Some(o) = offers.iter().find(|o| o.provides.iter().any(|p| p == serves)) {
-                        if ui.small_button(format!("{}  Get {}", ic::DOWNLOAD, o.name)).clicked() {
-                            let o = o.clone();
-                            *act = Some(Box::new(move || install_offer(&o).map(|m| format!("{} {} installed.", m.name, m.version))));
-                        }
                     } else {
-                        tag(ui, "Needs an extension", crate::gui::bad());
+                        tag(ui, "Not in this build", crate::gui::bad());
                     }
                     ui.end_row();
                 }
@@ -1505,37 +1399,6 @@ mod tests {
         TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir));
     }
 
-    /// A command line goes to the extension that serves it as typed: `web --listen x` as such,
-    /// `remote-access status` without the name of the part that serves it put in front.
-    #[cfg(unix)]
-    #[test]
-    fn provided_commands_reach_the_extension_as_typed() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("sshremote-ext-run-{}", std::process::id()));
-        TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
-        let ext = dir.join("dev.sshremote.test-parts");
-        std::fs::create_dir_all(&ext).unwrap();
-        let said = dir.join("said");
-        std::fs::write(ext.join("run.sh"), format!("#!/bin/sh\necho \"$*\" >> '{}'\n", said.display())).unwrap();
-        std::fs::set_permissions(ext.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(
-            ext.join("extension.json"),
-            format!(
-                r#"{{"id":"dev.sshremote.test-parts","name":"Parts","version":"1.0.0","api":1,"permissions":["native"],
-                "programs":{{"{}":"run.sh"}},"contributes":{{"provides":["remote","web"]}}}}"#,
-                platform()
-            ),
-        )
-        .unwrap();
-        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        run_provided("remote", &args(&["remote-access", "status"])).unwrap();
-        run_provided("web", &args(&["web", "--listen", "x"])).unwrap();
-        call_provided("remote", &args(&["remote-access", "id"])).unwrap();
-        assert_eq!(std::fs::read_to_string(&said).unwrap(), "remote-access status\nweb --listen x\nremote-access id\n");
-        TEST_ROOT.with(|r| *r.borrow_mut() = None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Ids that would name the extensions folder or its parent are refused everywhere.
     #[test]
     fn ids_never_name_a_folder_above() {
@@ -1593,13 +1456,13 @@ mod tests {
         assert!(installed().iter().all(|m| m.id != "dev.sshremote.test-sea"));
     }
 
-    /// A native extension: its program for this platform serves the command it names; programs
-    /// without the "native" permission are refused.
+    /// A native extension: its program for this platform is installed runnable; programs without
+    /// the "native" permission, or outside its folder, are refused.
     #[test]
-    fn native_programs_serve_their_commands() {
+    fn native_programs_install_runnable() {
         assert!(parse_manifest(r#"{"id":"x.y","programs":{"linux-x86_64":"x"}}"#).unwrap_err().contains("native"));
-        let m = parse_manifest(r#"{"id":"x.y","permissions":["native"],"programs":{"a":"../x","b":"ok"},"contributes":{"provides":["web","nope"]}}"#).unwrap();
-        assert_eq!((m.programs, m.provides), (vec![("b".to_string(), "ok".to_string())], vec!["web".to_string()]));
+        let m = parse_manifest(r#"{"id":"x.y","permissions":["native"],"programs":{"a":"../x","b":"ok"}}"#).unwrap();
+        assert_eq!(m.programs, vec![("b".to_string(), "ok".to_string())]);
         scratch();
         let d = std::env::temp_dir().join(format!("sshremote-ext-native-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1607,19 +1470,19 @@ mod tests {
         std::fs::write(d.join("gw"), b"#!/bin/sh
 ").unwrap();
         let here = platform();
-        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-gw","version":"1","permissions":["native"],"programs":{{"{here}":"gw"}},"contributes":{{"provides":["web"]}}}}"#)).unwrap();
+        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-gw","version":"1","permissions":["native"],"programs":{{"{here}":"gw"}}}}"#)).unwrap();
         let pkg = d.with_extension("sshx");
         pack(&d, &pkg).unwrap();
         install_file(&pkg).unwrap();
-        let (prog, _) = provider("web").unwrap();
-        assert!(prog.is_file() && provider("mcp").is_none());
+        let prog = folder("dev.sshremote.test-gw").unwrap().join("gw");
+        assert!(prog.is_file());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&prog).unwrap().permissions().mode() & 0o111, 0o111, "made runnable");
         }
         remove("dev.sshremote.test-gw").unwrap();
-        assert!(provider("web").is_none());
+        assert!(!prog.exists());
         // In the registry it is packed for each platform; only this one's is offered here.
         let index = d.join("index.json");
         std::fs::write(&index, format!(r#"{{"api":1,"extensions":[
@@ -1644,22 +1507,22 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("gw"), b"x").unwrap();
         let here = platform();
-        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-page","name":"Page gateway","version":"1.2.0","description":"A gateway.","permissions":["native"],"programs":{{"{here}":"gw"}},"contributes":{{"provides":["web"]}}}}"#)).unwrap();
+        std::fs::write(d.join("extension.json"), format!(r#"{{"id":"dev.sshremote.test-page","name":"Page gateway","version":"1.2.0","description":"A gateway.","permissions":["native"],"programs":{{"{here}":"gw"}}}}"#)).unwrap();
         let pkg = d.with_extension("sshx");
         pack(&d, &pkg).unwrap();
         install_file(&pkg).unwrap();
-        let offer = |id: &str, name: &str| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new(), provides: Vec::new() };
+        let offer = |id: &str, name: &str| Offer { id: id.into(), name: name.into(), version: "1.0.0".into(), description: "Offered.".into(), url: String::new(), sha256: String::new() };
         let mut tool = ExtTool { offers: Some(Ok(vec![
             offer("dev.sshremote.test-sea", "Sea pack"),
             offer("dev.sshremote.test-gold", "Gold pack"),
             Offer { version: "1.3.0".into(), ..offer("dev.sshremote.test-page", "Page gateway") },
-            Offer { provides: vec!["remote".into()], ..offer("dev.sshremote.test-rd", "Desk pack") },
+            offer("dev.sshremote.test-rd", "Desk pack"),
         ])), ..ExtTool::new() };
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
         let size = Vec2::new(760.0, 900.0);
         let pages: [(ExtTab, &str, &[&str]); 3] = [
-            (ExtTab::Installed, "installed", &["Parts of this app", "Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "Adds sshremote web", "run its own program", "Update to 1.3.0", "How to use it"]),
+            (ExtTab::Installed, "installed", &["Parts of this app", "Added extensions (1)", "Installed (1)", "1 update", "Page gateway", "Program", "run its own program", "Update to 1.3.0"]),
             (ExtTab::Browse, "browse", &["Sea pack", "Gold pack", "Installed", "Desk pack", "Install"]),
             (ExtTab::Manage, "manage", &["Install a package file", "Registry", "sshremote ext new my-tool"]),
         ];
@@ -1673,9 +1536,7 @@ mod tests {
             for text in texts {
                 assert!(!snap.find(text).is_empty(), "{text} is shown on {name}");
             }
-            if tab == ExtTab::Browse {
-                assert_eq!(!snap.find("Built into this edition").is_empty(), cfg!(feature = "remote"), "the extension a build carries itself");
-            }
+            assert!(snap.find("Built into this edition").is_empty(), "no extension stands in for a built-in part");
             if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR") {
                 snap.save(&ctx, size, &std::path::Path::new(&dir).join(format!("extensions_{name}.png")));
             }

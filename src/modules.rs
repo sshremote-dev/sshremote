@@ -24,7 +24,7 @@ pub fn set(id: &str, on: bool) {
     crate::hosts::set_setting(&format!("module.{id}"), if on { "on" } else { "off" });
 }
 
-/// Whether this build carries the part itself (the others come from an extension).
+/// Whether this build carries the part (one built with fewer features has fewer).
 pub fn built_in(id: &str) -> bool {
     match id {
         "web" => cfg!(feature = "web"),
@@ -34,21 +34,13 @@ pub fn built_in(id: &str) -> bool {
     }
 }
 
-/// The command an extension serves for this part.
-pub fn served_by(id: &str) -> &str {
-    match id {
-        "web" | "mcp" => id,
-        _ => "remote",
-    }
-}
-
 /// An error for a command whose part is off.
 pub fn need(id: &str) -> Result<(), String> {
     if on(id) {
         return Ok(());
     }
     let name = ALL.iter().find(|m| m.0 == id).map_or(id, |m| m.1);
-    Err(format!("{name} is turned off: `sshremote module on {id}`, or Extensions > Manage > Modules"))
+    Err(format!("{name} is turned off: `sshremote module on {id}`, or Settings > Parts"))
 }
 
 #[cfg(test)]
