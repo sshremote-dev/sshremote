@@ -652,11 +652,25 @@ struct Feed {
 
 static FEEDS: Mutex<Vec<std::sync::Arc<Mutex<Feed>>>> = Mutex::new(Vec::new());
 
+/// Hosts that refused the figures' own connection (no key, so a password would be needed): never
+/// tried again while the app runs, as repeated failed logins can get an address banned.
+static REFUSED: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+/// Whether ssh's complaint says the login itself was refused, not that the host was away.
+fn login_refused(stderr: &str) -> bool {
+    ["Permission denied", "Host key verification failed", "Too many authentication failures", "no matching host key"]
+        .iter()
+        .any(|m| stderr.contains(m))
+}
+
 /// The figures of the computer a terminal runs on: this one with no SSH command, else its host's,
 /// read over a connection of their own (one per host, shared by its panes, closed when no pane
 /// shows them for a while); None until the first arrive.
 fn host_stats(ctx: &egui::Context, ssh: Option<&[String]>) -> Option<Stats> {
     let Some(ssh) = ssh.filter(|s| !s.is_empty()) else { return Some(stats()) };
+    if REFUSED.lock().is_ok_and(|r| r.iter().any(|k| k == ssh)) {
+        return None;
+    }
     let feed = {
         let mut feeds = FEEDS.lock().ok()?;
         match feeds.iter().find(|f| f.lock().is_ok_and(|f| f.key == ssh)) {
@@ -688,9 +702,17 @@ fn follow(me: &std::sync::Arc<Mutex<Feed>>, ctx: &egui::Context) {
         cmd.args(&key[1..]);
         // sshremote where the agent is looked for (on PATH, else ~/.local/bin), else the shell.
         cmd.arg(format!("sshremote --stats || ~/.local/bin/sshremote --stats || {SHELL_STATS}"));
-        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         crate::sys::quiet(&mut cmd);
         if let Ok(mut child) = cmd.spawn() {
+            // What ssh says goes aside, to tell a refused login from a host that is away.
+            let complaint = child.stderr.take().map(|mut e| {
+                std::thread::spawn(move || {
+                    let mut text = String::new();
+                    let _ = std::io::Read::read_to_string(&mut std::io::Read::take(&mut e, 64 << 10), &mut text);
+                    text
+                })
+            });
             let out = child.stdout.take();
             for line in out.map(std::io::BufReader::new).into_iter().flat_map(|r| r.lines()).map_while(Result::ok) {
                 if let Some((times, s)) = parse_stats(&line)
@@ -710,6 +732,12 @@ fn follow(me: &std::sync::Arc<Mutex<Feed>>, ctx: &egui::Context) {
             }
             let _ = child.kill();
             let _ = child.wait();
+            if complaint.and_then(|t| t.join().ok()).is_some_and(|t| login_refused(&t)) {
+                if let Ok(mut r) = REFUSED.lock() {
+                    r.push(key);
+                }
+                break;
+            }
         }
         for _ in 0..20 {
             if idle() {
@@ -1240,6 +1268,35 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host that refuses the figures' own login is not asked again (repeated failed logins can get
+    /// an address banned); one that is merely away is.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_login_for_the_figures_is_not_tried_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sshremote-look-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ssh = dir.join("ssh");
+        let runs = dir.join("runs");
+        std::fs::write(&ssh, format!("#!/bin/sh\necho x >> '{}'\necho 'a@h: Permission denied (publickey).' >&2\nexit 255\n", runs.display())).unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let key = vec![ssh.display().to_string(), "h".to_string()];
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !REFUSED.lock().unwrap().contains(&key) && std::time::Instant::now() < until {
+            assert!(host_stats(&ctx, Some(&key)).is_none());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(REFUSED.lock().unwrap().contains(&key), "the refusal is kept");
+        for _ in 0..5 {
+            assert!(host_stats(&ctx, Some(&key)).is_none());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1, "one login only");
+        assert!(login_refused("Host key verification failed.") && !login_refused("ssh: connect to host h port 22: Connection timed out"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_look_survives_its_own_text() {
