@@ -191,7 +191,17 @@ impl App {
             ui.set_width(fit.x);
             let title = if new { "Add a computer".to_string() } else { s.name.clone().chars().take(40).collect::<String>() };
             let title = if title.is_empty() { s.was.clone() } else { title };
-            ui.label(RichText::new(title).size(17.0).strong());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(title).size(17.0).strong()).truncate());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut star = RichText::new(ic::STAR).size(18.0);
+                    star = if s.favorite { star.family(filled()).color(warn()) } else { star.color(ui.visuals().weak_text_color()) };
+                    let tip = if s.favorite { "A favorite: first in the list" } else { "Make it a favorite: first in the list" };
+                    if ui.add(egui::Button::new(star).frame_when_inactive(false)).on_hover_text(tip).clicked() {
+                        s.favorite = !s.favorite;
+                    }
+                });
+            });
             ui.add_space(10.0);
             if new {
                 ui.horizontal(|ui| {
@@ -206,7 +216,7 @@ impl App {
                 ui.add_space(8.0);
             }
             egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.62).auto_shrink([false, true]).show(ui, |ui| {
-                egui::Grid::new("sheet-grid").num_columns(2).spacing([14.0, 8.0]).min_col_width(96.0).show(ui, |ui| {
+                egui::Grid::new("sheet-grid").num_columns(2).spacing([14.0, 7.0]).min_col_width(84.0).show(ui, |ui| {
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut s.name).hint_text("as the list shows it (optional)").desired_width(300.0));
                     ui.end_row();
@@ -222,23 +232,25 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut s.entry.alias).hint_text("web1").desired_width(160.0));
                         ui.end_row();
                         ui.label("Host");
-                        ui.add(egui::TextEdit::singleline(&mut s.entry.hostname).hint_text("192.168.1.20 or web1.example.com").desired_width(300.0));
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut s.entry.hostname).hint_text("192.168.1.20 or web1.example.com").desired_width(240.0));
+                            ui.label(RichText::new("Port").weak());
+                            ui.add(egui::TextEdit::singleline(&mut s.entry.port).hint_text("22").desired_width(56.0));
+                        });
                         ui.end_row();
                         ui.label("User");
                         ui.add(egui::TextEdit::singleline(&mut s.entry.user).hint_text("your name there").desired_width(160.0));
-                        ui.end_row();
-                        ui.label("Port");
-                        ui.add(egui::TextEdit::singleline(&mut s.entry.port).hint_text("22").desired_width(70.0));
                         ui.end_row();
                         ui.label("Key file");
                         ui.add(egui::TextEdit::singleline(&mut s.entry.identity).hint_text("~/.ssh/id_ed25519 (optional)").desired_width(300.0));
                         ui.end_row();
                     } else {
                         ui.label("Address");
-                        ui.add(egui::TextEdit::singleline(&mut s.address).hint_text("user@host").desired_width(300.0));
-                        ui.end_row();
-                        ui.label("Port");
-                        ui.add(egui::TextEdit::singleline(&mut s.port).hint_text("22").desired_width(70.0));
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut s.address).hint_text("user@host").desired_width(240.0));
+                            ui.label(RichText::new("Port").weak());
+                            ui.add(egui::TextEdit::singleline(&mut s.port).hint_text("22").desired_width(56.0));
+                        });
                         ui.end_row();
                     }
                     if !s.by_id && (new || !s.in_config) {
@@ -248,7 +260,9 @@ impl App {
                             // The address typed becomes the alias's host and user.
                             let (user, host) = s.address.trim().rsplit_once('@').map_or((String::new(), s.address.trim().to_string()), |(u, h)| (u.to_string(), h.to_string()));
                             if s.entry.hostname.is_empty() {
-                                s.entry = HostEntry { alias: host.split('.').next().unwrap_or("").to_string(), hostname: host, user, port: s.port.clone(), identity: String::new() };
+                                // A name's first part is a fair alias; an IP's is not.
+                                let alias = if host.parse::<std::net::IpAddr>().is_ok() { String::new() } else { host.split('.').next().unwrap_or("").to_string() };
+                                s.entry = HostEntry { alias, hostname: host, user, port: s.port.clone(), identity: String::new() };
                             }
                         } else if r.changed() && s.address.is_empty() {
                             let user = if s.entry.user.is_empty() { String::new() } else { format!("{}@", s.entry.user) };
@@ -257,9 +271,6 @@ impl App {
                         }
                         ui.end_row();
                     }
-                    ui.label("");
-                    ui.checkbox(&mut s.favorite, "Favorite: first in the list");
-                    ui.end_row();
                     ui.label("Password");
                     ui.horizontal(|ui| {
                         let saved_pw = !new && crate::vault::get(&s.was).is_some();

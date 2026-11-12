@@ -446,6 +446,19 @@ pub fn platform() -> String {
     format!("{os}-{}", std::env::consts::ARCH)
 }
 
+/// Extensions that once added what is now part of the app itself.
+const RETIRED: [&str; 4] = ["dev.sshremote.remote-desktop", "dev.sshremote.web-gateway", "dev.sshremote.mcp-server", "dev.sshremote.ssh-tunnels"];
+
+/// Removes those of them still installed; their parts are built in now (the tunnels' list
+/// stays, for the computers list to take in).
+pub fn retire_built_in() {
+    for id in RETIRED {
+        if folder(id).is_some_and(|d| d.join("extension.json").exists()) {
+            let _ = remove(id);
+        }
+    }
+}
+
 /// Removes an installed extension (its layers in use show nothing from then on).
 pub fn remove(id: &str) -> Result<(), String> {
     if !valid_id(id) {

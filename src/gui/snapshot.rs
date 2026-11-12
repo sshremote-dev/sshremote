@@ -85,14 +85,20 @@ impl Snap {
         let ppp = out.pixels_per_point;
         let (w, h) = ((size.x * ppp) as usize, (size.y * ppp) as usize);
         let mut px = vec![Color32::BLACK; w * h];
-        for prim in ctx.tessellate(out.shapes.clone(), ppp) {
-            let egui::epaint::Primitive::Mesh(mesh) = prim.primitive else { continue };
-            let clip = Rect::from_min_max(prim.clip_rect.min * ppp, prim.clip_rect.max * ppp)
-                .intersect(Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32)));
-            let tex = self.textures.get(&mesh.texture_id);
-            for tri in mesh.indices.as_chunks::<3>().0 {
-                let v = [&mesh.vertices[tri[0] as usize], &mesh.vertices[tri[1] as usize], &mesh.vertices[tri[2] as usize]];
-                fill(&mut px, w, clip, ppp, v, tex);
+        // Which shape's fill of one colour last covered each pixel: such a fill covers a pixel
+        // once, even on the edge two of its triangles share (twice, a see-through fill shows a
+        // seam there). Its shading (shadows, smoothed edges) and strokes are not held to it.
+        let mut stamp = vec![0u64; w * h];
+        for (n, shape) in out.shapes.iter().enumerate() {
+            for prim in ctx.tessellate(vec![shape.clone()], ppp) {
+                let egui::epaint::Primitive::Mesh(mesh) = prim.primitive else { continue };
+                let clip = Rect::from_min_max(prim.clip_rect.min * ppp, prim.clip_rect.max * ppp)
+                    .intersect(Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32)));
+                let tex = self.textures.get(&mesh.texture_id);
+                for tri in mesh.indices.as_chunks::<3>().0 {
+                    let v = [&mesh.vertices[tri[0] as usize], &mesh.vertices[tri[1] as usize], &mesh.vertices[tri[2] as usize]];
+                    fill(&mut px, (&mut stamp, n as u64 + 1), w, clip, ppp, v, tex);
+                }
             }
         }
         let file = std::fs::File::create(path).expect("picture file");
@@ -105,7 +111,7 @@ impl Snap {
 }
 
 /// One triangle, its colours times its texture, blended over what is there (premultiplied).
-fn fill(px: &mut [Color32], w: usize, clip: Rect, ppp: f32, v: [&egui::epaint::Vertex; 3], tex: Option<&ColorImage>) {
+fn fill(px: &mut [Color32], (stamp, shape): (&mut [u64], u64), w: usize, clip: Rect, ppp: f32, v: [&egui::epaint::Vertex; 3], tex: Option<&ColorImage>) {
     let p: Vec<Pos2> = v.iter().map(|v| v.pos * ppp).collect();
     let area = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
     if area.abs() < 1e-6 {
@@ -115,6 +121,8 @@ fn fill(px: &mut [Color32], w: usize, clip: Rect, ppp: f32, v: [&egui::epaint::V
     let max = Pos2::new(p.iter().map(|q| q.x).fold(f32::MIN, f32::max), p.iter().map(|q| q.y).fold(f32::MIN, f32::max));
     let (x0, y0) = (min.x.max(clip.min.x).floor() as i32, min.y.max(clip.min.y).floor() as i32);
     let (x1, y1) = (max.x.min(clip.max.x).ceil() as i32, max.y.min(clip.max.y).ceil() as i32);
+    let uniform = v[0].color == v[1].color && v[1].color == v[2].color && v[0].uv == v[1].uv && v[1].uv == v[2].uv;
+    let once = uniform.then(|| (shape << 32) | u32::from_le_bytes(v[0].color.to_array()) as u64);
     for y in y0.max(0)..y1 {
         for x in x0.max(0)..x1 {
             let c = Pos2::new(x as f32 + 0.5, y as f32 + 0.5);
@@ -148,8 +156,11 @@ fn fill(px: &mut [Color32], w: usize, clip: Rect, ppp: f32, v: [&egui::epaint::V
             };
             let src = [col[0] * t[0] / 255.0, col[1] * t[1] / 255.0, col[2] * t[2] / 255.0, col[3] * t[3] / 255.0];
             let i = y as usize * w + x as usize;
-            if i >= px.len() {
+            if i >= px.len() || once.is_some_and(|k| stamp[i] == k) {
                 continue;
+            }
+            if let Some(k) = once {
+                stamp[i] = k;
             }
             let d = px[i];
             let k = 1.0 - src[3] / 255.0;

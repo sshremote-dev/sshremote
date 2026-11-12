@@ -110,10 +110,39 @@ fn with<R>(f: impl FnOnce(&mut Vec<Computer>) -> R) -> R {
 
 fn read() -> Vec<Computer> {
     let Some(path) = file() else { return Vec::new() };
-    match std::fs::read_to_string(&path) {
+    let mut list = match std::fs::read_to_string(&path) {
         Ok(text) => parse(&text),
         Err(_) => from_older_files(path.parent()),
+    };
+    if take_in_old_tunnels(path.parent(), &mut list) {
+        write(&list);
     }
+    list
+}
+
+/// The tunnels the SSH tunnels extension kept, each given to its computer, once: its file is
+/// renamed after. They were written in the same words as a computer's tunnels, with the host.
+fn take_in_old_tunnels(dir: Option<&std::path::Path>, list: &mut Vec<Computer>) -> bool {
+    let Some(f) = dir.map(|d| d.join("extension-data").join("ssh-tunnels.json")) else { return false };
+    let Ok(text) = std::fs::read_to_string(&f) else { return false };
+    let saved: Vec<Value> = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    for v in &saved {
+        let (Some(host), Some(t)) = (v.get("host").and_then(Value::as_str).map(str::trim).filter(|h| !h.is_empty()), Tunnel::from_json(v)) else {
+            continue;
+        };
+        let i = match list.iter().position(|c| c.address == host) {
+            Some(i) => i,
+            None => {
+                list.push(Computer { address: host.into(), ..Default::default() });
+                list.len() - 1
+            }
+        };
+        if !list[i].tunnels.contains(&t) {
+            list[i].tunnels.push(t);
+        }
+    }
+    let _ = std::fs::rename(&f, f.with_extension("json.moved"));
+    true
 }
 
 /// The list in `computers.json`'s words.
@@ -294,6 +323,27 @@ mod tests {
         assert_eq!((by("dev@build").port, by("dev@build").last_used), (Some(2222), 500));
         assert!(by("web1").favorite && by("nas").favorite && !by("dev@build").favorite);
         assert_eq!(by("sshremote://123456789@relay.example").label(), "ID 123 456 789");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The SSH tunnels extension's tunnels go to their computers once.
+    #[test]
+    fn the_tunnels_extension_hands_its_tunnels_over() {
+        let dir = scratch("tunnels");
+        std::fs::create_dir_all(dir.join("extension-data")).unwrap();
+        let old = r#"[{"host":"web1","kind":"local","port":5432,"dest":"localhost:5432","auto":true},
+                      {"host":"web1","kind":"socks","port":1080,"dest":"","auto":false},
+                      {"host":"-bad","kind":"local","port":0,"dest":"x"}]"#;
+        std::fs::write(dir.join("extension-data").join("ssh-tunnels.json"), old).unwrap();
+        std::fs::write(dir.join("computers.json"), r#"[{"address":"web1","name":"Web"}]"#).unwrap();
+        let list = read();
+        let web = list.iter().find(|c| c.address == "web1").unwrap();
+        assert_eq!(web.name, "Web");
+        assert_eq!(web.tunnels.iter().map(|t| t.args()).collect::<Vec<_>>(), [vec!["-L", "5432:localhost:5432"], vec!["-D", "1080"]]);
+        assert!(web.tunnels[0].start_with_app);
+        assert_eq!(list.len(), 1, "nothing made of what is not a tunnel");
+        assert!(dir.join("extension-data").join("ssh-tunnels.json.moved").exists());
+        assert_eq!(read(), list, "once");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

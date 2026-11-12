@@ -384,6 +384,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
     boot(native, move |cc| {
         let mut app = App::boot(cc, form, budget, &open);
         std::thread::spawn(crate::backup::auto);
+        std::thread::spawn(crate::ext::retire_built_in);
         // Remote access by ID while this window is open, when it is on and no service runs it.
         #[cfg(feature = "remote")]
         crate::access::start_in_app();
@@ -1307,6 +1308,54 @@ mod tests {
                     let what = if quick { "quick" } else { "home" };
                     snap.save(&ctx, size, &dir.join(format!("{what}_{name}_{w_}.png")));
                 }
+            }
+        }
+    }
+
+    /// The site's pictures of the windows, with made-up addresses for this computer:
+    /// SSHREMOTE_SITE_DIR=site/img cargo test --release site_pictures (the computers and keys are
+    /// those of the settings folder and ~/.ssh it runs with).
+    #[test]
+    fn site_pictures() {
+        let Some(dir) = std::env::var_os("SSHREMOTE_SITE_DIR").map(std::path::PathBuf::from) else { return };
+        for dark in [true, false] {
+            for name in ["new", "ssh", "local", "tools"] {
+                let ctx = egui::Context::default();
+                theme::style(&ctx);
+                theme::apply_theme(&ctx, dark);
+                let opt = crate::parse_client(&["--gui".into()]).unwrap();
+                let mut app = App::new(Form::from(&opt), None, "", None);
+                let ip = std::net::IpAddr::from([192, 168, 1, 40]);
+                app.here = std::sync::Arc::new(std::sync::Mutex::new(Some(crate::here::Here {
+                    name: "office-pc".into(),
+                    dns: String::new(),
+                    ips: vec![ip],
+                    user: "alex".into(),
+                    ssh: true,
+                })));
+                app.here_at = Some(Instant::now());
+                #[cfg(feature = "remote")]
+                {
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true };
+                    *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
+                    *app.access.service.lock().unwrap() = Some(Default::default());
+                    app.access.cfg = Some(cfg);
+                    app.access.looked = Some(Instant::now());
+                    app.access.service_looked = Some(Instant::now());
+                }
+                match name {
+                    "ssh" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
+                    "local" => app.access_sheet_open = true,
+                    "tools" => app.settings = Some(settings::Settings::keys()),
+                    _ => {}
+                }
+                let size = Vec2::new(900.0, 600.0);
+                let mut snap = snapshot::Snap::default();
+                for k in 0..12 {
+                    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.05), ..Default::default() };
+                    snap.frame(&ctx, input, |ui| app.home(ui));
+                }
+                snap.save(&ctx, size, &dir.join(format!("{name}-{}.png", if dark { "dark" } else { "light" })));
             }
         }
     }

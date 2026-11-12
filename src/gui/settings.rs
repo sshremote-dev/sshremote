@@ -92,10 +92,10 @@ impl Settings {
         Settings { page: Page::Appearance }
     }
 
-    /// Opened on the extensions, for the updates waiting.
-    #[allow(dead_code)]
-    pub(super) fn extensions() -> Settings {
-        Settings { page: Page::Extensions }
+    /// Opened on the SSH keys, for the site's pictures.
+    #[cfg(test)]
+    pub(super) fn keys() -> Settings {
+        Settings { page: Page::Keys(KeyTool::new()) }
     }
 }
 
