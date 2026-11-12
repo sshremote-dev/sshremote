@@ -200,3 +200,26 @@ pub fn tie(child: &std::process::Child) {
     #[cfg(not(windows))]
     let _ = child;
 }
+
+/// Starts `cmd` tied to this program (see `tie`). On Unix it leads a process group of its own,
+/// so `end_tree` ends what it starts as well.
+pub fn spawn_tied(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn()?;
+    tie(&child);
+    Ok(child)
+}
+
+/// Ends a child started with `spawn_tied`, with its process group on Unix, and waits for it.
+pub fn end_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(child.id()) {
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}

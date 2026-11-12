@@ -7,8 +7,8 @@
 //! Each request is checked against the permissions its manifest declares.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 
 use serde_json::{Value, json};
 
@@ -91,9 +91,27 @@ struct Running {
     id: String,
     name: String,
     permissions: Vec<String>,
-    stdin: ChildStdin,
+    /// Lines for the program's input, written by a thread of its own: a program that stops
+    /// reading never holds up the window (or its closing).
+    input: SyncSender<String>,
     child: Child,
     run: u64,
+}
+
+/// Lines waiting for a program to read them; past this many it has stopped reading.
+const INPUT_QUEUE: usize = 1000;
+
+/// A thread that writes the queued lines to a program's input, and closes it when the queue does.
+fn input_writer(mut stdin: std::process::ChildStdin) -> SyncSender<String> {
+    let (input, lines) = sync_channel::<String>(INPUT_QUEUE);
+    std::thread::spawn(move || {
+        for line in lines {
+            if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    input
 }
 
 #[derive(Default)]
@@ -167,11 +185,10 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
         // CREATE_NO_WINDOW: no console flashes up for an extension.
         cmd.creation_flags(0x0800_0000);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", file))?;
-    crate::sys::tie(&child);
+    let mut child = crate::sys::spawn_tied(&mut cmd).map_err(|e| format!("{}: {e}", file))?;
     let stdout = child.stdout.take().ok_or("no output")?;
     let stderr = child.stderr.take().ok_or("no errors")?;
-    let stdin = child.stdin.take().ok_or("no input")?;
+    let input = input_writer(child.stdin.take().ok_or("no input")?);
     let (tx, waker) = with(|s| {
         if s.tx.is_none() {
             let (tx, rx) = channel();
@@ -210,7 +227,7 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     with(|s| {
         s.stamps.insert(m.id.clone(), stamp(m));
         s.running.retain(|r| r.id != m.id);
-        s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), stdin, child, run });
+        s.running.push(Running { id: m.id.clone(), name: m.name.clone(), permissions: m.permissions.clone(), input, child, run });
     });
     let params = json!({
         "api": API,
@@ -331,17 +348,23 @@ fn send(ext: &str, method: &str, params: Value, id: Option<u64>) {
         if let Some(id) = id {
             msg["id"] = json!(id);
         }
-        let line = format!("{msg}\n");
-        let mut dead = None;
-        if let Some(r) = s.running.iter_mut().find(|r| r.id == ext) {
-            if r.stdin.write_all(line.as_bytes()).and_then(|()| r.stdin.flush()).is_err() {
-                dead = Some(r.id.clone());
-            }
-        }
-        if let Some(d) = dead {
-            keep_log(s, format!("{d}: stopped answering"));
-        }
+        queue(s, ext, format!("{msg}\n"));
     });
+}
+
+/// Queues a line for an extension's input. One that has stopped reading it is ended.
+fn queue(s: &mut State, ext: &str, line: String) {
+    let Some(i) = s.running.iter().position(|r| r.id == ext) else { return };
+    match s.running[i].input.try_send(line) {
+        Ok(()) => {}
+        Err(TrySendError::Disconnected(_)) => keep_log(s, format!("{ext}: stopped answering")),
+        Err(TrySendError::Full(_)) => {
+            keep_log(s, format!("{ext}: stopped reading its input, so it was stopped"));
+            s.notices.push(format!("{}: stopped answering, so it was stopped", s.running[i].name));
+            let r = s.running.remove(i);
+            std::thread::spawn(move || end_all(vec![r]));
+        }
+    }
 }
 
 fn request(ext: &str, method: &str, params: Value) {
@@ -359,11 +382,7 @@ fn reply(ext: &str, id: &Value, result: Result<Value, String>) {
         Ok(v) => json!({ "jsonrpc": "2.0", "id": id, "result": v }),
         Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": e } }),
     };
-    with(|s| {
-        if let Some(r) = s.running.iter_mut().find(|r| r.id == ext) {
-            let _ = r.stdin.write_all(format!("{msg}\n").as_bytes()).and_then(|()| r.stdin.flush());
-        }
-    });
+    with(|s| queue(s, ext, format!("{msg}\n")));
 }
 
 /// What the extensions said since the last frame: applied to the status bar and panels, and
@@ -474,7 +493,7 @@ fn handle(ext: &str, msg: &Value) {
             let r = with(|s| s.running.iter().position(|r| r.id == ext).map(|i| s.running.remove(i)));
             forget(ext);
             if let Some(r) = r {
-                std::thread::spawn(move || end(r));
+                std::thread::spawn(move || end_all(vec![r]));
             }
             return;
         }
@@ -647,27 +666,39 @@ pub fn stop(ext: &str) {
         Some(s.running.remove(i))
     });
     if let Some(r) = r {
-        end(r);
+        end_all(vec![r]);
     }
     forget(ext);
 }
 
-/// Its input closed, a moment to finish, then ended and waited for.
-fn end(mut r: Running) {
-    drop(r.stdin);
+/// Their input closed, together a moment to finish, then ended with what they started, and
+/// waited for.
+fn end_all(rs: Vec<Running>) {
+    let mut children: Vec<Child> = rs
+        .into_iter()
+        .map(|r| {
+            drop(r.input);
+            r.child
+        })
+        .collect();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-    while std::time::Instant::now() < deadline && matches!(r.child.try_wait(), Ok(None)) {
+    while std::time::Instant::now() < deadline && children.iter_mut().any(|c| matches!(c.try_wait(), Ok(None))) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let _ = r.child.kill();
-    let _ = r.child.wait();
+    for c in &mut children {
+        crate::sys::end_tree(c);
+    }
 }
 
-/// Stops them all (the app is closing).
+/// Stops them all (the app is closing): each asked to shut down, then all ended after one wait.
 pub fn stop_all() {
     let ids: Vec<String> = with(|s| s.running.iter().map(|r| r.id.clone()).collect());
-    for id in ids {
-        stop(&id);
+    for id in &ids {
+        send(id, "shutdown", Value::Null, None);
+    }
+    end_all(with(|s| std::mem::take(&mut s.running)));
+    for id in &ids {
+        forget(id);
     }
 }
 
@@ -709,6 +740,29 @@ pub fn test_request(r: Request) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program that never reads its input cannot hold up the app: sending to it does not block,
+    /// it is ended once its queue is full, and closing waits once, not forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_stops_reading_never_blocks_the_app() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = crate::sys::spawn_tied(&mut cmd).unwrap();
+        let input = input_writer(child.stdin.take().unwrap());
+        let id = "test.deaf".to_string();
+        with(|s| s.running.push(Running { id: id.clone(), name: "Deaf".into(), permissions: Vec::new(), input, child, run: 0 }));
+        let started = std::time::Instant::now();
+        let big = "x".repeat(4096);
+        for _ in 0..INPUT_QUEUE + 200 {
+            send(&id, "event", json!({ "data": big }), None);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "sending never blocks");
+        assert!(!running(&id), "ended once it stopped reading");
+        let started = std::time::Instant::now();
+        stop_all();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "closing does not hang");
+    }
 
     #[test]
     fn requests_are_checked_against_permissions() {
