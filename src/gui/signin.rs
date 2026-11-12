@@ -99,8 +99,14 @@ impl SignIn {
                     row(ui, "Computer", &self.host);
                 } else {
                     row(ui, "Host", &self.host);
-                    row(ui, "User", if self.user.is_empty() { "from ~/.ssh/config, or yours here" } else { &self.user });
-                    row(ui, "Port", if self.port.is_empty() { "22, or from ~/.ssh/config" } else { &self.port });
+                    // A login refused for the wrong user (or a port that is not ssh's) is put
+                    // right here.
+                    ui.label(RichText::new("User").weak());
+                    ui.add(egui::TextEdit::singleline(&mut self.user).hint_text("from ~/.ssh/config, or yours here").desired_width(220.0));
+                    ui.end_row();
+                    ui.label(RichText::new("Port").weak());
+                    ui.add(egui::TextEdit::singleline(&mut self.port).hint_text("22, or from ~/.ssh/config").desired_width(80.0));
+                    ui.end_row();
                 }
                 row(ui, "For", &self.purpose);
             });
@@ -175,7 +181,10 @@ impl SignIn {
         if let Target::Direct { password, .. } = &mut t {
             *password = self.password.clone();
         }
-        if let Target::Ssh { args, password, .. } = &mut t {
+        if let Target::Ssh { host, port, args, password, .. } = &mut t {
+            let user = self.user.trim();
+            *host = if user.is_empty() { self.host.clone() } else { format!("{user}@{}", self.host) };
+            *port = self.port.trim().parse().ok().filter(|&p: &u16| p > 0);
             if !self.password.is_empty() {
                 *password = Some(self.password.clone());
             }
@@ -205,6 +214,15 @@ mod tests {
         s.key = "/k/new".into();
         let Target::Ssh { args, password, .. } = s.target(&t) else { panic!() };
         assert_eq!((args, password), (vec!["-A".to_string(), "-i".into(), "/k/new".into()], Some("pw".to_string())));
+        // The user and port put right in the dialog go to the next try; left empty, ssh's own.
+        s.user = "ops".into();
+        s.port = "".into();
+        let Target::Ssh { host, port, .. } = s.target(&t) else { panic!() };
+        assert_eq!((host.as_str(), port), ("ops@build", None));
+        s.user = " ".into();
+        s.port = "2200".into();
+        let Target::Ssh { host, port, .. } = s.target(&t) else { panic!() };
+        assert_eq!((host.as_str(), port), ("build", Some(2200)));
         assert!(SignIn::new(1, &Target::Local { capture: String::new() }, "x", "").is_none());
     }
 
