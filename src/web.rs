@@ -36,6 +36,25 @@ struct Gate {
     local: Option<String>,
     /// Failed sign-ins by address: how many, and when the last was.
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    /// Open sockets by address, so one browser (or one attacker) cannot take them all.
+    sockets: Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// Connections served at once, and sockets from one address: enough for many tabs, not for a flood.
+const MOST_CONNECTIONS: usize = 512;
+const MOST_SOCKETS_EACH: usize = 32;
+/// A request or header line longer than this is no browser's.
+const MOST_LINE: u64 = 8192;
+
+static CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One connection served; counted down however it ends.
+struct Served;
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn password_file() -> Option<PathBuf> {
@@ -75,12 +94,26 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if local.is_some() && !listen.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) {
         return Err("--local-agent only listens on 127.0.0.1".into());
     }
-    let gate = Arc::new(Gate { password, id_only, relay, local, failures: Mutex::new(HashMap::new()) });
+    let gate = Arc::new(Gate {
+        password,
+        id_only,
+        relay,
+        local,
+        failures: Mutex::new(HashMap::new()),
+        sockets: Mutex::new(HashMap::new()),
+    });
     let server = TcpListener::bind(&listen).map_err(|e| format!("{listen}: {e}"))?;
     eprintln!("sshremote web: on http://{listen}/");
     for conn in server.incoming().flatten() {
+        // Over the limit the connection is closed at once, before a thread is spent on it.
+        if CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MOST_CONNECTIONS {
+            CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            continue;
+        }
+        let served = Served;
         let gate = gate.clone();
         std::thread::spawn(move || {
+            let _served = served;
             let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
             if let Err(e) = serve(conn, &gate) {
                 eprintln!("web: {e}");
@@ -95,9 +128,19 @@ struct Request {
     headers: HashMap<String, String>,
 }
 
+/// One line of the request, at most `MOST_LINE` long.
+fn read_line(r: &mut BufReader<TcpStream>, line: &mut String) -> Result<(), String> {
+    line.clear();
+    let n = r.by_ref().take(MOST_LINE).read_line(line).map_err(|e| e.to_string())?;
+    if n as u64 == MOST_LINE && !line.ends_with('\n') {
+        return Err("request line too long".into());
+    }
+    Ok(())
+}
+
 fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut line = String::new();
-    r.read_line(&mut line).map_err(|e| e.to_string())?;
+    read_line(r, &mut line)?;
     let mut parts = line.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/").to_string());
     if method != "GET" {
@@ -105,8 +148,7 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, String> {
     }
     let mut headers = HashMap::new();
     for _ in 0..100 {
-        line.clear();
-        r.read_line(&mut line).map_err(|e| e.to_string())?;
+        read_line(r, &mut line)?;
         let l = line.trim_end();
         if l.is_empty() {
             return Ok(Request { path, headers });
@@ -156,6 +198,29 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
             {
                 return respond(&conn, "403 Forbidden", "text/plain", b"wrong origin");
             }
+            // A socket is held for as long as the page is open: a few per address.
+            let mut sockets = gate.sockets.lock().map_err(|e| e.to_string())?;
+            let open = sockets.entry(who).or_insert(0);
+            if *open >= MOST_SOCKETS_EACH {
+                drop(sockets);
+                return respond(&conn, "429 Too Many Requests", "text/plain", b"too many connections");
+            }
+            *open += 1;
+            drop(sockets);
+            struct Held<'a>(&'a Gate, IpAddr);
+            impl Drop for Held<'_> {
+                fn drop(&mut self) {
+                    if let Ok(mut m) = self.0.sockets.lock()
+                        && let Some(n) = m.get_mut(&self.1)
+                    {
+                        *n -= 1;
+                        if *n == 0 {
+                            m.remove(&self.1);
+                        }
+                    }
+                }
+            }
+            let _held = Held(gate, who);
             let accept = {
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD
@@ -166,9 +231,7 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
                 format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes(),
             )
             .map_err(|e| e.to_string())?;
-            // On both handles: on Windows a clone keeps its own timeout.
-            let _ = conn.set_read_timeout(None);
-            let _ = r.get_ref().set_read_timeout(None);
+            // The sign-in must come within the 30 s; session lifts the limit after it.
             session(r, conn.try_clone().map_err(|e| e.to_string())?, gate, who)
         }
         _ => respond(&conn, "404 Not Found", "text/plain", b"not here"),
@@ -350,6 +413,12 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     let w = Arc::new(Mutex::new(w));
     // Signing in: five wrong tries from one address wait a quarter hour; each wrong one waits too.
     let Frame::Text(first) = read_frame(&mut r, &w)? else { return Err("expected a sign-in".into()) };
+    // Signed in or not, it is a page now: it may stay quiet as long as it is open. On both
+    // handles: on Windows a clone keeps its own timeout.
+    let _ = r.get_ref().set_read_timeout(None);
+    if let Ok(w) = w.lock() {
+        let _ = w.set_read_timeout(None);
+    }
     let v: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
     let blocked = gate
         .failures
@@ -1025,6 +1094,22 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request line longer than any browser's is refused instead of read on and on.
+    #[test]
+    fn long_request_lines_are_refused() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let sender = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            let _ = s.write_all(format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(20_000)).as_bytes());
+            let _ = s.write_all(b"GET /fine HTTP/1.1\r\nHost: x\r\n\r\n");
+        });
+        let (conn, _) = l.accept().unwrap();
+        let mut r = BufReader::new(conn);
+        assert_eq!(read_request(&mut r).err().as_deref(), Some("request line too long"));
+        sender.join().unwrap();
+    }
 
     #[test]
     fn browser_input_messages() {
