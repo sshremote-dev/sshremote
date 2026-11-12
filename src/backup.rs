@@ -509,8 +509,8 @@ mod tests {
         assert_eq!(union("a\nb\n", "b\nc"), "a\nb\nc\n");
     }
 
-    /// A whole backup and restore in a scratch home folder. It changes the process environment,
-    /// so it runs only on request: cargo test -- --ignored --test-threads=1
+    /// A whole backup and restore in a scratch home folder. It changes the process environment
+    /// while it runs, so it runs only on request: cargo test -- --ignored --test-threads=1
     #[test]
     #[ignore]
     fn keys_survive_a_round_trip_only_with_the_passphrase() {
@@ -521,7 +521,21 @@ mod tests {
         std::fs::write(ssh.join("id_ed25519"), b"PRIVATE KEY").unwrap();
         std::fs::write(ssh.join("sub").join("extra"), b"x").unwrap();
         std::fs::write(ssh.join("config"), "Host a\n  HostName 1.2.3.4\n").unwrap();
-        for var in ["USERPROFILE", "HOME", "APPDATA", "XDG_CONFIG_HOME"] {
+        // The variables are put back however this ends: the tests after it share the process.
+        struct Back(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => unsafe { std::env::set_var(k, v) },
+                        None => unsafe { std::env::remove_var(k) },
+                    }
+                }
+            }
+        }
+        let vars = ["USERPROFILE", "HOME", "APPDATA", "XDG_CONFIG_HOME"];
+        let _back = Back(vars.iter().map(|&k| (k, std::env::var_os(k))).collect());
+        for var in vars {
             unsafe { std::env::set_var(var, &home) };
         }
         let file = home.join("b.json");
