@@ -51,6 +51,20 @@ fn the_emulator_answers_cursor_queries() {
     assert_eq!(replies, ["\x1b[1;3R"]);
 }
 
+/// Marks combined with a character (an accent written after its letter, Korean from macOS in
+/// letters) stay with it in what the views read.
+#[test]
+fn combining_marks_stay_with_their_characters() {
+    let ctx = egui::Context::default();
+    let mut w = TermWindow::new(None);
+    frame(&ctx, &mut w, Vec::new());
+    let id = w.tabs[0].id;
+    w.output(id, "cafe\u{301} \u{1112}\u{1161}\u{11AB}".as_bytes());
+    frame(&ctx, &mut w, Vec::new());
+    let text = reader::screen_text(&w.tabs[0], 0, 0).0;
+    assert!(text.contains("cafe\u{301} \u{1112}\u{1161}\u{11AB}"), "{text:?}");
+}
+
 /// In a tab of one pane Alt+arrows are the shell's (a word left or right); with two panes they
 /// move between them.
 #[test]

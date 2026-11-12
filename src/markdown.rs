@@ -330,7 +330,8 @@ pub fn mono_job(text: &str, font: &FontId, color: Color32, fonts: &mut egui::epa
     let mut job = LayoutJob::default();
     let mut run_start = 0;
     for (i, c) in text.char_indices() {
-        if c.is_ascii() {
+        // A mark combined with the character before it takes no cell of its own.
+        if c.is_ascii() || c.width() == Some(0) {
             continue;
         }
         // A symbol from a fallback font is often narrower or wider than the cell; it is spaced to

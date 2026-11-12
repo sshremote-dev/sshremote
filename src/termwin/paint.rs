@@ -140,6 +140,14 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
             painter.hline(cell_rect.x_range(), cell_rect.bottom() - 1.5, egui::Stroke::new(1.0, fg));
         }
         let c = if flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+        // Marks combined with the character (é written e + accent, Korean from macOS in letters)
+        // are drawn with it, on its cell.
+        if let Some(marks) = cell.zerowidth().filter(|z| !z.is_empty() && !flags.contains(Flags::HIDDEN)) {
+            flush(&mut run, run_start, run_color);
+            let s: String = std::iter::once(c).chain(marks.iter().copied()).collect();
+            painter.text(cell_rect.center(), Align2::CENTER_CENTER, s, font.clone(), fg);
+            continue;
+        }
         // ASCII shares the grid exactly; anything else is placed on its own cell.
         if c.is_ascii() && !wide && fg == run_color && !run.is_empty() {
             run.push(c);

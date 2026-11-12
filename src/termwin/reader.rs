@@ -377,6 +377,8 @@ pub(super) fn screen_text(t: &Tab, from: i32, to: i32) -> (String, usize) {
                 continue;
             }
             text.push(if cell.c == '\0' { ' ' } else { cell.c });
+            // Marks combined with it (an accent, Korean in letters) go with it.
+            text.extend(cell.zerowidth().into_iter().flatten());
         }
         if line == cursor.line.0 {
             // The cursor's row keeps its spaces up to the cursor, so the caret sits where it is.
@@ -419,6 +421,8 @@ pub(super) fn row_plain(t: &Tab, line: i32) -> String {
         let cell = &row[Column(c)];
         if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
             text.push(if cell.c == '\0' { ' ' } else { cell.c });
+            // Marks combined with it (an accent, Korean in letters) go with it.
+            text.extend(cell.zerowidth().into_iter().flatten());
         }
     }
     text.truncate(text.trim_end().len());
@@ -894,8 +898,12 @@ pub(super) fn row_markdown(t: &Tab, line: i32) -> (String, bool) {
         }
         let ch = if cell.c == '\0' { ' ' } else { cell.c };
         let f = cell.flags;
-        cells.push((ch, f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE)));
-        at.push(c);
+        let style = (f.contains(Flags::BOLD), f.intersects(Flags::ITALIC), f.contains(Flags::UNDERLINE));
+        // Marks combined with it go with it, at its column.
+        for ch in std::iter::once(ch).chain(cell.zerowidth().into_iter().flatten().copied()) {
+            cells.push((ch, style.0, style.1, style.2));
+            at.push(c);
+        }
     }
     // Hints a program floats over its text are not part of it.
     let mut hidden = vec![false; cols];
