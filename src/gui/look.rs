@@ -285,6 +285,23 @@ enum Loaded {
 
 static PICTURES: Mutex<Vec<(String, Loaded)>> = Mutex::new(Vec::new());
 
+/// Pictures uploaded as textures, by their memory id, with when each was last drawn: one not
+/// drawn for half a minute (a layer taken away, a look changed) is let go.
+static SHOWN: Mutex<Vec<(egui::Id, f64)>> = Mutex::new(Vec::new());
+
+/// Lets go of the textures of pictures no longer drawn.
+fn sweep_pictures(ctx: &egui::Context) {
+    let now = ctx.input(|i| i.time);
+    let Ok(mut shown) = SHOWN.lock() else { return };
+    shown.retain(|&(id, last)| {
+        let keep = now - last < 30.0;
+        if !keep {
+            ctx.data_mut(|d| d.remove::<std::sync::Arc<Vec<(egui::TextureHandle, f64)>>>(id));
+        }
+        keep
+    });
+}
+
 /// The picture's frame for now as a texture, once read (in the background the first time), and
 /// when the next frame is due for one that moves.
 fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Option<(egui::TextureHandle, Option<f64>)>, String> {
@@ -305,6 +322,13 @@ fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Optio
         return super::lottie::frame(ctx, path, px * ctx.pixels_per_point(), play).map(|t| t.map(|t| (t, None)));
     }
     let id = egui::Id::unique(("look-picture", path));
+    let now = ctx.input(|i| i.time);
+    if let Ok(mut shown) = SHOWN.lock() {
+        match shown.iter_mut().find(|(i, _)| *i == id) {
+            Some(s) => s.1 = now,
+            None => shown.push((id, now)),
+        }
+    }
     let textures = match ctx.data(|d| d.get_temp::<std::sync::Arc<Vec<(egui::TextureHandle, f64)>>>(id)) {
         Some(t) => t,
         None => {
@@ -317,6 +341,8 @@ fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Optio
                     let t: Vec<_> = frames.iter().map(|(img, d)| (ctx.load_texture("look-picture", img.clone(), opts), *d)).collect();
                     let t = std::sync::Arc::new(t);
                     ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+                    // Uploaded: the decoded frames are not kept as well (read again if ever needed).
+                    list.retain(|(p, _)| p != path);
                     t
                 }
                 None => {
@@ -365,35 +391,53 @@ fn read_frames(path: &str) -> Result<Vec<(egui::ColorImage, f64)>, String> {
     let bytes = std::fs::read(path).map_err(|x| x.to_string())?;
     let cursor = || std::io::Cursor::new(bytes.as_slice());
     let format = image::guess_format(&bytes).map_err(e)?;
-    let frames: Option<Vec<image::Frame>> = match format {
-        image::ImageFormat::Gif => Some(image::codecs::gif::GifDecoder::new(cursor()).map_err(e)?.into_frames().collect_frames().map_err(e)?),
+    // The frames as they are decoded, one at a time: only as many as are kept are ever decoded.
+    let frames: Option<image::Frames> = match format {
+        image::ImageFormat::Gif => Some(image::codecs::gif::GifDecoder::new(cursor()).map_err(e)?.into_frames()),
         image::ImageFormat::Png => {
             let d = image::codecs::png::PngDecoder::new(cursor()).map_err(e)?;
-            if d.is_apng().map_err(e)? { Some(d.apng().map_err(e)?.into_frames().collect_frames().map_err(e)?) } else { None }
+            if d.is_apng().map_err(e)? { Some(d.apng().map_err(e)?.into_frames()) } else { None }
         }
         image::ImageFormat::WebP => {
             let d = image::codecs::webp::WebPDecoder::new(cursor()).map_err(e)?;
-            if d.has_animation() { Some(d.into_frames().collect_frames().map_err(e)?) } else { None }
+            if d.has_animation() { Some(d.into_frames()) } else { None }
         }
         _ => None,
     };
-    let to_color = |img: image::DynamicImage| {
-        let img = if img.width().max(img.height()) > 4096 { img.thumbnail(4096, 4096) } else { img };
+    let to_color = |img: image::DynamicImage, most: u32| {
+        let img = if img.width().max(img.height()) > most { img.thumbnail(most, most) } else { img };
         let rgba = img.to_rgba8();
         egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
     };
     match frames {
-        Some(frames) if !frames.is_empty() => Ok(frames
-            .into_iter()
-            .take(600)
-            .map(|f| {
+        Some(frames) => {
+            // A moving background at most 1920 a side, 300 frames and 256 MB: a long or huge
+            // animation plays its start rather than taking the computer's memory.
+            let mut out = Vec::new();
+            let mut bytes_used = 0usize;
+            for f in frames.take(300) {
+                let f = match f {
+                    Ok(f) => f,
+                    // A damaged frame ends the animation there; none at all is an error.
+                    Err(x) if out.is_empty() => return Err(x.to_string()),
+                    Err(_) => break,
+                };
                 let (n, d) = f.delay().numer_denom_ms();
                 // A frame with no time of its own shows for a tenth of a second, as browsers do.
                 let secs = if n == 0 || d == 0 { 0.1 } else { (n as f64 / d as f64 / 1000.0).max(0.02) };
-                (to_color(image::DynamicImage::ImageRgba8(f.into_buffer())), secs)
-            })
-            .collect()),
-        _ => Ok(vec![(to_color(image::load_from_memory(&bytes).map_err(e)?), 0.0)]),
+                let img = to_color(image::DynamicImage::ImageRgba8(f.into_buffer()), 1920);
+                bytes_used += img.pixels.len() * 4;
+                out.push((img, secs));
+                if bytes_used > 256 << 20 {
+                    break;
+                }
+            }
+            if out.is_empty() {
+                return Ok(vec![(to_color(image::load_from_memory(&bytes).map_err(e)?, 4096), 0.0)]);
+            }
+            Ok(out)
+        }
+        _ => Ok(vec![(to_color(image::load_from_memory(&bytes).map_err(e)?, 4096), 0.0)]),
     }
 }
 
@@ -937,12 +981,13 @@ pub(crate) fn chosen_fonts() -> (Option<String>, Option<String>) {
 // ---------------------------------------------------------------------------------------------
 // Every window, every frame.
 
-/// The look applied to a window: its fonts and size, the overlay, and the Appearance window when
-/// it was opened here.
 /// The open window keeps its own plain look: no overlay drawn over it.
 pub(crate) static PLAIN: AtomicBool = AtomicBool::new(false);
 
+/// The look applied to a window: its fonts and size, the overlay, and the Appearance window when
+/// it was opened here.
 pub(crate) fn frame(ctx: &egui::Context) {
+    sweep_pictures(ctx);
     let l = get();
     let fonts_key = egui::Id::unique("look-fonts-applied");
     let want = (l.ui_font.clone(), l.mono_font.clone());
@@ -1287,6 +1332,23 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long animation plays its start: only the frames kept are decoded.
+    #[test]
+    fn long_animations_are_cut_short() {
+        use image::codecs::gif::GifEncoder;
+        let path = std::env::temp_dir().join(format!("sshremote-long-{}.gif", std::process::id()));
+        {
+            let mut enc = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            for i in 0..400u32 {
+                let buf = image::RgbaImage::from_pixel(4, 4, image::Rgba([(i % 256) as u8, 0, 0, 255]));
+                enc.encode_frame(image::Frame::new(buf)).unwrap();
+            }
+        }
+        let frames = read_frames(path.to_str().unwrap()).unwrap();
+        assert_eq!(frames.len(), 300);
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// A host that refuses the figures' own login is not asked again (repeated failed logins can get
     /// an address banned); one that is merely away is.
