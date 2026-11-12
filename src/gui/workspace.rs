@@ -158,6 +158,8 @@ struct Pane {
     terms: Option<crate::termwin::TermWindow>,
     /// Asked for at start (--open): the terminal panel and the chat beside the screen, full screen.
     start: PaneStart,
+    /// What the user chose in the connection that dropped, for the next one.
+    prefs: Option<remote::Prefs>,
     state: State,
 }
 
@@ -364,7 +366,7 @@ impl Node {
                     let line = Rect::from_min_max(Pos2::new(x - GAP, rect.top()), Pos2::new(x + GAP, rect.bottom()));
                     (rect.with_max_x(x - GAP / 2.0), rect.with_min_x(x + GAP / 2.0), line)
                 };
-                let r = ui.interact(line, egui::Id::unique(("pane-split", path)), egui::Sense::drag());
+                let r = ui.interact(line, ui.scope_id().with(("pane-split", path)), egui::Sense::drag());
                 if r.hovered() || r.dragged() {
                     ui.ctx().set_cursor_icon(if *below {
                         egui::CursorIcon::ResizeVertical
@@ -435,8 +437,10 @@ pub(super) struct Workspace {
     dock: super::dock::Dock,
     /// Hosts reached, for the recent list.
     pub(super) reached: Vec<String>,
-    /// Why something asked for could not open, for the app to show.
+    /// Why something asked for could not open, for the app to show when no tab is left.
     pub(super) failed: Option<String>,
+    /// Notices of the workspace itself (an extension's command that failed, say), over the panes.
+    toasts: super::toast::Toasts,
     /// A host refused the login: the dialog asking how to sign in.
     signin: Option<super::signin::SignIn>,
     /// The extensions' side panel, and the command palette while open (its filter and choice).
@@ -504,6 +508,7 @@ impl Workspace {
             dock: Default::default(),
             reached: Vec::new(),
             failed: None,
+            toasts: Default::default(),
             signin: None,
             side: Default::default(),
             palette: None,
@@ -569,6 +574,7 @@ impl Workspace {
                 mode: PaneMode::Terminal,
                 terms: None,
                 start,
+                prefs: None,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
             Launch::Agent { target, label, ssh_cmd, mode } => Pane {
@@ -579,6 +585,7 @@ impl Workspace {
                 mode,
                 terms: None,
                 start,
+                prefs: None,
                 state: State::Down(Down::new(false, String::new())),
             },
         };
@@ -651,6 +658,7 @@ impl Workspace {
         }
         if let Some(ti) = emptied {
             self.tabs.remove(ti);
+            (self.dragging, self.dropped, self.drag_out) = (None, None, None);
             if ti < self.current {
                 self.current -= 1;
             }
@@ -666,7 +674,10 @@ impl Workspace {
     }
 
     /// Takes tab `t` with its panes into a workspace of its own.
-    pub(super) fn take_tab(&mut self, t: usize) -> Workspace {
+    pub(super) fn take_tab(&mut self, t: usize) -> Option<Workspace> {
+        if t >= self.tabs.len() {
+            return None;
+        }
         let tab = self.tabs.remove(t);
         let mut ids = Vec::new();
         tab.root.leaves(&mut ids);
@@ -681,7 +692,7 @@ impl Workspace {
             self.zoom = None;
         }
         self.current = self.current.min(self.tabs.len().saturating_sub(1));
-        w
+        Some(w)
     }
 
     /// Takes in the tab of a workspace from another window (one `take_tab` made), at `at`, and
@@ -757,7 +768,7 @@ impl Workspace {
         for r in crate::exthost::take_requests() {
             match r {
                 crate::exthost::Request::OpenTerminal { argv, label, split } => self.open_command(argv, label, split),
-                crate::exthost::Request::Paste(text) => ctx.input_mut(|i| i.events.push(egui::Event::Paste(text))),
+                crate::exthost::Request::Paste(text) => self.paste(ctx, text),
             }
         }
         super::extui::question(ctx, &mut self.side);
@@ -787,6 +798,22 @@ impl Workspace {
         }
     }
 
+    /// Text an extension or the palette pastes, into the active pane: a shell types it, a remote
+    /// pane takes it by what it shows.
+    fn paste(&mut self, ctx: &egui::Context, text: String) {
+        let Some(i) = self.active_id().and_then(|id| self.index(id)) else { return };
+        let result = match &mut self.panes[i].state {
+            State::Live(r) => r.paste_text(ctx, text),
+            _ => {
+                ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            self.lost(i, e);
+        }
+    }
+
     /// A terminal running `argv` (the login shell when empty), in a tab or beside the active pane.
     fn open_command(&mut self, argv: Vec<String>, label: String, split: Option<bool>) {
         let local = crate::termwin::local_profiles().into_iter().next().expect("a local shell");
@@ -805,7 +832,7 @@ impl Workspace {
         match e.run {
             Run::Host { ext, id } => crate::exthost::command(&ext, &id, ""),
             Run::Script(c) => match crate::script::run_command(&c, "", "") {
-                Ok((text, true)) if !text.is_empty() => ctx.input_mut(|i| i.events.push(egui::Event::Paste(text))),
+                Ok((text, true)) if !text.is_empty() => self.paste(ctx, text),
                 Ok((text, _)) => ctx.copy_text(text),
                 Err(err) => self.failed = Some(err),
             },
@@ -863,30 +890,41 @@ impl Workspace {
         let waker = ctx.clone();
         sess.on_message(move || waker.request_repaint());
         let p = &mut self.panes[i];
+        let again = matches!(&p.state, State::Down(d) if d.again);
         let label = format!("{}  {}x{}  {}", p.label, sess.desk.0, sess.desk.1, sess.backend);
         let mut r = Remote::new(sess, rx, ctl, label, p.ssh_cmd.clone());
         if let Some(t) = p.terms.take() {
             r.adopt_terms(t);
         }
-        let result = r.set_mode(p.mode);
+        let mut result = r.set_mode(p.mode);
+        if let Some(prefs) = p.prefs.take() {
+            result = result.and_then(|_| r.restore(prefs));
+        }
+        if again {
+            r.notify("Connected again");
+        }
         let PaneStart { panel, chat, fullscreen: full } = std::mem::take(&mut p.start);
         r.open_panels(false, chat);
         self.reached.push(p.label.clone());
         p.state = State::Live(Box::new(r));
         let id = p.id;
-        // The terminal asked for beside the screen is a pane of its own below it, as every pane is.
+        // The terminal asked for beside the screen is a pane of its own below it, as every pane
+        // is; the tab shown stays the one the user is in.
         if panel {
             let launch = Launch::Agent { target: p.target.clone(), label: p.label.clone(), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Terminal };
-            if let Some(t) = self.tab_of(id) {
-                self.current = t;
-                self.tabs[t].active = id;
-                self.add(launch, Place::Split { below: true }, PaneStart::default());
+            if let Some(t) = self.tab_of(id)
+                && let Some(new) = self.new_pane(launch, PaneStart::default())
+            {
+                let tab = &mut self.tabs[t];
+                tab.root.split(id, new, true);
+                tab.root.even_out(new, true);
+                tab.active = new;
             }
         }
         if full {
             // `--fullscreen`: this screen alone on the whole monitor.
             if let Some(t) = self.tab_of(id) {
-                self.current = t;
+                self.select_tab(t);
                 self.tabs[t].active = id;
             }
             self.set_full(ctx, true);
@@ -901,6 +939,7 @@ impl Workspace {
         let p = &mut self.panes[i];
         if let State::Live(r) = &mut p.state {
             p.mode = r.mode();
+            p.prefs = Some(r.prefs());
             p.terms = r.take_terms().filter(|_| true).and_then(|mut t| t.keep_local().then_some(t));
             r.close();
         }
@@ -917,6 +956,14 @@ impl Workspace {
         }
         // A zoom the full screen made is the user's now.
         self.full.zoomed = None;
+    }
+
+    /// Shows tab `t`; a pane zoomed in the tab left is drawn there only.
+    fn select_tab(&mut self, t: usize) {
+        if t != self.current {
+            self.current = t;
+            self.zoom = None;
+        }
     }
 
     /// The tab holding pane `id`.
@@ -1059,6 +1106,10 @@ impl Workspace {
             return Out { empty: true, grab: false };
         }
         ui.painter().rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill);
+        // A zoom is of a pane in the tab shown; one left from another tab (or a closed pane) goes.
+        if self.zoom.is_some_and(|z| self.tab_of(z) != Some(self.current)) {
+            self.zoom = None;
+        }
         let Some(tab) = self.tabs.get_mut(self.current) else { return Out::default() };
         let mut rects = Vec::new();
         match self.zoom {
@@ -1179,6 +1230,13 @@ impl Workspace {
         for id in closing {
             self.close_pane(id);
         }
+        // Shown here while tabs are open; with none left the open window shows it.
+        if !self.tabs.is_empty()
+            && let Some(e) = self.failed.take()
+        {
+            self.toasts.push(&e);
+        }
+        self.toasts.draw(&ctx, area);
         self.confirm_dialog(&ctx);
         // The window's title follows the active pane.
         if let Some(id) = self.active_id() {
@@ -1227,11 +1285,9 @@ impl Workspace {
         } else if take(cs, Key::W) {
             self.confirm = Some(Confirm::Pane(active));
         } else if take(cs, Key::Tab) && !self.tabs.is_empty() {
-            self.current = (self.current + self.tabs.len() - 1) % self.tabs.len();
-            self.zoom = None;
+            self.select_tab((self.current + self.tabs.len() - 1) % self.tabs.len());
         } else if take(Modifiers::CTRL, Key::Tab) && !self.tabs.is_empty() {
-            self.current = (self.current + 1) % self.tabs.len();
-            self.zoom = None;
+            self.select_tab((self.current + 1) % self.tabs.len());
         } else if take(alt_shift, Key::Plus) || take(alt_shift, Key::Equals) {
             self.picker = Some(Place::Split { below: false });
         } else if take(alt_shift, Key::Minus) {
@@ -1465,13 +1521,12 @@ impl Workspace {
             if xr.clicked() || r.middle_clicked() {
                 self.confirm = Some(Confirm::Tab(id));
             } else if r.clicked() {
-                self.current = t;
-                self.zoom = None;
+                self.select_tab(t);
             }
             if r.drag_started() {
                 self.dragging = Some(t);
                 self.drag_last = None;
-                self.current = t;
+                self.select_tab(t);
                 self.grab_dx = r.interact_pointer_pos().map_or(fit / 2.0, |p| p.x - slot.left());
             }
             let mut tip = name;
@@ -1539,8 +1594,7 @@ impl Workspace {
                 r.on_hover_text(format!("All {n} tabs"));
             });
             if let Some(t) = pick {
-                self.current = t;
-                self.zoom = None;
+                self.select_tab(t);
             }
         }
         rects
@@ -2274,10 +2328,39 @@ mod tests {
         h.until("it connects again", |w| live(w, 0));
         assert_eq!(mode_of(&h.w, 0), Some(PaneMode::Terminal), "in the mode it had");
 
+        // What the user chose stays chosen: a screen set to view only is view only again.
+        h.w.set_mode(order[0], PaneMode::Screen);
+        h.until("screen again", |w| mode_of(w, 0) == Some(PaneMode::Screen));
+        if let State::Live(r) = &mut h.w.panes[0].state {
+            r.set_view_only(true);
+            r.close();
+        }
+        h.until("the pane notices", |w| matches!(w.panes[0].state, State::Down(_)));
+        h.until("it connects again", |w| live(w, 0));
+        let State::Live(r) = &h.w.panes[0].state else { unreachable!() };
+        assert!(r.view_only(), "still view only after the reconnect");
+        assert!(r.toast_texts().contains(&"Connected again"), "and it says it is back");
+
         // Closing the tab closes both panes; nothing is left.
         h.w.close_tab(0);
         h.frame(Vec::new());
         assert!(h.w.tabs.is_empty() && h.w.panes.is_empty());
+    }
+
+    /// What could not be done while tabs are open shows over the panes, not on the open window
+    /// the user is no longer looking at.
+    #[test]
+    fn a_failure_in_the_workspace_shows_there() {
+        let mut h = Harness::new();
+        let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+        let shell = Launch::Shell { label: profile.name.clone(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None };
+        h.w.add(shell, Place::Tab, PaneStart::default());
+        h.frame(Vec::new());
+        h.w.failed = Some("The script failed: no such file".into());
+        h.frame(Vec::new());
+        assert!(h.w.failed.is_none(), "taken by the workspace");
+        assert_eq!(h.w.toasts.texts(), ["The script failed: no such file"]);
+        h.w.close_all();
     }
 
     /// Pictures of the workspace to look at: split, narrow, a pane in full screen, connecting.
@@ -2532,7 +2615,7 @@ mod tests {
         let mut other = Workspace::new(h.w.opt.clone());
         other.add(shell("c"), Place::Tab, PaneStart::default());
         other.add(shell("d"), Place::Split { below: false }, PaneStart::default());
-        let moved = other.take_tab(0);
+        let moved = other.take_tab(0).expect("a tab");
         h.w.put_tab(moved, 1);
         h.frame(Vec::new());
         let names: Vec<String> = (0..h.w.tabs.len()).map(|t| h.w.name(h.w.tabs[t].active).0).collect();

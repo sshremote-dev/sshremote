@@ -9,6 +9,9 @@ pub(crate) enum Session {}
 
 pub(crate) enum Ev {}
 
+/// What the user chose in a connection; never made here.
+pub(super) enum Prefs {}
+
 pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
 
 pub(super) struct Remote {
@@ -49,10 +52,34 @@ impl Remote {
     pub(super) fn shown_rect(&self) -> Option<Rect> {
         match self.never {}
     }
+    #[cfg(test)]
+    pub(super) fn set_view_only(&mut self, _: bool) {
+        match self.never {}
+    }
+    #[cfg(test)]
+    pub(super) fn view_only(&self) -> bool {
+        match self.never {}
+    }
+    #[cfg(test)]
+    pub(super) fn toast_texts(&self) -> Vec<&str> {
+        match self.never {}
+    }
     pub(super) fn open_panels(&mut self, _: bool, _: bool) {
         match self.never {}
     }
     pub(super) fn background(&mut self, _: &egui::Context) -> Result<(), String> {
+        match self.never {}
+    }
+    pub(super) fn prefs(&self) -> Prefs {
+        match self.never {}
+    }
+    pub(super) fn restore(&mut self, _: Prefs) -> Result<(), String> {
+        match self.never {}
+    }
+    pub(super) fn notify(&mut self, _: &str) {
+        match self.never {}
+    }
+    pub(super) fn paste_text(&mut self, _: &egui::Context, _: String) -> Result<(), String> {
         match self.never {}
     }
 }

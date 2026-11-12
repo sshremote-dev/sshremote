@@ -46,8 +46,8 @@ pub(super) struct Remote {
     view: (u16, u16),
     view_changed: Option<Instant>,
     win_next: bool,
-    /// Notifications at the bottom right: text, whether it is a warning, when it came.
-    toasts: Vec<(String, bool, Instant)>,
+    /// Notifications at the bottom right.
+    toasts: super::toast::Toasts,
     grab_keys: bool,
     uploads: std::collections::VecDeque<Upload>,
     next_upload: u32,
@@ -66,8 +66,14 @@ pub(super) struct Remote {
     term_h: f32,
     term_focus: bool,
     paused: bool,
+    /// The user paused the picture (rather than the pane showing something else).
+    user_paused: bool,
     monitors: Vec<crate::proto::MonitorInfo>,
     monitor: usize,
+    /// The monitor the user picked, if any, to pick again after a reconnect.
+    chosen_monitor: Option<u8>,
+    /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
+    wheel: Vec2,
     inbox: crate::files::Inbox,
     /// Downloads in progress: id, name and the request tag (0 for the Downloads folder).
     downloads: Vec<(u32, String, u32)>,
@@ -106,6 +112,8 @@ struct Upload {
     /// The remote folder chosen in the file window; `None` for the Downloads folder.
     dir: Option<String>,
     cancelled: bool,
+    /// Why the local file could not be read to the end.
+    error: Option<String>,
     file: std::fs::File,
     size: u64,
     sent: u64,
@@ -116,6 +124,34 @@ struct Upload {
 /// Unacknowledged upload bytes; more would only queue in ssh and delay the screen.
 const UPLOAD_WINDOW: u64 = 1 << 20;
 const UPLOAD_CHUNK: usize = 64 << 10;
+
+/// How long one frame may spend on network messages before the window is drawn.
+const PUMP_BUDGET: Duration = Duration::from_millis(12);
+
+/// What the user chose for a connection, carried over when it is made again after a drop: a
+/// host set to view only stays view only.
+pub(super) struct Prefs {
+    view_only: bool,
+    fit: Fit,
+    fill_full: bool,
+    share_clipboard: bool,
+    grab_keys: bool,
+    sound: bool,
+    quality: Quality,
+    chat: bool,
+    chat_w: f32,
+    term_h: f32,
+    monitor: Option<u8>,
+    paused: bool,
+}
+
+/// The picture quality chosen: adapting to the link, a preset, or settings of the user's own.
+#[derive(Clone, Copy)]
+enum Quality {
+    Auto,
+    Preset(usize),
+    Custom(Mode, u8, u8),
+}
 
 impl Remote {
     pub(super) fn new(
@@ -162,7 +198,7 @@ impl Remote {
             view: (0, 0),
             view_changed: None,
             win_next: false,
-            toasts: Vec::new(),
+            toasts: Default::default(),
             grab_keys: true,
             uploads: std::collections::VecDeque::new(),
             next_upload: 1,
@@ -176,8 +212,11 @@ impl Remote {
             term_h: 260.0,
             term_focus: false,
             paused: false,
+            user_paused: false,
             monitors: Vec::new(),
             monitor: 0,
+            chosen_monitor: None,
+            wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
             files: None,
@@ -210,8 +249,9 @@ impl Remote {
             && !ctx.any_popup_open();
         let changed = (mods.alt, mods.ctrl, mods.shift) != (self.mods.alt, self.mods.ctrl, self.mods.shift);
         let synced = if here && changed { self.sync_mods(mods) } else { Ok(()) };
+        // Kept with the other keys held there, so they are let go however the pane loses them.
         let result = synced
-            .and_then(|_| grabbed.into_iter().try_for_each(|(keysym, down)| self.send(ToAgent::KeyState { keysym, down })))
+            .and_then(|_| grabbed.into_iter().try_for_each(|(keysym, down)| self.key(keysym, down)))
             .and_then(|_| self.frame(ui));
         if result.is_err() {
             self.sess.close();
@@ -247,20 +287,17 @@ impl Remote {
     }
 
     pub(super) fn notify(&mut self, text: &str) {
-        let l = text.to_lowercase();
-        let warn =
-            ["fail", "error", "unavailable", "cannot", "could not", "denied", "sound:"].iter().any(|w| l.contains(w));
-        self.toasts.push((text.to_string(), warn, Instant::now()));
-        if self.toasts.len() > 4 {
-            self.toasts.remove(0);
-        }
+        self.toasts.push(text);
     }
 
     /// One UI pass: network, input, picture and toolbar. An error ends the session.
     pub(super) fn frame(&mut self, ui: &mut egui::Ui) -> Result<(), String> {
         let ctx = ui.ctx().clone();
         self.pump(&ctx)?;
+        // What is copied here goes to the host being worked in, as the pane becomes active if
+        // it was copied meanwhile; the others do not get it.
         if self.share_clipboard
+            && self.active
             && let Some(text) = self.clip.poll()
         {
             self.send(ToAgent::Clipboard(text))?;
@@ -315,7 +352,7 @@ impl Remote {
         };
         let chat_rect = chat_rect.or(term_area);
         self.upload_overlay(&ctx, screen);
-        self.draw_toasts(&ctx, screen);
+        self.toasts.draw(&ctx, screen);
         self.term_window(&ctx)?;
         self.share_picker(&ctx)?;
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
@@ -365,7 +402,13 @@ impl Remote {
     }
 
     pub(super) fn pump(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let start = Instant::now();
         loop {
+            // A flood of messages waits for the next frame rather than keep this one from drawing.
+            if start.elapsed() > PUMP_BUDGET {
+                ctx.request_repaint();
+                return Ok(());
+            }
             match self.rx.try_recv() {
                 Ok(Ev::Net(ToClient::Frame(f))) => {
                     let resized = self.fb.apply(&f).map_err(|e| e.to_string())?;
@@ -405,8 +448,10 @@ impl Remote {
                     self.label = format!("{host}  {w}x{h}  {backend}");
                     self.view = (0, 0);
                 }
+                // Only the host being worked in writes the clipboard here: one in another pane or
+                // tab cannot replace what was just copied.
                 Ok(Ev::Net(ToClient::Clipboard(t))) => {
-                    if self.share_clipboard {
+                    if self.share_clipboard && self.active {
                         self.clip.set(t);
                     }
                 }
@@ -498,13 +543,16 @@ impl Remote {
                 Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
                     let name = self.uploads.iter().find(|u| u.id == id).map(|u| u.name.clone()).unwrap_or_default();
                     let cancelled = self.uploads.iter().any(|u| u.id == id && u.cancelled);
+                    let error = self.uploads.iter().find(|u| u.id == id).and_then(|u| u.error.clone());
                     let into_folder = self.uploads.iter().any(|u| u.id == id && u.dir.is_some());
                     self.uploads.retain(|u| u.id != id);
                     if into_folder && let Some(f) = self.files.as_ref() {
                         let cmd = f.refresh_remote();
                         self.file_cmd(cmd)?;
                     }
-                    let msg = if cancelled {
+                    let msg = if let Some(e) = error {
+                        format!("{name} failed: {e}")
+                    } else if cancelled {
                         format!("{name}: upload cancelled")
                     } else if ok {
                         format!("{name} saved on the SSH host: {text}")
@@ -585,7 +633,7 @@ impl Remote {
         let id = self.next_upload;
         self.next_upload += 1;
         self.send(ToAgent::FileStart { id, size, dir: dir.clone().unwrap_or_default(), name: name.clone() })?;
-        self.uploads.push_back(Upload { id, name, dir, cancelled: false, file, size, sent: 0, acked: 0, ended: false });
+        self.uploads.push_back(Upload { id, name, dir, cancelled: false, error: None, file, size, sent: 0, acked: 0, ended: false });
         Ok(())
     }
 
@@ -599,8 +647,16 @@ impl Remote {
             if u.sent - u.acked.min(u.sent) >= UPLOAD_WINDOW {
                 return Ok(());
             }
-            let n = u.file.read(&mut buf).map_err(|e| format!("{}: {e}", u.name))?;
             let id = u.id;
+            let n = match u.file.read(&mut buf) {
+                Ok(n) => n,
+                // A file that cannot be read on (a network drive gone) ends its upload, cancelled
+                // so the host drops what it has, not the connection.
+                Err(e) => {
+                    (u.error, u.ended) = (Some(e.to_string()), true);
+                    return self.send(ToAgent::FileEnd { id });
+                }
+            };
             if n == 0 {
                 u.ended = true;
                 return self.send(ToAgent::FileEnd { id });
@@ -631,7 +687,7 @@ impl Remote {
         let w = self.chat_w.clamp(260.0, (area.width() * 0.6).max(260.0));
         let panel = area.with_min_x(area.right() - w);
         let handle = Rect::from_min_max(Pos2::new(panel.left() - 3.0, area.top()), Pos2::new(panel.left() + 3.0, area.bottom()));
-        let r = ui.interact(handle, egui::Id::unique("chat-splitter"), egui::Sense::drag());
+        let r = ui.interact(handle, ui.scope_id().with("chat-splitter"), egui::Sense::drag());
         if r.hovered() || r.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
@@ -644,7 +700,7 @@ impl Remote {
         let h = self.term_h.clamp(120.0, (area.height() - 120.0).max(120.0));
         let panel = area.with_min_y(area.bottom() - h);
         let handle = Rect::from_min_max(Pos2::new(area.left(), panel.top() - 3.0), Pos2::new(area.right(), panel.top() + 3.0));
-        let r = ui.interact(handle, egui::Id::unique("terminal-splitter"), egui::Sense::drag());
+        let r = ui.interact(handle, ui.scope_id().with("terminal-splitter"), egui::Sense::drag());
         if r.hovered() || r.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
@@ -1013,37 +1069,10 @@ impl Remote {
         Ok(())
     }
 
-    /// Stacked notifications at the bottom right that fade out after a few seconds.
-    pub(super) fn draw_toasts(&mut self, ctx: &egui::Context, screen: Rect) {
-        self.toasts.retain(|t| t.2.elapsed() < Duration::from_secs(6));
-        let mut y = screen.bottom() - 16.0;
-        for (i, (text, warn, at)) in self.toasts.iter().enumerate().rev() {
-            let fade = (1.0 - (at.elapsed().as_secs_f32() - 5.0).max(0.0)).clamp(0.0, 1.0);
-            let id = egui::Id::unique(("toast", i));
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, id));
-            let galley = painter.layout(text.clone(), FontId::proportional(14.0), Color32::WHITE, 380.0);
-            let size = galley.size() + Vec2::new(30.0, 20.0);
-            let rect = Rect::from_min_size(Pos2::new(screen.right() - 16.0 - size.x, y - size.y), size);
-            painter.rect_filled(
-                rect,
-                CornerRadius::same(crate::gui::theme::R_MD),
-                Color32::from_rgba_unmultiplied(32, 34, 41, (235.0 * fade) as u8),
-            );
-            let bar = Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height()));
-            painter.rect_filled(bar, CornerRadius::same(2), (if *warn { super::warn() } else { ACCENT }).gamma_multiply(fade));
-            painter.galley(rect.min + Vec2::new(18.0, 10.0), galley, Color32::WHITE.gamma_multiply(fade));
-            y = rect.top() - 8.0;
-        }
-        if let Some(next) = self.toasts.iter().map(|t| t.2).min() {
-            // Steady until the last second, which fades.
-            let until_fade = Duration::from_secs(5).saturating_sub(next.elapsed());
-            ctx.request_repaint_after(if until_fade.is_zero() { Duration::from_millis(50) } else { until_fade });
-        }
-    }
-
     /// Progress of uploads and the drop hint, bottom left over the remote screen.
     pub(super) fn upload_overlay(&self, ctx: &egui::Context, screen: Rect) {
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        // Dropped files go to the active pane: only it says so.
+        let hovering = self.active && ctx.input(|i| !i.raw.hovered_files.is_empty());
         let mut lines: Vec<String> = self
             .uploads
             .iter()
@@ -1055,7 +1084,7 @@ impl Remote {
             }
         }
         if hovering {
-            lines.push("Drop to send to the remote Downloads folder".into());
+            lines.push(format!("Drop to send to the Downloads folder on {}", self.host()));
         }
         if lines.is_empty() {
             return;
@@ -1365,7 +1394,10 @@ impl Remote {
                         egui::MouseWheelUnit::Line => delta,
                         egui::MouseWheelUnit::Page => delta * 10.0,
                     };
-                    let (sy, sx) = (-lines.y.round() as i32, -lines.x.round() as i32);
+                    // Whole steps go now, the rest adds up with what comes next.
+                    self.wheel -= lines;
+                    let (sy, sx) = (self.wheel.y.trunc() as i32, self.wheel.x.trunc() as i32);
+                    self.wheel -= Vec2::new(sx as f32, sy as f32);
                     if sy != 0 {
                         self.send(ToAgent::Scroll { steps: sy.clamp(-10, 10) as i8 })?;
                     }
@@ -1494,7 +1526,10 @@ impl Remote {
                     let primary = if m.primary { ", primary" } else { "" };
                     let text = format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h);
                     if ui.selectable_label(i == self.monitor, text).clicked() {
-                        *action = Some(Box::new(move |r, _| r.send(ToAgent::SelectMonitor(i as u8))));
+                        *action = Some(Box::new(move |r, _| {
+                            r.chosen_monitor = Some(i as u8);
+                            r.send(ToAgent::SelectMonitor(i as u8))
+                        }));
                         ui.close();
                     }
                 }
@@ -1626,8 +1661,6 @@ impl Remote {
 
         let mut sound = self.sound.is_some();
         let mut sound_clicked = false;
-        let mut dark = ui.visuals().dark_mode;
-        let mut theme_clicked = false;
         // The screen's options (view only, sound, system keys...): only where the screen is shown.
         if screen {
             let more = icon_menu(ui, ic::GEAR, |ui| {
@@ -1641,7 +1674,6 @@ impl Remote {
                     let tip = "While this screen is the active pane, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
                     ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
                 }
-                theme_clicked = ui.checkbox(&mut dark, "Dark theme").clicked();
                 ui.separator();
                 if ui.button("Repaint the whole screen").clicked() {
                     *action = Some(Box::new(|r, _| r.menu('r')));
@@ -1682,14 +1714,11 @@ impl Remote {
         }
         if pause {
             let on = !self.paused;
-            self.paused = on;
+            (self.paused, self.user_paused) = (on, on);
             *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
         }
         if frame {
             *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
-        }
-        if theme_clicked {
-            set_theme(ui.ctx(), dark);
         }
         if sound_clicked {
             *action = Some(Box::new(move |r, _| {
@@ -1713,6 +1742,16 @@ impl Remote {
     #[cfg(test)]
     pub(super) fn shown_rect(&self) -> Option<Rect> {
         self.last_shown
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_view_only(&mut self, on: bool) {
+        self.view_only = on;
+    }
+
+    #[cfg(test)]
+    pub(super) fn toast_texts(&self) -> Vec<&str> {
+        self.toasts.texts()
     }
 
     /// The round trip to the host in milliseconds.
@@ -1779,11 +1818,14 @@ impl Remote {
             }
             PaneMode::Screen => {}
         }
+        // The picture stops while it is not shown, and stays stopped back on the screen if the
+        // user paused it.
         let show = mode == PaneMode::Screen;
-        if show != was_screen {
-            self.paused = !show;
-            self.send(ToAgent::Pause(!show))?;
-            if show {
+        let pause = !show || self.user_paused;
+        if show != was_screen && pause != self.paused {
+            self.paused = pause;
+            self.send(ToAgent::Pause(pause))?;
+            if !pause {
                 self.send(ToAgent::Refresh)?;
             }
         }
@@ -1822,6 +1864,99 @@ impl Remote {
         self.ctl.auto = None;
         let s = self.ctl.s;
         self.send(ToAgent::Settings(s))
+    }
+
+    /// What the user chose here, to carry into the connection made after this one drops.
+    pub(super) fn prefs(&self) -> Prefs {
+        let quality = if self.ctl.auto.is_some() {
+            Quality::Auto
+        } else if let Some(i) = PRESETS.iter().position(|p| p.name == self.ctl.preset) {
+            Quality::Preset(i)
+        } else {
+            Quality::Custom(self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps)
+        };
+        Prefs {
+            view_only: self.view_only,
+            fit: self.fit,
+            fill_full: self.fill_full,
+            share_clipboard: self.share_clipboard,
+            grab_keys: self.grab_keys,
+            sound: self.sound.is_some(),
+            quality,
+            chat: self.chat.is_some(),
+            chat_w: self.chat_w,
+            term_h: self.term_h,
+            monitor: self.chosen_monitor,
+            paused: self.user_paused,
+        }
+    }
+
+    /// Takes on what the user chose in the connection before this one. The quality goes out
+    /// with the first picture size, as on any start.
+    pub(super) fn restore(&mut self, p: Prefs) -> Result<(), String> {
+        (self.view_only, self.fit, self.fill_full) = (p.view_only, p.fit, p.fill_full);
+        (self.share_clipboard, self.grab_keys) = (p.share_clipboard, p.grab_keys);
+        (self.chat_w, self.term_h) = (p.chat_w, p.term_h);
+        match p.quality {
+            Quality::Auto => {
+                if self.ctl.auto.is_none() {
+                    let _ = self.ctl.menu('a');
+                }
+            }
+            Quality::Preset(i) => {
+                let _ = self.ctl.menu(char::from(b'0' + i as u8));
+            }
+            Quality::Custom(mode, scale, fps) => {
+                (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) = (mode, scale, fps);
+                (self.ctl.preset, self.ctl.auto) = ("custom".into(), None);
+            }
+        }
+        self.open_panels(false, p.chat);
+        if let Some(m) = p.monitor {
+            self.chosen_monitor = Some(m);
+            self.send(ToAgent::SelectMonitor(m))?;
+        }
+        if p.sound {
+            match crate::audio::Player::new() {
+                Ok(pl) => {
+                    self.sound = Some(pl);
+                    self.send(ToAgent::Audio(true))?;
+                }
+                Err(e) => self.notify(&format!("Sound: {e}")),
+            }
+        }
+        self.user_paused = p.paused;
+        if p.paused && self.mode() == super::workspace::PaneMode::Screen && !self.paused {
+            self.paused = true;
+            self.send(ToAgent::Pause(true))?;
+        }
+        Ok(())
+    }
+
+    /// Text pasted into the host from an extension or the command palette: a screen gets it on
+    /// its clipboard and then Ctrl+V; a terminal types it.
+    pub(super) fn paste_text(&mut self, ctx: &egui::Context, text: String) -> Result<(), String> {
+        use super::workspace::PaneMode;
+        match self.mode() {
+            PaneMode::Screen if !self.view_only => {
+                self.send(ToAgent::Clipboard(text))?;
+                self.release_all()?;
+                self.send(ToAgent::Key { keysym: 'v' as u32, mods: crate::proto::MOD_CTRL })
+            }
+            PaneMode::Screen => {
+                self.notify("View only: nothing was pasted");
+                Ok(())
+            }
+            // The terminal takes it as a paste from the keyboard would.
+            PaneMode::Terminal => {
+                ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
+                Ok(())
+            }
+            PaneMode::Files => {
+                self.notify("Nothing to paste into here");
+                Ok(())
+            }
+        }
     }
 }
 

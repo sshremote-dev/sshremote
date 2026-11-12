@@ -37,6 +37,7 @@ pub(crate) mod snapshot;
 mod signin;
 mod extui;
 mod dock;
+mod toast;
 #[cfg(feature = "drive")]
 mod drive;
 
@@ -940,14 +941,15 @@ impl App {
                     ghost = Some((all[s].1.tab_label(t), point));
                 }
                 (Some((t, _)), Some(o)) => {
-                    let moved = all[s].1.take_tab(t);
-                    let hint = at(all[o].1);
-                    all[o].1.put_tab(moved, hint);
-                    focus = Some(all[o].0.unwrap_or(egui::ViewportId::ROOT));
+                    if let Some(moved) = all[s].1.take_tab(t) {
+                        let hint = at(all[o].1);
+                        all[o].1.put_tab(moved, hint);
+                        focus = Some(all[o].0.unwrap_or(egui::ViewportId::ROOT));
+                    }
                 }
                 (Some((t, _)), None) => {
                     if all[s].1.tabs_len() > 1 {
-                        tear = Some((all[s].1.take_tab(t), point));
+                        tear = all[s].1.take_tab(t).map(|w| (w, point));
                     }
                 }
             }
@@ -1071,6 +1073,7 @@ pub(crate) use crate::sys::human;
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     /// A tab dragged out lives in a window of its own, which goes when its last tab closes.
