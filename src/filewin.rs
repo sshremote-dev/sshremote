@@ -470,7 +470,8 @@ impl FileWindow {
                     let p = self.pane(remote);
                     let edit = crate::gui::field_selecting(ui, &mut p.typed, |t| 0..t.chars().count());
                     if edit.lost_focus() {
-                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                        // Taken, so the list does not also open its selection with it.
+                        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                             let typed = p.typed.trim().to_string();
                             let path = if typed == "Drives" { DRIVES.into() } else { typed };
                             self.go(remote, path, out);
@@ -786,7 +787,7 @@ impl FileWindow {
                 }
             });
         });
-        if done.is_none() && self.active && ctx.input(|i| i.key_pressed(Key::Enter)) {
+        if done.is_none() && self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
             done = Some(true);
         }
         if modal.should_close() && done.is_none() {
@@ -844,6 +845,36 @@ mod tests {
     }
 
     use super::*;
+
+    /// Enter that confirms a dialog only does what the dialog says: the list behind it does not
+    /// also open (download) its selection with the same key.
+    #[test]
+    fn enter_in_a_dialog_does_not_also_open_the_selection() {
+        let ctx = egui::Context::default();
+        let mut w = FileWindow::new();
+        w.focus_remote = true;
+        w.remote.path = "/home/a".into();
+        w.remote.entries = vec![DirEntry { name: "notes.txt".into(), dir: false, size: 5, mtime: 0 }];
+        w.remote.sel.insert(0);
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(900.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let _ = ctx.run_test(input(Vec::new()), |ui| {
+            w.embedded(ui, "host", &[]);
+        });
+        // A new folder, its name typed; the file stays selected behind the dialog.
+        w.dialog = Some(Dialog::NewFolder { remote: true, name: "made".into() });
+        let mut cmds = Vec::new();
+        let _ = ctx.run_test(input(vec![key(Key::Enter)]), |ui| {
+            cmds = w.embedded(ui, "host", &[]);
+        });
+        let fetches = cmds.iter().filter(|c| matches!(c, Cmd::Send(ToAgent::Fetch { .. }))).count();
+        let made = cmds.iter().filter(|c| matches!(c, Cmd::Send(ToAgent::FileOp { .. }))).count();
+        assert_eq!((made, fetches), (1, 0), "the folder made, the selected file not downloaded as well");
+    }
 
     #[test]
     fn paths_climb_to_the_drives() {
