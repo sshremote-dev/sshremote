@@ -665,6 +665,146 @@ impl Control {
 mod tests {
     use super::*;
 
+    /// A GNOME host's screen turned on its side during a session is followed: the viewer is told
+    /// the new size, and frames come at it, scaled to fit as before. Needs SSHREMOTE_GNOME_HOST
+    /// (an ssh alias of a host signed in to GNOME with one monitor, which is turned and turned
+    /// back), and optionally SSHREMOTE_GNOME_ENV (variables pointing at that session, such as a
+    /// private test one) and SSHREMOTE_GNOME_AGENT (the program there).
+    #[test]
+    #[ignore]
+    fn a_gnome_screen_turned_on_its_side_is_followed() {
+        use crate::proto::{Settings, ToAgent};
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh {
+            host: host.clone(),
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        // Mutter's own call, with the one monitor and its current mode; 1 applies it for now only.
+        let turn = |transform: u32| {
+            let script = r#"S=$(gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/DisplayConfig -m org.gnome.Mutter.DisplayConfig.GetCurrentState)
+serial=$(echo "$S" | sed -E 's/^\(uint32 ([0-9]+).*/\1/')
+con=$(echo "$S" | sed -E "s/^[^']*'([^']+)'.*/\1/")
+mode=$(echo "$S" | grep -oE "\('[^']+', [0-9]+, [0-9]+, [0-9.]+, [0-9.]+, \[[^]]*\], \{[^}]*'is-current': <true>" | head -1 | sed -E "s/^\('([^']+)'.*/\1/")
+gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/DisplayConfig -m org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig $serial 1 "[(0, 0, 1.0, uint32 TURN, true, [('$con', '$mode', @a{sv} {})])]" "@a{sv} {}""#
+                .replace("TURN", &transform.to_string());
+            let out = std::process::Command::new("ssh").arg(&host).arg(format!("env {env} sh -s")).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().unwrap().write_all(script.as_bytes())?;
+                c.wait_with_output()
+            }).expect("ssh");
+            assert!(out.status.success(), "turning the screen: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let (w, h) = (sess.desk.0 as u16, sess.desk.1 as u16);
+        assert!(w > h, "a screen wider than tall to start with: {w}x{h}");
+        sess.send(ToAgent::Settings(Settings { view_w: 640, view_h: 640, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        // The next frame for which `want` holds, acknowledging every frame meanwhile; the sizes
+        // announced on the way are returned with it.
+        let mut frame = |want: &dyn Fn(u16, u16) -> bool| -> (Vec<(u16, u16)>, (u16, u16)) {
+            let (mut hellos, mut seen) = (Vec::new(), Vec::new());
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(Ev::Net(ToClient::Hello { w, h, .. })) => hellos.push((w, h)),
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        seen.push((f.w, f.h));
+                        if want(f.w, f.h) {
+                            return (hellos, (f.w, f.h));
+                        }
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            seen.dedup();
+            panic!("no such frame in time; sizes announced: {hellos:?}, frames: {seen:?}");
+        };
+        let (_, first) = frame(&|w, h| w > h);
+        assert!(first.0 <= 640, "scaled to the view: {first:?}");
+        turn(1);
+        // Turned back however this ends.
+        struct Back<F: Fn(u32)>(F);
+        impl<F: Fn(u32)> Drop for Back<F> {
+            fn drop(&mut self) {
+                (self.0)(0);
+            }
+        }
+        let back = Back(&turn);
+        let (hellos, turned) = frame(&|w, h| h > w);
+        drop(back);
+        assert_eq!(hellos.last(), Some(&(h, w)), "the turned size is announced");
+        assert!(turned.1 <= 640 && turned.1 > turned.0, "scaled to the view, standing: {turned:?}");
+        let (hellos, back) = frame(&|w, h| w > h);
+        assert_eq!(hellos.last(), Some(&(w, h)), "and the size it came back to");
+        assert_eq!(back, first, "the same picture size as before");
+        sess.close();
+    }
+
+    /// Sharing a GNOME host's active window sends that window at its own size, scaled to fit, and
+    /// the whole screen comes back as it was. Needs SSHREMOTE_GNOME_HOST with a window focused
+    /// there (and SSHREMOTE_GNOME_ENV, SSHREMOTE_GNOME_AGENT as above).
+    #[test]
+    #[ignore]
+    fn a_gnome_window_shared_alone_comes_at_its_own_size() {
+        use crate::proto::{Settings, ToAgent};
+        use crate::shared::Share;
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh {
+            host,
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        // Sends `first`, then waits for a frame for which `want` holds.
+        let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Vec<(u16, u16)>, (u16, u16)) {
+            if let Some(m) = first {
+                sess.send(m).unwrap();
+            }
+            let (mut hellos, mut seen) = (Vec::new(), Vec::new());
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(Ev::Net(ToClient::Hello { w, h, .. })) => hellos.push((w, h)),
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        seen.push((f.w, f.h));
+                        if want(f.w, f.h) {
+                            return (hellos, (f.w, f.h));
+                        }
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            seen.dedup();
+            panic!("no such frame in time; sizes announced: {hellos:?}, frames: {seen:?}");
+        };
+        next(None, &|w, h| (w, h) == screen);
+        let (hellos, window) = next(Some(ToAgent::Share(Share::ActiveWindow)), &|w, h| (w, h) != screen);
+        assert_eq!(hellos.last(), Some(&window), "the window's size is announced and sent as it is");
+        assert!(window.0 < screen.0 || window.1 < screen.1, "a window, not the screen: {window:?}");
+        let (hellos, back) = next(Some(ToAgent::Share(Share::Screen)), &|w, h| (w, h) == screen);
+        assert_eq!((hellos.last(), back), (Some(&screen), screen));
+        drop(next);
+        sess.close();
+    }
+
     /// Any SSH host with sshremote on it answers to the usual agent command, as it always did.
     /// Needs SSHREMOTE_SSH_HOST (an ssh alias).
     #[test]

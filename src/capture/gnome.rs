@@ -62,8 +62,11 @@ pub struct Gnome {
     stream_path: String,
     node: u32,
     desk: (usize, usize),
+    /// The recorded monitor's picture size, as its stream sends it (it follows rotation and
+    /// resolution changes, which the mode list can lag behind).
+    screen: (usize, usize),
     target: (usize, usize),
-    pipe: Option<(gst::Pipeline, gst_app::AppSink)>,
+    pipe: Option<Pipe>,
     src: Src,
     app: Option<AppShare>,
     /// The stream chosen in GNOME's own sharing dialog, and its input session.
@@ -118,16 +121,39 @@ pub fn ensure_env() {
     }
 }
 
+/// A capture pipeline; it stops when it goes (one dropped while playing keeps its threads and its
+/// PipeWire connection).
+struct Pipe {
+    p: gst::Pipeline,
+    sink: gst_app::AppSink,
+    src: gst::Element,
+}
+
+impl Pipe {
+    /// The size the stream sends now, before any scaling here.
+    fn source_size(&self) -> Option<(usize, usize)> {
+        let caps = self.src.static_pad("src")?.current_caps()?;
+        let s = caps.structure(0)?;
+        Some((s.get::<i32>("width").ok()? as usize, s.get::<i32>("height").ok()? as usize))
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        let _ = self.p.set_state(gst::State::Null);
+    }
+}
+
 /// `source` is what pipewiresrc reads: "path=NODE", or "fd=FD path=NODE" for a portal stream.
-fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<(gst::Pipeline, gst_app::AppSink), String> {
+fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pipe, String> {
     let caps = match size {
         Some((w, h)) => format!(",width={w},height={h},pixel-aspect-ratio=1/1"),
         None => String::new(),
     };
     let desc = format!(
-        "pipewiresrc {source} do-timestamp=true keepalive-time=250 \
+        "pipewiresrc name=src {source} do-timestamp=true keepalive-time=250 \
          ! queue leaky=downstream max-size-buffers=1 \
-         ! videoconvert n-threads=2 ! videoscale method=1 n-threads=2 \
+         ! videoconvert n-threads=2 ! videoscale method=1 add-borders=false n-threads=2 \
          ! video/x-raw,format=BGRx{caps} \
          ! appsink name=sink max-buffers=1 drop=true sync=false"
     );
@@ -137,8 +163,10 @@ fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<(gst::Pipeline
         .map_err(|_| "GNOME capture pipeline is not a pipeline".to_string())?;
     let sink =
         p.by_name("sink").and_then(|s| s.downcast::<gst_app::AppSink>().ok()).ok_or("GNOME capture sink missing")?;
-    p.set_state(gst::State::Playing).map_err(|e| format!("GNOME capture did not start: {e}"))?;
-    Ok((p, sink))
+    let src = p.by_name("src").ok_or("GNOME capture source missing")?;
+    let pipe = Pipe { p, sink, src };
+    pipe.p.set_state(gst::State::Playing).map_err(|e| format!("GNOME capture did not start: {e}"))?;
+    Ok(pipe)
 }
 
 fn to_image(sample: &gst::Sample) -> Result<Image, String> {
@@ -154,7 +182,8 @@ fn to_image(sample: &gst::Sample) -> Result<Image, String> {
     })
 }
 
-/// Without crop information: the frame minus pure black rows and columns at its right and bottom.
+/// A window stream without crop information (older PipeWire): the frame minus pure black rows and
+/// columns at its right and bottom. Never for a monitor, whose dark edges are part of the picture.
 fn content_box(img: &Image) -> (usize, usize, usize, usize) {
     let black_px = |x: usize, y: usize| img.data[y * img.stride + x * 4..y * img.stride + x * 4 + 3] == [0, 0, 0];
     let mut h = img.h;
@@ -189,6 +218,8 @@ fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
     let place = |connector: &str| {
         logical.iter().find(|l| l.5.iter().any(|m| m.0 == connector)).map_or((0, 0, 1.0), |l| (l.0, l.1, l.2))
     };
+    // Turned a quarter (transforms 1, 3 and their flipped 5, 7): the picture is the mode on its side.
+    let sideways = |connector: &str| logical.iter().any(|l| l.3 % 2 == 1 && l.5.iter().any(|m| m.0 == connector));
     let mut out: Vec<(String, Monitor, (i32, i32, f64))> = mons
         .into_iter()
         .filter_map(|((connector, vendor, product, _), modes, _)| {
@@ -197,7 +228,8 @@ fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
             let name = format!("{connector} {vendor} {product}").trim().to_string();
             let primary = primary.contains(&connector);
             let at = place(&connector);
-            Some((connector, Monitor { name, w: current.1 as usize, h: current.2 as usize, primary }, at))
+            let (w, h) = if sideways(&connector) { (current.2, current.1) } else { (current.1, current.2) };
+            Some((connector, Monitor { name, w: w as usize, h: h as usize, primary }, at))
         })
         .collect();
     out.sort_by_key(|m| !m.1.primary);
@@ -244,15 +276,25 @@ impl Gnome {
         let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
         let mut added = sproxy.receive_signal("PipeWireStreamAdded").map_err(err("signal"))?;
         session.call::<_, _, ()>("Start", &()).map_err(err("Start"))?;
-        let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
-        let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
-
-        let (p, sink) = pipeline(&format!("path={node}"), None)?;
-        let first = sink
-            .try_pull_sample(gst::ClockTime::from_seconds(5))
-            .ok_or("no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)")?;
-        let img = to_image(&first)?;
+        let started = (|| {
+            let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
+            let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
+            let pipe = pipeline(&format!("path={node}"), None)?;
+            let first = pipe
+                .sink
+                .try_pull_sample(gst::ClockTime::from_seconds(5))
+                .ok_or("no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)")?;
+            Ok::<_, String>((node, pipe, to_image(&first)?))
+        })();
+        // A session that started and failed is stopped, not left recording.
+        let (node, pipe, img) = started.inspect_err(|_| {
+            let _ = session.call_noreply("Stop", &());
+        })?;
         let desk = (img.w, img.h);
+        let screen = match (src, list.get(current)) {
+            (Src::Monitor, _) | (_, None) => desk,
+            (_, Some(m)) => (m.1.w, m.1.h),
+        };
         Ok(Gnome {
             monitors: list,
             current,
@@ -261,8 +303,9 @@ impl Gnome {
             stream_path,
             node,
             desk,
+            screen,
             target: desk,
-            pipe: Some((p, sink)),
+            pipe: Some(pipe),
             src,
             app: None,
             portal: None,
@@ -276,9 +319,7 @@ impl Gnome {
 
     /// A new pipeline on the same stream, for when cutting or scaling changes; the old one is stopped first.
     fn restart_pipe(&mut self) -> Result<(), String> {
-        if let Some((p, _)) = self.pipe.take() {
-            let _ = p.set_state(gst::State::Null);
-        }
+        self.pipe = None;
         self.target = self.desk;
         self.set_target(self.desk.0, self.desk.1)
     }
@@ -291,19 +332,18 @@ impl Gnome {
         }
     }
 
-    /// Starts reading the stream chosen in the portal dialog; its first frame gives the size.
+    /// Starts reading the stream chosen in the portal dialog; its first frame gives the size. What
+    /// was shown goes on until that works, and stays if it does not.
     fn use_portal(&mut self, portal: super::portal::Portal) -> Result<(), String> {
-        if let Some((p, _)) = self.pipe.take() {
-            let _ = p.set_state(gst::State::Null);
-        }
-        self.app = None;
-        let (p, sink) = pipeline(&portal.source(), None)?;
-        let first = sink
+        let pipe = pipeline(&portal.source(), None)?;
+        let first = pipe
+            .sink
             .try_pull_sample(gst::ClockTime::from_seconds(5))
             .ok_or("no picture from the chosen window within 5 s")?;
         let img = to_image(&first)?;
+        self.app = None;
         (self.desk, self.target) = ((img.w, img.h), (img.w, img.h));
-        self.pipe = Some((p, sink));
+        self.pipe = Some(pipe);
         self.portal = Some(portal);
         self.src = Src::Portal;
         Ok(())
@@ -392,10 +432,53 @@ impl Gnome {
 
     /// Back to the whole monitor after the shared window or program closed.
     fn back_to_screen(&mut self) -> Result<(), String> {
-        let current = self.current;
-        *self = Gnome::open_on(Some(current), Src::Monitor)?;
+        self.reopen(Src::Monitor)?;
         self.ended = true;
         Ok(())
+    }
+
+    /// A new recording of the same monitor (or of `src` on it). The picture keeps the size the
+    /// viewer asked for when its size has not changed: the agent asks again only when it has.
+    fn reopen(&mut self, src: Src) -> Result<(), String> {
+        let (desk, target) = (self.desk, self.target);
+        *self = Gnome::open_on(Some(self.current), src)?;
+        if self.desk == desk && target != desk {
+            self.set_target(target.0, target.1)?;
+        }
+        Ok(())
+    }
+
+    /// Mutter ends a monitor's stream, without a word, when the monitors change (turned, another
+    /// resolution, one added or taken away): it is recorded again, a shared program cut out of it
+    /// again.
+    fn record_again(&mut self) -> Result<(), String> {
+        let app = self.app.as_ref().map(|a| a.app.clone());
+        let (desk, target) = (self.desk, self.target);
+        *self = Gnome::open_on(Some(self.current), Src::Monitor)?;
+        if let Some(app) = app {
+            self.cut_out(app)?;
+        }
+        if self.desk == desk && target != desk {
+            self.set_target(target.0, target.1)?;
+        }
+        Ok(())
+    }
+
+    /// Shares the program `app` from the monitor stream: its windows' part, the rest greyed out.
+    fn cut_out(&mut self, app: String) -> Result<(), String> {
+        self.app = Some(AppShare {
+            app,
+            area: R { l: 0, t: 0, r: self.desk.0 as i32, b: self.desk.1 as i32 },
+            shown: Vec::new(),
+            focused: true,
+            inside: true,
+            checked: std::time::Instant::now(),
+        });
+        self.refresh_app(true);
+        if let Some(a) = &self.app {
+            self.desk = ((a.area.r - a.area.l) as usize, (a.area.b - a.area.t) as usize);
+        }
+        self.restart_pipe()
     }
 
     /// Where the shared program's windows are on the recorded monitor, at most every 150 ms.
@@ -408,16 +491,13 @@ impl Gnome {
         if !list.iter().any(|w| self.app.as_ref().is_some_and(|a| a.app == w.2)) {
             // The program closed its last window.
             self.app = None;
-            if let Some(m) = self.monitors.get(self.current) {
-                self.desk = (m.1.w, m.1.h);
-            }
+            self.desk = self.screen;
             let _ = self.restart_pipe();
             self.ended = true;
             return;
         }
         let (lx, ly, scale) = self.monitors.get(self.current).map_or((0, 0, 1.0), |m| m.2);
-        let mon = self.monitors.get(self.current).map_or((self.desk.0, self.desk.1), |m| (m.1.w, m.1.h));
-        let screen = R { l: 0, t: 0, r: mon.0 as i32, b: mon.1 as i32 };
+        let screen = R { l: 0, t: 0, r: self.screen.0 as i32, b: self.screen.1 as i32 };
         let px = |v: i32, o: i32| ((v - o) as f64 * scale).round() as i32;
         let a = self.app.as_mut().unwrap();
         let mut stack = Vec::new();
@@ -618,10 +698,7 @@ impl Capture for Gnome {
             Share::Screen => {
                 monitor(self)?;
                 self.app = None;
-                self.target = self.desk;
-                if let Some(m) = self.monitors.get(self.current) {
-                    self.desk = (m.1.w, m.1.h);
-                }
+                self.desk = self.screen;
                 self.restart_pipe()?;
                 Ok("the whole screen".into())
             }
@@ -651,38 +728,25 @@ impl Capture for Gnome {
                 let app = list.iter().find(|w| w.0 == id).map(|w| w.2.clone()).ok_or("that window is gone")?;
                 self.helper_activate(id);
                 monitor(self)?;
-                self.app = Some(AppShare {
-                    app: app.clone(),
-                    area: R { l: 0, t: 0, r: self.desk.0 as i32, b: self.desk.1 as i32 },
-                    shown: Vec::new(),
-                    focused: true,
-                    inside: true,
-                    checked: std::time::Instant::now(),
-                });
-                self.refresh_app(true);
-                if let Some(a) = &self.app {
-                    self.desk = ((a.area.r - a.area.l) as usize, (a.area.b - a.area.t) as usize);
-                }
-                self.restart_pipe()?;
+                self.cut_out(app.clone())?;
                 Ok(format!("every window of {app}"))
             }
         }
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
-        let t = (w.min(self.desk.0), h.min(self.desk.1));
         if self.native() {
-            // A window stream stays at its own size, which follows the window; it is scaled here.
+            // A window stream stays at its own size, which follows the window; it is scaled here,
+            // up as well for a window smaller than the least the viewer asks for.
             if self.pipe.is_none() {
                 self.pipe = Some(pipeline(&self.source(), None)?);
             }
-            self.target = t;
+            self.target = (w.max(1), h.max(1));
             return Ok(());
         }
+        let t = (w.min(self.desk.0), h.min(self.desk.1));
         if t != self.target || self.pipe.is_none() {
-            if let Some((p, _)) = self.pipe.take() {
-                let _ = p.set_state(gst::State::Null);
-            }
+            self.pipe = None;
             self.pipe = Some(pipeline(&self.source(), (t != self.desk).then_some(t))?);
             self.target = t;
         }
@@ -690,32 +754,51 @@ impl Capture for Gnome {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
-        let Some((p, sink)) = &self.pipe else {
+        let Some(pipe) = &self.pipe else {
             return Ok(None);
         };
         let window = !matches!(self.src, Src::Monitor);
-        if let Some(bus) = p.bus() {
-            if let Some(m) = bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos]) {
-                if window {
-                    // The shared window closed and took its stream with it.
-                    self.back_to_screen()?;
-                    return Ok(None);
-                }
-                return Err(format!("GNOME stream stopped: {:?}", m.view()));
+        if let Some(bus) = pipe.p.bus()
+            && let Some(m) = bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos])
+        {
+            if window {
+                // The shared window closed and took its stream with it.
+                self.back_to_screen()?;
+                return Ok(None);
             }
+            return Err(format!("GNOME stream stopped: {:?}", m.view()));
         }
-        let Some(s) = sink.try_pull_sample(gst::ClockTime::ZERO) else {
-            // A window stream sends nothing while its window is still; after a second, check it exists.
+        let Some(s) = pipe.sink.try_pull_sample(gst::ClockTime::ZERO) else {
+            // A window stream sends nothing while its window is still, and a monitor's (otherwise
+            // repeated four times a second) nothing once Mutter ended it: after a second, check
+            // it exists.
             let quiet = self.last_frame.elapsed() > std::time::Duration::from_secs(1);
-            if window && quiet && self.checked_alive.elapsed() > std::time::Duration::from_secs(1) {
+            if quiet && self.checked_alive.elapsed() > std::time::Duration::from_secs(1) {
                 self.checked_alive = std::time::Instant::now();
                 if !self.stream_alive() {
-                    self.back_to_screen()?;
+                    if window {
+                        self.back_to_screen()?;
+                    } else {
+                        self.record_again()?;
+                    }
                 }
             }
             return Ok(None);
         };
         self.last_frame = std::time::Instant::now();
+        // The host's resolution or rotation changed under the monitor stream.
+        let now = if self.src == Src::Monitor { pipe.source_size() } else { None };
+        if let Some(now) = now.filter(|&n| n != self.screen) {
+            self.screen = now;
+            self.monitors = monitors(&self.conn);
+            if self.app.is_none() {
+                // The agent tells the viewer the new size and asks for a new target, which
+                // remakes the pipeline; this frame was scaled for the old one.
+                self.desk = now;
+                return Ok(None);
+            }
+            self.refresh_app(true);
+        }
         let mut img = to_image(&s)?;
         if !self.native() {
             return Ok(Some(img));
@@ -735,10 +818,13 @@ impl Capture for Gnome {
             return Ok(Some(super::scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)));
         }
         // A window stream's buffers can be larger than the window; the window is the crop area.
+        // Mutter marks a monitor's frames with an empty crop.
         let crop = s.buffer().and_then(|b| b.meta::<gst_video::VideoCropMeta>().map(|m| m.rect()));
+        let monitor = self.portal.as_ref().is_some_and(|p| p.monitor);
         let (cx, cy, cw, ch) = match crop {
             Some((x, y, w, h)) if w > 0 && h > 0 => (x as usize, y as usize, w as usize, h as usize),
-            _ => content_box(&img),
+            None if !monitor => content_box(&img),
+            _ => (0, 0, img.w, img.h),
         };
         if (cx, cy, cw, ch) != (0, 0, img.w, img.h) && cx + cw <= img.w && cy + ch <= img.h {
             let mut data = Vec::with_capacity(cw * ch * 4);
@@ -832,9 +918,7 @@ impl Capture for Gnome {
 
 impl Drop for Gnome {
     fn drop(&mut self) {
-        if let Some((p, _)) = self.pipe.take() {
-            let _ = p.set_state(gst::State::Null);
-        }
+        self.pipe = None;
         let _ = self.session.call_noreply("Stop", &());
     }
 }

@@ -19,6 +19,8 @@ pub struct Portal {
     conn: Connection,
     session: OwnedObjectPath,
     pub node: u32,
+    /// A whole monitor was chosen, rather than a window.
+    pub monitor: bool,
     fd: OwnedFd,
     /// The RemoteDesktop interface, made once: input events go through it many times a second.
     rd: Proxy<'static>,
@@ -94,7 +96,10 @@ pub fn pick() -> Result<Portal, String> {
         .and_then(|v| v.try_clone().ok())
         .and_then(|v| v.try_into().ok())
         .ok_or("the portal sent no stream")?;
-    let node = streams.first().map(|s| s.0).ok_or("the portal sent no stream")?;
+    let (node, props) = streams.first().ok_or("the portal sent no stream")?;
+    let node = *node;
+    // source_type 1 is a monitor, 2 a window.
+    let monitor = props.get("source_type").and_then(|v| u32::try_from(v).ok()) == Some(1);
 
     let p = Proxy::new(&conn, DEST, PATH, SC).map_err(err("ScreenCast"))?;
     let fd: OwnedFd =
@@ -106,7 +111,7 @@ pub fn pick() -> Result<Portal, String> {
         .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
         .and_then(|b| b.build())
         .map_err(err("RemoteDesktop"))?;
-    Ok(Portal { conn, session, node, fd, rd })
+    Ok(Portal { conn, session, node, monitor, fd, rd })
 }
 
 impl Portal {
