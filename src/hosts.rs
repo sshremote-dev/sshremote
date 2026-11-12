@@ -3,9 +3,86 @@
 
 use std::io::{BufRead, Write};
 
-/// Concrete `Host` names in ~/.ssh/config (patterns with wildcards or negation are skipped).
+/// Concrete `Host` names in ~/.ssh/config and the files it includes (patterns with wildcards or
+/// negation are skipped).
 pub fn ssh_config_hosts() -> Vec<String> {
-    parse_ssh_hosts(&std::fs::read_to_string(crate::sys::ssh_dir().join("config")).unwrap_or_default())
+    let dir = crate::sys::ssh_dir();
+    parse_ssh_hosts(&with_includes(&dir.join("config"), &dir, 0))
+}
+
+/// A config file's text with the files its `Include` lines name put in their place, as ssh
+/// reads them: `~` for the home folder, other relative paths under ~/.ssh, `*` and `?` in file
+/// names; at most eight deep, so files that include each other end.
+fn with_includes(file: &std::path::Path, ssh: &std::path::Path, depth: usize) -> String {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    if depth >= 8 {
+        return text;
+    }
+    let mut out = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        let Some((key, rest)) = t.split_once(|c: char| c.is_whitespace() || c == '=') else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        if !key.eq_ignore_ascii_case("include") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+        for pattern in rest.split_whitespace().map(|p| p.trim_matches('"')) {
+            let path = match pattern.strip_prefix("~/") {
+                Some(r) => ssh.parent().map_or_else(|| ssh.join(r), |home| home.join(r)),
+                None if std::path::Path::new(pattern).is_absolute() => std::path::PathBuf::from(pattern),
+                None => ssh.join(pattern),
+            };
+            let (folder, name) = (path.parent().map(|p| p.to_path_buf()).unwrap_or_default(), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            let mut files: Vec<std::path::PathBuf> = if name.contains(['*', '?']) {
+                std::fs::read_dir(&folder)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| wildcard(&name, &e.file_name().to_string_lossy()))
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .collect()
+            } else {
+                vec![path]
+            };
+            files.sort();
+            for f in files {
+                out.push_str(&with_includes(&f, ssh, depth + 1));
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Whether `name` matches `pattern` with `*` (any run) and `?` (any one character).
+fn wildcard(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    // The classic two-pointer match, going back to the last `*` on a mismatch.
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(s) = star {
+            i = s + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|&c| c == '*')
 }
 
 /// Services that answer ssh for git only: an alias for one of them is there for git, never a
@@ -242,6 +319,24 @@ pub fn remember(host: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hosts in files the config includes are found: by a relative path, `~`, and a pattern;
+    /// files that include each other end.
+    #[test]
+    fn included_files_bring_their_hosts() {
+        let home = std::env::temp_dir().join(format!("sshremote-include-{}", std::process::id()));
+        let ssh = home.join(".ssh");
+        std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+        std::fs::write(ssh.join("config"), "Include config.d/*.conf\ninclude ~/.ssh/extra\nHost main\n  HostName 10.0.0.1\n").unwrap();
+        std::fs::write(ssh.join("config.d").join("a.conf"), "Host alpha\n  HostName 10.0.0.2\n").unwrap();
+        std::fs::write(ssh.join("config.d").join("b.conf"), "Host beta\n").unwrap();
+        std::fs::write(ssh.join("config.d").join("skip.txt"), "Host nope\n").unwrap();
+        std::fs::write(ssh.join("extra"), "Host gamma\nInclude extra\n").unwrap();
+        let hosts = super::parse_ssh_hosts(&super::with_includes(&ssh.join("config"), &ssh, 0));
+        assert_eq!(hosts, ["alpha", "beta", "gamma", "main"]);
+        assert!(super::wildcard("*.conf", "a.conf") && !super::wildcard("*.conf", "a.txt") && super::wildcard("h?st", "host"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn ssh_config_hosts_skip_patterns() {
