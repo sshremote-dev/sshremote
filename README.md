@@ -18,6 +18,25 @@ Linux needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopus-dev li
 pkg-config` and a C++ compiler. Put the binary on the host as `~/.local/bin/sshremote` (Windows:
 anywhere on `PATH`).
 
+## Tests
+
+`cargo test` runs the tests that need nothing else. The ignored ones start the built program, draw
+windows, save passwords or reach other computers. Run them one at a time:
+`SSHREMOTE_EXE=$PWD/target/debug/sshremote cargo test -- --ignored --test-threads=1`.
+
+On a Linux computer with GNOME, `scripts/gnome-session.sh up` starts a private headless GNOME
+session: its own bus, PipeWire, password store and virtual monitor. Tests run in it with
+`scripts/gnome-session.sh run ...` leave the desktop of whoever is signed in alone. `shot FILE`
+takes a picture of it through `sshremote mcp`, and `down` stops it.
+`SSHREMOTE_SNAP_DIR` keeps the windows' pictures; `secret-tool` must be on `PATH` for the password
+tests.
+
+Tests that reach other computers name them by ssh alias:
+- `SSHREMOTE_WINDOWS_HOST`: a Windows computer with the service installed.
+- `SSHREMOTE_SSH_HOST`: any host with sshremote.
+- `SSHREMOTE_GNOME_HOST`: a GNOME host. Add `SSHREMOTE_GNOME_ENV="$(scripts/gnome-session.sh env)"`
+  (run there) for its private session.
+
 ## The window
 
 `sshremote` opens a small open window: a new connection, this computer (local shells, its screen
