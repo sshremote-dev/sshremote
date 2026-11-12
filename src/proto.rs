@@ -310,6 +310,11 @@ pub enum ToClient {
         ok: bool,
         text: String,
     },
+    /// Every file of the `Fetch` with `tag` has been sent (or failed). Sent only for tags with
+    /// [`crate::files::DONE_TAG`] set, so viewers that do not ask never see it.
+    FetchDone {
+        tag: u32,
+    },
     /// The remote host's monitors and which one is shown.
     Monitors {
         list: Vec<MonitorInfo>,
@@ -793,6 +798,10 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 111
             }
+            ToClient::FetchDone { tag } => {
+                b.extend_from_slice(&tag.to_le_bytes());
+                126
+            }
             ToClient::Audio(p) => {
                 b.extend_from_slice(p);
                 113
@@ -971,6 +980,7 @@ impl ToClient {
             115 => ToClient::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             116 => ToClient::Snapshot(c.rest().to_vec()),
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            126 => ToClient::FetchDone { tag: c.u32()? },
             125 => ToClient::HelperInstalled { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             119 => ToClient::TermOutput { id: c.u32()?, data: c.rest().to_vec() },
             121 => {
@@ -1103,6 +1113,7 @@ mod tests {
             ToClient::OpDone { ok: false, text: "denied".into() },
             ToClient::HelperInstalled { ok: true, text: "installed; sign out and in".into() },
             ToClient::FetchStart { id: 3, size: 4, tag: 5, name: "d/y".into() },
+            ToClient::FetchDone { tag: 0x8000_0005 },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },
             ToClient::WindowList {

@@ -266,6 +266,9 @@ impl Queued {
     }
 }
 
+/// A `Fetch` tag with this bit set is answered with `FetchDone` once all its files are sent.
+pub const DONE_TAG: u32 = 0x8000_0000;
+
 /// A receiver that has taken nothing for this long is gone; its file is given up.
 const STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -292,9 +295,9 @@ pub fn walk(dir: &Path, base: &str, out: &mut Vec<(PathBuf, String)>) {
 }
 
 impl Outbox {
-    /// Queues a file or a whole folder; returns an error message to send at once, if any.
+    /// Queues a file or a whole folder; returns messages to send at once (why it cannot be).
     /// Each file is announced with `FetchStart` carrying `tag`.
-    pub fn fetch(&mut self, path: &str, tag: u32) -> Option<ToClient> {
+    pub fn fetch(&mut self, path: &str, tag: u32) -> Vec<ToClient> {
         let p = PathBuf::from(path);
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         if p.is_dir() {
@@ -302,9 +305,25 @@ impl Outbox {
         } else if p.is_file() {
             self.push_file(p, name, tag, false);
         } else {
-            return Some(ToClient::FetchEnd { id: 0, ok: false, text: format!("{path}: not found") });
+            let mut out = vec![ToClient::FetchEnd { id: 0, ok: false, text: format!("{path}: not found") }];
+            self.done_if_last(tag, &mut out);
+            return out;
         }
-        None
+        Vec::new()
+    }
+
+    /// Says a request is complete once nothing of it is queued, if it asked to be told.
+    fn done_if_last(&self, tag: u32, out: &mut Vec<ToClient>) {
+        if tag & DONE_TAG != 0 && !self.queue.iter().any(|q| q.tag() == tag) {
+            out.push(ToClient::FetchDone { tag });
+        }
+    }
+
+    /// Takes the front item off the queue, saying its request is complete if it was the last.
+    fn pop(&mut self, out: &mut Vec<ToClient>) {
+        if let Some(q) = self.queue.pop_front() {
+            self.done_if_last(q.tag(), out);
+        }
     }
 
     fn push_file(&mut self, path: PathBuf, name: String, tag: u32, front: bool) {
@@ -380,6 +399,8 @@ impl Outbox {
                 Some(Queued::Folder { .. }) => {
                     let Some(Queued::Folder { path, name, tag }) = self.queue.pop_front() else { unreachable!() };
                     self.open_folder(&path, &name, tag);
+                    // An empty folder completes its request at once.
+                    self.done_if_last(tag, &mut out);
                     continue;
                 }
                 Some(Queued::File(o)) => o,
@@ -393,7 +414,7 @@ impl Outbox {
                     }
                     Err(e) => {
                         out.push(ToClient::FetchEnd { id: o.id, ok: false, text: format!("{}: {e}", o.path.display()) });
-                        self.queue.pop_front();
+                        self.pop(&mut out);
                         continue;
                     }
                 }
@@ -402,7 +423,7 @@ impl Outbox {
                 let since = *o.stalled.get_or_insert_with(std::time::Instant::now);
                 if since.elapsed() > STALL {
                     out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "the other side stopped taking the file".into() });
-                    self.queue.pop_front();
+                    self.pop(&mut out);
                     continue;
                 }
                 break;
@@ -410,7 +431,7 @@ impl Outbox {
             let want = (o.size - o.sent).min(CHUNK as u64) as usize;
             if want == 0 {
                 out.push(ToClient::FetchEnd { id: o.id, ok: true, text: String::new() });
-                self.queue.pop_front();
+                self.pop(&mut out);
                 continue;
             }
             self.buf.resize(want, 0);
@@ -418,7 +439,7 @@ impl Outbox {
                 Some(Ok(0)) => {
                     let text = format!("{}: it got shorter while being sent", o.path.display());
                     out.push(ToClient::FetchEnd { id: o.id, ok: false, text });
-                    self.queue.pop_front();
+                    self.pop(&mut out);
                 }
                 Some(Ok(n)) => {
                     o.sent += n as u64;
@@ -427,11 +448,9 @@ impl Outbox {
                 }
                 Some(Err(e)) => {
                     out.push(ToClient::FetchEnd { id: o.id, ok: false, text: format!("{}: {e}", o.path.display()) });
-                    self.queue.pop_front();
+                    self.pop(&mut out);
                 }
-                None => {
-                    self.queue.pop_front();
-                }
+                None => self.pop(&mut out),
             }
         }
         out
@@ -622,7 +641,7 @@ mod tests {
         let path = dir.join("log.txt");
         std::fs::write(&path, vec![b'a'; 3 * CHUNK]).unwrap();
         let mut out = Outbox::default();
-        assert!(out.fetch(path.to_str().unwrap(), 0).is_none());
+        assert!(out.fetch(path.to_str().unwrap(), 0).is_empty());
         let first = out.pump(CHUNK);
         assert!(matches!(first[0], ToClient::FetchStart { size, .. } if size == 3 * CHUNK as u64));
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[b'b'; 1000]).unwrap();
@@ -662,14 +681,19 @@ mod tests {
         std::fs::write(dir.join("a.txt"), vec![1u8; 100_000]).unwrap();
         std::fs::write(dir.join("sub").join("b.txt"), b"bb").unwrap();
         let mut out = Outbox::default();
-        assert!(out.fetch(dir.to_str().unwrap(), 0).is_none());
+        assert!(out.fetch(dir.to_str().unwrap(), DONE_TAG | 7).is_empty());
         let mut names = Vec::new();
+        let mut done = 0;
         let mut bytes = 0;
         for _ in 0..10 {
             for m in out.pump(1 << 20) {
                 match m {
                     ToClient::FetchStart { name, .. } => names.push(name),
                     ToClient::FetchData { data, .. } => bytes += data.len(),
+                    ToClient::FetchDone { tag } => {
+                        assert_eq!((tag, names.len()), (DONE_TAG | 7, 2), "told once, after the last file");
+                        done += 1;
+                    }
                     _ => {}
                 }
             }
@@ -677,7 +701,9 @@ mod tests {
         names.sort();
         let base = dir.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(names, [format!("{base}/a.txt"), format!("{base}/sub/b.txt")]);
-        assert_eq!(bytes, 100_002);
+        assert_eq!((bytes, done), (100_002, 1));
+        // A path that is not there is told at once, and so is its end.
+        assert!(matches!(&out.fetch("/no/such/path", DONE_TAG | 8)[..], [ToClient::FetchEnd { ok: false, .. }, ToClient::FetchDone { tag }] if *tag == DONE_TAG | 8));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

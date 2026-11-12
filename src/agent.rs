@@ -389,7 +389,7 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
                 }
                 ToAgent::ListDir { path } => send(enc, &crate::files::list(&path)).map_err(io_err)?,
                 ToAgent::Fetch { tag, path } => {
-                    if let Some(m) = outbox.fetch(&path, tag) {
+                    for m in outbox.fetch(&path, tag) {
                         send(enc, &m).map_err(io_err)?;
                     }
                 }
