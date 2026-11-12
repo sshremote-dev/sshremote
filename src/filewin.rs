@@ -58,7 +58,6 @@ pub enum Cmd {
     },
     /// Stops a transfer: (upload?, id).
     Cancel(bool, u32),
-    Close,
 }
 
 /// A row of the transfer list.
@@ -296,34 +295,7 @@ impl FileWindow {
         }
     }
 
-    /// Draws the window; returns what the session should do.
-    pub fn show(&mut self, ctx: &egui::Context, host: &str, transfers: &[Transfer]) -> Vec<Cmd> {
-        let mut out = Vec::new();
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title(format!("Files - {host}"))
-            .with_inner_size([1000.0, 640.0])
-            .with_min_inner_size([640.0, 360.0])
-            .with_decorations(false);
-        if let Some(icon) = crate::gui::app_icon() {
-            builder = builder.with_icon(icon);
-        }
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sshremote-files"), builder, |ui, _| {
-            if ui.ctx().input(|i| i.viewport().close_requested()) {
-                out.push(Cmd::Close);
-            }
-            crate::gui::chrome::behaviour(ui.ctx());
-            let bar = crate::gui::chrome::title_bar(ui, |ui| {
-                ui.label(RichText::new(format!("Files - {host}")).size(13.0));
-            });
-            if bar.close {
-                out.push(Cmd::Close);
-            }
-            self.body(ui, host, transfers, &mut out);
-        });
-        out
-    }
-
-    /// The file manager drawn inside another window, as a connection made for files shows it.
+    /// The file manager drawn in a pane; returns what the session should do.
     pub fn embedded(&mut self, ui: &mut egui::Ui, host: &str, transfers: &[Transfer]) -> Vec<Cmd> {
         let mut out = Vec::new();
         self.body(ui, host, transfers, &mut out);

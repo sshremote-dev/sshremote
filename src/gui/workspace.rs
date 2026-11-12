@@ -415,14 +415,11 @@ pub(super) struct Workspace {
     pub(super) picker: Option<Place>,
     opt: Options,
     next_id: u64,
-    /// One pane fills the screen (its own full screen).
+    /// One pane fills the tab, the others wait (a layout, not full screen).
     zoom: Option<u64>,
-    /// Whether the window was last told to be full screen: it follows `zoom` and `window_full`.
-    sent_full: bool,
-    /// The whole window, split as it is, fills the screen.
-    window_full: bool,
-    /// Until when the title bar stays shown over a full-screen window, and the zoomed pane's dock.
-    reveal_until: f64,
+    /// The window on the whole monitor, and the dock that stands in for its title bar there.
+    full: super::dock::FullScreen,
+    dock: super::dock::Dock,
     /// Hosts reached, for the recent list.
     pub(super) reached: Vec<String>,
     /// Why something asked for could not open, for the app to show.
@@ -477,6 +474,8 @@ const TAB_MAX: f32 = 220.0;
 const TAB_MIN: f32 = 120.0;
 /// The + after the tabs.
 const PLUS_W: f32 = 34.0;
+/// The six layout buttons and their separator.
+const LAYOUT_W: f32 = 6.0 * 32.0 + 16.0;
 
 impl Workspace {
     pub(super) fn new(opt: Options) -> Workspace {
@@ -488,9 +487,8 @@ impl Workspace {
             opt,
             next_id: 1,
             zoom: None,
-            sent_full: false,
-            window_full: false,
-            reveal_until: 0.0,
+            full: Default::default(),
+            dock: Default::default(),
             reached: Vec::new(),
             failed: None,
             signin: None,
@@ -853,8 +851,7 @@ impl Workspace {
         sess.on_message(move || waker.request_repaint());
         let p = &mut self.panes[i];
         let label = format!("{}  {}x{}  {}", p.label, sess.desk.0, sess.desk.1, sess.backend);
-        let mut r = Remote::new(sess, rx, ctl, label, p.ssh_cmd.clone(), false);
-        r.in_pane = true;
+        let mut r = Remote::new(sess, rx, ctl, label, p.ssh_cmd.clone());
         if let Some(t) = p.terms.take() {
             r.adopt_terms(t);
         }
@@ -867,15 +864,19 @@ impl Workspace {
         // The terminal asked for beside the screen is a pane of its own below it, as every pane is.
         if panel {
             let launch = Launch::Agent { target: p.target.clone(), label: p.label.clone(), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Terminal };
-            let tab = self.tabs.iter().position(|t| { let mut l = Vec::new(); t.root.leaves(&mut l); l.contains(&id) });
-            if let Some(t) = tab {
+            if let Some(t) = self.tab_of(id) {
                 self.current = t;
                 self.tabs[t].active = id;
                 self.add(launch, Place::Split { below: true }, PaneStart::default());
             }
         }
         if full {
-            self.set_zoom(ctx, Some(id));
+            // `--fullscreen`: this screen alone on the whole monitor.
+            if let Some(t) = self.tab_of(id) {
+                self.current = t;
+                self.tabs[t].active = id;
+            }
+            self.set_full(ctx, true);
         }
         if let Err(e) = result {
             self.lost(i, e);
@@ -893,20 +894,90 @@ impl Workspace {
         p.state = State::Down(Down::new(true, why));
     }
 
-    fn set_zoom(&mut self, _ctx: &egui::Context, zoom: Option<u64>) {
+    /// One pane alone in its tab, or the grid again. What fills the tab is what takes the keys.
+    fn set_zoom(&mut self, zoom: Option<u64>) {
         self.zoom = zoom;
-        // What fills the window is what takes the keys.
         if let Some(z) = zoom
-            && let Some(tab) = self.tabs.iter_mut().find(|t| {
-                let mut l = Vec::new();
-                t.root.leaves(&mut l);
-                l.contains(&z)
-            })
+            && let Some(t) = self.tab_of(z)
         {
-            tab.active = z;
+            self.tabs[t].active = z;
         }
-        if zoom.is_some() {
-            self.window_full = false;
+        // A zoom the full screen made is the user's now.
+        self.full.zoomed = None;
+    }
+
+    /// The tab holding pane `id`.
+    fn tab_of(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| {
+            let mut l = Vec::new();
+            t.root.leaves(&mut l);
+            l.contains(&id)
+        })
+    }
+
+    /// The window on the whole monitor, or back. A screen in a split tab takes the monitor alone,
+    /// as Remote Desktop and RustDesk show one computer; that zoom goes again on the way out.
+    fn set_full(&mut self, ctx: &egui::Context, on: bool) {
+        if !self.full.set(ctx, on) {
+            return;
+        }
+        if on {
+            self.dock.greet(ctx.input(|i| i.time));
+            let active = self.active_id();
+            let screen = active.and_then(|id| self.index(id)).is_some_and(|i| self.mode_of_pane(i) == PaneMode::Screen);
+            if screen && self.zoom.is_none() && self.order(self.current).len() > 1 {
+                self.zoom = active;
+                self.full.zoomed = active;
+            }
+        } else {
+            self.left_full();
+        }
+    }
+
+    /// After full screen ended: the zoom it made goes, and the dock folds for next time.
+    fn left_full(&mut self) {
+        if self.full.zoomed.is_some() && self.zoom == self.full.zoomed {
+            self.zoom = None;
+        }
+        self.full.zoomed = None;
+        self.dock.open = false;
+    }
+
+    /// The dock while the window is full screen: Ctrl+Alt+Home unfolds or folds it, even over a
+    /// remote screen (whose keys are otherwise the host's); unfolded it holds the title bar's
+    /// tabs and controls.
+    fn full_screen_dock(&mut self, ctx: &egui::Context, area: Rect, action: &mut Option<(u64, remote::Deferred)>) {
+        let home = ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, egui::Key::Home));
+        if home {
+            self.dock.toggle(ctx.input(|i| i.time));
+        }
+        let status = self.status();
+        let width = self.bar_width();
+        let mut dock = std::mem::take(&mut self.dock);
+        dock.show(ctx, area, &status, width, |ui| self.bar(ui, action));
+        self.dock = dock;
+    }
+
+    /// The title bar's contents at their natural width: the tabs at their widest (up to four), the
+    /// +, the mode, the pane's controls as measured last frame, the layout and full-screen buttons.
+    fn bar_width(&self) -> f32 {
+        let tabs = self.tabs.len().clamp(1, 4) as f32 * TAB_MAX + PLUS_W + 12.0;
+        tabs + self.mode_w + 8.0 + self.controls_w + LAYOUT_W + 46.0 + 16.0
+    }
+
+    /// What the folded dock tells of the active pane.
+    fn status(&self) -> super::dock::Status {
+        let Some((id, i)) = self.active_id().and_then(|id| self.index(id).map(|i| (id, i))) else {
+            return super::dock::Status { glyph: ic::TERMINAL, name: String::new(), rtt: None, view_only: false, details: String::new() };
+        };
+        let (glyph, _) = self.glyph(id);
+        let name = self.panes[i].label.clone();
+        match &self.panes[i].state {
+            #[cfg(feature = "remote")]
+            State::Live(r) if r.mode() == PaneMode::Screen => {
+                super::dock::Status { glyph, rtt: Some(r.rtt()), view_only: r.view_only(), details: r.details(), name }
+            }
+            _ => super::dock::Status { glyph, rtt: None, view_only: false, details: name.clone(), name },
         }
     }
 
@@ -949,50 +1020,27 @@ impl Workspace {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.confirm = Some(Confirm::Window);
         }
-        let now = ctx.input(|i| i.time);
-        let pointer_top = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= 6.0);
-        if pointer_top {
-            self.reveal_until = now + 1.2;
-        }
-        // The title bar, unless a full screen hides it until the pointer reaches the top edge.
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
-        let show_bar = !self.window_full || now < self.reveal_until || ctx.any_popup_open() || menu_open(&ctx);
-        if show_bar {
-            // In the window's full screen the bar comes down over the panes, as the screen's
-            // toolbar does, rather than pushing them down.
-            let over = self.window_full.then(|| {
-                let r = Rect::from_min_size(ui.max_rect().min, Vec2::new(ui.max_rect().width(), super::chrome::HEIGHT));
-                ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(r)
-                        .layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("full-window-bar"))),
-                )
-            });
-            let bar = match over {
-                Some(mut child) => super::chrome::title_bar(&mut child, |ui| self.bar(ui, &mut remote_action)),
-                None => super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action)),
-            };
+        if self.full.follow_system(&ctx) {
+            self.left_full();
+        }
+        // In a window, the title bar; in full screen the dock stands in for it, drawn over the panes.
+        if !self.full.on {
+            let bar = super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action));
             if bar.close {
                 self.confirm = Some(Confirm::Window);
             }
             if bar.leave_full {
-                self.window_full = false;
-            }
-            // Kept while the pointer is on it or one of its menus is open.
-            let on_bar = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= super::chrome::HEIGHT + 4.0);
-            if self.window_full && (on_bar || ctx.any_popup_open() || menu_open(&ctx)) {
-                self.reveal_until = now + 0.6;
+                self.set_full(&ctx, false);
             }
         }
         self.extensions(&ctx);
         // Full screen is the picture alone: the extensions' status bar and panel wait outside it.
-        let area = if self.window_full { ui.available_rect_before_wrap() } else { super::extui::edges(ui, ui.available_rect_before_wrap(), &mut self.side) };
+        let area = if self.full.on { ui.available_rect_before_wrap() } else { super::extui::edges(ui, ui.available_rect_before_wrap(), &mut self.side) };
         self.panes_area = area;
         self.shortcuts(&ctx, area);
-        let full = self.window_full;
-        if full != self.sent_full {
-            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(full));
-            self.sent_full = full;
+        if self.full.on {
+            self.full_screen_dock(&ctx, area, &mut remote_action);
         }
         if self.tabs.is_empty() {
             return Out { empty: true, grab: false };
@@ -1018,7 +1066,7 @@ impl Workspace {
         let mut grabbed = Some(grabbed);
         let mut closing = Vec::new();
         let mut lost = Vec::new();
-        let mut zoom_req = None;
+        let mut full_toggle = false;
         let mut grab = false;
         let mut to_shell = Vec::new();
         for (id, rect) in &rects {
@@ -1036,18 +1084,13 @@ impl Workspace {
                 }
                 State::Live(r) => {
                     r.active = is_active;
-                    // The screen's own full-screen key (Ctrl+Alt+Enter) is this pane alone on the
-                    // whole monitor: zoomed and the window full screen.
-                    r.zoomed = self.zoom == Some(*id) && self.window_full;
-                    r.filling = self.window_full && (self.zoom == Some(*id) || !several);
+                    // Alone on the whole monitor, the picture fills it.
+                    r.filling = self.full.on && (self.zoom == Some(*id) || !several);
                     let keys = if is_active { grabbed.take().unwrap_or_default() } else { Vec::new() };
                     match r.show(&mut child, keys) {
-                        Err(e) if e == "disconnected" => closing.push(*id),
                         Err(e) => lost.push((i, e)),
                         Ok(()) => {
-                            if let Some(on) = r.zoom_request.take() {
-                                zoom_req = Some(on.then_some(*id));
-                            }
+                            full_toggle |= std::mem::take(&mut r.full_toggle);
                             if r.pane_closed {
                                 closing.push(*id);
                             }
@@ -1097,10 +1140,8 @@ impl Workspace {
                 }
                 State::Live(r) => {
                     r.active = false;
-                    match r.background(&ctx) {
-                        Err(e) if e == "disconnected" => closing.push(id),
-                        Err(e) => lost.push((i, e)),
-                        Ok(()) => {}
+                    if let Err(e) = r.background(&ctx) {
+                        lost.push((i, e));
                     }
                 }
                 State::Down(_) => {}
@@ -1111,11 +1152,7 @@ impl Workspace {
             && let State::Live(r) = &mut self.panes[i].state
             && let Err(e) = f(r, &ctx)
         {
-            if e == "disconnected" {
-                closing.push(id);
-            } else {
-                lost.push((i, e));
-            }
+            lost.push((i, e));
         }
         for (i, e) in lost {
             self.lost(i, e);
@@ -1123,10 +1160,8 @@ impl Workspace {
         for id in to_shell {
             self.set_mode(id, PaneMode::Terminal);
         }
-        if let Some(z) = zoom_req {
-            // After the zoom, which leaves the window's full screen: this one fills the monitor.
-            self.set_zoom(&ctx, z);
-            self.window_full = z.is_some();
+        if full_toggle {
+            self.set_full(&ctx, !self.full.on);
         }
         for id in closing {
             self.close_pane(id);
@@ -1168,10 +1203,10 @@ impl Workspace {
         };
         let panes = self.order(self.current).len();
         if take(Modifiers::NONE, Key::F11) {
-            self.window_full = !self.window_full;
+            self.set_full(ctx, !self.full.on);
         } else if take(cs, Key::Enter) {
             let z = if self.zoom == Some(active) { None } else { Some(active) };
-            self.set_zoom(ctx, z);
+            self.set_zoom(z);
         } else if take(cs, Key::T) {
             self.picker = Some(Place::Tab);
         } else if take(cs, Key::P) {
@@ -1213,9 +1248,8 @@ impl Workspace {
     fn bar(&mut self, ui: &mut egui::Ui, action: &mut Option<(u64, remote::Deferred)>) {
         ui.spacing_mut().item_spacing.x = 2.0;
         let avail = ui.available_width();
-        // Widths: the five layout buttons and their separator, the mode drop-down and the pane's
-        // controls (as measured last frame), the "more" menu.
-        const LAYOUT_W: f32 = 6.0 * 32.0 + 16.0;
+        // Widths: the mode drop-down and the pane's controls (as measured last frame), the "more"
+        // menu; the layout buttons' is `LAYOUT_W`.
         const MORE_W: f32 = 36.0;
         let mode_w = self.mode_w + 8.0;
         let now_for = self.active_id().and_then(|id| self.index(id).map(|i| (id, self.mode_of_pane(i))));
@@ -1240,7 +1274,7 @@ impl Workspace {
             // The whole window on the monitor, beside the window's own buttons.
             // A shared screen keeps F11 for the remote computer: its key is Ctrl+Alt+Enter.
             let screen = self.index(active).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen));
-            let (glyph, tip) = match (self.window_full, screen) {
+            let (glyph, tip) = match (self.full.on, screen) {
                 (true, false) => (ic::ARROWS_IN, "Leave full screen (F11)"),
                 (true, true) => (ic::ARROWS_IN, "Leave full screen (Ctrl+Alt+Enter; F11 goes to the remote computer)"),
                 (false, false) => (ic::ARROWS_OUT, "Full screen: the window on the whole monitor, as it is (F11)"),
@@ -1249,8 +1283,9 @@ impl Workspace {
                     "Full screen: the window on the whole monitor, as it is (F11 goes to the remote computer; Ctrl+Alt+Enter fills the screen with this one)",
                 ),
             };
-            if ui.add(tool_button(glyph, self.window_full)).on_hover_text(tip).clicked() {
-                self.window_full = !self.window_full;
+            if ui.add(tool_button(glyph, self.full.on)).on_hover_text(tip).clicked() {
+                let on = !self.full.on;
+                self.set_full(ui.ctx(), on);
             }
             ui.separator();
             if !fold_layout {
@@ -1759,8 +1794,7 @@ impl Workspace {
             match what {
                 0 => {
                     let z = if zoomed { None } else { self.active_id() };
-                    let ctx = ui.ctx().clone();
-                    self.set_zoom(&ctx, z);
+                    self.set_zoom(z);
                 }
                 1 | 2 => self.picker = Some(Place::Split { below: what == 2 }),
                 _ => self.move_active(what == 3),
@@ -2060,18 +2094,18 @@ mod tests {
         let cae = egui::Modifiers::CTRL | egui::Modifiers::ALT;
         let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
-        assert!(!h.w.window_full, "F11 goes to the remote computer");
+        assert!(!h.w.full.on, "F11 goes to the remote computer");
         h.bar(ic::ARROWS_OUT);
-        assert!(h.w.window_full, "the button fills the monitor");
+        assert!(h.w.full.on, "the button fills the monitor");
         h.frame(vec![key(egui::Key::Enter, cae)]);
         h.frame(Vec::new());
-        assert!(!h.w.window_full, "Ctrl+Alt+Enter leaves it");
+        assert!(!h.w.full.on, "Ctrl+Alt+Enter leaves it");
         h.frame(vec![key(egui::Key::Enter, cae)]);
         h.frame(Vec::new());
-        assert!(h.w.window_full, "and fills the monitor with the screen again");
+        assert!(h.w.full.on, "and fills the monitor with the screen again");
         h.frame(vec![key(egui::Key::Enter, cae)]);
         h.frame(Vec::new());
-        assert!(!h.w.window_full && h.w.zoom.is_none(), "and leaves");
+        assert!(!h.w.full.on && h.w.zoom.is_none(), "and leaves");
         h.w.close_all();
     }
 
@@ -2208,11 +2242,13 @@ mod tests {
         h.click_at(Pos2::new(200.0, 400.0), PointerButton::Primary);
         h.bar(ic::CORNERS_OUT);
         assert_eq!(h.w.zoom, Some(order[0]), "pane full screen");
-        h.w.set_zoom(&h.ctx.clone(), None);
-        // The window's full screen keeps the split.
+        h.w.set_zoom(None);
+        // Full screen from a screen shows it alone; leaving brings the split back.
         h.bar(ic::ARROWS_OUT);
-        assert!(h.w.window_full && h.w.zoom.is_none(), "window full screen");
-        h.w.window_full = false;
+        assert!(h.w.full.on && h.w.zoom == Some(order[0]), "the screen alone on the monitor");
+        let ctx = h.ctx.clone();
+        h.w.set_full(&ctx, false);
+        assert!(!h.w.full.on && h.w.zoom.is_none(), "the split again");
 
         // A lost connection is made again by itself, in the mode it had.
         h.w.set_mode(order[0], PaneMode::Terminal);
@@ -2287,12 +2323,11 @@ mod tests {
             h.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
             h.size = Vec2::new(1280.0, 800.0);
             let first = h.w.order(0)[0];
-            let ctx = h.ctx.clone();
             h.w.tabs[0].active = first;
-            h.w.set_zoom(&ctx, Some(first));
+            h.w.set_zoom(Some(first));
             h.frame(vec![Event::PointerMoved(Pos2::new(640.0, 2.0))]);
             save(&mut h, "zoom_dock");
-            h.w.set_zoom(&ctx, None);
+            h.w.set_zoom(None);
             if let State::Live(r) = &mut h.w.panes[0].state {
                 r.close();
             }
@@ -2600,9 +2635,9 @@ mod tests {
         assert_eq!(h.w.confirm, None);
         let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
         h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
-        assert!(h.w.window_full, "F11: the window's full screen");
+        assert!(h.w.full.on, "F11: the window's full screen");
         h.frame(vec![key(egui::Key::F11, egui::Modifiers::NONE)]);
-        assert!(!h.w.window_full);
+        assert!(!h.w.full.on);
         h.frame(vec![key(egui::Key::Enter, egui::Modifiers::CTRL | egui::Modifiers::SHIFT)]);
         assert_eq!(h.w.zoom, Some(id), "Ctrl+Shift+Enter: the pane's");
         h.w.close_all();
@@ -2787,16 +2822,16 @@ mod tests {
         }
         h.bar(ic::CORNERS_OUT);
         assert_eq!(h.w.zoom, Some(h.w.tabs[0].active), "the pane alone, in the tab");
-        assert!(!h.w.sent_full, "the window stays as it is");
+        assert!(!h.w.full.on, "the window stays as it is");
         for _ in 0..3 {
             h.frame(Vec::new());
         }
         assert!(h.snap.find(ic::PLUS).iter().any(|r| r.center().y < super::super::chrome::HEIGHT), "the tabs stay");
         h.bar(ic::CORNERS_IN);
         assert_eq!(h.w.zoom, None, "back to the grid");
-        // The window's full screen is its own button, at the right, and keeps the grid.
+        // The window's full screen is its own button, at the right, and keeps a grid of shells.
         h.bar(ic::ARROWS_OUT);
-        assert!(h.w.window_full && h.w.zoom.is_none());
+        assert!(h.w.full.on && h.w.zoom.is_none());
         h.w.close_all();
     }
 
@@ -2890,8 +2925,7 @@ mod tests {
         // A zoomed pane, then closed: the tab is a grid again.
         h.w.add(shell("d"), Place::Split { below: false }, PaneStart::default());
         let d = h.w.tabs[h.w.current].active;
-        let ctx = h.ctx.clone();
-        h.w.set_zoom(&ctx, Some(d));
+        h.w.set_zoom(Some(d));
         h.frame(Vec::new());
         assert_eq!(h.w.zoom, Some(d));
         h.w.close_pane(d);
@@ -2929,10 +2963,10 @@ mod tests {
         h.w.close_all();
     }
 
-    /// In the window's full screen the title bar hides, shows when the pointer reaches the top
-    /// edge, and hides again once it leaves.
+    /// In full screen the title bar gives way to a dock at the top edge: folded, the pane's state and
+    /// a caret; unfolded, the bar's tabs and controls.
     #[test]
-    fn full_window_shows_its_bar_at_the_top_edge() {
+    fn full_screen_dock_folds_and_unfolds() {
         let mut h = Harness::new();
         let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
         h.w.add(
@@ -2942,21 +2976,47 @@ mod tests {
         );
         h.frame(Vec::new());
         h.bar(ic::ARROWS_OUT);
-        assert!(h.w.window_full);
-        let bar_shown = |h: &Harness| h.snap.find(ic::PLUS).iter().any(|r| r.center().y < super::super::chrome::HEIGHT);
-        for _ in 0..40 {
-            h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
-        }
-        assert!(!bar_shown(&h), "hidden in full screen");
-        h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 1.0))]);
-        h.frame(Vec::new());
-        assert!(bar_shown(&h), "shown at the top edge");
-        // Over the panes, not pushing them down.
+        assert!(h.w.full.on);
+        let away = Pos2::new(600.0, 500.0);
+        let tabs_shown = |h: &Harness| !h.snap.find(ic::PLUS).is_empty();
+        h.frame(vec![Event::PointerMoved(away)]);
+        assert!(!tabs_shown(&h), "folded: no title bar");
         assert!(h.w.panes_area.top() < 1.0, "the panes start at the top: {:?}", h.w.panes_area);
-        for _ in 0..40 {
-            h.frame(vec![Event::PointerMoved(Pos2::new(600.0, 400.0))]);
+        assert!(!h.snap.find(ic::CARET_DOWN).is_empty(), "the folded dock greets at first");
+        for _ in 0..80 {
+            h.frame(vec![Event::PointerMoved(away)]);
         }
-        assert!(!bar_shown(&h), "hidden again");
+        assert!(h.snap.find(ic::CARET_DOWN).is_empty(), "then steps aside: the picture is whole");
+        h.frame(vec![Event::PointerMoved(Pos2::new(900.0, 1.0))]);
+        h.frame(Vec::new());
+        let caret = h.snap.find(ic::CARET_DOWN).into_iter().next().expect("back at the top edge");
+        assert!(caret.top() < 40.0, "at the top edge");
+        assert!(!h.snap.find("shell").is_empty(), "the pane's name in the dock");
+        // The caret unfolds it: the tabs and the controls.
+        h.click_at(caret.center(), PointerButton::Primary);
+        assert!(h.w.dock.open && tabs_shown(&h), "unfolded");
+        // Away from it, it folds by itself after a moment.
+        for _ in 0..60 {
+            h.frame(vec![Event::PointerMoved(away)]);
+        }
+        assert!(!h.w.dock.open && !tabs_shown(&h), "folded again");
+        // Ctrl+Alt+Home unfolds and folds it.
+        let home = |pressed| Event::Key { key: egui::Key::Home, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT };
+        h.frame(vec![home(true)]);
+        h.frame(vec![home(false)]);
+        assert!(h.w.dock.open, "Ctrl+Alt+Home unfolds it");
+        // The pill stays where it was: a second click on its caret folds the band up.
+        let again = h.snap.find(ic::CARET_UP).into_iter().next().expect("the caret, turned");
+        assert!((again.center().x - caret.center().x).abs() < 1.0, "the caret did not move");
+        h.click_at(again.center(), PointerButton::Primary);
+        assert!(!h.w.dock.open, "folded up by the same spot");
+        // Leaving full screen from the band.
+        h.click_at(caret.center(), PointerButton::Primary);
+        let leave = h.snap.find(ic::ARROWS_IN).into_iter().next().expect("leave full screen in the band");
+        h.click_at(leave.center(), PointerButton::Primary);
+        assert!(!h.w.full.on, "left full screen");
+        h.frame(Vec::new());
+        assert!(tabs_shown(&h), "the title bar is back");
         h.w.close_all();
     }
 
@@ -2968,7 +3028,8 @@ mod tests {
         let mut h = Harness::new();
         h.w.add(test_desktop(), Place::Tab, PaneStart::default());
         h.until("connected", |w| live(w, 0));
-        h.w.window_full = true;
+        let ctx = h.ctx.clone();
+        h.w.set_full(&ctx, true);
         let shown_of = |w: &Workspace| match &w.panes[0].state {
             State::Live(r) => r.shown_rect(),
             _ => None,

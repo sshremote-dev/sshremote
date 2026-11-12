@@ -12,10 +12,8 @@ pub(crate) enum Ev {}
 pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
 
 pub(super) struct Remote {
-    pub(super) in_pane: bool,
     pub(super) active: bool,
-    pub(super) zoom_request: Option<bool>,
-    pub(super) zoomed: bool,
+    pub(super) full_toggle: bool,
     pub(super) filling: bool,
     pub(super) grab_wanted: bool,
     pub(super) pane_closed: bool,
@@ -47,6 +45,7 @@ impl Remote {
     pub(super) fn toolbar_items(&mut self, _: &mut egui::Ui, _: &mut Option<Deferred>) {
         match self.never {}
     }
+    #[cfg(test)]
     pub(super) fn shown_rect(&self) -> Option<Rect> {
         match self.never {}
     }

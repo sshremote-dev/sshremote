@@ -36,6 +36,7 @@ mod lottie;
 pub(crate) mod snapshot;
 mod signin;
 mod extui;
+mod dock;
 #[cfg(feature = "drive")]
 mod drive;
 
@@ -124,7 +125,6 @@ pub(crate) mod ic {
     pub const PAUSE: &str = "\u{E39E}";
     pub const PLAY: &str = "\u{E3D0}";
     pub const PUSH_PIN: &str = "\u{E3E2}";
-    pub const PUSH_PIN_SLASH: &str = "\u{E3E4}";
     pub const STAR: &str = "\u{E46A}";
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";

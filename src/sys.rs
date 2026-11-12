@@ -92,7 +92,7 @@ pub fn quote_arg(a: &str) -> String {
 }
 
 /// A command line from separate arguments.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub fn command_line(argv: &[String]) -> String {
     argv.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ")
 }
