@@ -269,9 +269,10 @@ fn terminals_draw_korean() {
     if !ui_fonts.iter().any(|(p, _)| is_cjk(p) && std::path::Path::new(p).is_file()) {
         return;
     }
+    use crate::gui::snapshot::RunTest;
     let ctx = egui::Context::default();
     install_fonts(&ctx);
-    let _ = ctx.run_ui(Default::default(), |_| {});
+    let _ = ctx.run_test(Default::default(), |_| {});
     let has = |family: FontFamily| ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::new(14.0, family), '안'));
     assert!(has(FontFamily::Proportional));
     assert!(has(FontFamily::Monospace), "Hangul in the terminal's font");

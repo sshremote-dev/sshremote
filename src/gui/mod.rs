@@ -1094,13 +1094,13 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..3 {
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = ctx.run_test(input(), |ui| {
                 app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
             });
         }
         assert_eq!(app.windows.len(), 1, "the window stays while it has a tab");
         app.windows[0].1.close_all();
-        let _ = ctx.run_ui(input(), |ui| {
+        let _ = ctx.run_test(input(), |ui| {
             app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
         });
         assert!(app.windows.is_empty(), "and goes with its last tab");
@@ -1132,7 +1132,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..3 {
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = ctx.run_test(input(), |ui| {
                 app.other_windows(ui.ctx(), Vec::new(), &mut Vec::new());
             });
         }

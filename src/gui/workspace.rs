@@ -1982,6 +1982,7 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<Dow
 /// SSHREMOTE_EXE=target/release/sshremote.exe cargo test --release -- --ignored --test-threads=1 workspace
 #[cfg(test)]
 mod tests {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     /// A terminal-only core hands screens and files to the Remote desktop extension's window.
@@ -2665,7 +2666,7 @@ mod tests {
         info.inner_rect = Some(Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 600.0)));
         info.native_pixels_per_point = Some(1.5);
         let mut got = Pos2::ZERO;
-        let _ = ctx.run_ui(input, |ui| got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0)));
+        let _ = ctx.run_test(input, |ui| got = screen_point(ui.ctx(), Pos2::new(10.0, 20.0)));
         assert_eq!(got, Pos2::new(165.0, 105.0));
     }
 

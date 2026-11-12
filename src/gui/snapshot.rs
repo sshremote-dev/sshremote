@@ -5,6 +5,20 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, TextureId, Vec2};
 
+/// A frame run in a test, without a window to take its textures: they are let go, as epaint
+/// asserts that none is dropped unapplied.
+pub trait RunTest {
+    fn run_test(&self, input: egui::RawInput, run: impl FnMut(&mut egui::Ui)) -> egui::FullOutput;
+}
+
+impl RunTest for egui::Context {
+    fn run_test(&self, input: egui::RawInput, run: impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
+        let mut out = self.run_ui(input, run);
+        out.textures_delta.clear();
+        out
+    }
+}
+
 /// The textures egui has handed out so far (the font atlas among them).
 #[derive(Default)]
 pub struct Snap {

@@ -53,7 +53,7 @@ impl Synthetic {
             let y = 60 + row * 22;
             let line = row + self.scrolled;
             let mut x = 20 + (line % 3) * 30;
-            let mut seed = line as u32 * 2654435761;
+            let mut seed = (line as u32).wrapping_mul(2654435761);
             while x < 760 {
                 seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
                 let word = 2 + (seed >> 16) as usize % 7;

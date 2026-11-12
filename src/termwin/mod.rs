@@ -1499,6 +1499,7 @@ pub(crate) fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     #[test]
@@ -1560,7 +1561,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = Vec::new();
-        let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
+        let _ = ctx.run_test(input, |ui| out.extend(w.embedded(ui)));
         out
     }
 
@@ -1769,7 +1770,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            ctx.run_ui(input, |ui| {
+            ctx.run_test(input, |ui| {
                 w.embedded(ui);
             })
         };
@@ -1865,7 +1866,7 @@ mod tests {
                     ..Default::default()
                 };
                 let mut cmds = Vec::new();
-                let _ = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+                let _ = ctx.run_test(input, |ui| cmds.extend(w.embedded(ui)));
                 cmds
             };
             at(&mut w, 900.0);
@@ -1928,7 +1929,7 @@ mod tests {
                 time: Some(clock),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = ctx.run_test(input, |ui| {
                 w.embedded(ui);
             });
         };
@@ -2175,7 +2176,7 @@ mod tests {
                 time: Some(clock),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = ctx.run_test(input, |ui| {
                 w.embedded(ui);
             });
         };
@@ -2221,7 +2222,7 @@ mod tests {
                 ..Default::default()
             };
             let mut out = Vec::new();
-            let _ = ctx.run_ui(input, |ui| out.extend(w.embedded(ui)));
+            let _ = ctx.run_test(input, |ui| out.extend(w.embedded(ui)));
             typed(&out)
         };
         assert_eq!(cut(&ctx, &mut w, egui::Modifiers::SHIFT), "\u{1b}[3;2~");
@@ -2268,7 +2269,7 @@ mod tests {
             focused: true,
             ..Default::default()
         };
-        let out = ctx.run_ui(input, |ui| {
+        let out = ctx.run_test(input, |ui| {
             w.embedded(ui);
         });
         let ime = out.platform_output.ime.expect("an input method at the cursor");
@@ -2304,7 +2305,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        let out = ctx.run_ui(input, |ui| {
+        let out = ctx.run_test(input, |ui| {
             w.embedded(ui);
         });
         out.platform_output.ime.map_or(f32::NAN, |i| i.cursor_rect.top())
@@ -2367,7 +2368,7 @@ mod tests {
             ..Default::default()
         };
         let mut cmds = Vec::new();
-        let out = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+        let out = ctx.run_test(input, |ui| cmds.extend(w.embedded(ui)));
         assert_eq!(typed(&cmds), "", "Ctrl+C with a selection copies instead of interrupting");
         let copied = out
             .platform_output
@@ -2399,11 +2400,11 @@ mod tests {
             ..Default::default()
         };
         let mut cmds = Vec::new();
-        let out = ctx.run_ui(input(vec![key(egui::Modifiers::CTRL)]), |ui| cmds.extend(w.embedded(ui)));
+        let out = ctx.run_test(input(vec![key(egui::Modifiers::CTRL)]), |ui| cmds.extend(w.embedded(ui)));
         assert_eq!(typed(&cmds), "", "nothing typed");
         assert!(out.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s == "copy me")));
         cmds.clear();
-        let out = ctx.run_ui(input(vec![key(egui::Modifiers::SHIFT)]), |ui| cmds.extend(w.embedded(ui)));
+        let out = ctx.run_test(input(vec![key(egui::Modifiers::SHIFT)]), |ui| cmds.extend(w.embedded(ui)));
         assert_eq!(typed(&cmds), "", "nothing typed");
         let pasting = out.viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::RequestPaste));
         assert!(pasting, "Shift+Insert asks for the clipboard");
@@ -2429,7 +2430,7 @@ mod tests {
                     focused: true,
                     ..Default::default()
                 };
-                shapes = ctx.run_ui(input, |ui| { w.embedded(ui); }).shapes;
+                shapes = ctx.run_test(input, |ui| { w.embedded(ui); }).shapes;
             }
             // Where "alpha beta gamma" was drawn.
             fn find(s: &egui::Shape, out: &mut Option<Rect>) {
@@ -2458,7 +2459,7 @@ mod tests {
                 ..Default::default()
             };
             let mut cmds = Vec::new();
-            let out = ctx.run_ui(input, |ui| cmds.extend(w.embedded(ui)));
+            let out = ctx.run_test(input, |ui| cmds.extend(w.embedded(ui)));
             assert_eq!(typed(&cmds), "", "{view:?}: Ctrl+C with a selection does not interrupt");
             let copied: Vec<&String> = out
                 .platform_output
@@ -2511,6 +2512,7 @@ mod tests {
 
 #[cfg(test)]
 mod speed {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     /// Time to rebuild the reading views from a full scrollback, whole and after new output:
@@ -2521,8 +2523,8 @@ mod speed {
         let ctx = egui::Context::default();
         let mut w = TermWindow::new(None);
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))), ..Default::default() };
-        let _ = ctx.run_ui(input.clone(), |ui| { w.embedded(ui); });
-        let _ = ctx.run_ui(input, |ui| { w.embedded(ui); });
+        let _ = ctx.run_test(input.clone(), |ui| { w.embedded(ui); });
+        let _ = ctx.run_test(input, |ui| { w.embedded(ui); });
         let t = &mut w.tabs[0];
         let out = |t: &mut Tab, from: usize, n: usize| {
             for k in from..from + n {
@@ -2543,12 +2545,13 @@ mod speed {
 
 #[cfg(test)]
 mod rows {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     fn tab_with(w: &mut TermWindow, ctx: &egui::Context) {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0))), ..Default::default() };
-        let _ = ctx.run_ui(input.clone(), |ui| { w.embedded(ui); });
-        let _ = ctx.run_ui(input, |ui| { w.embedded(ui); });
+        let _ = ctx.run_test(input.clone(), |ui| { w.embedded(ui); });
+        let _ = ctx.run_test(input, |ui| { w.embedded(ui); });
     }
 
     /// The cached scrollback matches the scrollback worked out whole, while it fills, once it is

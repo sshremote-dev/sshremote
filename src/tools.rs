@@ -998,6 +998,7 @@ pub fn open_path(p: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::snapshot::RunTest;
     #[test]
     fn config_blocks_are_read() {
         let text = "Host web1
@@ -1087,7 +1088,7 @@ Host c
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = ctx.run_test(input, |ui| {
                 let mut actions = Vec::new();
                 let mut changed = false;
                 keys.ui(ui, &mut actions);

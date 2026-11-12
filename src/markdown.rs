@@ -1437,6 +1437,7 @@ mod tests {
 
 #[cfg(test)]
 mod speed {
+    use crate::gui::snapshot::RunTest;
     use super::*;
 
     /// Frame times for a long document drawn whole and drawn by what is in view:
@@ -1458,10 +1459,10 @@ mod speed {
             ..Default::default()
         };
         let time = |f: &mut dyn FnMut(&mut egui::Ui)| {
-            let _ = ctx.run_ui(input(), |ui| f(ui));
+            let _ = ctx.run_test(input(), |ui| f(ui));
             let start = std::time::Instant::now();
             for _ in 0..10 {
-                let _ = ctx.run_ui(input(), |ui| f(ui));
+                let _ = ctx.run_test(input(), |ui| f(ui));
             }
             start.elapsed().as_secs_f64() * 100.0
         };

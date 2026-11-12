@@ -806,6 +806,7 @@ impl FileWindow {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::snapshot::RunTest;
     /// Keys typed into another pane do not reach a file manager that is not the active one:
     /// Delete would otherwise ask to delete its selection, and Enter would confirm.
     #[test]
@@ -822,10 +823,10 @@ mod tests {
                 ..Default::default()
             };
             let delete = egui::Event::Key { key: Key::Delete, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
-            let _ = ctx.run_ui(input(Vec::new()), |ui| {
+            let _ = ctx.run_test(input(Vec::new()), |ui| {
                 w.embedded(ui, "host", &[]);
             });
-            let _ = ctx.run_ui(input(vec![delete]), |ui| {
+            let _ = ctx.run_test(input(vec![delete]), |ui| {
                 w.embedded(ui, "host", &[]);
             });
             assert_eq!(w.dialog.is_some(), active, "active {active}");
