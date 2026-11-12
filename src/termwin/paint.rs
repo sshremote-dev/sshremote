@@ -158,7 +158,9 @@ pub(super) fn paint(ui: &egui::Ui, t: &Tab, area: Rect, font: &FontId, cw: f32, 
     end_bg(&mut bg_run, &mut bgs);
     painter.set(bg_slot, egui::Shape::Vec(bgs));
     let mut caret = caret_cell;
-    if !t.preedit.is_empty() && show_cursor {
+    // A program that hides the cursor (a full-screen editor, a TUI) still shows what is being
+    // composed (Korean, Japanese), where the cursor is.
+    if !t.preedit.is_empty() && offset == 0 && t.exited.is_none() {
         // The composition in progress, underlined, with the caret after it as in a text field.
         let at =
             Pos2::new(origin.x + cursor.column.0 as f32 * cw, origin.y + (cursor.line.0 + offset - first) as f32 * ch);
@@ -272,9 +274,11 @@ pub(super) fn screen(
     };
 
     // Mouse: drag selects, double click selects a word, the wheel scrolls back.
+    // From where the button went down, not where the pointer is once it counts as a drag (a few
+    // pixels on), which would leave out the first characters.
     if !app_mouse
         && resp.drag_started_by(egui::PointerButton::Primary)
-        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(p) = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos())
     {
         let (pt, side) = cell_at(p);
         t.term.selection = Some(Selection::new(SelectionType::Simple, pt, side));
