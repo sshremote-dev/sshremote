@@ -455,7 +455,7 @@ function keysym(e) {
 // Draws the gateway's picture updates on `canvas`, in order: the moves (an area shifted, as the
 // host scrolled), then the changed areas, each a WebP or JPEG picture. `drawn` is told each
 // update's number once it is on the canvas, and `first` the first time.
-function painter(canvas, first, drawn) {
+function painter(canvas, first, drawn, resized) {
   const ctx = canvas.getContext("2d");
   const TYPES = ["image/webp", "image/jpeg"];
   const queue = [];
@@ -465,7 +465,7 @@ function painter(canvas, first, drawn) {
     let o = 1;
     const seq = d.getUint32(o, true), w = d.getUint16(o + 4, true), hh = d.getUint16(o + 6, true);
     o += 8;
-    if (canvas.width !== w || canvas.height !== hh) { canvas.width = w; canvas.height = hh; }
+    if (canvas.width !== w || canvas.height !== hh) { canvas.width = w; canvas.height = hh; resized(); }
     const moves = d.getUint8(o++);
     for (let i = 0; i < moves; i++, o += 10) {
       const x = d.getUint16(o, true), y = d.getUint16(o + 2, true), mw = d.getUint16(o + 4, true), mh = d.getUint16(o + 6, true), dy = d.getInt16(o + 8, true);
@@ -841,8 +841,18 @@ class Client {
 
   // ----- Screen
   want() {
-    const c = $("canvas");
+    // Zoomed, the host's own size (the agent never sends more); else the view's, in pixels.
+    if (typeof this.viewFit === "number") return [8192, 8192];
+    const c = $("vscreen");
     return [Math.max(64, Math.round(c.clientWidth * devicePixelRatio)) || 1280, Math.max(64, Math.round(c.clientHeight * devicePixelRatio)) || 720];
+  }
+  // How the picture fits the view, kept for next time.
+  setFit(f) {
+    this.viewFit = f;
+    store.set("fit", f);
+    this.layout();
+    this.send({ view: this.want() });
+    this.screenTools();
   }
   screenWait() {
     const w = $("swait");
@@ -860,14 +870,31 @@ class Client {
     this.pictured = false;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    this.show = painter(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } }, seq => this.send({ drawn: seq }));
+    // How the picture sits in the view: fitted (with bars where the shapes differ), stretched to
+    // fill it, or at a zoom (1: a pixel of the host's to a point here), panned by scrolling.
+    this.viewFit = store.get("fit", "fit");
+    this.layout = () => {
+      const z = typeof this.viewFit === "number" ? this.viewFit : 0;
+      $("vscreen").classList.toggle("zoomed", !!z);
+      canvas.style.objectFit = this.viewFit === "stretch" ? "fill" : "contain";
+      canvas.style.width = z ? canvas.width * z + "px" : "";
+      canvas.style.height = z ? canvas.height * z + "px" : "";
+    };
+    this.layout();
+    this.show = painter(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } }, seq => this.send({ drawn: seq }), () => this.layout());
     const send = v => { if (!this.viewOnly) this.send(v); };
-    // Pointer positions in the picture's pixels, past the letterbox around it.
+    // Pointer positions in the picture's pixels: past the bars around a fitted picture, or
+    // across the whole of a stretched or zoomed one.
     const point = e => {
       const r = canvas.getBoundingClientRect();
-      const k = Math.min(r.width / canvas.width, r.height / canvas.height);
-      const ox = (r.width - canvas.width * k) / 2, oy = (r.height - canvas.height * k) / 2;
-      const x = Math.floor((e.clientX - r.left - ox) / k), y = Math.floor((e.clientY - r.top - oy) / k);
+      let x, y;
+      if (this.viewFit === "fit") {
+        const k = Math.min(r.width / canvas.width, r.height / canvas.height);
+        const ox = (r.width - canvas.width * k) / 2, oy = (r.height - canvas.height * k) / 2;
+        x = Math.floor((e.clientX - r.left - ox) / k); y = Math.floor((e.clientY - r.top - oy) / k);
+      } else {
+        x = Math.floor((e.clientX - r.left) * canvas.width / r.width); y = Math.floor((e.clientY - r.top) * canvas.height / r.height);
+      }
       return x >= 0 && y >= 0 && x < canvas.width && y < canvas.height ? [x, y] : null;
     };
     const BUTTON = [1, 2, 3, 8, 9];
@@ -875,8 +902,68 @@ class Client {
     // browser (a finger's drag turned into scrolling or zooming).
     let down = null;
     canvas.style.touchAction = "none";
-    canvas.onpointermove = e => { const p = point(e); if (p) send({ move: p }); };
+    // Fingers, by pointer: a tap clicks, a long press right-clicks, a drag drags with the left
+    // button, two fingers scroll and pinch to zoom the picture here.
+    const fingers = new Map();
+    let finger = null;   // the one finger's gesture: { at, start, drag, long, timer }
+    let pair = null;     // two fingers': { mid, dist, zoom, rows }
+    const mid = () => { const [a, b] = [...fingers.values()]; return [(a.x + b.x) / 2, (a.y + b.y) / 2, Math.hypot(a.x - b.x, a.y - b.y)]; };
+    const click = (p, b) => { send({ move: p }); send({ button: [b, 1] }); send({ button: [b, 0] }); };
+    const touchDown = e => {
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* a pointer the browser no longer has */ }
+      if (fingers.size === 1) {
+        const p = point(e);
+        finger = { at: p, start: [e.clientX, e.clientY], drag: false, long: false, timer: null };
+        if (p) finger.timer = setTimeout(() => { finger.long = true; click(p, 3); navigator.vibrate?.(15); }, 550);
+      } else if (fingers.size === 2) {
+        if (finger?.drag) send({ button: [1, 0] });
+        if (finger) clearTimeout(finger.timer);
+        finger = null;
+        const r = canvas.getBoundingClientRect();
+        const [x, y, dist] = mid();
+        pair = { mid: [x, y], dist, zoom: typeof this.viewFit === "number" ? this.viewFit : r.width / canvas.width, rows: 0 };
+      }
+    };
+    const touchMove = e => {
+      if (!fingers.has(e.pointerId)) return;
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (finger && fingers.size === 1) {
+        const p = point(e);
+        if (!finger.drag && !finger.long && Math.hypot(e.clientX - finger.start[0], e.clientY - finger.start[1]) > 8) {
+          clearTimeout(finger.timer);
+          finger.drag = true;
+          if (finger.at) { send({ move: finger.at }); send({ button: [1, 1] }); }
+        }
+        if (finger.drag && p) send({ move: p });
+      } else if (pair && fingers.size === 2) {
+        const [x, y, dist] = mid();
+        // Fingers up scroll the page down, as on a phone; every 30 points a step.
+        pair.rows += (pair.mid[1] - y) / 30;
+        // A hair over, so 90 points made of thirds of a step are 3 steps, not 2.999.
+        const steps = Math.trunc(pair.rows + Math.sign(pair.rows) * 1e-9);
+        if (steps) { send({ wheel: [0, steps] }); pair.rows -= steps; }
+        pair.mid = [x, y];
+        const z = Math.min(4, Math.max(0.25, pair.zoom * dist / pair.dist));
+        if (Math.abs(dist / pair.dist - 1) > 0.12) { this.viewFit = Math.round(z * 20) / 20; this.layout(); }
+      }
+    };
+    const touchUp = e => {
+      if (!fingers.delete(e.pointerId)) return;
+      if (finger && fingers.size === 0) {
+        clearTimeout(finger.timer);
+        if (finger.drag) send({ button: [1, 0] });
+        else if (!finger.long && finger.at) click(finger.at, 1);
+        finger = null;
+      }
+      if (fingers.size < 2) pair = null;
+    };
+    canvas.onpointermove = e => {
+      if (e.pointerType === "touch") { touchMove(e); return; }
+      const p = point(e); if (p) send({ move: p });
+    };
     canvas.onpointerdown = e => {
+      if (e.pointerType === "touch") { e.preventDefault(); touchDown(e); return; }
       this.keyboard();
       const p = point(e); if (!p) return;
       canvas.setPointerCapture(e.pointerId);
@@ -885,11 +972,13 @@ class Client {
       e.preventDefault();
     };
     canvas.onpointerup = e => {
+      if (e.pointerType === "touch") { touchUp(e); return; }
       const b = BUTTON[e.button] || 1;
       if (b === down) down = null;
       send({ button: [b, 0] });
     };
-    canvas.onpointercancel = () => {
+    canvas.onpointercancel = e => {
+      if (e.pointerType === "touch") { touchUp(e); return; }
       if (down !== null) send({ button: [down, 0] });
       down = null;
     };
@@ -1074,6 +1163,11 @@ class Client {
       ["Auto (adapts to the connection)", () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
       ...(this.qualities || []).map((p, i) => [p.text, () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
       ["Custom: colours, resolution, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
+      null,
+      "View",
+      ["Fit to the window", () => this.setFit("fit"), { on: this.viewFit === "fit" }],
+      ["Stretch to fill", () => this.setFit("stretch"), { on: this.viewFit === "stretch" }],
+      ...[0.5, 0.75, 1, 1.5, 2].map(z => [z * 100 + "%" + (z === 1 ? " (the host's own size)" : ""), () => this.setFit(z), { on: this.viewFit === z }]),
       null,
       ["Repaint the whole screen", () => this.send({ refresh: 1 })],
     ], at);
