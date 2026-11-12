@@ -373,15 +373,16 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     let argv: Vec<String> = if host == HERE { Vec::new() } else { vec!["ssh".into(), "-tt".into(), host.to_string()] };
     let (wake_tx, wake) = mpsc::sync_channel::<()>(1);
     let term = pty_spawn(&argv, size("cols", 80), size("rows", 24), wake_tx)?;
-    let term = Arc::new(Mutex::new(term));
-    // Output to the browser as it comes.
+    // Taken out when the browser goes, which hangs up the shell (or ssh) at once.
+    let term = Arc::new(Mutex::new(Some(term)));
+    // Output to the browser as it comes, until the terminal is taken away or ends.
     let (t2, w2) = (term.clone(), w.clone());
     let out = std::thread::spawn(move || {
         loop {
             let _ = wake.recv_timeout(Duration::from_millis(500));
-            let (data, end) = match t2.lock() {
-                Ok(mut t) => t.drain(),
-                Err(_) => return,
+            let (data, end) = match t2.lock().as_deref_mut() {
+                Ok(Some(t)) => t.drain(),
+                _ => return,
             };
             if !data.is_empty() && send(&w2, 0x2, &data).is_err() {
                 return;
@@ -397,9 +398,16 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
         }
     });
     // Input and resizes from the browser until it goes.
+    let with_term = |f: &mut dyn FnMut(&mut _)| {
+        if let Ok(mut t) = term.lock()
+            && let Some(t) = t.as_mut()
+        {
+            f(t);
+        }
+    };
     loop {
         match read_frame(&mut r, &w) {
-            Ok(Frame::Binary(data)) => term.lock().map_err(|e| e.to_string())?.write(&data),
+            Ok(Frame::Binary(data)) => with_term(&mut |t| t.write(&data)),
             Ok(Frame::Text(t)) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
                 if let Some([c, r]) = v
@@ -408,9 +416,8 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
                     .map(|a| a.iter().filter_map(|n| n.as_u64()).collect::<Vec<_>>())
                     .as_deref()
                 {
-                    term.lock()
-                        .map_err(|e| e.to_string())?
-                        .resize((*c).clamp(2, 500) as u16, (*r).clamp(1, 500) as u16);
+                    let (c, r) = ((*c).clamp(2, 500) as u16, (*r).clamp(1, 500) as u16);
+                    with_term(&mut |t| t.resize(c, r));
                 }
             }
             Ok(Frame::Close) | Err(_) => break,
@@ -419,8 +426,10 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     if let Ok(s) = w.lock() {
         let _ = s.shutdown(std::net::Shutdown::Both);
     }
-    // The terminal ends with the session (dropping it hangs up the shell).
-    drop(term);
+    // The terminal ends with the session: taken from the output thread too, it is dropped here,
+    // which hangs up the shell.
+    let gone = term.lock().ok().and_then(|mut t| t.take());
+    drop(gone);
     let _ = out.join();
     Ok(())
 }
@@ -989,6 +998,30 @@ Host: x
         }
         // Typed, then printed.
         assert!(String::from_utf8_lossy(&seen).matches("web-42").count() >= 2, "{}", String::from_utf8_lossy(&seen));
+        // Closing the tab hangs up its shell at once, rather than leave it for the gateway's life.
+        #[cfg(unix)]
+        {
+            put(&mut s, 2, b"echo PID=$$=\r");
+            let mut out = String::new();
+            let pid = loop {
+                let (op, d) = get(&mut r);
+                if op == 2 {
+                    out.push_str(&String::from_utf8_lossy(&d));
+                }
+                // The echo of the command shows "$$"; the shell's answer shows digits.
+                if let Some(p) = out.split("PID=").filter_map(|t| t.split('=').next()?.parse::<u32>().ok()).next() {
+                    break p;
+                }
+            };
+            put(&mut s, 8, b"");
+            let gone = (0..30).any(|_| {
+                std::thread::sleep(Duration::from_millis(100));
+                !std::path::Path::new(&format!("/proc/{pid}")).exists()
+                    || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|st| st.contains(") Z "))
+            });
+            assert!(gone, "the shell {pid} outlived its tab");
+        }
+        #[cfg(not(unix))]
         put(&mut s, 8, b"");
     }
 

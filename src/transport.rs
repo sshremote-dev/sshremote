@@ -31,6 +31,14 @@ impl Link {
     }
 }
 
+/// A link let go on any path (an error on the way out included) ends its ssh or agent with it,
+/// and reaps it.
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 pub use crate::vault::ASKPASS_SECRET;
 
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
