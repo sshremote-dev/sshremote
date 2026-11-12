@@ -242,13 +242,16 @@ pub(crate) fn apply_theme(ctx: &egui::Context, dark: bool) {
     ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
 }
 
-/// The main action of a window or form: a button close to the background with an outline, in
-/// the text colour, so it stands out without loud colour.
+/// The main action of a window or form, one to a form: white on the app's blue, so it is the
+/// first thing the eye finds and Enter's button is plain.
 pub(crate) fn primary(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text.into()).strong())
-        .stroke(Stroke::new(1.0, crate::gui::outline()))
+    egui::Button::new(egui::RichText::new(text.into()).strong().color(egui::Color32::WHITE))
+        .fill(PRIMARY)
         .min_size(Vec2::new(0.0, 32.0))
 }
+
+/// The main action's blue: the logo's, dark enough under white text in both themes.
+pub(crate) const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0x2B, 0x59, 0xC3);
 
 #[cfg(test)]
 mod contrast {

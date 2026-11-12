@@ -175,6 +175,11 @@ pub fn load() -> Config {
     stored().ok().flatten().unwrap_or_else(fresh)
 }
 
+/// The relay this computer uses, to reach others by ID through it too.
+pub fn relay() -> String {
+    stored().ok().flatten().map_or_else(default_relay, |c| c.relay)
+}
+
 pub fn save(c: &Config) -> Result<(), String> {
     if c.password.trim().chars().count() < 8 {
         return Err("The password needs at least 8 characters".into());

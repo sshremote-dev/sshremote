@@ -8,20 +8,47 @@ pub fn ssh_config_hosts() -> Vec<String> {
     parse_ssh_hosts(&std::fs::read_to_string(crate::sys::ssh_dir().join("config")).unwrap_or_default())
 }
 
+/// Services that answer ssh for git only: an alias for one of them is there for git, never a
+/// computer to open a terminal or a screen on.
+const GIT_HOSTS: [&str; 8] = [
+    "github.com",
+    "ssh.github.com",
+    "gitlab.com",
+    "altssh.gitlab.com",
+    "bitbucket.org",
+    "altssh.bitbucket.org",
+    "codeberg.org",
+    "ssh.dev.azure.com",
+];
+
+/// The `Host` aliases of an ssh config without patterns, and without those for git services
+/// (by their name or their `HostName`).
 fn parse_ssh_hosts(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut git: Vec<String> = Vec::new();
+    // The aliases of the `Host` block being read.
+    let mut block: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         let Some((key, rest)) = line.split_once(|c: char| c.is_whitespace() || c == '=') else { continue };
-        if !key.eq_ignore_ascii_case("host") {
-            continue;
-        }
-        for name in rest.split_whitespace() {
-            if !name.contains(['*', '?', '!']) && !out.iter().any(|n| n == name) {
-                out.push(name.to_string());
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+        if key.eq_ignore_ascii_case("host") {
+            block = rest.split_whitespace().filter(|n| !n.contains(['*', '?', '!'])).map(String::from).collect();
+            for name in &block {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+                if GIT_HOSTS.contains(&name.to_lowercase().as_str()) {
+                    git.push(name.clone());
+                }
             }
+        } else if key.eq_ignore_ascii_case("match") {
+            block.clear();
+        } else if key.eq_ignore_ascii_case("hostname") && GIT_HOSTS.contains(&rest.trim().to_lowercase().as_str()) {
+            git.extend(block.iter().cloned());
         }
     }
+    out.retain(|n| !git.contains(n));
     out
 }
 
@@ -209,5 +236,21 @@ mod tests {
     fn ssh_config_hosts_skip_patterns() {
         let cfg = "Host ubuntu\n  HostName 192.168.40.10\nHost *.corp !bad web1 web2\nhost=db\nMatch all\n";
         assert_eq!(parse_ssh_hosts(cfg), ["ubuntu", "web1", "web2", "db"]);
+    }
+
+    /// Aliases for git services are for git, not computers to open: by name or by HostName.
+    #[test]
+    fn ssh_config_hosts_leave_out_git_services() {
+        let cfg = "Host github.com
+  User git
+Host github-443
+  HostName ssh.github.com
+  Port 443
+Host work
+  HostName = 10.0.0.5
+Host gl
+  hostname GitLab.com
+";
+        assert_eq!(parse_ssh_hosts(cfg), ["work"]);
     }
 }

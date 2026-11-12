@@ -15,6 +15,19 @@ pub(crate) enum PaneMode {
 impl PaneMode {
     pub(crate) const ALL: [PaneMode; 3] = [PaneMode::Terminal, PaneMode::Screen, PaneMode::Files];
 
+    /// Its name in the settings file.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            PaneMode::Terminal => "terminal",
+            PaneMode::Screen => "screen",
+            PaneMode::Files => "files",
+        }
+    }
+
+    pub(crate) fn from_key(k: &str) -> Option<PaneMode> {
+        PaneMode::ALL.into_iter().find(|m| m.key() == k)
+    }
+
     pub(crate) fn glyph(self) -> &'static str {
         match self {
             PaneMode::Terminal => ic::TERMINAL,

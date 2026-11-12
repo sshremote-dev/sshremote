@@ -72,6 +72,7 @@ pub(crate) mod ic {
     pub const ERASER: &str = "\u{E21E}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const PLUS: &str = "\u{E3D4}";
+    pub const PLUGS: &str = "\u{EB56}";
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP: &str = "\u{E13C}";
@@ -81,7 +82,6 @@ pub(crate) mod ic {
     pub const GLOBE: &str = "\u{E288}";
     pub const KEY: &str = "\u{E2D6}";
     pub const TEXT_T: &str = "\u{E48A}";
-    pub const WRENCH: &str = "\u{E5D4}";
     pub const DOTS: &str = "\u{E1FE}";
     pub const CURSOR_CLICK: &str = "\u{E7C8}";
     pub const GRIP: &str = "\u{EAE2}";
@@ -129,6 +129,7 @@ pub(crate) mod ic {
     pub const SUN: &str = "\u{E472}";
     pub const TERMINAL: &str = "\u{EAE8}";
     pub const X: &str = "\u{E4F6}";
+    pub const WARNING: &str = "\u{E4E0}";
 }
 
 /// The mark drawn as a line icon in `rect` and `color`, as `assets/logo.svg` draws it on its
@@ -232,6 +233,8 @@ struct Form {
     preset: Option<usize>,
     remote: String,
     capture: String,
+    /// What Connect opens: a terminal, the screen or the files; remembered.
+    mode: PaneMode,
 }
 
 type Pending = mpsc::Receiver<Result<(Session, mpsc::Receiver<Ev>), String>>;
@@ -294,12 +297,10 @@ pub struct App {
     budget: Option<f64>,
     /// System keys taken from Windows while a session is in front.
     grabbed: Option<mpsc::Receiver<(u32, bool)>>,
-    /// The stand-alone terminal window (local shells and ssh sessions).
-    terms: Option<crate::termwin::TermWindow>,
-    /// Terminal windows made from tabs dragged out of the terminal.
-    torn_terms: Vec<crate::termwin::TermWindow>,
-    keys: Option<crate::tools::KeyTool>,
-    config: Option<crate::tools::ConfigTool>,
+    /// The page of Settings open, if one is.
+    tool: Option<home::Tool>,
+    /// The address field takes the keyboard on the next frame.
+    focus_host: bool,
     /// What the next connection opens with: its screen, its terminal or its files.
     start_with: Start,
     /// The first connection opens in full screen (--fullscreen).
@@ -321,8 +322,9 @@ pub struct App {
     windows_made: u64,
     /// What to open next frame: the open view's choices, tools, the command line.
     queued: Vec<(workspace::Launch, workspace::Place, PaneStart)>,
-    vault: Option<crate::tools::VaultTool>,
-    backup: Option<crate::tools::BackupTool>,
+    /// The open window growing into the working window: the size asked for and the frames waited.
+    /// What is queued opens once it has its size, so a terminal starts at the size it keeps.
+    growing: Option<(Vec2, u32)>,
     exts: Option<crate::ext::ExtTool>,
     /// The Remote access card's state.
     access: access_ui::AccessUi,
@@ -342,6 +344,7 @@ impl Form {
             preset: opt.preset,
             remote: if opt.remote.is_empty() { REMOTE.into() } else { opt.remote.clone() },
             capture: opt.capture.clone(),
+            mode: crate::hosts::setting("connect_mode").and_then(|k| PaneMode::from_key(&k)).unwrap_or(PaneMode::Terminal),
         }
     }
 }
@@ -352,8 +355,9 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let local = opt.local;
     let budget = opt.budget;
     let open = opt.open.clone();
-    let size = if auto_start { [1280.0, 800.0] } else { OPEN_SIZE };
-    let native = native_options("SSH Remote", size);
+    let size = if auto_start { WORK_SIZE } else { OPEN_SIZE };
+    let mut native = native_options("SSH Remote", size);
+    native.centered = true;
     boot(native, move |cc| {
         let mut app = App::boot(cc, form, budget, &open);
         std::thread::spawn(crate::backup::auto);
@@ -456,12 +460,6 @@ pub(crate) fn selected_fill() -> Color32 {
 pub(crate) fn selected_stroke() -> Color32 {
     if theme::dark() { Color32::from_white_alpha(90) } else { Color32::from_black_alpha(80) }
 }
-
-/// The outline of a button that stands out a little (the main action of a form).
-pub(crate) fn outline() -> Color32 {
-    if theme::dark() { Color32::from_white_alpha(40) } else { Color32::from_black_alpha(40) }
-}
-
 
 /// A dialog over the window, below its title bar so that stays in sight, centred in the room
 /// left; `fit` is the content size it would like, made smaller to fit that room whole.
@@ -620,10 +618,8 @@ impl App {
             error: None,
             budget,
             grabbed,
-            terms: None,
-            torn_terms: Vec::new(),
-            keys: None,
-            config: None,
+            tool: None,
+            focus_host: true,
             start_with: if open.split_whitespace().any(|w| w == "terminal") {
                 Start::Terminal
             } else if open.split_whitespace().any(|w| w == "files") {
@@ -636,12 +632,10 @@ impl App {
                 open.split_whitespace().any(|w| w == "panel"),
                 open.split_whitespace().any(|w| w == "chat"),
             ),
-            vault: None,
-            backup: None,
             exts: None,
             access: Default::default(),
             service: None,
-            section: home::Section::Ssh,
+            section: home::Section::Connect,
             windows: Vec::new(),
             windows_made: 0,
             quit_when_empty: false,
@@ -649,6 +643,7 @@ impl App {
             grab_window: None,
             sized_for: None,
             queued: Vec::new(),
+            growing: None,
         }
     }
 }
@@ -724,10 +719,32 @@ pub fn run_terminal(first: TermStart, panes: Vec<(TermStart, bool)>, view: Optio
     })
 }
 
-/// The open window's size, about a file dialog's.
-const OPEN_SIZE: [f32; 2] = [900.0, 600.0];
+/// The open window's size when it first shows, and its smallest.
+const OPEN_SIZE: [f32; 2] = [980.0, 640.0];
+const MIN_OPEN: [f32; 2] = [720.0, 500.0];
+/// The working window's size when it first shows, as much of the monitor as fits.
+const WORK_SIZE: [f32; 2] = [1280.0, 800.0];
 /// The smallest working window that still shows its bar, a split and the files readably.
 pub(crate) const MIN_WORK: [f32; 2] = [760.0, 480.0];
+
+/// Resizes the window to `want`, no larger than most of the monitor, moved as little as needed to
+/// stay whole on it. Returns the size asked for.
+fn grow_on_screen(ctx: &egui::Context, want: Vec2) -> Vec2 {
+    let (monitor, outer) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().outer_rect));
+    let size = monitor.map_or(want, |m| want.min(m * 0.92));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+    // The monitor's own origin is not known here, so only a window on the primary one (at the
+    // origin) is moved, to stay within it above the taskbar.
+    if let (Some(m), Some(o)) = (monitor, outer)
+        && Rect::from_min_size(Pos2::ZERO, m).contains(o.min)
+    {
+        let at = Pos2::new(o.min.x.min((m.x - size.x).max(0.0)), o.min.y.min((m.y - size.y - 48.0).max(0.0)));
+        if at != o.min {
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(at));
+        }
+    }
+    size
+}
 
 impl eframe::App for App {
     #[cfg(feature = "drive")]
@@ -747,17 +764,29 @@ impl eframe::App for App {
             look::frame(&ctx);
         }
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        // What was chosen opens in the workspace, which takes a working window's size.
-        for (launch, place, start) in std::mem::take(&mut self.queued) {
-            if !matches!(self.screen, Screen::Work(_)) {
-                self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
-                if !maximized && !fullscreen {
-                    ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
-                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(1280.0, 800.0)));
+        // What was chosen opens in the workspace, which takes a working window's size first.
+        if !self.queued.is_empty() && matches!(self.screen, Screen::Connect) && !maximized && !fullscreen {
+            match self.growing {
+                None => {
+                    self.growing = Some((grow_on_screen(&ctx, Vec2::from(WORK_SIZE)), 0));
+                    ctx.request_repaint();
+                }
+                Some((size, waited)) => {
+                    let now = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                    let there = now.is_some_and(|n| (n - size).length() < 2.0);
+                    self.growing = if there || waited >= 12 { None } else { Some((size, waited + 1)) };
+                    ctx.request_repaint();
                 }
             }
-            if let Screen::Work(w) = &mut self.screen {
-                w.add(launch, place, start);
+        }
+        if self.growing.is_none() {
+            for (launch, place, start) in std::mem::take(&mut self.queued) {
+                if !matches!(self.screen, Screen::Work(_)) {
+                    self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
+                }
+                if let Screen::Work(w) = &mut self.screen {
+                    w.add(launch, place, start);
+                }
             }
         }
         // System keys caught for a host go to the window whose pane asked for them last frame.
@@ -795,29 +824,27 @@ impl eframe::App for App {
             self.screen = Screen::Connect;
             ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
         }
-        // The open window has one size, whatever the working window was; the working window
-        // resizes, down to where it still reads.
+        // Back from the workspace, the window is the open window's size again; either way it
+        // resizes down to where it still reads.
         let open = matches!(self.screen, Screen::Connect);
         if self.sized_for != Some(open) {
+            let first = self.sized_for.is_none();
             self.sized_for = Some(open);
-            chrome::set_fixed(&ctx, open);
             if open {
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
-                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(OPEN_SIZE)));
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
-                ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
-                ctx.send_viewport_cmd(ViewportCommand::EnableButtons { close: true, minimized: true, maximize: false });
+                if !first {
+                    ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
+                }
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_OPEN)));
+                self.focus_host = self.section == home::Section::Connect;
             } else {
-                ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
-                ctx.send_viewport_cmd(ViewportCommand::EnableButtons { close: true, minimized: true, maximize: true });
                 ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_WORK)));
             }
         }
         if open {
             self.connect_screen(ui);
         }
-        self.side_windows(&ctx);
         #[cfg(feature = "drive")]
         drive::end_of_frame(&ctx);
     }
@@ -1147,10 +1174,16 @@ mod tests {
             w.picker = Some(Place::Tab);
             let mut snap = snapshot::Snap::default();
             let size = Vec2::new(w_, h_);
-            for (section, name) in [(home::Section::New, "new"), (home::Section::Local, "local"), (home::Section::Ssh, "ssh"), (home::Section::Extensions, "extensions"), (home::Section::Tools, "tools")] {
+            for (section, name) in [
+                (home::Section::Connect, "connect"),
+                (home::Section::Local, "local"),
+                (home::Section::Extensions, "extensions"),
+                (home::Section::Settings, "settings"),
+                (home::Section::Settings, "settings_config"),
+            ] {
                 app.section = section;
-                if section == home::Section::Tools {
-                    app.config = Some(crate::tools::ConfigTool::new());
+                if name == "settings_config" {
+                    app.tool = Some(home::Tool::Config(crate::tools::ConfigTool::new()));
                 }
                 for k in 0..10 {
                     let input = egui::RawInput {
@@ -1193,8 +1226,8 @@ mod tests {
         }
     }
 
-    /// Digits in New connection are a remote access ID: the page says so and offers the screen
-    /// and files, not a terminal; a relay that has not the ID says why in plain words.
+    /// Digits in Connect are a remote access ID: its password field shows at once, and Connect
+    /// opens the screen (an ID has no terminal); a relay that has not the ID says why plainly.
     #[test]
     fn an_id_opens_through_the_relay() {
         let ctx = egui::Context::default();
@@ -1203,7 +1236,8 @@ mod tests {
         let mut app = App::new(Form::from(&opt), None, "", None);
         let mut w = workspace::Workspace::new(app.options());
         w.picker = Some(Place::Tab);
-        app.section = home::Section::New;
+        app.section = home::Section::Connect;
+        app.form.mode = PaneMode::Terminal;
         app.form.host = "123 456 789".into();
         let mut snap = snapshot::Snap::default();
         for k in 0..4 {
@@ -1212,9 +1246,27 @@ mod tests {
                 app.open_dialog(ui.ctx(), &mut w);
             });
         }
-        assert!(!snap.find("A remote access ID").is_empty());
-        assert!(!snap.find("Screen sharing").is_empty());
+        assert!(!snap.find("Password of that computer").is_empty(), "the ID's password field");
+        assert!(!snap.find(&format!("{}  Connect", PaneMode::Screen.glyph())).is_empty(), "Connect opens the screen");
         assert!(friendly("relay: offline").1.contains("not at the relay"));
+    }
+
+    /// A password typed on Connect goes to the host in its field, never to one opened from the list.
+    #[test]
+    fn a_typed_password_stays_with_its_host() {
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        app.form.host = "alice@a".into();
+        app.form.password = "secret".into();
+        let password_of = |l: Launch| match l {
+            Launch::Agent { target: Target::Ssh { password, .. }, .. } => password,
+            _ => None,
+        };
+        let other = app.host_launch("bob@b", "", PaneMode::Screen).unwrap();
+        assert_ne!(password_of(other), Some("secret".into()), "not given to another host");
+        assert_eq!(app.form.password, "secret", "still there for its own");
+        let own = app.host_launch("alice@a", "", PaneMode::Screen).unwrap();
+        assert_eq!(password_of(own), Some("secret".into()));
     }
 
     fn main(app: &mut App) -> &mut workspace::Workspace {

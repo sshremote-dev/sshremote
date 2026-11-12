@@ -92,8 +92,11 @@ impl App {
             });
     }
 
+    /// The settings kept, read once (a fresh ID kept at once, so the ID shown is the one others
+    /// will use), and the service and the relay asked about in the background now and then.
+    /// `None` when they cannot be read or kept (see `problem`).
     #[cfg(feature = "remote")]
-    fn access_body(&mut self, ui: &mut egui::Ui) {
+    fn access_status(&mut self, ctx: &egui::Context) -> Option<(crate::access::Config, Service)> {
         use crate::access;
         let a = &mut self.access;
         if a.cfg.is_none() && a.problem.is_none() {
@@ -111,11 +114,98 @@ impl App {
                 Err(e) => a.problem = Some(e),
             }
         }
-        let Some(mut cfg) = a.cfg.clone() else {
+        let cfg = a.cfg.clone()?;
+        if a.relay.is_empty() {
+            a.relay = cfg.relay.clone();
+        }
+        if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
+            a.service_looked = Some(std::time::Instant::now());
+            in_background(&a.service, &SERVICE_BUSY, ctx, || Service { installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
+        }
+        // The relay's view of this ID, asked again every 5 s while it is shown.
+        if cfg.enabled && a.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+            a.looked = Some(std::time::Instant::now());
+            let (id, relay) = (cfg.id.clone(), cfg.relay.clone());
+            in_background(&a.online, &ONLINE_BUSY, ctx, move || {
+                let r = access::online(&id, &relay);
+                (id, relay, r)
+            });
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        let svc = a.service.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
+        Some((cfg, svc))
+    }
+
+    /// Whether viewers can reach this computer now, as a colour and a line.
+    #[cfg(feature = "remote")]
+    fn access_state(&self, cfg: &crate::access::Config, svc: Service, weak: egui::Color32) -> (egui::Color32, String) {
+        use crate::access;
+        // Only an answer about this ID at this relay counts.
+        let online = self.access.online.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|(id, relay, _)| *id == cfg.id && *relay == cfg.relay).map(|(_, _, r)| r);
+        // When the service runs remote access, this window's own loop is off: the relay says.
+        let local = if svc.runs { access::State::Off } else { access::state() };
+        if !cfg.enabled {
+            return (weak, "Off: nobody can connect by ID".into());
+        }
+        match (&local, online) {
+            (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
+            (access::State::Failed(e), _) => (bad(), e.clone()),
+            (_, Some(Ok(true))) => (good(), format!("Ready: waiting at {}", cfg.relay)),
+            (_, Some(Ok(false))) => (bad(), if svc.runs { "Not at the relay yet: the service connects in a moment".into() } else { "Connecting to the relay\u{2026}".into() }),
+            (_, Some(Err(e))) => (bad(), format!("The relay could not be reached: {e}")),
+            (_, None) => (weak, "Connecting\u{2026}".into()),
+        }
+    }
+
+    /// This computer's ID and password in the side bar of the open window, as RustDesk shows them
+    /// beside the place to connect: copied with a click; off, a word that it is off.
+    #[cfg(feature = "remote")]
+    pub(super) fn access_summary(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let mut open_page = false;
+        let Some((cfg, svc)) = self.access_status(&ctx) else { return false };
+        let weak = ui.visuals().weak_text_color();
+        ui.label(RichText::new("This computer").size(11.5).color(weak));
+        if !cfg.enabled {
+            ui.label(RichText::new("Remote access by ID is off").size(12.5));
+            open_page = ui.link(RichText::new("Turn it on").size(12.5)).clicked();
+            return open_page;
+        }
+        let copy = |ui: &mut egui::Ui, text: RichText, value: &str, what: &str| {
+            let r = ui.add(egui::Label::new(text).sense(egui::Sense::click())).on_hover_text(format!("Click to copy the {what}"));
+            if r.clicked() {
+                ui.ctx().copy_text(value.to_string());
+            }
+            r.on_hover_cursor(egui::CursorIcon::PointingHand);
+        };
+        copy(ui, RichText::new(crate::access::spaced(&cfg.id)).size(19.0).strong().monospace(), &cfg.id, "ID");
+        ui.horizontal(|ui| {
+            let shown = if self.access.show_password { cfg.password.clone() } else { "\u{2022}".repeat(cfg.password.chars().count()) };
+            copy(ui, RichText::new(shown).size(14.0).monospace(), &cfg.password, "password");
+            let (g, t) = if self.access.show_password { (ic::EYE_SLASH, "Hide the password") } else { (ic::EYE, "Show the password") };
+            if ui.add(egui::Button::new(RichText::new(g).size(13.0)).frame_when_inactive(false).min_size(egui::vec2(22.0, 22.0))).on_hover_text(t).clicked() {
+                self.access.show_password = !self.access.show_password;
+            }
+        });
+        let (color, text) = self.access_state(&cfg, svc, weak);
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 3.5, color);
+            let short = text.split(':').next().unwrap_or(&text).to_string();
+            ui.add(egui::Label::new(RichText::new(short).size(11.5).color(color)).truncate()).on_hover_text(&text);
+        });
+        open_page
+    }
+
+    #[cfg(feature = "remote")]
+    fn access_body(&mut self, ui: &mut egui::Ui) {
+        use crate::access;
+        let ctx = ui.ctx().clone();
+        let Some((mut cfg, svc)) = self.access_status(&ctx) else {
             ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
             ui.label(RichText::new("Lets others reach this computer with an ID and a password through the relay, for computers on Wi-Fi or without a fixed address.").weak().size(12.0));
             ui.add_space(6.0);
-            let why = a.problem.clone().unwrap_or_default();
+            let why = self.access.problem.clone().unwrap_or_default();
             ui.label(RichText::new(format!("Not set up yet: {why}")).color(bad()));
             ui.horizontal(|ui| {
                 if cfg!(windows) && !crate::admin::elevated() && ui.add(theme::primary(format!("{}  Restart as administrator to set it up", ic::SHIELD_CHECK))).clicked() {
@@ -127,26 +217,7 @@ impl App {
             });
             return;
         };
-        if a.relay.is_empty() {
-            a.relay = cfg.relay.clone();
-        }
-        let ctx = ui.ctx().clone();
-        if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
-            a.service_looked = Some(std::time::Instant::now());
-            in_background(&a.service, &SERVICE_BUSY, &ctx, || Service { installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
-        }
-        let svc = a.service.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
         let service = svc.installed;
-        // The relay's view of this ID, asked again every 5 s while the card shows.
-        if cfg.enabled && a.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
-            a.looked = Some(std::time::Instant::now());
-            let (id, relay) = (cfg.id.clone(), cfg.relay.clone());
-            in_background(&a.online, &ONLINE_BUSY, &ctx, move || {
-                let r = access::online(&id, &relay);
-                (id, relay, r)
-            });
-        }
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}  Remote access by ID", ic::GLOBE)).size(15.0).strong());
@@ -194,22 +265,7 @@ impl App {
                 });
                 ui.end_row();
                 ui.label(RichText::new("State").weak());
-                // Only an answer about this ID at this relay counts.
-                let online = self.access.online.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|(id, relay, _)| *id == cfg.id && *relay == cfg.relay).map(|(_, _, r)| r);
-                // When the service runs remote access, this window's own loop is off: the relay says.
-                let local = if svc.runs { access::State::Off } else { access::state() };
-                let (color, text) = if !cfg.enabled {
-                    (ui.visuals().weak_text_color(), "Off: nobody can connect by ID".to_string())
-                } else {
-                    match (&local, online) {
-                        (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
-                        (access::State::Failed(e), _) => (bad(), e.clone()),
-                        (_, Some(Ok(true))) => (good(), format!("Ready: waiting at {}", cfg.relay)),
-                        (_, Some(Ok(false))) => (bad(), if svc.runs { "Not at the relay yet: the service connects in a moment".into() } else { "Connecting to the relay\u{2026}".into() }),
-                        (_, Some(Err(e))) => (bad(), format!("The relay could not be reached: {e}")),
-                        (_, None) => (ui.visuals().weak_text_color(), "Connecting\u{2026}".into()),
-                    }
-                };
+                let (color, text) = self.access_state(&cfg, svc, ui.visuals().weak_text_color());
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter().circle_filled(r.center(), 4.5, color);

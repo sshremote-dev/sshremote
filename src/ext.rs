@@ -1068,9 +1068,21 @@ impl ExtTool {
         }
     }
 
+    /// What you added first; the app's own parts below, folded unless one still needs an extension.
     fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
-        self.parts_card(ui, act);
-        ui.add_space(10.0);
+        self.added_list(ui, installed, offers, act);
+        ui.add_space(12.0);
+        let wanting = crate::modules::ALL
+            .iter()
+            .any(|(id, _, _)| !crate::modules::built_in(id) && provider(crate::modules::served_by(id)).is_none());
+        egui::CollapsingHeader::new(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong())
+            .id_salt("ext-parts")
+            .default_open(wanting)
+            .show(ui, |ui| self.parts_card(ui, act));
+    }
+
+    /// The extensions you added, with their updates; a way to find some when there are none.
+    fn added_list(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
         ui.label(RichText::new(format!("Added extensions ({})", installed.len())).strong());
         ui.label(RichText::new("Installed by you from the registry or a package file; each can be removed.").weak().size(12.0));
         ui.add_space(4.0);
@@ -1332,9 +1344,8 @@ impl ExtTool {
     fn parts_card(&mut self, ui: &mut egui::Ui, act: &mut Act) {
         let offers: Vec<Offer> = self.offers.as_ref().and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
         card(ui, |ui| {
-            ui.label(RichText::new(format!("{}  Parts of this app", ic::SQUARES_FOUR)).strong());
             ui.label(
-                RichText::new("Built in: inside the program you downloaded, never removed. Extension: brought by an added extension below. Untick a part to hide it from the menus.")
+                RichText::new("Built in: inside the program you downloaded, never removed. Extension: brought by an added extension above. Untick a part to hide it from the menus.")
                     .weak()
                     .size(12.0),
             );

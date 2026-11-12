@@ -1009,6 +1009,24 @@ fn editor_window(ctx: &egui::Context) {
     }
 }
 
+/// The Appearance settings as a page (Settings > Appearance): the same editor as its window.
+pub(crate) fn page(ui: &mut egui::Ui) {
+    static PAGE: Mutex<Option<Editor>> = Mutex::new(None);
+    let Ok(mut g) = PAGE.lock() else { return };
+    let ed = g.get_or_insert_with(Editor::default);
+    let mut l = get();
+    let before = l.clone();
+    editor(ui, &mut l, ed);
+    if l != before {
+        preview(l);
+        UNSAVED.store(true, Ordering::Relaxed);
+    }
+    // Saved once a slider is let go, not on every frame of the drag.
+    if !ui.ctx().input(|i| i.pointer.any_down()) && UNSAVED.swap(false, Ordering::Relaxed) {
+        crate::hosts::set_setting("look", &get().to_json());
+    }
+}
+
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
     ui.label(RichText::new(text).strong().size(15.0));
@@ -1035,7 +1053,9 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut Str
             std::path::Path::new(value.as_str()).file_stem().map_or(value.clone(), |s| s.to_string_lossy().into_owned())
         })
     };
-    egui::ComboBox::from_id_salt(id).selected_text(current).width(300.0).show_ui(ui, |ui| {
+    // A click in the search field keeps the list open; one outside closes it.
+    let list_box = egui::ComboBox::from_id_salt(id).selected_text(current).width(300.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    list_box.show_ui(ui, |ui| {
         ui.add(egui::TextEdit::singleline(filter).hint_text("Search fonts").desired_width(280.0));
         if ui.selectable_label(value.is_empty(), "The system's own").clicked() {
             value.clear();

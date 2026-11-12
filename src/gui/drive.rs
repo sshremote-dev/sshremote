@@ -6,7 +6,7 @@
 //!
 //! Lines: `wait MS`, `move X Y`, `click X Y [right|middle]`, `dbl X Y`, `drag X1 Y1 X2 Y2`,
 //! `scroll DX DY`, `key NAME [ctrl+alt+shift+cmd]`, `text WORDS`, `shot NAME`, `info`,
-//! `fullscreen on|off`, `exit`. Coordinates are in points; `#` starts a comment.
+//! `fullscreen on|off`, `size W H`, `exit`. Coordinates are in points; `#` starts a comment.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -210,6 +210,7 @@ impl Driver {
                 ));
             }
             "fullscreen" => ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(rest.first() == Some(&"on"))),
+            "size" => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(num(0)?, num(1)?))),
             "exit" => {
                 self.log("exit");
                 std::process::exit(0);

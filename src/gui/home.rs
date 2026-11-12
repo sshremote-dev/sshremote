@@ -1,4 +1,5 @@
-//! The home screen: connecting, the host list, the tools menu and the windows beside it.
+//! The open view: connecting (an address field above the hosts known), this computer, the
+//! extensions and the settings, with this computer's ID and password always in sight beside them.
 
 use super::*;
 
@@ -85,21 +86,8 @@ impl App {
     pub(super) fn system_terminal(&mut self, host: &str, port: &str) {
         let (_, cmd) = ssh_command(host, port);
         if let Err(e) = crate::termwin::spawn_system(&cmd) {
-            self.error = Some(format!("cannot open the system terminal: {e}"));
+            self.error = Some(format!("Cannot open the system terminal: {e}"));
         }
-    }
-
-    /// The terminal windows that live beside every screen: the one docked here and those torn off.
-    pub(super) fn side_windows(&mut self, ctx: &egui::Context) {
-        if let Some(mut t) = self.terms.take() {
-            let cmds = t.show(ctx, "");
-            self.torn_terms.extend(t.take_torn());
-            let closed = cmds.iter().any(|c| matches!(c, crate::termwin::Cmd::Close));
-            if !closed {
-                self.terms = Some(t);
-            }
-        }
-        crate::termwin::TermWindow::show_torn(ctx, &mut self.torn_terms);
     }
 
     /// The host lists again, after a tool changed them.
@@ -110,20 +98,17 @@ impl App {
         self.seen = crate::hosts::last_seen();
     }
 
-    /// Administrator or standard user; a click on the latter asks for the rights.
+    /// Administrator or not: a quiet shield when it is, and "Standard user" to click for the rights
+    /// when it is not, since that is the one that asks for something.
     pub(super) fn admin_badge(&mut self, ui: &mut egui::Ui) {
-        let (glyph, text, color) = if crate::admin::elevated() {
-            (ic::SHIELD_CHECK, "Administrator", good())
-        } else {
-            (ic::SHIELD, "Standard user", ui.visuals().weak_text_color())
-        };
-        let b = egui::Button::new(RichText::new(format!("{glyph}  {text}")).size(12.5).color(color)).frame(false);
-        let tip = if crate::admin::elevated() {
-            crate::admin::ADDS.to_string()
-        } else {
-            format!("Click to restart with administrator rights.\n\n{}", crate::admin::ADDS)
-        };
-        if ui.add(b).on_hover_text(tip).clicked() && !crate::admin::elevated() {
+        if crate::admin::elevated() {
+            ui.label(RichText::new(ic::SHIELD_CHECK).size(15.0).color(ui.visuals().weak_text_color()))
+                .on_hover_text(format!("Running as administrator.\n\n{}", crate::admin::ADDS));
+            return;
+        }
+        let b = egui::Button::new(RichText::new(format!("{}  Standard user", ic::SHIELD)).size(12.5).color(ui.visuals().weak_text_color())).frame(false);
+        let tip = format!("Click to restart with administrator rights.\n\n{}", crate::admin::ADDS);
+        if ui.add(b).on_hover_text(tip).clicked() {
             self.restart_elevated(ui.ctx());
         }
     }
@@ -136,47 +121,6 @@ impl App {
             }
             Err(e) => self.error = Some(format!("Cannot ask for administrator rights: {e}")),
         }
-    }
-
-    /// The tools menu's part about this computer: administrator rights and the service.
-    pub(super) fn admin_items(&mut self, ui: &mut egui::Ui) {
-        #[cfg(windows)]
-        {
-            let admin = crate::admin::elevated();
-            ui.label(RichText::new("This computer").small().weak());
-            let installed = *self.service.get_or_insert_with(crate::admin::service_installed);
-            let need = "Needs administrator rights: restart sshremote as administrator first.";
-            let (label, tip) = if installed {
-                (format!("{}  Remove the sshremote service", ic::SHIELD), "Stop and remove the service")
-            } else {
-                (
-                    format!("{}  Install the sshremote service", ic::SHIELD_CHECK),
-                    "Lets this computer be controlled at the sign-in and lock screens and receive Ctrl+Alt+Del",
-                )
-            };
-            let r = ui.add_enabled(admin, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text(need);
-            if r.clicked() {
-                let flag = if installed { "--uninstall-service" } else { "--install-service" };
-                #[cfg(feature = "remote")]
-                let result = if installed { crate::service::uninstall() } else { crate::service::install() };
-                #[cfg(not(feature = "remote"))]
-                let result = crate::ext::call_provided("remote", &[flag.to_string()]);
-                let _ = flag;
-                self.service = None;
-                self.error = result.err().map(|e| format!("Service: {e}"));
-                ui.close();
-            }
-            if !admin && ui.button(format!("{}  Restart as administrator", ic::SHIELD_CHECK)).clicked() {
-                self.restart_elevated(ui.ctx());
-                ui.close();
-            }
-            let mut ask = crate::admin::ask_at_start();
-            if ui.checkbox(&mut ask, "Ask for administrator rights at start").changed() {
-                crate::admin::set_ask_at_start(ask);
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = ui;
     }
 
     /// The open window: its title bar, then the open view.
@@ -204,36 +148,78 @@ impl App {
         }
     }
 
-    /// What to open, as a file dialog lays it out: the places on the left (a new host, this
-    /// computer, the SSH hosts, the tools), their choices on the right.
+    /// What to open: the places on the left under this computer's ID, the chosen one on the right.
     pub(super) fn open_view(&mut self, ui: &mut egui::Ui) -> Option<Choice> {
         let mut go: Option<Choice> = None;
         let full = ui.available_rect_before_wrap();
-        let side = Rect::from_min_size(full.min, Vec2::new(176.0, full.height()));
-        let body = full.with_min_x(side.right() + 12.0);
+        let side = Rect::from_min_size(full.min, Vec2::new(SIDE_W, full.height()));
+        let body = full.with_min_x(side.right() + 16.0);
         let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
-        ui.painter().vline(side.right() + 4.0, full.y_range(), Stroke::new(1.0, line));
+        ui.painter().vline(side.right() + 6.0, full.y_range(), Stroke::new(1.0, line));
         let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(egui::Layout::top_down(egui::Align::Min)));
+        self.side_bar(&mut nav);
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
+        let ui = &mut ui;
+        ui.add_space(4.0);
+        match self.section {
+            Section::Connect => self.connect_section(ui, &mut go),
+            Section::Local => self.local_section(ui, &mut go),
+            Section::Extensions => {
+                page_title(ui, "Extensions", "Looks, commands, status bar items, panels and features. Each one can do only what its card says.");
+                self.error_banner(ui);
+                let exts = self.exts.get_or_insert_with(crate::ext::ExtTool::new);
+                egui::ScrollArea::vertical().id_salt("extensions").auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_max_width((ui.available_width() - 14.0).min(760.0));
+                    exts.ui(ui);
+                    ui.add_space(12.0);
+                });
+            }
+            Section::Settings => self.settings_section(ui),
+        }
+        go
+    }
+
+    /// The side bar: this computer's ID and password on top, then the places.
+    fn side_bar(&mut self, nav: &mut egui::Ui) {
         nav.spacing_mut().item_spacing.y = 2.0;
-        nav.add_space(4.0);
+        #[cfg(feature = "remote")]
+        if crate::modules::on("screen") {
+            let v = nav.visuals().clone();
+            let mut to_local = false;
+            egui::Frame::new()
+                .fill(v.faint_bg_color)
+                .stroke(Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
+                .corner_radius(CornerRadius::same(theme::R_MD))
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(nav, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    to_local = self.access_summary(ui);
+                });
+            if to_local {
+                self.go_to(Section::Local);
+            }
+            nav.add_space(10.0);
+        }
         for (s, glyph, name) in [
-            (Section::New, ic::PLUS, "New connection"),
+            (Section::Connect, ic::PLUGS, "Connect"),
             (Section::Local, ic::DESKTOP, "This computer"),
-            (Section::Ssh, ic::GLOBE, "SSH hosts"),
             (Section::Extensions, ic::PUZZLE_PIECE, "Extensions"),
-            (Section::Tools, ic::WRENCH, "Tools"),
+            (Section::Settings, ic::GEAR, "Settings"),
         ] {
             let on = self.section == s;
-            let (rect, r) = nav.allocate_exact_size(Vec2::new(side.width() - 8.0, 32.0), egui::Sense::click());
+            let (rect, r) = nav.allocate_exact_size(Vec2::new(nav.available_width(), 34.0), egui::Sense::click());
             if on {
                 nav.painter().rect_filled(rect, theme::R_SM, selected_fill());
-                nav.painter().rect_stroke(rect, theme::R_SM, Stroke::new(1.0, selected_stroke()), egui::StrokeKind::Inside);
+                // The place shown is marked with the app's blue along its left edge.
+                let mark = Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 8.0), Vec2::new(3.0, rect.height() - 16.0));
+                nav.painter().rect_filled(mark, 1.5, super::brand());
             } else if r.hovered() {
                 nav.painter().rect_filled(rect, theme::R_SM, nav.visuals().widgets.hovered.weak_bg_fill);
             }
             let fg = if on { nav.visuals().strong_text_color() } else { nav.visuals().text_color() };
-            nav.painter().text(rect.left_center() + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(15.0), fg);
-            nav.painter().text(rect.left_center() + Vec2::new(34.0, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(13.5), fg);
+            nav.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(16.0), fg);
+            nav.painter().text(rect.left_center() + Vec2::new(38.0, 0.0), Align2::LEFT_CENTER, name, FontId::proportional(14.0), fg);
             // Updates waiting, as a count beside Extensions.
             if s == Section::Extensions
                 && let Some(n) = crate::ext::updates_waiting().filter(|n| *n > 0)
@@ -242,115 +228,404 @@ impl App {
                 nav.painter().circle_filled(at, 8.0, super::brand());
                 nav.painter().text(at, Align2::CENTER_CENTER, n.to_string(), FontId::proportional(10.5), Color32::WHITE);
             }
+            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
             if r.clicked() {
-                self.section = s;
+                self.go_to(s);
             }
         }
-        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
-        let ui = &mut ui;
-        ui.add_space(4.0);
-        if self.section != Section::New {
-            self.error_box(ui);
-        }
-        match self.section {
-            Section::New => self.new_section(ui, &mut go),
-            Section::Local => {
-                egui::ScrollArea::vertical().id_salt("local").auto_shrink([false, false]).show(ui, |ui| {
-                    ui.set_max_width((ui.available_width() - 14.0).min(760.0));
-                    ui.label(RichText::new("This computer").size(16.0).strong());
-                    ui.add_space(6.0);
-                    self.access_card(ui);
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Open here").strong());
-                    let row = place_row;
-                    for p in crate::termwin::local_profiles() {
-                        if row(ui, p.icon, &p.name, "A terminal here") {
-                            go = Some((String::new(), String::new(), How::Local(p.clone())));
-                        }
-                    }
-                    ui.separator();
-                    if PaneMode::Screen.on() && row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
-                        go = Some((String::new(), String::new(), How::This(PaneMode::Screen)));
-                    }
-                    if PaneMode::Files.on() && row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
-                        go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
-                    }
-                    // A synthetic screen for trying the viewer, in development builds only.
-                    if cfg!(feature = "test-desktop") && row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
-                        go = Some((String::new(), String::new(), How::TestDesktop));
-                    }
-                });
-            }
-            Section::Ssh => self.ssh_section(ui, &mut go),
-            Section::Extensions => {
-                ui.label(RichText::new("Extensions").size(16.0).strong());
-                ui.label(RichText::new("Add looks, commands, status bar items, panels and features. Each one can do only what its card says.").weak().size(12.0));
-                ui.add_space(6.0);
-                let exts = self.exts.get_or_insert_with(crate::ext::ExtTool::new);
-                egui::ScrollArea::vertical().id_salt("extensions").auto_shrink([false, false]).show(ui, |ui| {
-                    ui.set_max_width((ui.available_width() - 14.0).min(760.0));
-                    exts.ui(ui);
-                    ui.add_space(12.0);
-                });
-            }
-            Section::Tools => self.tools_section(ui),
-        }
-        go
     }
 
-    /// The tools: a list of them, or the one open, as a page with a way back.
-    fn tools_section(&mut self, ui: &mut egui::Ui) {
-        let open = [self.keys.is_some(), self.config.is_some(), self.vault.is_some(), self.backup.is_some()];
-        let Some(which) = open.iter().position(|&o| o) else {
-            ui.label(RichText::new("Tools").size(16.0).strong());
-            ui.add_space(6.0);
-            if place_row(ui, ic::KEY, "SSH keys", "Your key pairs: copy one, install it on a host, or create one") {
-                self.keys = Some(crate::tools::KeyTool::new());
-            }
-            if place_row(ui, ic::GLOBE, "SSH hosts", "The hosts of ~/.ssh/config: names, users, ports and keys") {
-                self.config = Some(crate::tools::ConfigTool::new());
-            }
-            if place_row(ui, ic::LOCK_KEY, "Saved passwords", "Passwords for SSH sign-in, in the system's password store") {
-                self.vault = Some(crate::tools::VaultTool::new(self.form.host.trim()));
-            }
-            if crate::modules::on("backup") && place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
-                self.backup = Some(crate::tools::BackupTool::new());
-            }
-            if place_row(ui, ic::EYE, "Appearance", "Fonts, colours, background pictures and an overlay of the load and time") {
-                super::look::open(ui.ctx());
-            }
-            if cfg!(windows) {
-                ui.add_space(6.0);
-                ui.separator();
-                self.admin_items(ui);
-            }
-            return;
-        };
-        let (glyph, title) = [
-            (ic::KEY, "SSH keys"),
-            (ic::GLOBE, "SSH hosts (~/.ssh/config)"),
-            (ic::LOCK_KEY, "Saved passwords"),
-            (ic::ARCHIVE, "Backup and restore"),
-        ][which];
-        let mut back = false;
+    /// Shows a place; on Connect the address field takes the keyboard.
+    pub(super) fn go_to(&mut self, s: Section) {
+        if self.section != s {
+            self.error = None;
+        }
+        self.section = s;
+        self.focus_host = s == Section::Connect;
+    }
+
+    /// Connect: the address field and its button, what it opens, the options folded away, then
+    /// the hosts known. Enter connects; a click on a host puts it in the field, a double click
+    /// connects to it.
+    fn connect_section(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        // Digits only: an ID that remote access gave another computer, reached through the relay.
+        let digits: String = self.form.host.chars().filter(|c| !c.is_whitespace()).collect();
+        let by_id = (6..=12).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+        // An ID has a screen and files, no terminal.
+        let mode = if by_id && self.form.mode == PaneMode::Terminal { PaneMode::Screen } else { self.form.mode };
+        page_title(ui, "Connect", "A host you reach with SSH, or a computer by its remote access ID.");
+        let mut enter = false;
+        let mut connect = false;
         ui.horizontal(|ui| {
-            back = icon(ui, ic::ARROW_LEFT, "Back to the tools", false).clicked();
-            ui.label(RichText::new(format!("{glyph}  {title}")).size(16.0).strong());
+            let button_w = 132.0;
+            let field = egui::TextEdit::singleline(&mut self.form.host)
+                .hint_text("user@host, an alias of ~/.ssh/config, or an ID")
+                .desired_width((ui.available_width() - button_w - 8.0).max(160.0))
+                .font(FontId::proportional(15.0))
+                .margin(egui::Margin::symmetric(10, 8));
+            let r = ui.add(field);
+            if std::mem::take(&mut self.focus_host) {
+                r.request_focus();
+            }
+            enter |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let tip = format!("Open {} on it (Enter)", mode.name().to_lowercase());
+            connect |= ui.add(theme::primary(format!("{}  Connect", mode.glyph())).min_size(Vec2::new(button_w, 36.0))).on_hover_text(tip).clicked();
         });
         ui.add_space(4.0);
-        let known: Vec<String> = if which == 2 { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Opens").weak());
+            for m in PaneMode::ALL.into_iter().filter(|m| m.on()) {
+                let enabled = !(by_id && m == PaneMode::Terminal);
+                let b = ui.add_enabled(enabled, choice(format!("{}  {}", m.glyph(), m.name()), mode == m));
+                if b.on_disabled_hover_text("A computer reached by its ID shows its screen and files").clicked() {
+                    self.form.mode = m;
+                    crate::hosts::set_setting("connect_mode", m.key());
+                }
+            }
+            if !by_id && icon(ui, ic::ARROW_SQUARE_OUT, "Open ssh in the system's own terminal instead", false).clicked() {
+                *go = Some((self.form.host.trim().to_string(), self.form.port.clone(), How::System));
+            }
+        });
+        if by_id {
+            // The password set on that computer: needed, so it is not folded away.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.form.password)
+                        .password(true)
+                        .hint_text("Password of that computer")
+                        .desired_width(260.0)
+                        .margin(egui::Margin::symmetric(8, 6)),
+                );
+                enter |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
+                    .on_hover_text("Keep it in the system's password store for this ID");
+            });
+        }
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(RichText::new("Options").size(13.0)).id_salt("connect-options").show(ui, |ui| {
+            self.connect_options(ui, by_id);
+        });
+        self.error_banner(ui);
+        if (connect || enter) && !self.form.host.trim().is_empty() {
+            #[cfg(feature = "remote")]
+            let target = if by_id { crate::access::address(&digits, &crate::access::relay()) } else { self.form.host.trim().to_string() };
+            #[cfg(not(feature = "remote"))]
+            let target = self.form.host.trim().to_string();
+            let how = match mode {
+                PaneMode::Terminal => How::Terminal,
+                PaneMode::Screen => How::Screen,
+                PaneMode::Files => How::Files,
+            };
+            *go = Some((target, self.form.port.clone(), how));
+        } else if connect {
+            self.error = Some("Enter a host, for example user@192.168.1.20, or a remote access ID.".into());
+        }
+        ui.add_space(14.0);
+        self.host_section(ui, go);
+    }
+
+    /// The connection's options: port, password, quality, and how the agent starts.
+    fn connect_options(&mut self, ui: &mut egui::Ui, by_id: bool) {
+        egui::Grid::new("connect-options-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            if !by_id {
+                ui.label(RichText::new("Port").weak());
+                ui.add(egui::TextEdit::singleline(&mut self.form.port).hint_text("22").desired_width(70.0));
+                ui.end_row();
+                ui.label(RichText::new("Password").weak()).on_hover_text("Leave it empty to sign in with your SSH keys.");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(220.0));
+                    ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
+                        .on_hover_text("Keep it in the system's password store for this host");
+                });
+                ui.end_row();
+            }
+            ui.label(RichText::new("Screen quality").weak());
+            let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
+            combo("quality", current).width(260.0).show_ui(ui, |ui| {
+                crate::gui::menu_look(ui);
+                ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
+                for (i, p) in PRESETS.iter().enumerate() {
+                    ui.selectable_value(&mut self.form.preset, Some(i), preset_text(p));
+                }
+            });
+            ui.end_row();
+            if !by_id {
+                ui.label(RichText::new("Agent command").weak()).on_hover_text("How the screen and files start sshremote on the host");
+                ui.add(egui::TextEdit::singleline(&mut self.form.remote).desired_width(320.0));
+                ui.end_row();
+                ui.label(RichText::new("Capture").weak()).on_hover_text("How the host's screen is read: auto picks the one for its desktop");
+                ui.horizontal(|ui| {
+                    crate::gui::menu_look(ui);
+                    let test = cfg!(feature = "test-desktop").then_some("synthetic");
+                    for c in ["auto", "gnome", "windows"].into_iter().chain(test) {
+                        ui.selectable_value(&mut self.form.capture, c.to_string(), c);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    }
+
+    /// Why the last thing asked for did not happen, with a hint and a way to put it away.
+    fn error_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(e) = self.error.clone() else { return };
+        let (what, hint) = friendly(&e);
+        ui.add_space(8.0);
+        let mut close = false;
+        egui::Frame::new()
+            .fill(bad().gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0, bad().gamma_multiply(0.5)))
+            .corner_radius(CornerRadius::same(theme::R_MD))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width((ui.available_width()).min(760.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::WARNING).size(16.0).color(bad()));
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&what).color(ui.visuals().strong_text_color())).wrap()).on_hover_text(e.as_str());
+                        if !hint.is_empty() {
+                            ui.add(egui::Label::new(RichText::new(hint).weak()).wrap());
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text("Dismiss").clicked();
+                    });
+                });
+            });
+        if close {
+            self.error = None;
+        }
+    }
+
+    /// The known hosts under the address field: favorites, recent ones and ~/.ssh/config aliases.
+    fn host_section(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        let hosts = self.host_list();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Hosts").size(15.0).strong());
+            if !hosts.is_empty() || !self.search.is_empty() {
+                ui.label(RichText::new(hosts.len().to_string()).weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(format!("{}  Search", ic::SEARCH)).desired_width(180.0));
+                });
+            }
+        });
+        ui.add_space(2.0);
+        if hosts.is_empty() {
+            let text = if self.search.is_empty() {
+                "The hosts you connect to, your favorites and the aliases in ~/.ssh/config show here."
+            } else {
+                "No host matches the search."
+            };
+            ui.add_space(10.0);
+            ui.label(RichText::new(text).weak());
+            return;
+        }
+        let mut act = None;
+        egui::ScrollArea::vertical().id_salt("hosts").auto_shrink([false, false]).show(ui, |ui| {
+            for (i, (h, p, src)) in hosts.iter().enumerate() {
+                if let Some(a) = self.host_row(ui, i, h, p, *src) {
+                    act = Some((h.clone(), p.clone(), a));
+                }
+            }
+        });
+        let Some((h, p, a)) = act else { return };
+        match a {
+            RowAct::Pick => {
+                (self.form.host, self.form.port) = (h, p);
+                self.form.password.clear();
+                self.focus_host = true;
+            }
+            RowAct::Open(how) => *go = Some((h, p, how)),
+            RowAct::Star(on) => {
+                crate::hosts::set_favorite(&h, on);
+                self.favorites = crate::hosts::favorites();
+            }
+            RowAct::Forget => {
+                self.recent.retain(|(r, _)| *r != h);
+                crate::hosts::save_recent(&self.recent);
+            }
+        }
+    }
+
+    /// One host as a row: its mark, its name and when it was last reached, and on the right what
+    /// can be opened on it, the star and a menu.
+    fn host_row(&self, ui: &mut egui::Ui, i: usize, h: &str, p: &str, src: Source) -> Option<RowAct> {
+        let mut act = None;
+        let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), egui::Sense::click());
+        let picked = self.form.host.trim() == h;
+        if picked {
+            ui.painter().rect_filled(rect, CornerRadius::same(theme::R_SM), selected_fill());
+        } else if r.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::same(theme::R_SM), ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        if i > 0 && !picked {
+            ui.painter().hline(rect.x_range().shrink(8.0), rect.top(), Stroke::new(1.0, line.gamma_multiply(0.5)));
+        }
+        let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        row.style_mut().interaction.selectable_labels = false;
+        badge(&mut row, h);
+        #[cfg(feature = "remote")]
+        let id = crate::net::Address::parse(h).map(|a| a.id);
+        #[cfg(not(feature = "remote"))]
+        let id: Option<String> = None;
+        // The buttons first, from the right edge, so a long name is cut short before them.
+        let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        right.spacing_mut().item_spacing.x = 2.0;
+        egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
+            crate::gui::menu_look(ui);
+            ui.set_min_width(210.0);
+            if id.is_none() && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
+                act = Some(RowAct::Open(How::System));
+            }
+            if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
+                ui.ctx().copy_text(id.clone().unwrap_or_else(|| h.to_string()));
+            }
+            if src == Source::Recent && ui.button(format!("{}  Remove from the list", ic::TRASH)).clicked() {
+                act = Some(RowAct::Forget);
+            }
+        });
+        let fav = src == Source::Favorite;
+        let mut star = RichText::new(ic::STAR).size(16.0);
+        star = if fav { star.family(filled()).color(warn()) } else { star.color(right.visuals().weak_text_color()) };
+        let tip = if fav { "Remove from favorites" } else { "Add to favorites" };
+        if right.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
+            act = Some(RowAct::Star(!fav));
+        }
+        if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, "Files", false).clicked() {
+            act = Some(RowAct::Open(How::Files));
+        }
+        if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, "Screen sharing", false).clicked() {
+            act = Some(RowAct::Open(How::Screen));
+        }
+        if id.is_none() && icon(&mut right, ic::TERMINAL, "Terminal", false).clicked() {
+            act = Some(RowAct::Open(How::Terminal));
+        }
+        let room = (right.min_rect().left() - row.cursor().left() - 8.0).max(40.0);
+        row.allocate_ui_with_layout(Vec2::new(room, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add_space(7.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            #[cfg(feature = "remote")]
+            let name = match &id {
+                Some(id) => format!("ID {}", crate::access::spaced(id)),
+                None if p.is_empty() => h.to_string(),
+                None => format!("{h}:{p}"),
+            };
+            #[cfg(not(feature = "remote"))]
+            let name = if p.is_empty() { h.to_string() } else { format!("{h}:{p}") };
+            ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+            let when = match (src, self.seen.get(h)) {
+                (_, Some(t)) => crate::hosts::ago(*t),
+                (Source::SshConfig, None) => "from ~/.ssh/config".into(),
+                _ => "not reached yet".into(),
+            };
+            let how = if id.is_some() { "by ID" } else { "SSH" };
+            ui.add(egui::Label::new(RichText::new(format!("{how}  ·  {when}")).small().weak()).truncate());
+        });
+        if act.is_none() {
+            if r.double_clicked() {
+                let mode = if id.is_some() && self.form.mode == PaneMode::Terminal { PaneMode::Screen } else { self.form.mode };
+                act = Some(RowAct::Open(match mode {
+                    PaneMode::Terminal => How::Terminal,
+                    PaneMode::Screen => How::Screen,
+                    PaneMode::Files => How::Files,
+                }));
+            } else if r.clicked() {
+                act = Some(RowAct::Pick);
+            }
+        }
+        r.on_hover_text("Click to put it in the field above, double-click to connect");
+        act
+    }
+
+    /// This computer: remote access by ID, and its own terminals, screen and files.
+    fn local_section(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        page_title(ui, "This computer", "Others reach it by its ID; you open its terminals, screen and files here.");
+        self.error_banner(ui);
+        egui::ScrollArea::vertical().id_salt("local").auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width((ui.available_width() - 14.0).min(760.0));
+            self.access_card(ui);
+            ui.add_space(12.0);
+            ui.label(RichText::new("Open here").size(15.0).strong());
+            ui.add_space(2.0);
+            for p in crate::termwin::local_profiles() {
+                if place_row(ui, p.icon, &p.name, "A terminal on this computer") {
+                    *go = Some((String::new(), String::new(), How::Local(p.clone())));
+                }
+            }
+            if PaneMode::Screen.on() && place_row(ui, ic::MONITOR, "This computer's screen", "Through the local agent, as a remote host would be") {
+                *go = Some((String::new(), String::new(), How::This(PaneMode::Screen)));
+            }
+            if PaneMode::Files.on() && place_row(ui, ic::FOLDER, "This computer's files", "The file manager on both sides") {
+                *go = Some((String::new(), String::new(), How::This(PaneMode::Files)));
+            }
+            // A synthetic screen for trying the viewer, in development builds only.
+            if cfg!(feature = "test-desktop") && place_row(ui, ic::APP_WINDOW, "Built-in test desktop", "A synthetic screen, to try the viewer") {
+                *go = Some((String::new(), String::new(), How::TestDesktop));
+            }
+        });
+    }
+
+    /// Settings: the look and the SSH tools as a list, or the one open as a page with a way back.
+    fn settings_section(&mut self, ui: &mut egui::Ui) {
+        let Some(mut tool) = self.tool.take() else {
+            page_title(ui, "Settings", "The look of the windows, and your SSH keys, hosts, passwords and backups.");
+            self.error_banner(ui);
+            egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_max_width((ui.available_width() - 14.0).min(760.0));
+                if place_row(ui, ic::PALETTE, "Appearance", "Theme, fonts, colours, background pictures and the load overlay") {
+                    self.tool = Some(Tool::Appearance);
+                }
+                if place_row(ui, ic::KEY, "SSH keys", "Your key pairs: copy one, install it on a host, or create one") {
+                    self.tool = Some(Tool::Keys(crate::tools::KeyTool::new()));
+                }
+                if place_row(ui, ic::FILE_TEXT, "SSH config file", "The hosts of ~/.ssh/config: names, users, ports and keys") {
+                    self.tool = Some(Tool::Config(crate::tools::ConfigTool::new()));
+                }
+                if place_row(ui, ic::LOCK_KEY, "Saved passwords", "Passwords for SSH sign-in, in the system's password store") {
+                    self.tool = Some(Tool::Vault(crate::tools::VaultTool::new(self.form.host.trim())));
+                }
+                if crate::modules::on("backup") && place_row(ui, ic::ARCHIVE, "Backup and restore", "Hosts, settings and ~/.ssh, by hand or each day") {
+                    self.tool = Some(Tool::Backup(crate::tools::BackupTool::new()));
+                }
+                if cfg!(windows) {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Administrator rights").size(15.0).strong());
+                    ui.label(RichText::new(crate::admin::ADDS).weak().size(12.0));
+                    ui.add_space(4.0);
+                    if !crate::admin::elevated() && ui.add(theme::primary(format!("{}  Restart as administrator", ic::SHIELD_CHECK))).clicked() {
+                        self.restart_elevated(ui.ctx());
+                    }
+                    #[cfg(windows)]
+                    {
+                        let mut ask = crate::admin::ask_at_start();
+                        if ui.checkbox(&mut ask, "Ask for administrator rights at start").changed() {
+                            crate::admin::set_ask_at_start(ask);
+                        }
+                    }
+                }
+            });
+            return;
+        };
+        let (glyph, title) = tool.title();
+        let mut back = false;
+        ui.horizontal(|ui| {
+            back = icon(ui, ic::ARROW_LEFT, "Back to the settings (Esc)", false).clicked();
+            ui.label(RichText::new(format!("{glyph}  {title}")).size(18.0).strong());
+        });
+        ui.add_space(6.0);
+        let known: Vec<String> = if matches!(tool, Tool::Vault(_)) { self.host_list().into_iter().map(|h| h.0).collect() } else { Vec::new() };
         let mut actions = Vec::new();
         let mut changed = false;
         egui::ScrollArea::vertical().id_salt("tool-page").auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width((ui.available_width() - 14.0).min(720.0));
-            if let Some(k) = &mut self.keys {
-                k.ui(ui, &mut actions);
-            } else if let Some(c) = &mut self.config {
-                c.ui(ui, &mut changed);
-            } else if let Some(v) = &mut self.vault {
-                v.ui(ui, &known);
-            } else if let Some(b) = &mut self.backup {
-                b.ui(ui, &mut changed);
+            match &mut tool {
+                Tool::Appearance => super::look::page(ui),
+                Tool::Keys(k) => k.ui(ui, &mut actions),
+                Tool::Config(c) => c.ui(ui, &mut changed),
+                Tool::Vault(v) => v.ui(ui, &known),
+                Tool::Backup(b) => b.ui(ui, &mut changed),
             }
             ui.add_space(12.0);
         });
@@ -367,242 +642,8 @@ impl App {
             self.reload_hosts();
         }
         let escape = !ui.ctx().any_popup_open() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
-        if back || escape {
-            // From a form back to its tool's list; from the list back to the tools.
-            let form = self.keys.as_ref().is_some_and(|t| t.sub_page())
-                || self.config.as_ref().is_some_and(|t| t.sub_page())
-                || self.vault.as_ref().is_some_and(|t| t.sub_page())
-                || self.backup.as_ref().is_some_and(|t| t.sub_page());
-            if form {
-                if let Some(t) = self.keys.as_mut() {
-                    t.back();
-                }
-                if let Some(t) = self.config.as_mut() {
-                    t.back();
-                }
-                if let Some(t) = self.vault.as_mut() {
-                    t.back();
-                }
-                if let Some(t) = self.backup.as_mut() {
-                    t.back();
-                }
-            } else if !self.config.as_mut().is_some_and(|c| c.keep_open()) {
-                self.keys = None;
-                self.config = None;
-                self.vault = None;
-                self.backup = None;
-            }
-        }
-    }
-
-    /// A host not in the list: its address, what to open, and the connection's options.
-    fn new_section(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
-        ui.label(RichText::new("New connection").size(16.0).strong());
-        ui.add_space(6.0);
-        let host = ui.add(
-            egui::TextEdit::singleline(&mut self.form.host)
-                .hint_text("user@host, an ~/.ssh/config alias, or a remote access ID")
-                .desired_width(ui.available_width())
-                .margin(egui::Margin::symmetric(8, 7)),
-        );
-        let enter = host.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        // Digits only: an ID that remote access gave another computer, reached through the relay.
-        let digits: String = self.form.host.chars().filter(|c| !c.is_whitespace()).collect();
-        let by_id = (6..=12).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
-        #[cfg(feature = "remote")]
-        let target = if by_id { crate::access::address(&digits, &crate::access::load().relay) } else { self.form.host.clone() };
-        #[cfg(not(feature = "remote"))]
-        let target = self.form.host.clone();
-        ui.label(
-            RichText::new(if by_id {
-                "A remote access ID: its screen and files open through the relay, with the password set on that computer."
-            } else {
-                "SSH: one host you reach directly, signed in with your keys or a password."
-            })
-            .weak()
-            .size(12.0),
-        );
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            for mode in PaneMode::ALL.into_iter().filter(|m| m.on() && !(by_id && *m == PaneMode::Terminal)) {
-                let b = theme::primary(format!("{}  {}", mode.glyph(), mode.name())).min_size(Vec2::new(0.0, 32.0));
-                if ui.add(b).clicked() || (enter && mode == PaneMode::Terminal) {
-                    let how = match mode {
-                        PaneMode::Terminal => How::Terminal,
-                        PaneMode::Screen => How::Screen,
-                        PaneMode::Files => How::Files,
-                    };
-                    *go = Some((target.clone(), self.form.port.clone(), how));
-                }
-            }
-            if by_id && enter {
-                *go = Some((target.clone(), self.form.port.clone(), How::Screen));
-            }
-            if !by_id && icon(ui, ic::ARROW_SQUARE_OUT, "The system's own terminal (ssh)", false).clicked() {
-                *go = Some((self.form.host.clone(), self.form.port.clone(), How::System));
-            }
-        });
-        ui.add_space(10.0);
-        egui::Grid::new("connect-options").num_columns(2).spacing([12.0, 8.0]).striped(false).show(ui, |ui| {
-            ui.label(RichText::new("Port").weak());
-            ui.add(egui::TextEdit::singleline(&mut self.form.port).hint_text("22").desired_width(70.0));
-            ui.end_row();
-            ui.label(RichText::new("Password").weak()).on_hover_text(
-                "For the remote screen and files. Leave empty to sign in with SSH keys; sshremote:// addresses need the password of that computer's remote access ID.",
-            );
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text("optional with SSH keys").desired_width(220.0));
-                ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
-                    .on_hover_text("Keep it in the system's password store");
-            });
-            ui.end_row();
-            ui.label(RichText::new("Screen quality").weak());
-            let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
-            combo("quality", current).width(260.0).show_ui(ui, |ui| {
-                crate::gui::menu_look(ui);
-                ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
-                for (i, p) in PRESETS.iter().enumerate() {
-                    ui.selectable_value(&mut self.form.preset, Some(i), preset_text(p));
-                }
-            });
-            ui.end_row();
-            ui.label(RichText::new("Agent command").weak()).on_hover_text("How the remote screen starts sshremote on the host");
-            ui.add(egui::TextEdit::singleline(&mut self.form.remote).desired_width(260.0));
-            ui.end_row();
-            ui.label(RichText::new("Capture").weak());
-            ui.horizontal(|ui| {
-                // Chosen as in a menu: a quiet tint, not a colour.
-                crate::gui::menu_look(ui);
-                for c in ["auto", "gnome", "windows", "synthetic"] {
-                    ui.selectable_value(&mut self.form.capture, c.to_string(), c);
-                }
-            });
-            ui.end_row();
-        });
-        self.error_box(ui);
-    }
-
-    /// Why the last thing asked for could not open, on whichever page is shown.
-    fn error_box(&self, ui: &mut egui::Ui) {
-        if let Some(e) = &self.error {
-            let (what, hint) = friendly(e);
-            ui.add_space(8.0);
-            egui::Frame::new()
-                .fill(bad().gamma_multiply(0.15))
-                .stroke(Stroke::new(1.0, bad().gamma_multiply(0.6)))
-                .corner_radius(CornerRadius::same(theme::R_MD))
-                .inner_margin(10.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Could not open").strong().color(bad()));
-                    ui.label(&what).on_hover_text(e.as_str());
-                    if !hint.is_empty() {
-                        ui.label(RichText::new(hint).weak());
-                    }
-                });
-    }
-    }
-
-    /// The known hosts: favorites, recent ones and ~/.ssh/config aliases, with search.
-    fn ssh_section(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
-        let mut starred: Option<(String, bool)> = None;
-        let mut forget: Option<String> = None;
-        let hosts = self.host_list();
-        let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("SSH hosts").size(16.0).strong());
-            ui.label(RichText::new(format!("{}", hosts.len())).weak());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(format!("{}  Search", ic::SEARCH)).desired_width(180.0));
-            });
-        });
-        ui.add_space(4.0);
-        if hosts.is_empty() {
-            let text = if self.search.is_empty() {
-                "Hosts you connect to, and the aliases in ~/.ssh/config, appear here."
-            } else {
-                "No host matches the search."
-            };
-            ui.add_space(16.0);
-            ui.label(RichText::new(text).weak());
-            return;
-        }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (i, (h, p, src)) in hosts.iter().enumerate() {
-                let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), egui::Sense::click());
-                if r.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(theme::R_SM), ui.visuals().widgets.hovered.weak_bg_fill);
-                }
-                if i > 0 {
-                    ui.painter().hline(rect.x_range().shrink(8.0), rect.top(), Stroke::new(1.0, line.gamma_multiply(0.5)));
-                }
-                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                row.style_mut().interaction.selectable_labels = false;
-                badge(&mut row, h);
-                row.vertical(|ui| {
-                    ui.add_space(8.0);
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    let name = if p.is_empty() { h.clone() } else { format!("{h}:{p}") };
-                    ui.label(RichText::new(name).strong());
-                    let when = match (src, self.seen.get(h)) {
-                        (_, Some(t)) => crate::hosts::ago(*t),
-                        (Source::SshConfig, None) => "from ~/.ssh/config".into(),
-                        _ => "never connected".into(),
-                    };
-                    let how = if h.starts_with("sshremote://") { "direct" } else { "SSH" };
-                    ui.label(RichText::new(format!("{how}  ·  {when}")).small().weak());
-                });
-                row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let direct = h.starts_with("sshremote://");
-                    egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(ui, |ui| {
-                        crate::gui::menu_look(ui);
-                        ui.set_min_width(210.0);
-                        if !direct && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
-                            *go = Some((h.clone(), p.clone(), How::System));
-                        }
-                        if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
-                            ui.ctx().copy_text(h.clone());
-                        }
-                        if *src == Source::Recent && ui.button(format!("{}  Remove from the list", ic::TRASH)).clicked() {
-                            forget = Some(h.clone());
-                        }
-                    });
-                    let fav = *src == Source::Favorite;
-                    let mut star = RichText::new(ic::STAR).size(16.0);
-                    star = if fav { star.family(filled()).color(warn()) } else { star.color(ui.visuals().weak_text_color()) };
-                    let tip = if fav { "Remove from favorites" } else { "Add to favorites" };
-                    if ui.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
-                        starred = Some((h.clone(), !fav));
-                    }
-                    if PaneMode::Files.on() && icon(ui, ic::FOLDER, "Files", false).clicked() {
-                        *go = Some((h.clone(), p.clone(), How::Files));
-                    }
-                    if PaneMode::Screen.on() && icon(ui, ic::MONITOR, "Screen sharing", false).clicked() {
-                        *go = Some((h.clone(), p.clone(), How::Screen));
-                    }
-                    if !direct && icon(ui, ic::TERMINAL, "Terminal", false).clicked() {
-                        *go = Some((h.clone(), p.clone(), How::Terminal));
-                    }
-                });
-                if r.clicked() {
-                    (self.form.host, self.form.port) = (h.clone(), p.clone());
-                }
-                if r.double_clicked() {
-                    let how = if h.starts_with("sshremote://") { How::Screen } else { How::Terminal };
-                    *go = Some((h.clone(), p.clone(), how));
-                }
-                r.on_hover_text("Double-click for a terminal");
-            }
-        });
-        if let Some((h, on)) = starred {
-            crate::hosts::set_favorite(&h, on);
-            self.favorites = crate::hosts::favorites();
-        }
-        if let Some(h) = forget {
-            self.recent.retain(|(r, _)| *r != h);
-            crate::hosts::save_recent(&self.recent);
-        }
+        // From a tool's form back to its list; from the list back to the settings.
+        self.tool = if back || escape { tool.back() } else { Some(tool) };
     }
 
     /// Opens what was chosen: in a new tab, or beside the active pane.
@@ -638,8 +679,13 @@ impl App {
                 match self.host_launch(&host, &port, mode) {
                     Ok(l) => l,
                     Err(e) => {
+                        // Shown on Connect, with the host it was about in the field.
                         self.error = Some(e);
-                        self.section = Section::New;
+                        if !host.is_empty() && self.form.host.trim() != host {
+                            (self.form.host, self.form.port) = (host, port);
+                            self.form.password.clear();
+                        }
+                        self.go_to(Section::Connect);
                         return;
                     }
                 }
@@ -648,37 +694,45 @@ impl App {
         self.queued.push((launch, place, start));
     }
 
-    /// A launch for `host`: a plain ssh terminal (nothing needed on the host), or the agent.
+    /// A launch for `host`: a plain ssh terminal (nothing needed on the host), or the agent. A
+    /// password typed on Connect goes to the host in its field only, never to another one opened
+    /// from the list.
     pub(super) fn host_launch(&mut self, host: &str, port: &str, mode: PaneMode) -> Result<Launch, String> {
         let host = host.trim().to_string();
         if host.is_empty() {
             return Err("Enter a host, for example user@192.168.1.20".into());
         }
-        #[cfg(feature = "remote")]
-        if let Some(addr) = crate::net::Address::parse(&host) {
-            if mode == PaneMode::Terminal {
-                return Err("sshremote:// addresses reach the screen and files only.".into());
-            }
-            if self.form.password.is_empty() {
-                return Err("Enter the password set for that computer's remote access ID".into());
-            }
-            let target = Target::Direct { addr, password: std::mem::take(&mut self.form.password) };
-            return Ok(Launch::Agent { target, label: host, ssh_cmd: None, mode });
-        }
-        let f = self.form.clone();
-        if f.remember && !f.password.is_empty() && let Err(e) = crate::vault::set(&host, &f.password) {
+        let typed_here = {
+            let field = self.form.host.trim();
+            let digits: String = field.chars().filter(|c| !c.is_whitespace()).collect();
+            field == host || (!digits.is_empty() && host.contains(&format!("//{digits}")))
+        };
+        let typed = if typed_here { std::mem::take(&mut self.form.password) } else { String::new() };
+        if !typed.is_empty() && self.form.remember && let Err(e) = crate::vault::set(&host, &typed) {
             self.error = Some(format!("The password was not saved: {e}"));
         }
         // A password typed now wins over a saved one.
-        let password = Some(f.password.clone()).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
-        self.form.password.clear();
+        let password = Some(typed).filter(|p| !p.is_empty()).or_else(|| crate::vault::get(&host));
+        #[cfg(feature = "remote")]
+        if let Some(addr) = crate::net::Address::parse(&host) {
+            if mode == PaneMode::Terminal {
+                return Err("A computer reached by its ID shows its screen and files, not a terminal.".into());
+            }
+            let Some(password) = password else {
+                return Err("Enter the password set on that computer for its remote access ID.".into());
+            };
+            // Recent once reached, as other hosts are.
+            self.pending_ports.insert(host.clone(), String::new());
+            let target = Target::Direct { addr, password };
+            return Ok(Launch::Agent { target, label: host, ssh_cmd: None, mode });
+        }
         let (port_n, cmd) = ssh_command(&host, port);
         let target = Target::Ssh {
             host: host.clone(),
             port: port_n,
             args: Vec::new(),
-            remote: f.remote.clone(),
-            capture: f.capture.clone(),
+            remote: self.form.remote.clone(),
+            capture: self.form.capture.clone(),
             password,
             unattended: true,
         };
@@ -707,14 +761,63 @@ impl App {
     }
 }
 
+/// The side bar's width.
+const SIDE_W: f32 = 196.0;
+
 /// The places of the open view.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Section {
-    New,
+    Connect,
     Local,
-    Ssh,
     Extensions,
-    Tools,
+    Settings,
+}
+
+/// A page of Settings while it is open.
+pub(super) enum Tool {
+    Appearance,
+    Keys(crate::tools::KeyTool),
+    Config(crate::tools::ConfigTool),
+    Vault(crate::tools::VaultTool),
+    Backup(crate::tools::BackupTool),
+}
+
+impl Tool {
+    fn title(&self) -> (&'static str, &'static str) {
+        match self {
+            Tool::Appearance => (ic::PALETTE, "Appearance"),
+            Tool::Keys(_) => (ic::KEY, "SSH keys"),
+            Tool::Config(_) => (ic::FILE_TEXT, "SSH config file"),
+            Tool::Vault(_) => (ic::LOCK_KEY, "Saved passwords"),
+            Tool::Backup(_) => (ic::ARCHIVE, "Backup and restore"),
+        }
+    }
+
+    /// One step back: from a form to its tool's list, from there out of the tool (unless a
+    /// change still has to be kept or thrown away).
+    fn back(mut self) -> Option<Tool> {
+        let sub = match &mut self {
+            Tool::Appearance => false,
+            Tool::Keys(t) => t.sub_page().then(|| t.back()).is_some(),
+            Tool::Config(t) => t.sub_page().then(|| t.back()).is_some(),
+            Tool::Vault(t) => t.sub_page().then(|| t.back()).is_some(),
+            Tool::Backup(t) => t.sub_page().then(|| t.back()).is_some(),
+        };
+        let keep = match &mut self {
+            Tool::Config(c) => c.keep_open(),
+            _ => false,
+        };
+        (sub || keep).then_some(self)
+    }
+}
+
+/// What a host row asks for.
+enum RowAct {
+    /// Put it in the address field.
+    Pick,
+    Open(How),
+    Star(bool),
+    Forget,
 }
 
 /// What the open view asks to open.
@@ -732,17 +835,23 @@ pub(super) enum How {
 /// A host, its port, and what to open on it.
 pub(super) type Choice = (String, String, How);
 
+/// A page's title and a line about it.
+fn page_title(ui: &mut egui::Ui, title: &str, about: &str) {
+    ui.label(RichText::new(title).size(20.0).strong());
+    ui.label(RichText::new(about).weak().size(12.5));
+    ui.add_space(10.0);
+}
+
 /// A place to open or a tool, as a row: its icon, its name and a line about it.
 fn place_row(ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str) -> bool {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), egui::Sense::click());
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), egui::Sense::click());
     if r.hovered() {
         ui.painter().rect_filled(rect, theme::R_SM, ui.visuals().widgets.hovered.weak_bg_fill);
     }
     let fg = ui.visuals().strong_text_color();
     ui.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(18.0), fg);
-    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 14.0), Align2::LEFT_CENTER, title, FontId::proportional(14.0), fg);
+    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 15.0), Align2::LEFT_CENTER, title, FontId::proportional(14.0), fg);
     let weak = ui.visuals().weak_text_color();
-    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 32.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.5), weak);
-    r.clicked()
+    ui.painter().text(Pos2::new(rect.left() + 44.0, rect.top() + 33.0), Align2::LEFT_CENTER, sub, FontId::proportional(12.0), weak);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
-
