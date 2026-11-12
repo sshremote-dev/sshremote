@@ -274,6 +274,9 @@ mod sys {
     };
 
     const PSEUDOCONSOLE_ATTRIBUTE: usize = 0x20016;
+    /// The pseudo console leaves reflowing to the terminal on a resize instead of printing its
+    /// screen again, which would land in the scrollback a second time (Windows Terminal's flag).
+    const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
 
     pub struct Handle {
         console: usize,
@@ -302,7 +305,11 @@ mod sys {
             }
             let mut console = std::mem::zeroed();
             let size = COORD { X: cols as i16, Y: rows as i16 };
-            let hr = CreatePseudoConsole(size, in_r, out_w, 0, &mut console);
+            let mut hr = CreatePseudoConsole(size, in_r, out_w, PSEUDOCONSOLE_RESIZE_QUIRK, &mut console);
+            if hr != 0 {
+                // A Windows that does not know the flag.
+                hr = CreatePseudoConsole(size, in_r, out_w, 0, &mut console);
+            }
             // The pseudo console holds its own copies of these ends.
             CloseHandle(in_r);
             CloseHandle(out_w);
