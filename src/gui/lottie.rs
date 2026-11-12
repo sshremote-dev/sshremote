@@ -69,6 +69,27 @@ struct Player {
 
 static PLAYERS: Mutex<Vec<Arc<Mutex<Player>>>> = Mutex::new(Vec::new());
 
+/// When a window of this program last had the keyboard, in ms from the first call: moving
+/// backgrounds move only then, and hold their frame while the program is in the background.
+static FOCUSED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn since_epoch() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Called each frame of each window: one with the keyboard keeps the animations going.
+pub(super) fn note_focus(ctx: &egui::Context) {
+    if ctx.input(|i| i.focused) {
+        FOCUSED_AT.store(since_epoch(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A window had the keyboard within the last second.
+fn awake() -> bool {
+    since_epoch().saturating_sub(FOCUSED_AT.load(std::sync::atomic::Ordering::Relaxed)) < 1000
+}
+
 /// The animation's frame for now, as a texture `px` pixels on its longer side (rounded up, so a
 /// size that changes a little keeps its player).
 pub(crate) fn frame(ctx: &egui::Context, path: &str, px: f32, play: bool) -> Result<Option<egui::TextureHandle>, String> {
@@ -317,6 +338,7 @@ fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Pl
     let step = Duration::from_secs_f32(1.0 / rate.min(built_in(path).map_or(30.0, |b| b.fps)));
     let start = Instant::now();
     let mut drawn_still = false;
+    let mut drawn_any = false;
     loop {
         let (play, idle) = match me.lock() {
             Ok(p) => (p.play, p.used.elapsed()),
@@ -332,6 +354,11 @@ fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Pl
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
+        // In the background the frame shown stays, and nothing is drawn or repainted for it.
+        if play && drawn_any && !awake() {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
         let at = if play { anim.in_point + (start.elapsed().as_secs_f32() * rate) % length } else { anim.in_point };
         match prepared.render_frame(at, config) {
             Ok(f) => {
@@ -345,6 +372,7 @@ fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Pl
             Err(e) => return fail(e.to_string()),
         }
         drawn_still = !play;
+        drawn_any = true;
         std::thread::sleep(step);
     }
 }
@@ -352,6 +380,20 @@ fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Pl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Moving backgrounds move while a window has the keyboard and hold still a second after.
+    #[test]
+    fn animations_rest_in_the_background() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ctx = egui::Context::default();
+        let input = |focused| egui::RawInput { focused, ..Default::default() };
+        let _ = ctx.run_ui(input(true), |ui| note_focus(ui.ctx())).textures_delta.clear();
+        assert!(awake(), "a window has the keyboard");
+        // As if the last frame with the keyboard were two seconds back.
+        FOCUSED_AT.store(since_epoch().saturating_sub(2000).max(1), Relaxed);
+        let _ = ctx.run_ui(input(false), |ui| note_focus(ui.ctx())).textures_delta.clear();
+        assert!(!awake() || since_epoch() < 2000, "in the background");
+    }
 
     #[test]
     fn moved_styles_point_at_their_packs() {

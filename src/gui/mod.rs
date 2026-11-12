@@ -775,6 +775,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
         crate::exthost::pump();
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -1028,6 +1029,7 @@ impl App {
                 builder = builder.with_icon(icon);
             }
             ctx.show_viewport_immediate(*id, builder, |ui, _| {
+                lottie::note_focus(ui.ctx());
                 let ctx = ui.ctx().clone();
                 // Closing asks first (the workspace does that); once empty the window goes.
                 chrome::behaviour(&ctx);
