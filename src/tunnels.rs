@@ -171,6 +171,20 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
         // CREATE_NO_WINDOW: no console flashes up for it.
         cmd.creation_flags(0x0800_0000);
     }
+    // Ended with the app even when it does not end well (on Windows its job does that). Tunnels
+    // are started from the window's thread, which lasts as long as the app.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        let parent = libc::getpid();
+        cmd.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
     let mut child = cmd.spawn().map_err(|e| format!("cannot start ssh: {e}"))?;
     crate::sys::tie(&child);
     let said = std::sync::Arc::new(Mutex::new(String::new()));
