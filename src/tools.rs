@@ -314,8 +314,10 @@ fn block(lines: &[&str], alias: &str) -> Option<(usize, usize)> {
 /// The config text with `h` added, or the block of `was` updated to it.
 pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
     let lines: Vec<&str> = text.lines().collect();
+    // A key file in a folder with a space in its name (C:\Users\Jo Ann) is quoted, as ssh reads it.
+    let identity = if h.identity.trim().contains(char::is_whitespace) { format!("\"{}\"", h.identity.trim()) } else { h.identity.trim().to_string() };
     let values =
-        [h.hostname.trim(), h.user.trim(), if h.port.trim() == "22" { "" } else { h.port.trim() }, h.identity.trim()];
+        [h.hostname.trim(), h.user.trim(), if h.port.trim() == "22" { "" } else { h.port.trim() }, identity.as_str()];
     let names = ["HostName", "User", "Port", "IdentityFile"];
     let Some((start, end)) = block(&lines, was).or_else(|| block(&lines, h.alias.trim())) else {
         let mut out = text.trim_end().to_string();
@@ -359,6 +361,26 @@ pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
     out.extend(body);
     out.extend(lines[end..].iter().map(|l| l.to_string()));
     out.join("\n") + "\n"
+}
+
+/// What is wrong with a host's values, as ssh would refuse them (and with them the whole file,
+/// every connection through it): none when they can go in.
+pub fn host_problem(h: &HostEntry) -> Option<String> {
+    let bad = |v: &str| v.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '#' | '"' | '\''));
+    if bad(h.hostname.trim()) {
+        return Some("The host name or address cannot hold spaces, quotes or #.".into());
+    }
+    if bad(h.user.trim()) {
+        return Some("The user name cannot hold spaces, quotes or #.".into());
+    }
+    let port = h.port.trim();
+    if !port.is_empty() && !port.parse::<u16>().is_ok_and(|p| p > 0) {
+        return Some("The port is a number from 1 to 65535.".into());
+    }
+    if h.identity.contains(['"', '\n', '\r']) {
+        return Some("The key file's path cannot hold quotes or line breaks.".into());
+    }
+    None
 }
 
 /// The config text without the block of `alias`.
@@ -421,6 +443,20 @@ impl ConfigTool {
         }
     }
 
+    /// Whether the file is as it was read; changed meanwhile (by an editor, by ssh-keygen), it is
+    /// read again and nothing is written over it.
+    fn unchanged_outside(&mut self) -> bool {
+        let now = std::fs::read_to_string(config_path()).unwrap_or_default();
+        if now == self.saved {
+            return true;
+        }
+        self.hosts = parse_config(&now);
+        self.saved = now.clone();
+        self.text = now;
+        self.status = Some((false, "The file was changed outside this tool; it is read again. Check, then try once more.".into()));
+        false
+    }
+
     /// Writes the file, keeping the previous one as config.bak.
     fn write(&mut self, text: String, done: String) -> bool {
         let path = config_path();
@@ -454,10 +490,18 @@ impl ConfigTool {
             self.status = Some((false, format!("{alias} is in the file already.")));
             return false;
         }
+        if let Some(problem) = host_problem(h) {
+            self.status = Some((false, problem));
+            return false;
+        }
         if self.text != self.saved {
             self.status = Some((false, "The file has unsaved edits; save or revert them first.".into()));
             return false;
         }
+        if !self.unchanged_outside() {
+            return false;
+        }
+        let h = &self.form;
         let text = upsert_host(&self.saved, &self.editing, h);
         let done = if self.editing.is_empty() { format!("Added {alias}") } else { format!("Saved {alias}") };
         let ok = self.write(text, done);
@@ -535,8 +579,8 @@ impl ConfigTool {
         if let Some(alias) = remove {
             if self.text != self.saved {
                 self.status = Some((false, "The file has unsaved edits; save or revert them first.".into()));
-            } else if self
-                .write(remove_host(&self.saved, &alias), format!("Removed {alias} (the old file is config.bak)"))
+            } else if self.unchanged_outside()
+                && self.write(remove_host(&self.saved, &alias), format!("Removed {alias} (the old file is config.bak)"))
             {
                 *changed = true;
             }
@@ -1011,6 +1055,23 @@ pub fn open_path(p: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use crate::gui::snapshot::RunTest;
+    /// Values ssh would refuse (and with them every connection through the file) are not written;
+    /// a key file in a folder with a space is quoted.
+    #[test]
+    fn host_values_are_checked_and_paths_quoted() {
+        use super::{HostEntry, host_problem, upsert_host};
+        let h = |host: &str, user: &str, port: &str| HostEntry { alias: "w".into(), hostname: host.into(), user: user.into(), port: port.into(), ..Default::default() };
+        assert!(host_problem(&h("10.0.0.5", "ana", "2222")).is_none());
+        assert!(host_problem(&h("10.0.0.5", "ana", "")).is_none());
+        assert!(host_problem(&h("10.0.0.5 evil", "ana", "22")).is_some());
+        assert!(host_problem(&h("10.0.0.5", "ana#x", "22")).is_some());
+        assert!(host_problem(&h("10.0.0.5", "ana", "70000")).is_some());
+        assert!(host_problem(&h("10.0.0.5", "ana", "0")).is_some());
+        let mut e = h("10.0.0.5", "ana", "22");
+        e.identity = r"C:\Users\Jo Ann\.ssh\id_ed25519".into();
+        assert!(upsert_host("", "", &e).contains(r#"IdentityFile "C:\Users\Jo Ann\.ssh\id_ed25519""#));
+    }
+
     /// A private key under a .pub name is never taken for a public key.
     #[test]
     fn only_public_key_lines_count_as_public_keys() {
