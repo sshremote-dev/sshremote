@@ -1,13 +1,17 @@
 //! Extensions: packages (`.sshx`, a zip with `extension.json` and its files) that add to the
 //! program, installed from a file or from the online registry (sshremote.dev), updated and
 //! removed. They contribute background layers (Lottie animations and pictures) to Appearance,
-//! commands and settings, and programs: helpers run beside the app, and commands they provide
-//! (`sshremote web`, `mcp`, `remote`) in builds without them. See docs/extensions.md.
+//! commands and settings, programs (helpers run beside the app, and commands they provide:
+//! `sshremote web`, `mcp`, `remote` in builds without them), and tools that open in a pane of
+//! their own: web apps (`contributes.panes`, API 3), each a page of a browser run with no window
+//! (`capture::browser`). See docs/extensions.md.
 //!
 //! extension.json (`api` is the extension API it needs, at most [`API`]):
 //!   { "id": "dev.sshremote.ocean", "name": "Ocean", "version": "1.0.0", "api": 1,
 //!     "description": "...", "contributes": { "layers": [
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
+//!   A tool in a pane: "contributes": { "panes": [
+//!       { "id": "translate", "title": "Translate", "url": "https://translate.google.com" } ] }
 //!
 //! The registry is a static index (build.py in the sshremote-extensions repository writes it):
 //!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size" } ] }
@@ -22,7 +26,7 @@ use eframe::egui::{self, RichText};
 use crate::gui::ic;
 
 /// What extensions this program can read.
-pub const API: u64 = 2;
+pub const API: u64 = 3;
 /// Where the registry's index is unless a setting names another (a company's own mirror).
 pub const REGISTRY: &str = "https://sshremote.dev/registry/v1/index.json";
 
@@ -45,6 +49,33 @@ pub struct Manifest {
     pub programs: Vec<(String, String)>,
     /// "startup": its program runs beside the app, talking with the extension host.
     pub activation: Option<String>,
+    /// Tools it opens in a pane (`contributes.panes`).
+    pub panes: Vec<PaneDef>,
+}
+
+/// A tool an extension opens in a pane of its own: a web app at an address, shown as a page of a
+/// browser run with no window (`capture::browser`), beside terminals and screens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneDef {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub description: String,
+}
+
+/// The tools of every installed extension, with the extension's name; looked at again every few
+/// seconds (installing one shows it soon after).
+pub fn panes() -> Vec<(String, PaneDef)> {
+    static KEPT: std::sync::Mutex<Option<(std::time::Instant, Vec<(String, PaneDef)>)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, list)) = kept.as_ref()
+        && at.elapsed() < std::time::Duration::from_secs(5)
+    {
+        return list.clone();
+    }
+    let list: Vec<(String, PaneDef)> = installed().into_iter().flat_map(|m| m.panes.into_iter().map(move |p| (m.name.clone(), p))).collect();
+    *kept = Some((std::time::Instant::now(), list.clone()));
+    list
 }
 
 /// A setting an extension declares: its id, what it is called, its kind ("text", "secret",
@@ -226,6 +257,20 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
     if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
         return Err("extension.json brings programs without the \"native\" permission".into());
     }
+    let panes = v
+        .pointer("/contributes/panes")
+        .and_then(|x| x.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|p| {
+                    let get = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    let (id, url) = (get("id"), get("url"));
+                    let web = url.starts_with("https://") || url.starts_with("http://");
+                    (word(&id) && web && url.len() < 2000).then(|| PaneDef { title: if get("title").is_empty() { id.clone() } else { get("title") }, description: get("description"), id, url })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let activation = v.get("activation").and_then(|x| x.as_str()).map(str::to_string);
     if activation.is_some() && programs.is_empty() {
         return Err("extension.json has an activation but no program to run".into());
@@ -234,6 +279,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         keys,
         settings,
         activation,
+        panes,
         programs,
         name: if s("name").is_empty() { id.clone() } else { s("name") },
         id,

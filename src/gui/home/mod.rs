@@ -199,6 +199,12 @@ impl App {
             How::This(mode) => {
                 Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode }
             }
+            How::Web(url, label) => Launch::Agent {
+                label: if label.is_empty() { crate::computers::get(&url).filter(|c| !c.name.is_empty()).map_or_else(|| web_label(&url), |c| c.name) } else { label },
+                target: Target::Local { capture: format!("browser:{url}") },
+                ssh_cmd: None,
+                mode: PaneMode::Screen,
+            },
             How::TestDesktop => Launch::Agent {
                 target: Target::Local { capture: "synthetic".into() },
                 label: "Test desktop".into(),
@@ -316,10 +322,19 @@ pub(super) enum How {
     TestDesktop,
     Local(crate::termwin::Profile),
     This(PaneMode),
+    /// A web app at this address, as a page in a pane, and what the pane is called (empty: its
+    /// name in the list, else its site).
+    Web(String, String),
 }
 
 /// An address, its port, and what to open on it.
 pub(super) type Choice = (String, String, How);
+
+/// What a web app's pane is called before it is given a name: its site.
+pub(super) fn web_label(url: &str) -> String {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or(url);
+    host.trim_start_matches("www.").to_string()
+}
 
 /// An address as the field takes it: `host:port`, `[v6]:port`, or the host alone.
 fn with_port(host: &str, port: &str) -> String {

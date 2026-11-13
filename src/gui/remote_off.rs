@@ -33,6 +33,9 @@ impl Remote {
     pub(super) fn mode(&self) -> super::workspace::PaneMode {
         match self.never {}
     }
+    pub(super) fn is_web(&self) -> bool {
+        match self.never {}
+    }
     pub(super) fn set_mode(&mut self, _: super::workspace::PaneMode) -> Result<(), String> {
         match self.never {}
     }

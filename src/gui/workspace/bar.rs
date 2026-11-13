@@ -306,7 +306,10 @@ impl Workspace {
             State::Shell(_) => PaneMode::Terminal,
             State::Down(_) => p.mode,
         };
+        // A web app's page, by its address: a window of its own, whatever its mode says.
+        let web = matches!(&p.target, Target::Local { capture } if capture.starts_with("browser:"));
         let glyph = match mode {
+            _ if web => ic::APP_WINDOW,
             PaneMode::Terminal => ic::TERMINAL,
             PaneMode::Screen => ic::DESKTOP,
             PaneMode::Files => ic::FOLDER,
@@ -364,6 +367,10 @@ impl Workspace {
     /// The drop-down that turns the active pane into a terminal, the screen or the files.
     pub(super) fn mode_menu(&mut self, ui: &mut egui::Ui, id: u64) {
         let Some(i) = self.index(id) else { return };
+        // A web app's page has no terminal or files of its own to switch to.
+        if matches!(&self.panes[i].state, State::Live(r) if r.is_web()) {
+            return;
+        }
         let start = ui.cursor().left();
         let cur = match &self.panes[i].state {
             State::Live(r) => r.mode(),

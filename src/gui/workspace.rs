@@ -429,8 +429,9 @@ impl Workspace {
     /// The pane's name and round trip for its tab and the dock.
     fn name(&self, id: u64) -> (String, Option<f32>) {
         let Some(p) = self.index(id).map(|i| &self.panes[i]) else { return (String::new(), None) };
+        // A web app's page is on this computer: no time to the host to tell.
         let rtt = match &p.state {
-            State::Live(r) => Some(r.rtt()),
+            State::Live(r) if !r.is_web() => Some(r.rtt()),
             _ => None,
         };
         (p.label.clone(), rtt)
@@ -856,7 +857,7 @@ impl Workspace {
         let name = self.panes[i].label.clone();
         match &self.panes[i].state {
             #[cfg(feature = "remote")]
-            State::Live(r) if r.mode() == PaneMode::Screen => {
+            State::Live(r) if r.mode() == PaneMode::Screen && !r.is_web() => {
                 super::dock::Status { glyph, rtt: Some(r.rtt()), view_only: r.view_only(), details: r.details(), name }
             }
             _ => super::dock::Status { glyph, rtt: None, view_only: false, details: name.clone(), name },

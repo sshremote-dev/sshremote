@@ -17,6 +17,9 @@ pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result
 /// toolbar and owns full screen; the pane takes input only while it is the active one.
 pub(super) struct Remote {
     pub(super) active: bool,
+    /// A web app's page (`capture::browser`): a page's controls (back, forward, reload), not a
+    /// computer's.
+    pub(super) web: bool,
     /// Ctrl+Alt+Enter was pressed in it: the workspace turns full screen on or off.
     pub(super) full_toggle: bool,
     /// The pane is the whole full-screen window (zoomed, or the window's only pane in full
@@ -224,6 +227,7 @@ impl Remote {
         // The conversation with this host so far, from earlier sessions.
         let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
         Remote {
+            web: sess.backend == "browser",
             active: true,
             full_toggle: false,
             filling: false,
@@ -896,6 +900,11 @@ impl Remote {
     }
 
     /// What a pane of this connection shows.
+    /// Whether it shows a web app's page.
+    pub(super) fn is_web(&self) -> bool {
+        self.web
+    }
+
     pub(super) fn mode(&self) -> super::workspace::PaneMode {
         use super::workspace::PaneMode;
         if self.files_only {

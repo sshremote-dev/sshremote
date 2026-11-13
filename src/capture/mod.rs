@@ -1,3 +1,4 @@
+mod browser;
 #[cfg(windows)]
 mod dxgi;
 #[cfg(target_os = "linux")]
@@ -80,6 +81,11 @@ pub trait Capture {
         Err("this capture backend has one screen".into())
     }
     fn desktop_size(&self) -> (usize, usize);
+    /// Whether the screen takes the size it is shown at (a web page, laid out again), rather
+    /// than being scaled to it.
+    fn resizable(&self) -> bool {
+        false
+    }
     /// Where the captured area starts on the virtual desktop, to place accessibility rectangles.
     fn origin(&self) -> (i32, i32) {
         (0, 0)
@@ -107,6 +113,8 @@ pub fn ensure_session_env() {
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
     match name {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),
+        // A web app in a pane: a page of a browser run with no window.
+        n if n.starts_with("browser:") => Ok(Box::new(browser::Browser::open(&n["browser:".len()..])?)),
         "synthetic2" => Ok(Box::new(synthetic::Synthetic::with_screens(2))),
         #[cfg(target_os = "linux")]
         "gnome" | "auto" => Ok(Box::new(gnome::Gnome::open()?)),

@@ -268,6 +268,8 @@ impl App {
                 }
                 ui.add_space(10.0);
             }
+            // A web app kept in the list: its name, tags and address alone.
+            let web = !s.by_id && !s.in_config && matches!(super::connect::typed(&s.address), super::connect::Typed::Web { .. });
             // All the room the window leaves under the title and above the buttons.
             let room = (ctx.content_rect().height() - chrome::HEIGHT - if new { 260.0 } else { 220.0 }).max(160.0);
             egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
@@ -304,6 +306,8 @@ impl App {
                             kit::row(ui, "User", |ui| ui.add(kit::field(&mut s.entry.user, "your name there")));
                             kit::row(ui, "Key file", |ui| ui.add(kit::field(&mut s.entry.identity, "~/.ssh/id_ed25519 (optional)")));
                         }
+                    } else if web {
+                        kit::row(ui, "Address", |ui| ui.add(kit::field(&mut s.address, "https://…")));
                     } else {
                         kit::row(ui, "Address", |ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -313,7 +317,7 @@ impl App {
                             });
                         });
                     }
-                    if !s.by_id && !s.was_in_config {
+                    if !s.by_id && !s.was_in_config && !web {
                         let r = kit::row(ui, "", |ui| {
                             ui.checkbox(&mut s.in_config, "Keep it in ~/.ssh/config").on_hover_text("As an alias, with its user, port and key: ssh and other programs know it too")
                         });
@@ -330,6 +334,9 @@ impl App {
                             s.address = format!("{user}{}", s.entry.hostname);
                             s.port = s.entry.port.clone();
                         }
+                    }
+                    if web {
+                        return;
                     }
                     kit::row(ui, "Wake address", |ui| {
                         ui.add(kit::field(&mut s.mac, "its network card's, to wake it (optional)"))
@@ -350,8 +357,10 @@ impl App {
                         });
                     });
                 });
-                ui.add_space(kit::GAP);
-                self.tunnel_rows(ui, &mut s);
+                if !web {
+                    ui.add_space(kit::GAP);
+                    self.tunnel_rows(ui, &mut s);
+                }
             });
             if let Some(p) = s.problem.clone() {
                 ui.add_space(10.0);

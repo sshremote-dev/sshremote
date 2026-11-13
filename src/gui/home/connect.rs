@@ -14,6 +14,9 @@ pub(in crate::gui) enum Typed {
     Id { address: String, id: String },
     /// An SSH address (an alias, a name, `user@host`, an IP), with the port typed after it.
     Ssh { host: String, port: String },
+    /// A web address (`https://…`): a web app, opened in a pane as a page of a browser run with
+    /// no window (`capture::browser`).
+    Web { url: String },
     /// Words that are no address: they only find computers in the list.
     Words,
 }
@@ -23,6 +26,10 @@ pub(in crate::gui) fn typed(text: &str) -> Typed {
     let t = text.trim();
     if t.is_empty() {
         return Typed::Empty;
+    }
+    let lower = t.to_ascii_lowercase();
+    if (lower.starts_with("https://") || lower.starts_with("http://")) && !t.contains(char::is_whitespace) && t.len() > 9 {
+        return Typed::Web { url: t.to_string() };
     }
     let digits: String = t.chars().filter(|c| !c.is_whitespace()).collect();
     if (6..=12).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -101,6 +108,11 @@ fn tag_chip(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     r
+}
+
+/// Whether a computer of the list is a web app (`Typed::Web`).
+pub(in crate::gui) fn is_web(c: &Computer) -> bool {
+    matches!(typed(&c.address), Typed::Web { .. })
 }
 
 /// A line of the list.
@@ -203,6 +215,9 @@ impl App {
         if enter && let Some(p) = picked {
             *go = self.default_open(&entries[p]);
         }
+        if what == Typed::Empty {
+            self.tools(ui, go);
+        }
         self.computer_list(ui, &what, &entries, picked, go);
     }
 
@@ -213,6 +228,7 @@ impl App {
             Typed::Empty => String::new(),
             Typed::Id { id, .. } => id.clone(),
             Typed::Ssh { host, .. } => host.to_lowercase(),
+            Typed::Web { url } => url.to_lowercase(),
             Typed::Words => self.form.host.trim().to_lowercase(),
         };
         let here = self.here.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.name.to_lowercase()).unwrap_or_default();
@@ -238,6 +254,7 @@ impl App {
                 ui.label(RichText::new(format!("{}  Finding computers by these words.", ic::SEARCH)).color(weak).size(12.5));
                 return;
             }
+            Typed::Web { url } => return self.web_typed(ui, url, enter, go),
             Typed::Id { address, .. } => (address.clone(), String::new(), true),
             Typed::Ssh { host, port } => (host.clone(), port.clone(), false),
         };
@@ -334,6 +351,43 @@ impl App {
         }
     }
 
+    /// A web address typed: it opens in a pane as a web app, and can be kept in the list.
+    fn web_typed(&mut self, ui: &mut egui::Ui, url: &str, enter: bool, go: &mut Option<Choice>) {
+        let weak = ui.visuals().weak_text_color();
+        let known = self.computers.iter().any(|c| c.address == url);
+        let mut open = enter;
+        kit::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                egui::Frame::new().fill(super::super::brand().gamma_multiply(0.16)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(7, 3)).show(ui, |ui| {
+                    ui.label(RichText::new("Web").size(11.0).strong().color(super::super::brand()));
+                });
+                ui.add(egui::Label::new(RichText::new(url)).truncate());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !known && ui.add(kit::ghost(ic::PLUS)).on_hover_text("Keep it in the list, to open again with a click").clicked() {
+                        crate::computers::update(url, |c| c.last_used = crate::sys::now_secs());
+                        self.computers_at = None;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            if ui.add(theme::primary(format!("{}  Open in a pane", ic::APP_WINDOW)).min_size(Vec2::new(150.0, kit::CONTROL_H))).on_hover_text("Open it here (Enter)").clicked() {
+                open = true;
+            }
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new("A page of Chrome, Edge or Chromium run with no window of its own, beside your other panes; its sign-ins stay in SSH Remote's own profile for this site.")
+                        .small()
+                        .color(weak),
+                )
+                .wrap(),
+            );
+        });
+        if open {
+            *go = Some((url.to_string(), String::new(), How::Web(url.to_string(), String::new())));
+        }
+    }
+
     /// What Enter and a double click open: the last one chosen, a screen for an ID.
     pub(in crate::gui) fn default_mode(&self, by_id: bool) -> PaneMode {
         let m = self.form.mode;
@@ -346,6 +400,7 @@ impl App {
                 PaneMode::Terminal => (String::new(), String::new(), How::Local(crate::termwin::local_profiles().into_iter().next()?)),
                 m => (String::new(), String::new(), How::This(m)),
             },
+            Entry::Computer(c) if is_web(c) => (c.address.clone(), String::new(), How::Web(c.address.clone(), String::new())),
             Entry::Computer(c) => (c.address.clone(), c.port.map(|p| p.to_string()).unwrap_or_default(), how(self.default_mode(c.id().is_some()))),
         })
     }
@@ -374,6 +429,25 @@ impl App {
             }
         });
         ui.add_space(6.0);
+    }
+
+    /// The tools installed extensions open in a pane (a translator, a chat): one click opens one.
+    fn tools(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        let tools = crate::ext::panes();
+        if tools.is_empty() {
+            return;
+        }
+        kit::heading(ui, "Tools");
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            for (ext, t) in tools {
+                let tip = if t.description.is_empty() { format!("{} ({ext})", t.url) } else { format!("{}\n{} ({ext})", t.description, t.url) };
+                if ui.add(kit::secondary(format!("{}  {}", ic::APP_WINDOW, t.title)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
+                    *go = Some((t.url.clone(), String::new(), How::Web(t.url.clone(), t.title.clone())));
+                }
+            }
+        });
+        ui.add_space(10.0);
     }
 
     /// The computers: a heading with a way to add one, then a row each.
@@ -625,8 +699,9 @@ impl App {
         let mut act = None;
         let (r, mut row, lit) = self.row_frame(ui, picked, &c.address);
         let by_id = c.id().is_some();
+        let web = is_web(c);
         let weak = row.visuals().weak_text_color();
-        kit::mark(&mut row, if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, weak);
+        kit::mark(&mut row, if web { ic::APP_WINDOW } else if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, weak);
         let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
         right.spacing_mut().item_spacing.x = 2.0;
         if lit {
@@ -636,7 +711,7 @@ impl App {
                 if ui.button(format!("{}  Edit\u{2026}", ic::PENCIL)).clicked() {
                     act = Some(RowAct::Edit);
                 }
-                if !by_id && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
+                if !by_id && !web && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
                     act = Some(RowAct::Open(How::System));
                 }
                 if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
@@ -662,7 +737,11 @@ impl App {
                 act = Some(RowAct::Star(!c.favorite));
             }
         }
-        if lit {
+        if lit && web {
+            if icon(&mut right, ic::APP_WINDOW, "Open in a pane", false).clicked() {
+                act = Some(RowAct::Open(How::Web(c.address.clone(), String::new())));
+            }
+        } else if lit {
             if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, "Files", false).clicked() {
                 act = Some(RowAct::Open(How::Files));
             }
@@ -683,6 +762,7 @@ impl App {
                 sub.push(c.id().map_or_else(|| c.address.clone(), |id| format!("ID {}", crate::computers::spaced(id))));
             }
             sub.push(match (by_id, c.port) {
+                _ if web => format!("Web app, {}", super::web_label(&c.address)),
                 (true, _) if !c.name.is_empty() => String::new(),
                 (true, _) => "by ID".into(),
                 (false, Some(p)) => format!("SSH, port {p}"),

@@ -50,7 +50,7 @@
 </div></footer>
 <script>
 (function () {
-  const KINDS = { 'style pack': ['Style packs', 'palette'], script: ['Scripts', 'code'], program: ['Programs', 'cpu'], resident: ['Resident', 'bolt'] };
+  const KINDS = { tools: ['Tools', 'globe'], 'style pack': ['Style packs', 'palette'], script: ['Scripts', 'code'], program: ['Programs', 'cpu'], resident: ['Resident', 'bolt'] };
   const PLATFORMS = { 'windows-x86_64': 'Windows', 'linux-x86_64': 'Linux' };
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -80,6 +80,7 @@
     if (e.updated) rows.push(['Updated', '<time datetime="' + esc(e.updated) + '">' + esc(e.updated) + '</time>']);
     if (e.permissions && e.permissions.length) rows.push(['Permissions', e.permissions.map((p) => '<code>' + esc(p) + '</code>').join(' ')]);
     if (e.commands && e.commands.length) rows.push(['Commands', esc(e.commands.join(', '))]);
+    if (e.panes && e.panes.length) rows.push(['Opens in a pane', esc(e.panes.join(', '))]);
     if (e.homepage && /^https?:\/\//.test(e.homepage)) rows.push(['Homepage', '<a href="' + esc(e.homepage) + '">' + esc(e.homepage.replace(/^https?:\/\//, '')) + '</a>']);
     const layers = e.layers && e.layers.length ? '<details><summary>' + e.layers.length + ' backgrounds</summary><ul>' + e.layers.map((l) => '<li>' + esc(l) + '</li>').join('') + '</ul></details>' : '';
     return '<article class="card ext"><div class="row"><span class="ico">' + sshIcon(iconOf(e)) + '</span><div><h3>' + esc(e.name || e.id) +

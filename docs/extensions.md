@@ -25,6 +25,22 @@ an app that must stay safe on machines that hold SSH keys:
 | Style pack | `contributes.layers` | Pictures and Lottie animations behind the terminals |
 | Script | `main` (a `.wasm` file), `contributes.commands` | Commands in the terminal's right-click menu and the command palette that change the selected text |
 | Host extension | `programs`, `"activation": "startup"`, `contributes.commands` | Runs beside the app for as long as it is open: status bar items, panels, commands, terminals, events |
+| Tools (API 3) | `contributes.panes` | Web apps listed under Tools on the home and in Quick open (`+`); each opens in a pane of its own as a page of Chrome, Edge or Chromium run with no window, its sign-ins kept in a profile of its own per site |
+
+A tool in a pane:
+
+```json
+{
+  "id": "dev.sshremote.web-apps", "name": "Web apps", "version": "1.0.0", "api": 3,
+  "contributes": { "panes": [
+    { "id": "translate", "title": "Google Translate", "url": "https://translate.google.com",
+      "description": "Translate text, documents and pages." } ] }
+}
+```
+
+It needs no code and no permission: the page runs in the browser's own sandbox, sees nothing of the
+app, and gets only what is typed and clicked in its pane. Any other site opens the same way by
+typing its `https://` address on the home or in Quick open.
 
 ## The manifest
 

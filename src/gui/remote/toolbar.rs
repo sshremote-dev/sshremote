@@ -158,6 +158,20 @@ impl Remote {
     /// The pane's controls in the workspace's title bar (or its full-screen dock): the screen's
     /// display, sharing, keys, terminal, chat, screenshot, pause and options.
     pub(in crate::gui) fn toolbar_items(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
+        // A web app's page: a page's own controls, as a browser has them.
+        if self.web {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (glyph, tip, keysym, mods) in [
+                (ic::ARROW_LEFT, "Back (Alt+Left)", xk::LEFT, crate::proto::MOD_ALT),
+                (ic::ARROW_RIGHT, "Forward (Alt+Right)", xk::RIGHT, crate::proto::MOD_ALT),
+                (ic::ARROW_CLOCKWISE, "Reload (F5)", xk::F1 + 4, 0),
+            ] {
+                if ui.add(crate::gui::tool_button(glyph, false)).on_hover_text(tip).clicked() {
+                    *action = Some(Box::new(move |r, _| r.send(ToAgent::Key { keysym, mods })));
+                }
+            }
+            return;
+        }
         let screen = self.screen_controls();
         // A pane showing its shell: the shell's own controls first.
         if self.mode() == super::workspace::PaneMode::Terminal

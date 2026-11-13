@@ -39,9 +39,14 @@ fn send_sized(w: &mut Wire, m: &ToClient) -> io::Result<usize> {
 /// The picture's size for the viewer's area: the host's shape kept, never larger than the host,
 /// then the preset's scale. The limiting side is exact and the other rounded, so a 1920x1080
 /// desktop in a 1280x720 view is 1280x720, not a pixel short to be resampled.
-fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
+fn target(desk: (usize, usize), s: &Settings, resizable: bool) -> (usize, usize) {
     let (dw, dh) = (desk.0.max(1) as f64, desk.1.max(1) as f64);
     let (vw, vh) = (s.view_w.max(16) as f64, s.view_h.max(16) as f64);
+    let k = s.scale.clamp(1, 100) as f64 / 100.0;
+    // A screen that takes any size (a web page) is laid out at the size it is shown at.
+    if resizable {
+        return (((vw * k).round() as usize).max(16), ((vh * k).round() as usize).max(16));
+    }
     let (w, h) = if vw * dh <= vh * dw {
         let w = vw.min(dw);
         (w, (dh * w / dw).round())
@@ -49,7 +54,6 @@ fn target(desk: (usize, usize), s: &Settings) -> (usize, usize) {
         let h = vh.min(dh);
         ((dw * h / dh).round(), h)
     };
-    let k = s.scale.clamp(1, 100) as f64 / 100.0;
     (((w * k).round() as usize).max(16), ((h * k).round() as usize).max(16))
 }
 
@@ -436,7 +440,7 @@ fn serve_with(
             };
             match m {
                 ToAgent::Settings(s) => {
-                    let t = target(desk, &s);
+                    let t = target(desk, &s, cap.resizable());
                     if t != size {
                         cap.set_target(t.0, t.1)?;
                         size = t;
@@ -449,6 +453,10 @@ fn serve_with(
                         vid.reset();
                     }
                     settings = Some(s);
+                    // A page laid out at the new size: the viewer hears its new size.
+                    if cap.resizable() && cap.desktop_size() != desk {
+                        resized!();
+                    }
                 }
                 ToAgent::Ack(_) => {
                     in_flight = in_flight.saturating_sub(1);
@@ -975,7 +983,7 @@ fn announce(
     send(enc, &hello).map_err(io_err)?;
     send(enc, &monitors(cap)).map_err(io_err)?;
     if let Some(s) = settings {
-        *size = target(desk, &s);
+        *size = target(desk, &s, cap.resizable());
         cap.set_target(size.0, size.1)?;
     }
     Ok(())
@@ -999,11 +1007,14 @@ mod tests {
     /// never larger than the host, and the scale rounds rather than drops a pixel.
     #[test]
     fn the_picture_size_is_exact_on_the_limiting_side() {
-        assert_eq!(target((1920, 1080), &view(1280, 720, 100)), (1280, 720));
-        assert_eq!(target((1920, 1080), &view(1366, 768, 100)), (1365, 768));
-        assert_eq!(target((1920, 1080), &view(1920, 1200, 100)), (1920, 1080));
-        assert_eq!(target((1920, 1080), &view(4000, 3000, 100)), (1920, 1080), "never enlarged");
-        assert_eq!(target((1920, 1080), &view(1280, 720, 50)), (640, 360));
-        assert_eq!(target((1920, 1080), &view(1280, 720, 255)), (1280, 720), "a scale above 100 is 100");
+        assert_eq!(target((1920, 1080), &view(1280, 720, 100), false), (1280, 720));
+        assert_eq!(target((1920, 1080), &view(1366, 768, 100), false), (1365, 768));
+        assert_eq!(target((1920, 1080), &view(1920, 1200, 100), false), (1920, 1080));
+        assert_eq!(target((1920, 1080), &view(4000, 3000, 100), false), (1920, 1080), "never enlarged");
+        assert_eq!(target((1920, 1080), &view(1280, 720, 50), false), (640, 360));
+        assert_eq!(target((1920, 1080), &view(1280, 720, 255), false), (1280, 720), "a scale above 100 is 100");
+        // A web page takes the size it is shown at, whatever its shape was.
+        assert_eq!(target((1280, 800), &view(1178, 696, 100), true), (1178, 696));
+        assert_eq!(target((1280, 800), &view(1178, 696, 50), true), (589, 348));
     }
 }
