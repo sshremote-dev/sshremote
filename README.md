@@ -101,9 +101,11 @@ What is opened goes into the workspace:
 
 ## In a browser
 
-[web.sshremote.dev](https://web.sshremote.dev/) reaches computers by ID from any browser, with
-nothing to install. `sshremote web` serves the same from a computer of your own to a browser, a phone's too: terminals, screens and files of this
-computer and its `~/.ssh/config` hosts, and computers by ID. The screen sends only what changed
+[web.sshremote.dev](https://web.sshremote.dev/) reaches computers by their ID from any browser,
+with nothing to install; it opens nothing else (no SSH, no sign-in: `sshremote web --id-only`).
+`sshremote web` serves the same from a computer of your own to a browser, a phone's too:
+terminals, screens and files of this computer and its `~/.ssh/config` hosts after its password,
+and computers by ID. The screen sends only what changed
 (moves for scrolling, lossless WebP for text, JPEG for photographs) at the app's qualities, auto
 and black and white included; it has zoom, touch (tap, long press for the right button, two
 fingers to scroll and pinch), the keyboard of input methods and phones, keys the browser keeps,

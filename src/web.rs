@@ -199,7 +199,11 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
     let path = req.path.split('?').next().unwrap_or("/");
     let path = path.strip_prefix("/web").unwrap_or(path);
     match path {
-        "" | "/" | "/index.html" => page(&conn, &req, "text/html; charset=utf-8", PAGE.as_bytes()),
+        "" | "/" | "/index.html" => {
+            // A gateway for IDs only says so on the page, which then asks for an ID alone.
+            let body = if gate.id_only { PAGE.replacen("<html lang=\"en\">", "<html lang=\"en\" data-id-only>", 1) } else { PAGE.to_string() };
+            page(&conn, &req, "text/html; charset=utf-8", body.as_bytes())
+        }
         "/app.js" => page(&conn, &req, "text/javascript", APP_JS.as_bytes()),
         "/xterm.js" => page(&conn, &req, "text/javascript", XTERM_JS.as_bytes()),
         "/addon-fit.js" => page(&conn, &req, "text/javascript", FIT_JS.as_bytes()),

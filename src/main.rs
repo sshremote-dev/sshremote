@@ -122,8 +122,9 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote here                  how others reach this computer: its name, addresses and ID
        sshremote find                  computers on this network with remote access on
        sshremote wake MAC|ADDRESS      wake a computer by its network card (Wake-on-LAN)
-       sshremote web [--listen ADDR] [--password-file F]
-                                  terminals in a browser: this computer and its ~/.ssh/config hosts
+       sshremote web [--listen ADDR] [--password-file F] [--relay HOST] [--id-only]
+                                  terminals in a browser: this computer and its ~/.ssh/config hosts,
+                                  and computers by ID (--id-only: those alone, no SSH or sign-in)
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|roll-back ID|pack DIR OUT.sshx|new DIR|dev DIR
                                   extensions: style packs from sshremote.dev or a file;
                                   roll-back ID returns to the version before the last update

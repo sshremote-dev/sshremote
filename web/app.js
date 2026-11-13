@@ -214,6 +214,11 @@ async function unseal(s) {
   return new TextDecoder().decode(plain);
 }
 
+// A gateway for computers by ID only (a public one, as web.sshremote.dev): no SSH, no sign-in,
+// none of its own computers. It says so on the page it serves.
+const idOnly = document.documentElement.hasAttribute("data-id-only");
+const allowed = e => !idOnly || e.kind === "id";
+
 // Saved connections: { key, kind: "id" | "ssh" | "gw", address, port, name, last, view, pw }.
 const saved = () => store.get("saved", []);
 const keyOf = t => t.kind + ":" + t.address + (t.port ? ":" + t.port : "");
@@ -258,7 +263,7 @@ function fail(text) { $("error").textContent = text || ""; }
 
 function refreshForm() {
   const p = parse($("addr").value);
-  const ssh = p?.kind === "ssh";
+  const ssh = p?.kind === "ssh" && !idOnly;
   // SSH needs the gateway's owner first: one password at a time, the gateway's, then the host's.
   const locked = ssh && !signedIn();
   $("port").hidden = !ssh;
@@ -269,9 +274,9 @@ function refreshForm() {
   $("pw").placeholder = match?.pw ? "Saved password (type to change)" : ssh ? "Password (none with SSH keys)" : "Password set on that computer";
   $("keeprow").hidden = !canKeep || locked;
   // What was typed, named; and what the password is for it.
-  $("kind").textContent = !p ? "" : ssh ? "SSH host" : "ID";
+  $("kind").textContent = !p || (idOnly && p.kind !== "id") ? "" : ssh ? "SSH host" : "ID";
   $("pwlabel").textContent = ssh ? "SSH password" : "Password";
-  $("hint").textContent = !p || locked ? "" : ssh
+  $("hint").textContent = idOnly && p && p.kind !== "id" ? "This page opens computers by their 9-digit ID. For SSH, use the app." : !p || locked ? "" : ssh
     ? "Signed in to this gateway: SSH leaves from its server."
     : "A one-time password works too. Without any, leave it empty: the person there is asked to let you in, where that computer allows it.";
 }
@@ -294,6 +299,14 @@ $("theme").onclick = () => {
 };
 themeButton();
 
+if (idOnly) {
+  $("addrlabel").textContent = "Remote access ID";
+  $("addr").placeholder = "123 456 789";
+  $("addr").setAttribute("inputmode", "numeric");
+  $("addr").setAttribute("aria-label", "Remote access ID");
+  $("gatelink").hidden = true;
+}
+
 $("addr").addEventListener("input", () => {
   // An ID is spaced in threes as the app shows it.
   const v = $("addr").value;
@@ -315,6 +328,7 @@ $("form").onsubmit = async e => {
   fail("");
   const p = parse($("addr").value);
   if (!p) { fail("Enter a remote access ID, or an SSH host such as user@192.168.1.20."); $("addr").focus(); return; }
+  if (idOnly && p.kind !== "id") { fail("This page opens computers by their 9-digit ID. For SSH, use the app: sshremote.dev."); $("addr").focus(); return; }
   if (p.kind === "id" && p.address.length !== 9) { fail("An ID is 9 digits."); $("addr").focus(); return; }
   const port = p.kind === "ssh" ? ($("port").value.trim() || p.port || "") : "";
   if (port && !(+port >= 1 && +port <= 65535)) { fail("A port is a number from 1 to 65535."); $("port").focus(); return; }
@@ -347,7 +361,7 @@ $("form").onsubmit = async e => {
 };
 
 function renderSaved() {
-  const list = saved();
+  const list = saved().filter(allowed);
   const box = $("saved");
   box.textContent = "";
   $("savedn").textContent = list.length ? list.length : "";
@@ -2022,7 +2036,7 @@ let linked = location.hash;
     linked = typeof got?.then === "string" ? got.then : "";
     const text = (v, n) => (typeof v === "string" ? v : "").slice(0, n);
     const list = (Array.isArray(got?.saved) ? got.saved : [])
-      .filter(e => e && ["id", "ssh", "gw"].includes(e.kind) && typeof e.address === "string" && e.address && e.address.length < 300)
+      .filter(e => e && ["id", "ssh", "gw"].includes(e.kind) && allowed(e) && typeof e.address === "string" && e.address && e.address.length < 300)
       .slice(0, 40)
       .map(e => {
         const t = { kind: e.kind, address: e.address, port: /^\d{1,5}$/.test(String(e.port ?? "")) ? String(e.port) : "", name: text(e.name, 80), last: Number(e.last) || 0 };
@@ -2050,4 +2064,4 @@ renderSaved();
 refreshForm();
 renderGateway();
 // A remembered sign-in: checked, and the gateway's hosts listed.
-if (gateway.token) signIn(null, false, gateway.token).catch(e => { if (e.signin) signOut(); });
+if (gateway.token && !idOnly) signIn(null, false, gateway.token).catch(e => { if (e.signin) signOut(); });
