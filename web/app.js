@@ -28,6 +28,8 @@ const ICONS = {
   chat: "M4 5h16v11H10l-5 4v-4H4z",
   pause: "M8 5v14|M16 5v14",
   window: "M3 5h18v14H3z|M3 9h18",
+  sound: "M4 9h4l5-4v14l-5-4H4z|M16 9a4 4 0 0 1 0 6|M18.5 6.5a7.5 7.5 0 0 1 0 11",
+  below: "M3 4h18v16H3z|M3 13h18|M6.5 16l2 1.5-2 1.5",
   play: "M7 5l12 7-12 7z",
   clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z|M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
@@ -497,6 +499,40 @@ function painter(canvas, first, drawn, resized) {
   return buf => { queue.push(buf); run(); };
 }
 
+// The host's sound: 20 ms Opus packets, decoded by the browser (WebCodecs) and played about
+// 80 ms behind, which rides out the network's unevenness. Null where the browser cannot.
+function soundPlayer() {
+  if (!window.AudioDecoder || !window.AudioContext) return null;
+  const ac = new AudioContext({ sampleRate: 48000 });
+  let at = 0, ts = 0;
+  const dec = new AudioDecoder({
+    output: d => {
+      const n = d.numberOfFrames, ch = d.numberOfChannels;
+      const buf = ac.createBuffer(ch, n, d.sampleRate);
+      for (let c = 0; c < ch; c++) d.copyTo(buf.getChannelData(c), { planeIndex: c, format: "f32-planar" });
+      d.close();
+      const now = ac.currentTime;
+      // Behind by more than a moment (the tab slept): start over at the delay.
+      if (at < now || at > now + 0.5) at = now + 0.08;
+      const src = ac.createBufferSource();
+      src.buffer = buf;
+      src.connect(ac.destination);
+      src.start(at);
+      at += buf.duration;
+    },
+    error: () => {},
+  });
+  dec.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 2 });
+  return {
+    packet(p) {
+      if (dec.state !== "configured") return;
+      dec.decode(new EncodedAudioChunk({ type: "key", timestamp: ts, data: p }));
+      ts += 20000;
+    },
+    close() { try { dec.close(); } catch { /* closed */ } ac.close(); },
+  };
+}
+
 // A ZIP file (stored, not compressed: what is sent is already as small as it gets over the
 // link) built from parts as they arrive, so a folder downloads as one file.
 const CRC = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
@@ -557,6 +593,7 @@ class Client {
     this.monitors = null;
     this.hostClip = null;
     this.chatLines = [];         // { you, text, at }
+    this.split = store.get("split", false);
     this.unread = 0;
     $("home").hidden = true;
     $("client").hidden = false;
@@ -646,6 +683,9 @@ class Client {
   close() {
     this.ended = true;
     clearInterval(this.retryTimer);
+    this.sound?.close();
+    this.sound = null;
+    $("views").classList.remove("split");
     try { this.ws?.close(); } catch { /* gone */ }
     this.term?.dispose();
     this.unbind?.();
@@ -664,6 +704,7 @@ class Client {
         this.tail = ((this.tail || "") + new TextDecoder().decode(b.subarray(1))).slice(-2000);
       }
       else if (b[0] === 4) this.show(m.data);
+      else if (b[0] === 6) this.sound?.packet(b.subarray(1));
       else if (b[0] === 5) {
         saveBlob(new Blob([b.subarray(1)], { type: "image/png" }), "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
         toast("A lossless picture of the screen was saved.");
@@ -813,9 +854,10 @@ class Client {
     if (view === "files") { if (!this.files.wanted) { this.files.wanted = true; this.list(""); } else $("ftable").focus(); this.filesWait(); }
     if (this.ready) update(this.t.key || keyOf(this.t), { view });
     if (this.desk) this.figures();
+    this.splitView();
   }
   relayout() {
-    if (this.view === "term") this.fit.fit();
+    if (this.view === "term" || $("views").classList.contains("split")) this.fit.fit();
     clearTimeout(this.rt);
     this.rt = setTimeout(() => { if (this.view === "screen") this.send({ view: this.want() }); }, 250);
   }
@@ -1136,6 +1178,15 @@ class Client {
     if (this.stats && this.view === "screen") parts.push(this.stats.kbps.toFixed(this.stats.kbps < 10 ? 1 : 0) + " KB/s", Math.round(this.stats.rtt) + " ms");
     this.state(parts.join(" · "), "up");
   }
+  // The terminal below the screen, as the app shows it, while the screen is the view.
+  splitView() {
+    const on = !!this.split && this.view === "screen";
+    $("views").classList.toggle("split", on);
+    setTimeout(() => {
+      if (on) this.fit.fit();
+      if (this.view === "screen") this.send({ view: this.want() });
+    }, 0);
+  }
   // The host's windows to choose from: one, or every window of its program.
   windowPick(w) {
     const box = $("modal").firstElementChild;
@@ -1264,6 +1315,8 @@ class Client {
           ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
           ["Share…", () => shareMenu(more), { icon: "window", on: kind !== 0 }],
+          ["Sound", sound, { icon: "sound", on: !!this.sound }],
+          ["The terminal below", below, { icon: "below", on: !!this.split }],
         ];
         if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
         items.push(null, [this.paused ? "Go on" : "Pause the picture", pause, { icon: this.paused ? "play" : "pause", on: this.paused }]);
@@ -1284,10 +1337,26 @@ class Client {
     chat.classList.toggle("on", !$("chat").hidden);
     if (this.unread) chat.append(h("span", { class: "count", text: String(this.unread) }));
     chat.onclick = () => this.chatShow($("chat").hidden);
+    const sound = () => {
+      if (this.sound) { this.sound.close(); this.sound = null; this.send({ sound: false }); }
+      else {
+        this.sound = soundPlayer();
+        if (!this.sound) { toast("This browser cannot play the host's sound (it needs WebCodecs: Chrome, Edge or Firefox).", { bad: true }); return; }
+        this.send({ sound: true });
+      }
+      this.screenTools();
+    };
+    const below = () => { this.split = !this.split; store.set("split", this.split); this.splitView(); this.screenTools(); };
+    const hear = button("sound", null, { title: this.sound ? "Stop the host's sound" : "Hear the host's sound" });
+    hear.classList.toggle("on", !!this.sound);
+    hear.onclick = sound;
+    const term = button("below", null, { title: this.split ? "The screen alone" : "The terminal below the screen" });
+    term.classList.toggle("on", !!this.split);
+    term.onclick = below;
     const share = button("window", null, { title: "Share the whole screen, one window or one program" });
     share.classList.toggle("on", kind !== 0);
     share.onclick = () => shareMenu(share);
-    bar.append(keys, clip, quality, share, chat);
+    bar.append(keys, clip, quality, share, chat, hear, term);
     if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
       mon.onclick = () => monitorMenu(mon);

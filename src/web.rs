@@ -670,6 +670,10 @@ fn ask(frame: Frame) -> Option<Ask> {
     if let Some(on) = v.get("pause").and_then(|x| x.as_bool()) {
         return Some(Ask::Pause(on));
     }
+    // The host's sound, as Opus packets the browser decodes.
+    if let Some(on) = v.get("sound").and_then(|x| x.as_bool()) {
+        return Some(Ask::Agent(ToAgent::Audio(on)));
+    }
     // A lossless picture of the screen, as the app saves one.
     if v.get("snapshot").is_some() {
         return Some(Ask::Agent(ToAgent::Snapshot));
@@ -1107,6 +1111,11 @@ fn client(
                 }
                 ToClient::Sharing { kind, text } => {
                     let _ = send_json(&w, serde_json::json!({ "sharing": { "kind": kind, "text": text } }));
+                }
+                ToClient::Audio(packet) => {
+                    if send(&w, 0x2, &[&[6u8][..], &packet].concat()).is_err() {
+                        break 'run String::new();
+                    }
                 }
                 ToClient::Snapshot(png) => {
                     if send(&w, 0x2, &[&[5u8][..], &png].concat()).is_err() {
@@ -1748,6 +1757,7 @@ Host: x
         assert!(matches!(a(r#"{"snapshot":1}"#), Some(Ask::Agent(ToAgent::Snapshot))));
         use crate::shared::Share;
         assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
+        assert!(matches!(a(r#"{"sound":true}"#), Some(Ask::Agent(ToAgent::Audio(true)))));
         assert!(matches!(a(r#"{"share":{"kind":"window","id":"18446744073709551000"}}"#), Some(Ask::Agent(ToAgent::Share(Share::Window(18446744073709551000))))));
         assert!(matches!(a(r#"{"share":{"kind":"activeApp"}}"#), Some(Ask::Agent(ToAgent::Share(Share::ActiveApp)))));
         assert!(a(r#"{"share":{"kind":"window"}}"#).is_none(), "a window needs its id");
