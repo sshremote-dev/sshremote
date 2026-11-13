@@ -795,6 +795,7 @@ class Client {
         toast("A lossless picture of the screen was saved.");
       }
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
+      else if (b[0] === 8) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" }));
       return;
     }
     const v = JSON.parse(m.data);
@@ -1158,10 +1159,33 @@ class Client {
     // keyboard: let go after Shift, an "A" must not stay down as an "a" comes up.
     const kbd = $("kbd");
     const held = new Map();
+    // Ctrl+V there pastes what is copied here: the browser's paste brings it (a picture, files
+    // or text), it goes onto the host's clipboard, then Ctrl+V goes to the host.
+    const swallowed = new Set();
+    let pasteWait = null;
+    const pasteThere = () => {
+      const ctrl = [...held.values()].some(k => k === 0xffe3 || k === 0xffe4);
+      if (!ctrl) send({ key: [K.ctrl, 1] });
+      tap(0x76);
+      if (!ctrl) send({ key: [K.ctrl, 0] });
+    };
+    kbd.addEventListener("paste", e => {
+      e.preventDefault();
+      clearTimeout(pasteWait); pasteWait = null;
+      if (this.viewOnly) return;
+      this.pasteData(e.clipboardData, pasteThere);
+    });
     kbd.onkeydown = e => {
       // An input method is composing (Korean, Japanese, Chinese) or a phone keyboard sends no
       // key: its text comes when it is done.
       if (e.isComposing || e.key === "Process" || e.key === "Unidentified" || e.keyCode === 229) return;
+      if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.code === "KeyV" && !this.viewOnly) {
+        // Left to the browser, which pastes into the field; a browser that does not still pastes there.
+        swallowed.add(e.code);
+        clearTimeout(pasteWait);
+        pasteWait = setTimeout(() => { pasteWait = null; pasteThere(); }, 400);
+        return;
+      }
       const k = keysym(e); if (!k) return;
       e.preventDefault();
       // "Win + the next key" from the keys menu: this key goes with Win held.
@@ -1174,6 +1198,7 @@ class Client {
     };
     kbd.onkeyup = e => {
       const id = e.code || e.key;
+      if (swallowed.delete(id)) { e.preventDefault(); return; }
       const k = held.get(id) ?? keysym(e); if (!k) return;
       e.preventDefault(); held.delete(id); send({ key: [k, 0] });
     };
@@ -1420,6 +1445,7 @@ class Client {
       }],
       null,
       ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
+      ["Copy the host's picture here", () => this.copyHostImage(), { disabled: !this.hostImage }],
     ], at);
     // Read when opened: the quality changes after the bar is made (auto, the host's answer).
     const qualityMenu = at => { const Q = this.quality || {}; menu(["Picture quality",
@@ -1567,6 +1593,15 @@ class Client {
     bar.append(cam);
   }
   async pasteHere() {
+    // A picture copied here, when the browser lets the page read one.
+    if (navigator.clipboard?.read) {
+      try {
+        for (const item of await navigator.clipboard.read()) {
+          const type = item.types.find(t => t.startsWith("image/"));
+          if (type) { this.sendImage(await item.getType(type), () => this.combo([K.ctrl, 0x76])); return; }
+        }
+      } catch { /* text, below */ }
+    }
     if (!navigator.clipboard?.readText) { toast("This browser does not let the page read the clipboard; use “Type or paste text”.", { bad: true }); return; }
     try {
       const text = await navigator.clipboard.readText();
@@ -1576,6 +1611,61 @@ class Client {
       // Then Ctrl+V there, once the text is on its clipboard.
       setTimeout(() => this.combo([K.ctrl, 0x76]), 150);
     } catch { toast("The page was not allowed to read the clipboard.", { bad: true }); }
+  }
+  // What a paste in the screen brought: a picture onto the host's clipboard, files as files, or
+  // text; then `paste` (Ctrl+V there).
+  pasteData(dt, paste) {
+    const files = [...(dt?.files || [])];
+    if (files.length === 1 && files[0].type.startsWith("image/")) { this.sendImage(files[0], paste); return; }
+    if (files.length) { this.pasteFileList(files); return; }
+    const text = dt?.getData("text/plain");
+    if (text && text !== this.sentClip && text !== this.hostClip) {
+      this.sentClip = text;
+      this.send({ clipboard: text });
+      setTimeout(paste, 150);
+    } else paste();
+  }
+  // A picture onto the host's clipboard as PNG, in parts; larger than the host takes, it goes as
+  // a file instead.
+  async sendImage(blob, paste) {
+    try {
+      if (blob.type !== "image/png") {
+        const bmp = await createImageBitmap(blob);
+        const c = h("canvas", { width: bmp.width, height: bmp.height });
+        c.getContext("2d").drawImage(bmp, 0, 0);
+        blob = await new Promise(ok => c.toBlob(ok, "image/png"));
+      }
+      if (blob.size > 4 << 20) {
+        this.pasteFileList([new File([blob], "picture-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png", { type: "image/png" })]);
+        return;
+      }
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (this.ws?.readyState !== 1) return;
+      for (let at = 0; at < bytes.length; at += 512 << 10) {
+        const part = bytes.subarray(at, at + (512 << 10));
+        const fr = new Uint8Array(part.length + 1);
+        fr[0] = 8; fr.set(part, 1);
+        this.ws.send(fr);
+      }
+      this.send({ clipImageEnd: true });
+      setTimeout(paste, 250);
+    } catch { toast("The picture could not be read.", { bad: true }); }
+  }
+  // A picture copied on the host: onto this computer's clipboard when the browser allows it, or
+  // a button to do it (or to save it, where pictures cannot be copied).
+  clipImageIn(blob) {
+    this.hostImage = blob;
+    const offer = () => toast("A picture was copied on the host.", window.ClipboardItem ? { action: ["Copy here", () => this.copyHostImage()] } : { action: ["Save", () => this.saveHostImage()] });
+    if (!window.ClipboardItem || !navigator.clipboard?.write) { offer(); return; }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(() => {}, offer);
+  }
+  copyHostImage() {
+    if (!this.hostImage) return;
+    if (!window.ClipboardItem || !navigator.clipboard?.write) { this.saveHostImage(); return; }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": this.hostImage })]).then(() => toast("Copied here."), () => toast("This browser did not allow copying a picture.", { bad: true, action: ["Save", () => this.saveHostImage()] }));
+  }
+  saveHostImage() {
+    if (this.hostImage) saveBlob(this.hostImage, "picture-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
   }
   clipboardIn(text) {
     this.hostClip = text;
@@ -1889,13 +1979,16 @@ class Client {
     pick.onchange = () => {
       const files = [...pick.files];
       pick.remove();
-      if (!files.length) return;
-      const batch = "web-" + Date.now();
-      this.queueUploads(files.map(file => ({ file, name: file.name })), "\u0000clipboard/" + batch, () => this.send({ pasteFiles: { batch, names: files.map(f => f.name) } }));
-      toast("Pasting " + files.length + (files.length === 1 ? " file" : " files") + " there…");
+      this.pasteFileList(files);
     };
     document.body.append(pick);
     pick.click();
+  }
+  pasteFileList(files) {
+    if (!files.length || this.viewOnly) return;
+    const batch = "web-" + Date.now();
+    this.queueUploads(files.map(file => ({ file, name: file.name })), "\u0000clipboard/" + batch, () => this.send({ pasteFiles: { batch, names: files.map(f => f.name) } }));
+    toast("Pasting " + files.length + (files.length === 1 ? " file" : " files") + " there…");
   }
   queueUploads(list, dir = this.files.cwd, done = null) {
     if (!list.length) return;

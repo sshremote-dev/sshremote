@@ -6,7 +6,8 @@
 //!
 //! On the socket, text frames carry JSON (sign-in, what to open, the views, files, the end) and
 //! binary frames start with a type byte: 1 terminal bytes, 2 a JPEG picture, 3 a download chunk
-//! and 4 an upload chunk (both after a u32 LE id).
+//! and 4 an upload chunk (both after a u32 LE id), and 8 a part of a picture copied (as PNG: on
+//! the host to the page, or on the browser's computer to the host, ended by `clipImageEnd`).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -583,6 +584,9 @@ enum Ask {
     Upload { id: u32, size: u64, dir: String, name: String },
     Chunk(u32, Vec<u8>),
     UploadEnd(u32),
+    /// A part of a picture copied in the browser, for the host's clipboard; then its end.
+    ClipPart(Vec<u8>),
+    ClipEnd,
     /// The picture's quality: as the app's (auto, a preset, or colours, resolution and frame
     /// rate of the user's own).
     Quality(WebQuality),
@@ -614,6 +618,7 @@ fn ask(frame: Frame) -> Option<Ask> {
                 }
                 // The browser's voice in a call: 20 ms of Opus.
                 Some((7, data)) if data.len() <= 4000 => Some(Ask::Agent(ToAgent::Voice(data.to_vec()))),
+                Some((8, data)) => Some(Ask::ClipPart(data.to_vec())),
                 _ => None,
             };
         }
@@ -739,6 +744,9 @@ fn ask(frame: Frame) -> Option<Ask> {
     }
     if let Some(id) = n("uploadEnd") {
         return Some(Ask::UploadEnd(id as u32));
+    }
+    if v.get("clipImageEnd").is_some() {
+        return Some(Ask::ClipEnd);
     }
     match browser_input(&v)? {
         Input::Agent(a) => Some(Ask::Agent(a)),
@@ -1003,6 +1011,8 @@ fn client(
     let mut downloads: HashMap<u32, (u64, u64)> = HashMap::new();
     // Uploads under way: declared size and bytes passed on.
     let mut uploads: HashMap<u32, (u64, u64)> = HashMap::new();
+    // A picture copied in the browser, as its parts come; None once it is larger than the host takes.
+    let mut clip_image: Option<Vec<u8>> = Some(Vec::new());
     let end = 'run: loop {
         // The agent's messages, or a short wait when there is no agent to hear from.
         let mut msgs = Vec::new();
@@ -1177,6 +1187,11 @@ fn client(
                         break 'run String::new();
                     }
                 }
+                ToClient::ClipImage(png) => {
+                    if send(&w, 0x2, &[&[8u8][..], &png].concat()).is_err() {
+                        break 'run String::new();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1304,6 +1319,21 @@ fn client(
                 },
                 Ask::UploadEnd(id) if uploads.contains_key(&id) => Some(ToAgent::FileEnd { id }),
                 Ask::UploadEnd(_) => None,
+                Ask::ClipPart(data) => {
+                    clip_image = clip_image.take().filter(|b| b.len() + data.len() <= crate::clip::IMAGE_MAX).map(|mut b| {
+                        b.extend_from_slice(&data);
+                        b
+                    });
+                    None
+                }
+                Ask::ClipEnd => match std::mem::replace(&mut clip_image, Some(Vec::new())) {
+                    Some(png) if !png.is_empty() => Some(ToAgent::ClipImage(png)),
+                    Some(_) => None,
+                    None => {
+                        let _ = send_json(&w, serde_json::json!({ "notice": "The picture is larger than 4 MB: paste it as a file instead." }));
+                        None
+                    }
+                },
                 Ask::Gone => break 'run String::new(),
             };
             let Some(m) = to_agent else { continue };
@@ -1837,6 +1867,8 @@ Host: x
         assert!(matches!(a(r#"{"resize":[100,30]}"#), Some(Ask::Agent(ToAgent::TermResize { cols: 100, rows: 30, .. }))));
         assert!(matches!(a(r#"{"upload":{"id":3,"size":9,"dir":"/t","name":"a"}}"#), Some(Ask::Upload { id: 3, size: 9, .. })));
         assert!(matches!(a(r#"{"move":[1,2]}"#), Some(Ask::Agent(ToAgent::Pointer { x: 1, y: 2 }))));
+        assert!(matches!(a(r#"{"clipImageEnd":true}"#), Some(Ask::ClipEnd)));
+        assert!(matches!(ask(Frame::Binary(vec![8, 0x89, b'P'])), Some(Ask::ClipPart(b)) if b == [0x89, b'P']));
         assert!(matches!(ask(Frame::Binary(vec![1, b'l', b's'])), Some(Ask::Agent(ToAgent::TermInput { data, .. })) if data == b"ls"));
         assert!(matches!(ask(Frame::Binary(vec![4, 7, 0, 0, 0, 1])), Some(Ask::Chunk(7, d)) if d == [1]));
         assert!(ask(Frame::Binary(vec![4, 7])).is_none() && ask(Frame::Binary(vec![9])).is_none());

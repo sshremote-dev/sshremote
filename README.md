@@ -130,7 +130,8 @@ and computers by ID. The screen sends only what changed
 (moves for scrolling, lossless WebP for text, JPEG for photographs) at the app's qualities, auto
 and black and white included; it has zoom, touch (tap, long press for the right button, two
 fingers to scroll and pinch), the keyboard of input methods and phones, keys the browser keeps,
-clipboard (and files pasted there), chat, sound and voice calls (WebCodecs), sharing one window or
+clipboard (text, pictures and files: Ctrl+V on the screen pastes what is copied here, and a
+picture copied there comes onto this clipboard), chat, sound and voice calls (WebCodecs), sharing one window or
 program, the computer menu (lock, restart, its keyboard kept out, its screen hidden), pause,
 lossless screenshots, recording, files dropped on the screen, the terminal below the screen, every
 screen of a host in a window of its own, two-step codes, and reconnecting by itself.
