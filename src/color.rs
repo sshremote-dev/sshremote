@@ -401,20 +401,17 @@ impl Seen {
     }
 }
 
-/// Whether `r` looks like a photograph or a film rather than text and drawings: in most of nine
-/// 32x32 samples spread over it no colour covers a quarter of the pixels, where text, windows
-/// and drawings have a background that covers most of theirs.
-pub fn rich(p: &Plane, r: &Rect) -> bool {
-    if !matches!(p.mode, Mode::True | Mode::Color256) {
-        return false;
-    }
-    let bpp = p.mode.bpp();
+/// Whether `r` of the captured picture looks like a photograph or a film rather than text and
+/// drawings: in most of nine 32x32 samples spread over it no colour covers a quarter of the
+/// pixels, where text, windows and drawings have a background that covers most of theirs. The
+/// capture is judged, not the picture made of it, whose fewer colours would hide a photograph.
+pub fn rich(img: &Image, r: &Rect) -> bool {
     let (mut samples, mut many) = (0, 0);
     let mut keys = Vec::with_capacity(1024);
     for j in 0..3 {
         for i in 0..3 {
             let (sw, sh) = (32.min(r.w), 32.min(r.h));
-            if sw * sh < 64 {
+            if sw * sh < 64 || r.x + r.w > img.w || r.y + r.h > img.h {
                 continue;
             }
             // At a quarter, half and three quarters of the way: an area found by whole tiles has
@@ -422,8 +419,8 @@ pub fn rich(p: &Plane, r: &Rect) -> bool {
             let (x, y) = (r.x + (r.w - sw) * (i + 1) / 4, r.y + (r.h - sh) * (j + 1) / 4);
             keys.clear();
             for row in y..y + sh {
-                let s = (row * p.w + x) * bpp;
-                keys.extend(p.data[s..s + sw * bpp].chunks_exact(bpp).map(|px| if bpp == 3 { key(px) } else { px[0] as u32 }));
+                let s = row * img.stride + x * 4;
+                keys.extend(img.data[s..s + sw * 4].chunks_exact(4).map(|px| (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32));
             }
             keys.sort_unstable();
             let top = keys.chunk_by(|a, b| a == b).map(<[u32]>::len).max().unwrap_or(0);
@@ -651,8 +648,9 @@ mod tests {
         assert_eq!(again[0], data[0]);
         // A viewer that lost the palette cannot read it, rather than showing wrong colours.
         assert!(Colours::default().unpack(&data[0], 32, 32).is_none());
-        assert!(!rich(&p, &Rect { x: 0, y: 0, w: 64, h: 40 }));
-        assert!(rich(&p, &Rect { x: 64, y: 0, w: 32, h: 40 }));
+        let img = Image { w, h, stride: w * 4, data: p.data.chunks_exact(3).flat_map(|c| [c[2], c[1], c[0], 255]).collect() };
+        assert!(!rich(&img, &Rect { x: 0, y: 0, w: 64, h: 40 }));
+        assert!(rich(&img, &Rect { x: 64, y: 0, w: 32, h: 40 }));
     }
 
     #[test]

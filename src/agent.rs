@@ -676,7 +676,7 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
         }
         let mut video_part = None;
         if matches!(plane.mode, Mode::Color256 | Mode::True) {
-            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects, !moves.is_empty(), &|r| crate::color::rich(&plane, r)) {
+            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects, !moves.is_empty(), &|r| crate::color::rich(img, r)) {
                 // Its pixels went as a film: they go again losslessly, tile by tile, but for the
                 // tiles this frame sends whole anyway.
                 let inside = |c: &crate::color::Rect, t: &crate::color::Rect| c.x <= t.x && c.y <= t.y && c.x + c.w >= t.x + t.w && c.y + c.h >= t.y + t.h;
