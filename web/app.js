@@ -1364,6 +1364,7 @@ class Client {
     ], at);
     const clipMenu = at => menu([
       ["Paste my clipboard into the host", () => this.pasteHere()],
+      ["Paste files there…", () => this.pasteFiles(), { disabled: this.viewOnly }],
       ["Type or paste text for the host…", async () => {
         const text = await ask({ title: "Send text to the host", text: "It goes on the host's clipboard; paste it there.", area: "Text", ok: "Send" });
         if (text) { this.send({ clipboard: text }); toast("On the host's clipboard."); }
@@ -1833,7 +1834,21 @@ class Client {
 
   // ----- Uploads, one file at a time
   // `dir` "" sends to the host's Downloads folder.
-  queueUploads(list, dir = this.files.cwd) {
+  // Files chosen here, put on the host's clipboard as files and pasted where its keyboard is.
+  pasteFiles() {
+    const pick = h("input", { type: "file", multiple: true, hidden: true });
+    pick.onchange = () => {
+      const files = [...pick.files];
+      pick.remove();
+      if (!files.length) return;
+      const batch = "web-" + Date.now();
+      this.queueUploads(files.map(file => ({ file, name: file.name })), "\u0000clipboard/" + batch, () => this.send({ pasteFiles: { batch, names: files.map(f => f.name) } }));
+      toast("Pasting " + files.length + (files.length === 1 ? " file" : " files") + " there…");
+    };
+    document.body.append(pick);
+    pick.click();
+  }
+  queueUploads(list, dir = this.files.cwd, done = null) {
     if (!list.length) return;
     if (dir === null || dir === "::") { toast("Open a folder first."); return; }
     const big = list.filter(u => u.file.size > MAX_TRANSFER);
@@ -1841,7 +1856,7 @@ class Client {
     const items = list.filter(u => u.file.size <= MAX_TRANSFER);
     if (!items.length) return;
     const total = items.reduce((n, u) => n + u.file.size, 0);
-    const batch = { dir, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false };
+    const batch = { dir, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false, done };
     batch.ui = this.xferRow("upload", items.length === 1 ? items[0].name : items.length + " files", total, () => { batch.cancelled = true; });
     for (const u of items) this.uploads.push({ ...u, batch });
     this.pump();
@@ -1888,7 +1903,7 @@ class Client {
     if (b.sent < b.count) { b.ui.label(b.count + " files · " + b.sent + " of " + b.count); return; }
     if (b.cancelled) b.ui.done(false, "Cancelled");
     else if (b.failed.length) { b.ui.done(false, b.failed.length + " failed: " + b.failed[0]); }
-    else b.ui.done(true, size(b.total) + " sent");
+    else { b.ui.done(true, size(b.total) + " sent"); b.done?.(); }
     if (this.files.cwd === b.dir) this.list(b.dir);
   }
 

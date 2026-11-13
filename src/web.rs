@@ -681,6 +681,12 @@ fn ask(frame: Frame) -> Option<Ask> {
         return Some(Ask::Pause(on));
     }
     // The host's sound, as Opus packets the browser decodes.
+    // Files uploaded into a clipboard batch, to paste there: {"pasteFiles":{"batch":B,"names":[..]}}.
+    if let Some(p) = v.get("pasteFiles") {
+        let batch = p.get("batch")?.as_str()?.to_string();
+        let names = p.get("names")?.as_array()?.iter().filter_map(|n| n.as_str().map(String::from)).collect();
+        return Some(Ask::Agent(ToAgent::PasteFiles { batch, names }));
+    }
     if let Some(on) = v.get("call").and_then(|x| x.as_bool()) {
         return Some(Ask::Agent(ToAgent::Call(on)));
     }
@@ -1800,6 +1806,7 @@ Host: x
         assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
         assert!(matches!(a(r#"{"sound":true}"#), Some(Ask::Agent(ToAgent::Audio(true)))));
         assert!(matches!(a(r#"{"call":true}"#), Some(Ask::Agent(ToAgent::Call(true)))));
+        assert!(matches!(a(r#"{"pasteFiles":{"batch":"web-1","names":["a.txt"]}}"#), Some(Ask::Agent(ToAgent::PasteFiles { names, .. })) if names == ["a.txt"]));
         assert!(matches!(ask(Frame::Binary(vec![7, 1, 2])), Some(Ask::Agent(ToAgent::Voice(v))) if v == [1, 2]));
         assert!(matches!(a(r#"{"share":{"kind":"window","id":"18446744073709551000"}}"#), Some(Ask::Agent(ToAgent::Share(Share::Window(18446744073709551000))))));
         assert!(matches!(a(r#"{"share":{"kind":"activeApp"}}"#), Some(Ask::Agent(ToAgent::Share(Share::ActiveApp)))));
