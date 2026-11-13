@@ -769,7 +769,14 @@ class Client {
     }
     if (v.quality) { this.quality = v.quality; this.figures(); }
     if (v.stats) { this.stats = v.stats; this.figures(); }
-    if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied/i.test(v.notice) });
+    if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied|does not let/i.test(v.notice) });
+    if (v.host) {
+      this.host = v.host;
+      const at = this.hostWait;
+      this.hostWait = null;
+      if (at && this.computerMenu) this.computerMenu(at);
+    }
+    if (v.allowed) this.allowed = v.allowed;
     if (v.end || v.error) {
       const why = v.end || v.error;
       this.term.write("\r\n\x1b[31m[" + why + "]\x1b[0m\r\n");
@@ -1306,6 +1313,25 @@ class Client {
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
       [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
       null, ["All its screens, a window each", () => this.spread()]], at);
+    // The computer itself: asked what it can do the first time, then opened where it was asked for.
+    const computerMenu = this.computerMenu = at => {
+      const H = this.host;
+      if (!H) { this.hostWait = at; this.send({ host: { act: 0 } }); return; }
+      if (!H.can) return menu(["The person at that computer does not let you do these."], at);
+      const can = a => (H.can & (1 << a)) !== 0, on = a => (H.on & (1 << a)) !== 0;
+      const only = a => !can(a) ? { disabled: true } : {};
+      menu(["This computer",
+        ["Lock it", () => this.send({ host: { act: 2, on: true } }), { icon: "lock", ...only(2) }],
+        ["Restart it…", async () => {
+          if (await ask({ title: "Restart the computer?", text: "Programs there close; unsaved work may be lost. The connection comes back when it is up, if remote access starts with it.", ok: "Restart now", danger: true }))
+            this.send({ host: { act: 1, on: true } });
+        }, { icon: "reload", ...only(1) }],
+        null,
+        ["Keep its keyboard and mouse out", () => this.send({ host: { act: 3, on: !on(3) } }), { on: on(3), ...only(3) }],
+        ["Hide its screen", () => this.send({ host: { act: 4, on: !on(4) } }), { on: on(4), ...only(4) }],
+        ["Lock it when I leave", () => this.send({ host: { act: 5, on: !on(5) } }), { on: on(5), ...only(5) }],
+      ], at);
+    };
     const viewOnly = () => {
       this.viewOnly = !this.viewOnly;
       if (this.viewOnly) this.releaseKeys();
@@ -1330,6 +1356,7 @@ class Client {
           ["Keyboard", () => this.keyboard(), { icon: "keyboard" }],
           [this.unread ? "Chat (" + this.unread + " new)" : "Chat", () => this.chatShow($("chat").hidden), { icon: "chat", on: !$("chat").hidden }],
           ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
+          ["This computer…", () => computerMenu(more), { icon: "lock" }],
           ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
           ["Share…", () => shareMenu(more), { icon: "window", on: kind !== 0 }],
@@ -1347,6 +1374,8 @@ class Client {
     }
     const keys = button("keyboard", "Keys", { title: "Keys this browser keeps for itself" });
     keys.onclick = () => keysMenu(keys);
+    const computer = button("lock", null, { title: "This computer: lock, restart, keep its keyboard out, hide its screen" });
+    computer.onclick = () => computerMenu(computer);
     const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
     clip.onclick = () => clipMenu(clip);
     const quality = button("sliders", null, { title: "Picture quality" });
@@ -1374,7 +1403,7 @@ class Client {
     const share = button("window", null, { title: "Share the whole screen, one window or one program" });
     share.classList.toggle("on", kind !== 0);
     share.onclick = () => shareMenu(share);
-    bar.append(keys, clip, quality, share, chat, hear, term);
+    bar.append(keys, computer, clip, quality, share, chat, hear, term);
     if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
       mon.onclick = () => monitorMenu(mon);

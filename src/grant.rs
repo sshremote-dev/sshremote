@@ -60,6 +60,7 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::FileOp { .. } => FILES,
         ToAgent::Audio(true) => SOUND,
         ToAgent::TermOpen { .. } | ToAgent::TermInput { .. } | ToAgent::TermResize { .. } => TERMINAL,
+        ToAgent::Host { act, .. } if *act != crate::hostctl::QUERY => POWER,
         _ => return None,
     })
 }
@@ -77,6 +78,8 @@ mod tests {
         assert_eq!(needed(&ToAgent::Audio(false)), None);
         assert_eq!(needed(&ToAgent::Chat("hi".into())), None);
         assert_eq!(needed(&ToAgent::Refresh), None);
+        assert_eq!(needed(&ToAgent::Host { act: crate::hostctl::RESTART, on: false }), Some(POWER));
+        assert_eq!(needed(&ToAgent::Host { act: crate::hostctl::QUERY, on: false }), None);
         assert_eq!(words(CONTROL | FILES), "keyboard and mouse, files");
         assert_eq!(words(0), "nothing but watching");
         assert_eq!(ALL & ASK, 0);

@@ -329,6 +329,8 @@ fn serve_with(
     }
     // Rights a request was turned away for since they last changed: said once each.
     let mut told_off = 0u8;
+    // The computer itself: its own keyboard and mouse, its screen, locking as the viewer leaves.
+    let mut host = crate::hostctl::HostCtl::default();
     let mut pending = String::new();
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
@@ -423,6 +425,14 @@ fn serve_with(
                 ToAgent::Ack(_) => {
                     in_flight = in_flight.saturating_sub(1);
                     flight_sizes.pop_front();
+                }
+                ToAgent::Host { act, on } => {
+                    if act != crate::hostctl::QUERY {
+                        let text = host.act(act, on).unwrap_or_else(|e| format!("This computer: {e}"));
+                        send(enc, &ToClient::Notice(text)).map_err(io_err)?;
+                    }
+                    let can = if allowed & crate::grant::POWER != 0 { crate::hostctl::can() } else { 0 };
+                    send(enc, &ToClient::HostState { can, on: host.on() }).map_err(io_err)?;
                 }
                 ToAgent::Refresh => {
                     prev = None;
@@ -634,6 +644,10 @@ fn serve_with(
             }
         }
         paste(&mut pending, &mut clip, cap.as_mut());
+        if host.taken_back() {
+            send(enc, &ToClient::Notice("The person at that computer took its keyboard and mouse back (Ctrl+P).".into())).map_err(io_err)?;
+            send(enc, &ToClient::HostState { can: crate::hostctl::can(), on: host.on() }).map_err(io_err)?;
+        }
         for text in chat.replies() {
             // The person at the screen ended it.
             if text == crate::chat::END || text == crate::chat::DENY {
@@ -656,6 +670,9 @@ fn serve_with(
                 }
                 if taken & crate::grant::FILES != 0 {
                     (inbox, outbox) = (Default::default(), Default::default());
+                }
+                if taken & crate::grant::POWER != 0 {
+                    host = crate::hostctl::HostCtl::default();
                 }
                 send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
                 send(enc, &ToClient::Notice(format!("The person at that computer now lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;

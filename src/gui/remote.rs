@@ -84,6 +84,9 @@ pub(super) struct Remote {
     pub(super) spread_asked: bool,
     /// What the person at a computer reached by its ID lets this viewer do (`grant`).
     pub(super) allowed: u8,
+    /// What can be done to the computer itself and what is on (`hostctl` bits), once asked.
+    pub(super) host: Option<(u8, u8)>,
+    pub(super) host_asked: bool,
     /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
     wheel: Vec2,
     inbox: crate::files::Inbox,
@@ -259,6 +262,8 @@ impl Remote {
             chosen_monitor: None,
             spread_asked: false,
             allowed: crate::grant::ALL,
+            host: None,
+            host_asked: false,
             wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
@@ -488,6 +493,7 @@ impl Remote {
                 }
                 Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
                 Ok(Ev::Net(ToClient::Allowed(bits))) => self.allowed = bits,
+                Ok(Ev::Net(ToClient::HostState { can, on })) => self.host = Some((can, on)),
                 Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::session::save_snapshot(&png)),
                 Ok(Ev::Net(ToClient::Chat(t))) => {
                     // A message is cut where a chat stops being one.

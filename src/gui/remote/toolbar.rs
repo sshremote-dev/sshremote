@@ -321,6 +321,7 @@ impl Remote {
             }
         });
         keys.on_hover_text("Send special keys");
+        self.computer_menu(ui, action);
         ui.separator();
         }
         // The terminal under the screen, in a pane too, as with the chat; files have none.
@@ -540,5 +541,60 @@ fn share_list(
                 }
             }
         }
+    }
+}
+
+impl Remote {
+    /// The computer itself: lock and restart it, keep its own keyboard and mouse out, hide its
+    /// screen, lock it on leaving. What it can do is asked the first time the menu opens.
+    fn computer_menu(&self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
+        use crate::hostctl::{BLOCK, HIDE, LOCK, LOCK_ON_LEAVE, QUERY, RESTART, bit};
+        let asked = self.host_asked;
+        let state = self.host;
+        let menu = icon_menu(ui, ic::LOCK_KEY, |ui| {
+            if !asked {
+                *action = Some(Box::new(|r, _| {
+                    r.host_asked = true;
+                    r.send(ToAgent::Host { act: QUERY, on: false })
+                }));
+            }
+            let Some((can, on)) = state else {
+                ui.label(egui::RichText::new("Asking the computer\u{2026}").weak());
+                return;
+            };
+            if can == 0 {
+                ui.label(egui::RichText::new("The person at that computer does not let you do these.").weak());
+                return;
+            }
+            let able = |a: u8| can & bit(a) != 0;
+            let only = "Not on this computer (Windows only)";
+            if ui.add_enabled(able(LOCK), egui::Button::new(format!("{}  Lock it", ic::LOCK_KEY))).clicked() {
+                *action = Some(Box::new(|r, _| r.send(ToAgent::Host { act: LOCK, on: true })));
+                ui.close();
+            }
+            ui.add_enabled_ui(able(RESTART), |ui| {
+                ui.menu_button(format!("{}  Restart it", ic::ARROW_CLOCKWISE), |ui| {
+                    ui.label(egui::RichText::new("Programs there close; unsaved work may be lost.").weak());
+                    if ui.add(crate::gui::kit::danger("Restart now", true)).clicked() {
+                        *action = Some(Box::new(|r, _| r.send(ToAgent::Host { act: RESTART, on: true })));
+                        ui.close();
+                    }
+                });
+            });
+            ui.separator();
+            for (act, label, tip) in [
+                (BLOCK, "Keep its keyboard and mouse out", "Whoever sits there cannot type or click; Ctrl+P there takes them back"),
+                (HIDE, "Hide its screen", "Black for whoever sits there while you still see it; its keyboard and mouse are kept out too"),
+                (LOCK_ON_LEAVE, "Lock it when I leave", "Locks the computer as this connection ends"),
+            ] {
+                let mut now = on & bit(act) != 0;
+                let r = ui.add_enabled(able(act), egui::Checkbox::new(&mut now, label));
+                let r = if able(act) { r.on_hover_text(tip) } else { r.on_disabled_hover_text(only) };
+                if r.changed() {
+                    *action = Some(Box::new(move |r, _| r.send(ToAgent::Host { act, on: now })));
+                }
+            }
+        });
+        menu.on_hover_text("This computer: lock, restart, keep its keyboard out, hide its screen");
     }
 }

@@ -641,6 +641,11 @@ fn ask(frame: Frame) -> Option<Ask> {
     if let Some(t) = s("chat").filter(|t| !t.trim().is_empty()) {
         return Some(Ask::Agent(ToAgent::Chat(t)));
     }
+    // The computer itself: {"host": {"act": N, "on": true}} (`hostctl`).
+    if let Some(h) = v.get("host") {
+        let act = h.get("act").and_then(|a| a.as_u64()).filter(|a| *a <= 5)? as u8;
+        return Some(Ask::Agent(ToAgent::Host { act, on: h.get("on").and_then(|o| o.as_bool()).unwrap_or(false) }));
+    }
     if v.get("sas").is_some() {
         return Some(Ask::Agent(ToAgent::SecureAttention));
     }
@@ -1107,6 +1112,12 @@ fn client(
                 }
                 ToClient::Notice(t) => {
                     let _ = send_json(&w, serde_json::json!({ "notice": t }));
+                }
+                ToClient::HostState { can, on } => {
+                    let _ = send_json(&w, serde_json::json!({ "host": { "can": can, "on": on } }));
+                }
+                ToClient::Allowed(bits) => {
+                    let _ = send_json(&w, serde_json::json!({ "allowed": { "bits": bits, "words": crate::grant::words(bits) } }));
                 }
                 ToClient::Chat(t) => {
                     let _ = send_json(&w, serde_json::json!({ "chat": t }));
@@ -1755,6 +1766,8 @@ Host: x
         assert!(matches!(a(r#"{"download":"/d","tag":2147483649}"#), Some(Ask::Agent(ToAgent::Fetch { tag: 0x8000_0001, .. }))));
         assert!(matches!(a(r#"{"clipboard":"hi"}"#), Some(Ask::Agent(ToAgent::Clipboard(t))) if t == "hi"));
         assert!(matches!(a(r#"{"sas":1}"#), Some(Ask::Agent(ToAgent::SecureAttention))));
+        assert!(matches!(a(r#"{"host":{"act":3,"on":true}}"#), Some(Ask::Agent(ToAgent::Host { act: 3, on: true }))));
+        assert!(a(r#"{"host":{"act":9}}"#).is_none());
         assert!(matches!(a(r#"{"quality":"fast"}"#), Some(Ask::Quality(WebQuality::Preset(1)))));
         assert!(matches!(a(r#"{"quality":"auto"}"#), Some(Ask::Quality(WebQuality::Auto))));
         assert!(matches!(a(r#"{"quality":"preset","level":0}"#), Some(Ask::Quality(WebQuality::Preset(0)))));

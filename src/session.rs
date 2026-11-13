@@ -736,6 +736,51 @@ mod tests {
     /// the new size, and frames come at it, scaled to fit as before. Needs SSHREMOTE_GNOME_HOST
     /// (an ssh alias of a host signed in to GNOME with one monitor, which is turned and turned
     /// back), and optionally SSHREMOTE_GNOME_ENV (variables pointing at that session, such as a
+    /// The computer itself on GNOME: it says what it can do, refuses to keep out its keyboard or
+    /// hide its screen, and with SSHREMOTE_GNOME_LOCK=1 locks (the test session stays locked).
+    #[test]
+    #[ignore]
+    fn a_gnome_computer_says_what_it_can_do() {
+        use crate::hostctl::{BLOCK, LOCK, LOCK_ON_LEAVE, QUERY, RESTART, bit};
+        use crate::proto::ToAgent;
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh {
+            host,
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let next = |want: &dyn Fn(&ToClient) -> bool| loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Ev::Net(m)) if want(&m) => return m,
+                Ok(Ev::Net(_)) => {}
+                other => panic!("{:?}", other.err()),
+            }
+        };
+        let state = |m: &ToClient| matches!(m, ToClient::HostState { .. });
+        sess.send(ToAgent::Host { act: QUERY, on: false }).unwrap();
+        assert_eq!(next(&state), ToClient::HostState { can: bit(RESTART) | bit(LOCK) | bit(LOCK_ON_LEAVE), on: 0 });
+        sess.send(ToAgent::Host { act: BLOCK, on: true }).unwrap();
+        let ToClient::Notice(why) = next(&|m| matches!(m, ToClient::Notice(_))) else { unreachable!() };
+        assert!(why.contains("not on this computer"), "{why}");
+        assert_eq!(next(&state), ToClient::HostState { can: bit(RESTART) | bit(LOCK) | bit(LOCK_ON_LEAVE), on: 0 });
+        sess.send(ToAgent::Host { act: LOCK_ON_LEAVE, on: true }).unwrap();
+        assert!(matches!(next(&state), ToClient::HostState { on, .. } if on == bit(LOCK_ON_LEAVE)));
+        sess.send(ToAgent::Host { act: LOCK_ON_LEAVE, on: false }).unwrap();
+        assert!(matches!(next(&state), ToClient::HostState { on: 0, .. }));
+        if std::env::var("SSHREMOTE_GNOME_LOCK").is_ok() {
+            sess.send(ToAgent::Host { act: LOCK, on: true }).unwrap();
+            let ToClient::Notice(said) = next(&|m| matches!(m, ToClient::Notice(_))) else { unreachable!() };
+            assert_eq!(said, "The computer is locked.");
+        }
+    }
+
     /// private test one) and SSHREMOTE_GNOME_AGENT (the program there).
     #[test]
     #[ignore]

@@ -166,6 +166,12 @@ pub enum ToAgent {
         max: u16,
     },
     /// Operates an element from the last `UiState`, or brings a window (`target` = window id) forward.
+    /// Something done to the computer itself (`hostctl`): restart, lock, keep its own keyboard
+    /// and mouse out, hide its screen, lock it on leaving; `QUERY` asks what can be done.
+    Host {
+        act: u8,
+        on: bool,
+    },
     UiAct {
         target: u64,
         act: UiAction,
@@ -385,6 +391,11 @@ pub enum ToClient {
     },
     /// What the person at the screen lets this viewer, who came by the computer's ID, do (`grant`).
     Allowed(u8),
+    /// What can be done to the computer itself and what is on (`hostctl` bits).
+    HostState {
+        can: u8,
+        on: u8,
+    },
 }
 
 /// The largest picture a viewer takes: 16384 a side (four 4K screens in a row) and 64 megapixels.
@@ -633,6 +644,10 @@ impl ToAgent {
                 b.extend_from_slice(text.as_bytes());
                 37
             }
+            ToAgent::Host { act, on } => {
+                b.extend_from_slice(&[*act, *on as u8]);
+                38
+            }
             ToAgent::Share(share) => {
                 let (kind, id) = share.to_wire();
                 b.push(kind);
@@ -702,6 +717,7 @@ impl ToAgent {
             34 => ToAgent::InstallHelper,
             35 => ToAgent::PickOnRemote,
             36 => ToAgent::UiState { text: c.u8()? != 0, max: c.u16()? },
+            38 => ToAgent::Host { act: c.u8()?, on: c.u8()? != 0 },
             37 => ToAgent::UiAct {
                 target: c.u64()?,
                 act: match c.u8()? {
@@ -910,6 +926,10 @@ impl ToClient {
                 b.push(*bits);
                 127
             }
+            ToClient::HostState { can, on } => {
+                b.extend_from_slice(&[*can, *on]);
+                128
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -1067,6 +1087,7 @@ impl ToClient {
             }
             124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             127 => ToClient::Allowed(c.u8()?),
+            128 => ToClient::HostState { can: c.u8()?, on: c.u8()? },
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchStart {
                 id: c.u32()?,
@@ -1145,6 +1166,7 @@ mod tests {
             ToAgent::PickOnRemote,
             ToAgent::UiState { text: true, max: 150 },
             ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
+            ToAgent::Host { act: 4, on: true },
         ];
         for m in [
             ToClient::DirList {
@@ -1189,6 +1211,7 @@ mod tests {
             },
             ToClient::UiDone { ok: true, text: "clicked".into() },
             ToClient::Allowed(5),
+            ToClient::HostState { can: 0b111110, on: 0b1000 },
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

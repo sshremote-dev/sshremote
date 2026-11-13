@@ -37,6 +37,8 @@ mod filewin;
 mod gui;
 #[cfg(feature = "remote")]
 mod grant;
+#[cfg(feature = "remote")]
+mod hostctl;
 mod here;
 mod hosts;
 #[cfg(windows)]
