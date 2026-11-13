@@ -68,6 +68,12 @@ pub(super) enum Launch {
     Agent { target: Target, label: String, ssh_cmd: Option<Vec<String>>, mode: PaneMode },
 }
 
+/// A tab to open whole, as a project keeps it: one pane, or two parts beside or below each other.
+pub(super) enum Opening {
+    One(Launch),
+    Split { below: bool, ratio: f32, a: Box<Opening>, b: Box<Opening> },
+}
+
 /// Where a new pane goes.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Place {
@@ -103,6 +109,25 @@ fn pane_info(p: &Pane) -> serde_json::Value {
         _ => p.mode,
     };
     serde_json::json!({ "pane": p.id, "label": p.label, "mode": mode.name(), "host": host })
+}
+
+/// What a project keeps of a pane: its computer and what it shows. A test desktop is not kept.
+fn item_of(p: &Pane) -> Option<super::project::Item> {
+    use super::project::Item;
+    let mode = match &p.state {
+        State::Live(r) => r.mode(),
+        State::Shell(_) => PaneMode::Terminal,
+        State::Down(_) => p.mode,
+    };
+    match &p.target {
+        Target::Local { capture } if capture.starts_with("browser:") => Some(Item::Web { url: capture["browser:".len()..].to_string(), label: p.label.clone() }),
+        Target::Local { capture } if capture.starts_with("synthetic") => None,
+        Target::Local { .. } if mode == PaneMode::Terminal => Some(Item::Shell { profile: p.label.clone() }),
+        Target::Local { .. } => Some(Item::Here { mode }),
+        Target::Ssh { host, port, .. } => Some(Item::Host { address: host.clone(), port: port.map(|p| p.to_string()).unwrap_or_default(), mode }),
+        #[cfg(feature = "remote")]
+        Target::Direct { addr, .. } => Some(Item::Host { address: crate::access::address(&addr.id, &addr.relay), port: String::new(), mode }),
+    }
 }
 
 /// What the open window knows a reached connection by: an ID's address, or the host as typed
@@ -270,6 +295,10 @@ pub(super) struct Workspace {
     panes_area: Rect,
     /// The window is closing for good (told yes): nothing else is shown in it meanwhile.
     pub(super) closing_window: bool,
+    /// A project asked to be opened from the Projects menu, for the app to open here.
+    pub(super) open_project: Option<String>,
+    /// The name being typed to keep these tabs as a project.
+    naming: Option<String>,
     /// The current tab and room it was last brought into view for.
     scrolled_for: Option<(usize, usize)>,
 }
@@ -321,6 +350,8 @@ impl Workspace {
             confirm: None,
             panes_area: Rect::NOTHING,
             closing_window: false,
+            open_project: None,
+            naming: None,
             scrolled_for: None,
         }
     }
@@ -354,6 +385,105 @@ impl Workspace {
             }
         }
         self.zoom = None;
+    }
+
+    /// Opens a whole tab as a project kept it: its panes divided as they were.
+    pub(super) fn add_tree(&mut self, t: Opening) {
+        let Some(root) = self.node_of(t) else { return };
+        let mut ids = Vec::new();
+        root.leaves(&mut ids);
+        let Some(&first) = ids.first() else { return };
+        self.tabs.push(Tab { root, active: first });
+        self.current = self.tabs.len() - 1;
+        self.zoom = None;
+    }
+
+    fn node_of(&mut self, t: Opening) -> Option<Node> {
+        match t {
+            Opening::One(l) => self.new_pane(l, PaneStart::default()).map(Node::Leaf),
+            // A part that cannot open leaves the other the whole room.
+            Opening::Split { below, ratio, a, b } => match (self.node_of(*a), self.node_of(*b)) {
+                (Some(a), Some(b)) => Some(Node::Split { below, ratio, a: Box::new(a), b: Box::new(b) }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    /// The tabs as a project keeps them: what each pane opens and how they divide each tab.
+    pub(super) fn snapshot(&self) -> Vec<super::project::Tree> {
+        self.tabs.iter().filter_map(|t| self.tree_of(&t.root)).collect()
+    }
+
+    fn tree_of(&self, n: &Node) -> Option<super::project::Tree> {
+        use super::project::Tree;
+        match n {
+            Node::Leaf(id) => self.index(*id).and_then(|i| item_of(&self.panes[i])).map(Tree::Leaf),
+            Node::Split { below, ratio, a, b } => match (self.tree_of(a), self.tree_of(b)) {
+                (Some(a), Some(b)) => Some(Tree::Split { below: *below, ratio: *ratio, a: Box::new(a), b: Box::new(b) }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    /// The Projects menu beside +: these tabs kept under a name, and the projects to open.
+    pub(super) fn projects_menu(&mut self, ui: &mut egui::Ui) {
+        let all = super::project::list();
+        let r = super::icon_menu(ui, ic::ARCHIVE, |ui| {
+            super::menu_look(ui);
+            ui.set_min_width(260.0);
+            if ui.button(format!("{}  Keep these tabs as a project\u{2026}", ic::PLUS)).on_hover_text("Each pane's computer and what it shows, and how the panes divide each tab; never a password").clicked() {
+                self.naming = Some(String::new());
+                ui.close();
+            }
+            if !all.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Open in new tabs").weak().size(12.0));
+            }
+            for p in &all {
+                let tabs = p.tabs.len();
+                let text = format!("{}  {}  ({tabs} tab{})", if p.name == super::project::LAST { ic::CLOCK_COUNTER_CLOCKWISE } else { ic::ARCHIVE }, p.name, if tabs == 1 { "" } else { "s" });
+                if ui.button(text).clicked() {
+                    self.open_project = Some(p.name.clone());
+                    ui.close();
+                }
+            }
+        });
+        r.on_hover_text("Projects: keep these tabs, or open kept ones");
+    }
+
+    /// Asks the name to keep these tabs under, while asked.
+    fn naming_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut name) = self.naming.take() else { return };
+        let (modal, fit) = super::modal(ctx, "keep-project", Vec2::new(420.0, 0.0));
+        let mut done = None;
+        modal.show(ctx, |ui| {
+            ui.set_width(fit.x);
+            ui.label(RichText::new("Keep these tabs as a project").size(16.0).strong());
+            ui.add_space(4.0);
+            let panes: usize = self.snapshot().iter().map(super::project::Tree::panes).sum();
+            ui.label(RichText::new(format!("{} tabs, {panes} panes: each one's computer and what it shows. Passwords are not kept; they are asked again when needed.", self.tabs.len())).weak());
+            ui.add_space(10.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Its name, as Release or Support").desired_width(f32::INFINITY));
+            r.request_focus();
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(RichText::new("Keep").strong()).min_size(Vec2::new(0.0, 32.0))).clicked() {
+                    done = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
+                    done = Some(false);
+                }
+            });
+        });
+        let (enter, escape) = ctx.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Enter), i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)));
+        match done.or(if escape { Some(false) } else if enter && !name.trim().is_empty() { Some(true) } else { None }) {
+            Some(true) => match super::project::save(&name, self.snapshot()) {
+                Ok(()) => self.toasts.push(&format!("Kept as \"{}\": open it from Projects, here or on the home", name.trim())),
+                Err(e) => self.toasts.push(&e),
+            },
+            Some(false) => {}
+            None => self.naming = Some(name),
+        }
     }
 
     /// A pane for `launch`, not yet in any tab; None when it opens elsewhere.
@@ -1102,6 +1232,7 @@ impl Workspace {
         }
         self.toasts.draw(&ctx, area);
         self.confirm_dialog(&ctx);
+        self.naming_dialog(&ctx);
         // The window's title follows the active pane.
         if let Some(id) = self.active_id() {
             let title = format!("SSH Remote - {}", self.name(id).0);

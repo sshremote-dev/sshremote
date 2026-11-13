@@ -88,6 +88,7 @@ impl Workspace {
         if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
             self.picker = Some(Place::Tab);
         }
+        self.projects_menu(ui);
         self.drag_tab(ui, &tab_rects);
     }
 

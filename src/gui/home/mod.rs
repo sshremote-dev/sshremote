@@ -235,6 +235,52 @@ impl App {
         self.queued.push((launch, place, start));
     }
 
+    /// Opens a kept project's tabs in the workspace, each as it was divided; a pane that cannot
+    /// open is left out (and said why), a password asked for as when opened by hand.
+    pub(in crate::gui) fn open_project(&mut self, p: &crate::gui::project::Project) {
+        for tab in &p.tabs {
+            if let Some(o) = self.opening_of(tab) {
+                self.queued_tabs.push(o);
+            }
+        }
+    }
+
+    fn opening_of(&mut self, t: &crate::gui::project::Tree) -> Option<workspace::Opening> {
+        use crate::gui::project::Tree;
+        match t {
+            Tree::Leaf(item) => self.launch_of(item).map(workspace::Opening::One),
+            Tree::Split { below, ratio, a, b } => match (self.opening_of(a), self.opening_of(b)) {
+                (Some(a), Some(b)) => Some(workspace::Opening::Split { below: *below, ratio: *ratio, a: Box::new(a), b: Box::new(b) }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    fn launch_of(&mut self, item: &crate::gui::project::Item) -> Option<Launch> {
+        use crate::gui::project::Item;
+        match item {
+            Item::Host { address, port, mode } => match self.host_launch(address, port, *mode) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    self.error = Some(e);
+                    None
+                }
+            },
+            Item::Here { mode } => Some(Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode: *mode }),
+            Item::Shell { profile } => {
+                let profiles = crate::termwin::local_profiles();
+                let p = profiles.iter().find(|p| p.name == *profile).or_else(|| profiles.first())?.clone();
+                Some(Launch::Shell { label: p.name.clone(), profile: p, target: Target::Local { capture: "auto".into() }, ssh_cmd: None })
+            }
+            Item::Web { url, label } => Some(Launch::Agent {
+                target: Target::Local { capture: format!("browser:{url}") },
+                label: if label.is_empty() { web_label(url) } else { label.clone() },
+                ssh_cmd: None,
+                mode: PaneMode::Screen,
+            }),
+        }
+    }
+
     /// A launch for `host`: a plain ssh terminal (nothing needed on the host), or the agent. A
     /// password typed in the address row goes to the computer in the field only, never to another
     /// one opened from the list.

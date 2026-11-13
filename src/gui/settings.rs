@@ -260,6 +260,16 @@ impl App {
                     crate::hosts::set_setting("preset", &self.form.preset.map(|i| i.to_string()).unwrap_or_default());
                 }
             });
+            kit::row(ui, "At start", |ui| {
+                let mut on = crate::gui::project::reopen_at_start();
+                if ui
+                    .checkbox(&mut on, "Open the tabs of the last session")
+                    .on_hover_text("The tabs open when SSH Remote was closed, as they were divided; passwords are asked again where none is saved")
+                    .changed()
+                {
+                    crate::hosts::set_setting("reopen_last", if on { "yes" } else { "no" });
+                }
+            });
             // auto picks the capture for the computer's desktop.
             kit::row(ui, "Screen capture", |ui| {
                 let test = cfg!(feature = "test-desktop").then_some("synthetic");

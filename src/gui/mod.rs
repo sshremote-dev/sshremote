@@ -38,6 +38,7 @@ mod lottie;
 #[cfg(test)]
 pub(crate) mod snapshot;
 mod signin;
+pub(crate) mod project;
 mod extui;
 mod dock;
 mod toast;
@@ -366,6 +367,10 @@ pub struct App {
     windows_made: u64,
     /// What to open next frame: the home window's choices, tools, the command line.
     queued: Vec<(workspace::Launch, workspace::Place, PaneStart)>,
+    /// Whole tabs of a project to open, as they were divided.
+    queued_tabs: Vec<workspace::Opening>,
+    /// The last session was looked at for reopening at start.
+    reopened: bool,
     /// The open window growing into the working window: the size asked for and the frames waited.
     /// What is queued opens once it has its size, so a terminal starts at the size it keeps.
     growing: Option<(Vec2, u32)>,
@@ -767,6 +772,8 @@ impl App {
             grab_window: None,
             sized_for: None,
             queued: Vec::new(),
+            queued_tabs: Vec::new(),
+            reopened: false,
             growing: None,
         }
     }
@@ -890,7 +897,17 @@ impl eframe::App for App {
         }
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         // What was chosen opens in the workspace, which takes a working window's size first.
-        if !self.queued.is_empty() && matches!(self.screen, Screen::Connect) && !maximized && !fullscreen {
+        // The last session's tabs, once, when asked to come back with the app and nothing else was.
+        if !std::mem::replace(&mut self.reopened, true)
+            && self.queued.is_empty()
+            && !self.quit_when_empty
+            && matches!(self.screen, Screen::Connect)
+            && project::reopen_at_start()
+            && let Some(p) = project::get(project::LAST)
+        {
+            self.open_project(&p);
+        }
+        if (!self.queued.is_empty() || !self.queued_tabs.is_empty()) && matches!(self.screen, Screen::Connect) && !maximized && !fullscreen {
             match self.growing {
                 None => {
                     self.growing = Some((grow_on_screen(&ctx, Vec2::from(WORK_SIZE)), 0));
@@ -914,6 +931,15 @@ impl eframe::App for App {
                     w.add(launch, place, start);
                 }
             }
+            for tab in std::mem::take(&mut self.queued_tabs) {
+                if !matches!(self.screen, Screen::Work(_)) {
+                    self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
+                }
+                if let Screen::Work(w) = &mut self.screen {
+                    w.set_preset(self.form.preset);
+                    w.add_tree(tab);
+                }
+            }
         }
         // System keys caught for a host go to the window whose pane asked for them last frame.
         let grabbed: Vec<(u32, bool)> = self.grabbed.as_ref().map(|g| g.try_iter().collect()).unwrap_or_default();
@@ -926,6 +952,18 @@ impl eframe::App for App {
             let out = w.ui(ui, main_keys);
             back = out.empty;
             closing = w.closing_window;
+            if closing {
+                // Its tabs, kept as the last session to open again.
+                let tabs = w.snapshot();
+                if !tabs.is_empty() {
+                    let _ = project::save(project::LAST, tabs);
+                }
+            }
+            if let Some(name) = w.open_project.take()
+                && let Some(p) = project::get(&name)
+            {
+                self.open_project(&p);
+            }
             main_grab = out.grab;
             reached = std::mem::take(&mut w.reached);
             if let Some(e) = w.failed.take() {
@@ -1630,6 +1668,61 @@ mod tests {
                 snap.save(&ctx, size, &dir.join(format!("{name}_{}.png", if dark { "dark" } else { "light" })));
             }
         }
+    }
+
+    /// A kept project opens each tab whole, divided as it was, each pane as it was opened.
+    #[test]
+    fn a_project_opens_its_tabs_as_they_were_divided() {
+        use project::{Item, Project, Tree};
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        let p = Project {
+            name: "Release".into(),
+            saved: 0,
+            tabs: vec![
+                Tree::Split {
+                    below: true,
+                    ratio: 0.3,
+                    a: Box::new(Tree::Leaf(Item::Web { url: "https://translate.google.com".into(), label: "Translate".into() })),
+                    b: Box::new(Tree::Leaf(Item::Here { mode: PaneMode::Files })),
+                },
+                Tree::Leaf(Item::Host { address: "dev@build".into(), port: "2222".into(), mode: PaneMode::Terminal }),
+            ],
+        };
+        app.open_project(&p);
+        assert_eq!(app.queued_tabs.len(), 2);
+        match &app.queued_tabs[0] {
+            workspace::Opening::Split { below: true, ratio, a, b } => {
+                assert!((ratio - 0.3).abs() < 1e-6);
+                assert!(matches!(&**a, workspace::Opening::One(workspace::Launch::Agent { target: Target::Local { capture }, label, mode: PaneMode::Screen, .. }) if capture == "browser:https://translate.google.com" && label == "Translate"));
+                assert!(matches!(&**b, workspace::Opening::One(workspace::Launch::Agent { target: Target::Local { capture }, mode: PaneMode::Files, .. }) if capture == "auto"));
+            }
+            _ => panic!("the first tab divided as kept"),
+        }
+        assert!(matches!(&app.queued_tabs[1], workspace::Opening::One(workspace::Launch::Shell { label, .. }) if label.starts_with("dev@build")));
+    }
+
+    /// The tabs open now are kept as they are divided: a web app beside this computer's files,
+    /// and a terminal on a host, read back as the same project.
+    #[test]
+    fn the_tabs_open_are_kept_as_a_project() {
+        use project::{Item, Tree};
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let app = App::new(Form::from(&opt), None, "", None);
+        let mut w = workspace::Workspace::new(app.options());
+        let web = workspace::Launch::Agent { target: Target::Local { capture: "browser:https://translate.google.com".into() }, label: "Translate".into(), ssh_cmd: None, mode: PaneMode::Screen };
+        let files = workspace::Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode: PaneMode::Files };
+        w.add_tree(workspace::Opening::Split { below: false, ratio: 0.55, a: Box::new(workspace::Opening::One(web)), b: Box::new(workspace::Opening::One(files)) });
+        let tabs = w.snapshot();
+        assert_eq!(
+            tabs,
+            vec![Tree::Split {
+                below: false,
+                ratio: 0.55,
+                a: Box::new(Tree::Leaf(Item::Web { url: "https://translate.google.com".into(), label: "Translate".into() })),
+                b: Box::new(Tree::Leaf(Item::Here { mode: PaneMode::Files })),
+            }]
+        );
     }
 
     /// The vector logo at title bar and larger sizes on both themes:

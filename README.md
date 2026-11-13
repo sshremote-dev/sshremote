@@ -74,6 +74,11 @@ What is opened goes into the workspace:
   panes) or the whole window as split, the title bar appearing at the top edge.
 - **Lost connections** are tried again in the same mode, the shells kept; after 30 s the pane
   offers Reconnect or Close.
+- **Projects**: the box beside + keeps the open tabs under a name (each pane's computer and what
+  it shows, and how the panes divide each tab; never a password) and opens kept ones again; the
+  tabs open when the app closes are kept as **Last session**. Projects show on the home too, and
+  Settings, Connections can open the last session with the app. A computer without a saved
+  password asks for it, naming the computer, as when opened by hand.
 - **Files into a terminal**: files dropped on a terminal, or files and screenshots pasted into it
   (Ctrl+V with a picture on the clipboard), are copied into a folder of their own where its shell
   runs (over SFTP for an `ssh` tab, through the session for a remote screen's terminal; a local

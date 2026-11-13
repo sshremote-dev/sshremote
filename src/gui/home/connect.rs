@@ -216,6 +216,7 @@ impl App {
             *go = self.default_open(&entries[p]);
         }
         if what == Typed::Empty {
+            self.projects(ui);
             self.tools(ui, go);
         }
         self.computer_list(ui, &what, &entries, picked, go);
@@ -445,6 +446,43 @@ impl App {
                 if ui.add(kit::secondary(format!("{}  {}", ic::APP_WINDOW, t.title)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
                     *go = Some((t.url.clone(), String::new(), How::Web(t.url.clone(), t.title.clone())));
                 }
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    /// The projects kept (the last session first): one click opens its tabs as they were; its
+    /// menu removes it.
+    fn projects(&mut self, ui: &mut egui::Ui) {
+        let all = crate::gui::project::list();
+        if all.is_empty() {
+            return;
+        }
+        kit::heading(ui, "Projects");
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            for p in all {
+                let last = p.name == crate::gui::project::LAST;
+                let panes: usize = p.tabs.iter().map(crate::gui::project::Tree::panes).sum();
+                let tip = format!("{} tab{}, {panes} pane{}, kept {}", p.tabs.len(), if p.tabs.len() == 1 { "" } else { "s" }, if panes == 1 { "" } else { "s" }, crate::hosts::ago(p.saved));
+                let glyph = if last { ic::CLOCK_COUNTER_CLOCKWISE } else { ic::ARCHIVE };
+                let r = ui.add(kit::secondary(format!("{glyph}  {}", p.name)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip);
+                if r.clicked() {
+                    self.open_project(&p);
+                }
+                r.context_menu(|ui| {
+                    crate::gui::menu_look(ui);
+                    if ui.button(format!("{}  Open", ic::ARROW_SQUARE_OUT)).clicked() {
+                        self.open_project(&p);
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  Remove", ic::TRASH)).clicked() {
+                        if let Err(e) = crate::gui::project::remove(&p.name) {
+                            self.error = Some(e);
+                        }
+                        ui.close();
+                    }
+                });
             }
         });
         ui.add_space(10.0);
