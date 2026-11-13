@@ -119,7 +119,9 @@ A computer can list the addresses viewers may come from. Through the relay (1.2 
 told, before each call, where the relay sees the viewer from (`from NONCE ADDRESS`, a line older
 agents pass over); a viewer from elsewhere is answered 0xfffe in place of the agent's message
 and told why. Without the line (an older relay) nobody comes in past a list. A change of the
-settings ends the sessions it would no longer let in.
+settings ends the sessions it would no longer let in. The list adds to the password, it does not
+stand in for it: the line comes over the agent's own connection to the relay, which is not
+signed, so someone on the network path of the computer itself could write another address.
 
 ## Straight paths by ID (NAT hole punching)
 

@@ -98,12 +98,14 @@ fn png(rgb: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
 }
 
 /// Whether a terminal's answer to `QUERY` says it shows kitty images.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn answered(reply: &[u8]) -> bool {
     reply.windows(9).any(|w| w == b"_Gi=31;OK")
 }
 
 /// Asks the terminal whether it shows kitty images, then for its attributes (DA1), which every
 /// terminal answers: the second answer ends the wait without a timeout.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
 
 #[cfg(test)]

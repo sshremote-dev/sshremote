@@ -210,7 +210,6 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     std::thread::spawn(|| {
         let mut said = String::new();
         let mut shown = false;
-        let _ = crate::access::secure_shared_folder();
         loop {
             crate::access::take_end_requests();
             crate::access::publish_state(&mut said);

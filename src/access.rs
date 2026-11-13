@@ -403,7 +403,7 @@ pub fn publish_state(said: &mut String) {
     }
     let Some(f) = state_file() else { return };
     #[cfg(windows)]
-    if f.parent().is_some_and(|d| !d.is_dir()) && secure_shared_folder().is_err() {
+    if !shared_folder_ready() {
         return;
     }
     #[cfg(not(windows))]
@@ -503,7 +503,23 @@ pub fn take_end_requests() {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        let Ok(mut file) = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&f) else { return };
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        if !shared_folder_ready() {
+            return;
+        }
+        // Others may hold it open to add to it; that must not keep requests from being read.
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&f)
+        else {
+            return;
+        };
+        if !file.metadata().is_ok_and(|m| m.is_file()) {
+            return;
+        }
         let _ = (&mut file).take(4096).read_to_end(&mut got);
         if got.is_empty() {
             return;
@@ -522,66 +538,125 @@ pub fn take_end_requests() {
 }
 
 /// The service's folder under ProgramData, made safe to share (Windows): made by the service
-/// itself (one someone else made first, or a link elsewhere, is removed), written by it and
-/// administrators alone, read by everyone; and in it `end.txt`, which anyone may add to and
-/// nothing more. Without this a user could own the folder, or files in it, that SYSTEM then
-/// writes, replaces and removes.
+/// itself, owned by SYSTEM, written by it and administrators alone, read by everyone; and in it
+/// `end.txt`, which anyone may add to and nothing more. Without this a user could own the folder,
+/// or files or links in it, that SYSTEM then writes, empties and removes. What was there before
+/// (made by whoever, or a link elsewhere) is removed first, and nothing goes on if it cannot be.
 #[cfg(windows)]
 pub fn secure_shared_folder() -> Result<(), String> {
     let f = state_file().ok_or("no ProgramData folder")?;
     let dir = f.parent().ok_or("no folder")?.to_path_buf();
+    let gone = |e: io::Error| format!("{} could not be removed: {e}", dir.display());
     match std::fs::symlink_metadata(&dir) {
-        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
-            let _ = std::fs::remove_dir(&dir).or_else(|_| std::fs::remove_file(&dir));
-        }
-        Ok(_) if !win_owner_is_system(&dir) => {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        _ => {}
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => std::fs::remove_dir(&dir).or_else(|_| std::fs::remove_file(&dir)).map_err(gone)?,
+        Ok(_) => std::fs::remove_dir_all(&dir).map_err(gone)?,
+        Err(_) => {}
     }
-    match std::fs::create_dir(&dir) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(format!("{}: {e}", dir.display())),
-        _ => {}
+    // Made with its owner and permissions at once: nobody else can take it in between.
+    win_create(&dir, true, "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")?;
+    if !win_folder_is_safe(&dir) {
+        return Err(format!("{} is not the folder just made", dir.display()));
     }
-    win_set_security(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")?;
-    // What earlier versions left there, made by whoever: gone, then made anew.
-    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-        let p = e.path();
-        let _ = if e.file_type().is_ok_and(|t| t.is_dir()) { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-    }
-    let end = end_file().ok_or("no folder")?;
-    std::fs::write(&end, b"").map_err(|e| format!("{}: {e}", end.display()))?;
-    win_set_security(&end, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x100004;;;BU)")
+    make_end_file()
 }
 
+/// `end.txt` in the safe folder, made anew: anyone may add to it and do nothing else.
 #[cfg(windows)]
-fn win_set_security(path: &std::path::Path, sddl: &str) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::LocalFree;
+fn make_end_file() -> Result<(), String> {
+    let end = end_file().ok_or("no folder")?;
+    win_create(&end, false, "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x100004;;;BU)")
+}
+
+/// Whether the shared folder is safe to use, made so when it is not (tried again on each call
+/// until it is): the service touches nothing in it before.
+#[cfg(windows)]
+fn shared_folder_ready() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static READY: AtomicBool = AtomicBool::new(false);
+    if READY.load(Ordering::Acquire) {
+        return true;
+    }
+    let Some(dir) = state_file().and_then(|f| f.parent().map(|d| d.to_path_buf())) else { return false };
+    let ok = if win_folder_is_safe(&dir) {
+        end_file().is_some_and(|e| e.is_file()) || make_end_file().is_ok()
+    } else {
+        secure_shared_folder().is_ok()
+    };
+    READY.store(ok, Ordering::Release);
+    ok
+}
+
+/// Makes a folder (or an empty file) with this security descriptor; fails if anything is there.
+#[cfg(windows)]
+fn win_create(path: &std::path::Path, folder: bool, sddl: &str) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL};
     let (sddl, p) = (crate::sys::wide(sddl), crate::sys::wide(&path.to_string_lossy()));
     let mut sd = std::ptr::null_mut();
     if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } == 0 {
         return Err("the permissions could not be made".into());
     }
-    let ok = unsafe { SetFileSecurityW(p.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd) } != 0;
+    let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+    let ok = unsafe {
+        if folder {
+            CreateDirectoryW(p.as_ptr(), &sa) != 0
+        } else {
+            let h = CreateFileW(p.as_ptr(), GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut());
+            h != INVALID_HANDLE_VALUE && CloseHandle(h) != 0
+        }
+    };
+    let err = io::Error::last_os_error();
     unsafe { LocalFree(sd as _) };
-    if ok { Ok(()) } else { Err(format!("{}: {}", path.display(), io::Error::last_os_error())) }
+    if ok { Ok(()) } else { Err(format!("{}: {err}", path.display())) }
 }
 
-/// Whether SYSTEM or the Administrators group owns `path`.
+/// Whether `dir` itself (not where a link would lead) is a folder owned by SYSTEM or the
+/// administrators whose permissions are its own (protected, as this service makes them).
 #[cfg(windows)]
-fn win_owner_is_system(path: &std::path::Path) -> bool {
+fn win_folder_is_safe(dir: &std::path::Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{IsWellKnownSid, OWNER_SECURITY_INFORMATION, WinBuiltinAdministratorsSid, WinLocalSystemSid};
-    let p = crate::sys::wide(&path.to_string_lossy());
-    let (mut owner, mut sd) = (std::ptr::null_mut(), std::ptr::null_mut());
-    let r = unsafe { GetNamedSecurityInfoW(p.as_ptr(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &mut owner, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd) };
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, IsWellKnownSid, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    let Ok(h) = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)
+    else {
+        return false;
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(h.as_raw_handle(), &mut info) } == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return false;
+    }
+    let (mut owner, mut dacl, mut sd) = (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+    let r = unsafe {
+        GetSecurityInfo(h.as_raw_handle(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &mut owner, std::ptr::null_mut(), &mut dacl, std::ptr::null_mut(), &mut sd)
+    };
     if r != 0 {
         return false;
     }
-    let ok = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) != 0 || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0 };
+    let (mut control, mut rev) = (0u16, 0u32);
+    let ok = unsafe {
+        (IsWellKnownSid(owner, WinLocalSystemSid) != 0 || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0)
+            && GetSecurityDescriptorControl(sd, &mut control, &mut rev) != 0
+            && control & SE_DACL_PROTECTED != 0
+    };
     unsafe { LocalFree(sd as _) };
     ok
 }
@@ -1119,7 +1194,9 @@ pub fn comes_from(from: &str, ip: Option<std::net::IpAddr>) -> bool {
 static REQUEST_IN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static REQUEST_ENDED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 const REQUEST_BREATH: Duration = Duration::from_secs(5);
-const REQUEST_HOLD: Duration = Duration::from_secs(70);
+/// Longer than a request can take until it is answered: the exchange (10 s), the helper that asks
+/// starting on Windows (20 s) and the question on the screen (60 s).
+const REQUEST_HOLD: Duration = Duration::from_secs(100);
 
 /// The request taken at `taken` is over: its turn is free (unless another has it by now).
 fn request_done(taken: Option<std::time::Instant>) {
@@ -1664,6 +1741,27 @@ mod tests {
         assert_eq!(tidy_ranges(" 10.0.0.1,,  10.0.0.2 ;"), "10.0.0.1 10.0.0.2");
     }
     use super::*;
+
+    /// The service never takes a link (a junction elsewhere) for its folder, and never makes its
+    /// folder over something already there.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_is_never_taken_for_the_shared_folder() {
+        let base = std::env::temp_dir().join(format!("sshr-acl-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join("real");
+        win_create(&dir, true, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)").unwrap();
+        assert!(win_create(&dir, true, "D:P(A;;FA;;;SY)").is_err());
+        assert!(win_create(&dir.join("end.txt"), false, "D:P(A;;FA;;;SY)(A;;FA;;;OW)").is_ok());
+        assert!(win_create(&dir.join("end.txt"), false, "D:P(A;;FA;;;SY)").is_err());
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&dir).output().unwrap();
+        assert!(made.status.success() && link.join("end.txt").is_file());
+        assert!(!win_folder_is_safe(&link));
+        assert!(!win_folder_is_safe(&dir.join("end.txt")));
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn twenty_wrong_passwords_in_a_row_stop_the_checking() {
