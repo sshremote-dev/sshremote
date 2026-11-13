@@ -161,8 +161,9 @@ pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>
     enc.window_log(24).map_err(|e| e.to_string())?;
     enc.long_distance_matching(true).map_err(|e| e.to_string())?;
     let result = serve(&mut enc, input, backend);
+    // The viewer reads why in its own words: queued messages go out only when flushed.
     if let Err(e) = &result {
-        let _ = send(&mut enc, &ToClient::Error(e.clone()));
+        let _ = send(&mut enc, &ToClient::Error(e.clone())).and_then(|()| enc.flush());
     }
     result
 }
