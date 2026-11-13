@@ -85,17 +85,23 @@ A session by ID starts on the relay. After the password check an agent that may 
 over. A viewer that may too then sends control frames: sealed like the stream's, in the same
 order, with the top bit of the length set, and sent only to a side known to read them.
 
-1. Each side binds a UDP socket and asks the relay, on UDP at the relay's port, where it sees it
-   from (`sshremote-addr 1 NONCE`, answered with the address and port; the relay answers 20 a
-   second per address, never more bytes than asked).
+1. Each side binds a UDP socket for IPv4 and, where it has IPv6, one for IPv6, and asks the
+   relay, on UDP at the relay's port, where it sees the IPv4 one from (`sshremote-addr 1 NONCE`,
+   answered with the address and port; the relay answers 20 a second per address, never more
+   bytes than asked).
 2. `offer TAG FIRST ADDRESS...` (viewer) and `answer ADDRESS...` (agent): the router's address
-   and the computer's own, and an 8-byte tag for the UDP packets.
+   and the computer's own, IPv6 ones included (no router changes those; the one it sends from to
+   the internet first, a temporary one where those are used), and an 8-byte tag for the UDP
+   packets.
 3. Both probe all of the other's addresses (and any address a probe came from). The side named
    FIRST probes at once, the other a second later or when it first hears a probe, so a router
    never sees an answer before its own side sent: a Linux router answering a stray keeps it as a
-   flow and moves its side to another port, and some routers drop the mapping. The viewer names
-   the path (a private address if one answered in 100 ms, else the first) and the agent takes it.
-   Ten seconds each; a second try on new ports with the other side first.
+   flow and moves its side to another port, and some routers drop the mapping. IPv6 needs the
+   same: its routers have no NAT but a firewall that lets in only what its side began. The viewer
+   names the path (one on a private network if one answered in 100 ms, else IPv6, else IPv4) and
+   the agent takes it. Six seconds a try, each on new ports: the viewer first, then the agent,
+   then both, whose IPv4 probes die two hops out for 0.6 s (past their own router, not as far as
+   the other's) before going all the way.
 4. Each side then writes `move` on the relay and its frames from there on onto the UDP stream; a
    reader that reads `move` reads on from the UDP stream. Once both moved the relay's connection
    is shut.

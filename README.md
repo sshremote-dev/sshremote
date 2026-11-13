@@ -211,7 +211,9 @@ Both ends dial out to the relay, prove the password to each other with SPAKE2 an
 with ChaCha20-Poly1305; the relay sees neither. Once in, the two look for a **straight path
 through their routers** (NAT hole punching, as RustDesk and other remote desktops do): each asks
 the relay over UDP which address and port its router shows, they swap those and their own network
-addresses inside the sealed stream, and probe each other's. When a path answers, the sealed
+addresses, IPv6 ones included, inside the sealed stream, and probe each other's (over IPv6 the
+probes open the routers' firewalls the same way; when both work, the same network comes first,
+then IPv6, then IPv4). When a path answers, the sealed
 stream moves onto it (an ordered, reliable stream over UDP with its own congestion control) with
 nothing lost or repeated, and the relay lets the session go; the toolbar's lightning sign shows
 it. The session starts on the relay at once and stays there when no path is found (a router that
