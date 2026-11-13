@@ -87,7 +87,7 @@
   label.check input { accent-color: var(--primary); width: 15px; height: 15px; margin: 0; }
   .note { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--raised); border: 1px solid var(--line); color: var(--dim); font-size: 13px; }
   .note b { color: var(--fg); font-weight: 600; }
-  #gatebox .row { margin-top: 8px; } #gatepw { flex: 1; }
+  #gatebox p { margin: 0 0 4px; } #gatebox a { color: var(--accent); } #gatepw { width: 100%; }
   #error { color: var(--bad); font-size: 13px; min-height: 0; margin-top: 12px; } #error:empty { display: none; }
   .guide { margin-top: 24px; }
   .guide h3 { margin: 0 0 10px; font-size: 14px; }
@@ -272,16 +272,17 @@
           <label class="field" for="addr">Remote access ID or SSH host <span class="kind" id="kind"></span></label>
           <input id="addr" placeholder="123 456 789  or  user@192.168.1.20" spellcheck="false" autocapitalize="off" aria-label="ID or SSH host" autofocus>
           <label class="field" for="pw" id="pwlabel">Password</label>
-          <div class="row">
+          <div class="row" id="pwrow">
             <input id="pw" type="password" placeholder="Password" aria-label="Password" autocomplete="off">
             <input id="code" placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" autocomplete="one-time-code" hidden>
             <input id="port" placeholder="Port 22" inputmode="numeric" aria-label="Port" hidden>
           </div>
           <p class="hint" id="hint"></p>
-          <label class="check"><input type="checkbox" id="keep"> Remember the password on this browser</label>
+          <label class="check" id="keeprow"><input type="checkbox" id="keep"> Remember the password on this browser</label>
           <div id="gatebox" class="note" hidden>
-            <b>SSH leaves from this gateway's server.</b> Sign in to it once with its password; it then knows this browser.
-            <div class="row"><input id="gatepw" type="password" placeholder="Gateway password" aria-label="Gateway password" autocomplete="current-password"></div>
+            <p><b>SSH leaves from this gateway's server, so only its owner may use it.</b> Sign in to the gateway first; the SSH host's own password comes next. Not its owner? Reach the computer by its ID, or <a href="https://sshremote.dev/#download">use the app</a>.</p>
+            <label class="field" for="gatepw">Gateway password</label>
+            <input id="gatepw" type="password" placeholder="Set where this gateway runs" autocomplete="current-password">
             <label class="check"><input type="checkbox" id="gatekeep" checked> Keep this browser signed in for 30 days</label>
           </div>
           <div id="error" role="alert"></div>

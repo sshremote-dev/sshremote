@@ -259,16 +259,20 @@ function fail(text) { $("error").textContent = text || ""; }
 function refreshForm() {
   const p = parse($("addr").value);
   const ssh = p?.kind === "ssh";
+  // SSH needs the gateway's owner first: one password at a time, the gateway's, then the host's.
+  const locked = ssh && !signedIn();
   $("port").hidden = !ssh;
-  $("gatebox").hidden = !ssh || signedIn();
+  $("gatebox").hidden = !locked;
+  $("pwlabel").hidden = $("pwrow").hidden = locked;
+  $("go").textContent = locked ? "Sign in to this gateway" : "Connect";
   const match = p && saved().find(e => e.key === keyOf({ ...p, port: ssh ? $("port").value.trim() : "" }));
   $("pw").placeholder = match?.pw ? "Saved password (type to change)" : ssh ? "Password (none with SSH keys)" : "Password set on that computer";
-  $("keep").parentElement.hidden = !canKeep;
+  $("keeprow").hidden = !canKeep || locked;
   // What was typed, named; and what the password is for it.
   $("kind").textContent = !p ? "" : ssh ? "SSH host" : "ID";
   $("pwlabel").textContent = ssh ? "SSH password" : "Password";
-  $("hint").textContent = !p ? "" : ssh
-    ? (signedIn() ? "SSH leaves from this gateway's server." : "")
+  $("hint").textContent = !p || locked ? "" : ssh
+    ? "Signed in to this gateway: SSH leaves from its server."
     : "A one-time password works too. Without any, leave it empty: the person there is asked to let you in, where that computer allows it.";
 }
 
@@ -323,12 +327,17 @@ $("form").onsubmit = async e => {
   }
   // An ID without a password asks the person there to let this page in (where that computer
   // takes such requests; else it says so and the password is asked for).
+  // SSH: the gateway's sign-in is its own step; the host's password is asked for after it.
   if (p.kind === "ssh" && !signedIn()) {
     const gp = $("gatepw").value;
-    if (!gp) { $("gatebox").hidden = false; fail("Sign in to this gateway first: its password."); $("gatepw").focus(); return; }
+    if (!gp) { fail("The gateway's password, set where it runs."); $("gatepw").focus(); return; }
     $("go").disabled = true;
     try { await signIn(gp, $("gatekeep").checked); } catch (err) { $("go").disabled = false; fail(err.message); $("gatepw").focus(); return; }
     $("go").disabled = false;
+    $("gatepw").value = "";
+    toast("Signed in to this gateway. Now the SSH host's password, if it asks for one.");
+    $("pw").focus();
+    return;
   }
   // A password typed without "Remember" replaces the kept one with none.
   // The two-step code goes with this try only, never kept.
@@ -389,12 +398,12 @@ async function openSaved(e) {
   if (e.pw) {
     try { password = await unseal(e.pw); } catch { password = ""; }
   }
-  if ((e.kind === "ssh" || e.kind === "gw") && !signedIn()) {
+  // The gateway's own computers: its sign-in first, in its dialog.
+  if (e.kind === "gw" && !signedIn()) { $("gatelink").click(); return; }
+  if (e.kind === "ssh" && !signedIn()) {
     $("addr").value = e.address;
     $("port").value = e.port || "";
     refreshForm();
-    $("gatebox").hidden = false;
-    fail("Sign in to this gateway first: its password.");
     $("gatepw").focus();
     return;
   }

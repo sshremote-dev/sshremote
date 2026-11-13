@@ -129,6 +129,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
 struct Request {
     path: String,
     headers: HashMap<String, String>,
+    /// HEAD: the headers alone, as a check of the page would ask.
+    head: bool,
 }
 
 /// One line of the request, at most `MOST_LINE` long.
@@ -146,7 +148,8 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, String> {
     read_line(r, &mut line)?;
     let mut parts = line.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/").to_string());
-    if method != "GET" {
+    let head = method == "HEAD";
+    if method != "GET" && !head {
         return Err("only GET".into());
     }
     let mut headers = HashMap::new();
@@ -154,7 +157,7 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, String> {
         read_line(r, &mut line)?;
         let l = line.trim_end();
         if l.is_empty() {
-            return Ok(Request { path, headers });
+            return Ok(Request { path, headers, head });
         }
         if let Some((k, v)) = l.split_once(':') {
             headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
@@ -163,14 +166,23 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Result<Request, String> {
     Err("too many headers".into())
 }
 
-fn respond(mut s: &TcpStream, status: &str, kind: &str, body: &[u8]) -> Result<(), String> {
+/// A file of the page, or only its headers for HEAD.
+fn page(s: &TcpStream, req: &Request, kind: &str, body: &[u8]) -> Result<(), String> {
+    respond_as(s, "200 OK", kind, body, !req.head)
+}
+
+fn respond(s: &TcpStream, status: &str, kind: &str, body: &[u8]) -> Result<(), String> {
+    respond_as(s, status, kind, body, true)
+}
+
+fn respond_as(mut s: &TcpStream, status: &str, kind: &str, body: &[u8], with_body: bool) -> Result<(), String> {
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n\
          Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:\r\n\
          Referrer-Policy: no-referrer\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    s.write_all(head.as_bytes()).and_then(|_| s.write_all(body)).map_err(|e| e.to_string())
+    s.write_all(head.as_bytes()).and_then(|_| if with_body { s.write_all(body) } else { Ok(()) }).map_err(|e| e.to_string())
 }
 
 fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
@@ -187,12 +199,12 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
     let path = req.path.split('?').next().unwrap_or("/");
     let path = path.strip_prefix("/web").unwrap_or(path);
     match path {
-        "" | "/" | "/index.html" => respond(&conn, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
-        "/app.js" => respond(&conn, "200 OK", "text/javascript", APP_JS.as_bytes()),
-        "/xterm.js" => respond(&conn, "200 OK", "text/javascript", XTERM_JS.as_bytes()),
-        "/addon-fit.js" => respond(&conn, "200 OK", "text/javascript", FIT_JS.as_bytes()),
-        "/favicon.svg" => respond(&conn, "200 OK", "image/svg+xml", LOGO.as_bytes()),
-        "/xterm.css" => respond(&conn, "200 OK", "text/css", XTERM_CSS.as_bytes()),
+        "" | "/" | "/index.html" => page(&conn, &req, "text/html; charset=utf-8", PAGE.as_bytes()),
+        "/app.js" => page(&conn, &req, "text/javascript", APP_JS.as_bytes()),
+        "/xterm.js" => page(&conn, &req, "text/javascript", XTERM_JS.as_bytes()),
+        "/addon-fit.js" => page(&conn, &req, "text/javascript", FIT_JS.as_bytes()),
+        "/favicon.svg" => page(&conn, &req, "image/svg+xml", LOGO.as_bytes()),
+        "/xterm.css" => page(&conn, &req, "text/css", XTERM_CSS.as_bytes()),
         "/ws" => {
             let key = req.headers.get("sec-websocket-key").ok_or("not a WebSocket")?;
             // Another site's page may not use a signed-in browser's socket.

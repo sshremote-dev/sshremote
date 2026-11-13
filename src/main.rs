@@ -502,7 +502,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let mac = if lan::parse_mac(what).is_some() { what.clone() } else { computers::get(what).map(|c| c.mac).filter(|m| !m.is_empty()).ok_or("no hardware address is known for it")? };
             lan::wake(&mac).map(|()| println!("Wake-up sent to {mac}."))
         }
-        // The gateway browsers reach terminals through (sshremote.dev/web).
+        // The gateway browsers reach terminals through (web.sshremote.dev).
         #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
         #[cfg(not(feature = "web"))]
