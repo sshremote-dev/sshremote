@@ -596,6 +596,8 @@ fn ask(frame: Frame) -> Option<Ask> {
                 Some((4, rest)) if rest.len() >= 4 => {
                     Some(Ask::Chunk(u32::from_le_bytes(rest[..4].try_into().ok()?), rest[4..].to_vec()))
                 }
+                // The browser's voice in a call: 20 ms of Opus.
+                Some((7, data)) if data.len() <= 4000 => Some(Ask::Agent(ToAgent::Voice(data.to_vec()))),
                 _ => None,
             };
         }
@@ -679,6 +681,9 @@ fn ask(frame: Frame) -> Option<Ask> {
         return Some(Ask::Pause(on));
     }
     // The host's sound, as Opus packets the browser decodes.
+    if let Some(on) = v.get("call").and_then(|x| x.as_bool()) {
+        return Some(Ask::Agent(ToAgent::Call(on)));
+    }
     if let Some(on) = v.get("sound").and_then(|x| x.as_bool()) {
         return Some(Ask::Agent(ToAgent::Audio(on)));
     }
@@ -1136,6 +1141,14 @@ fn client(
                     if send(&w, 0x2, &[&[6u8][..], &packet].concat()).is_err() {
                         break 'run String::new();
                     }
+                }
+                ToClient::Voice(packet) => {
+                    if send(&w, 0x2, &[&[7u8][..], &packet].concat()).is_err() {
+                        break 'run String::new();
+                    }
+                }
+                ToClient::CallState(state) => {
+                    let _ = send_json(&w, serde_json::json!({ "call": state }));
                 }
                 ToClient::Snapshot(png) => {
                     if send(&w, 0x2, &[&[5u8][..], &png].concat()).is_err() {
@@ -1786,6 +1799,8 @@ Host: x
         use crate::shared::Share;
         assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
         assert!(matches!(a(r#"{"sound":true}"#), Some(Ask::Agent(ToAgent::Audio(true)))));
+        assert!(matches!(a(r#"{"call":true}"#), Some(Ask::Agent(ToAgent::Call(true)))));
+        assert!(matches!(ask(Frame::Binary(vec![7, 1, 2])), Some(Ask::Agent(ToAgent::Voice(v))) if v == [1, 2]));
         assert!(matches!(a(r#"{"share":{"kind":"window","id":"18446744073709551000"}}"#), Some(Ask::Agent(ToAgent::Share(Share::Window(18446744073709551000))))));
         assert!(matches!(a(r#"{"share":{"kind":"activeApp"}}"#), Some(Ask::Agent(ToAgent::Share(Share::ActiveApp)))));
         assert!(a(r#"{"share":{"kind":"window"}}"#).is_none(), "a window needs its id");

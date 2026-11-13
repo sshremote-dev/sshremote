@@ -65,7 +65,8 @@ impl Config {
             ask: v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false),
             allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
             lan: v.get("lan").and_then(|x| x.as_bool()).unwrap_or(true),
-            direct: v.get("direct").and_then(|x| x.as_bool()).unwrap_or(true),
+            // Off unless chosen, as a port open to the network is.
+            direct: v.get("direct").and_then(|x| x.as_bool()).unwrap_or(false),
             totp: s("totp").unwrap_or_default(),
         })
     }
@@ -187,7 +188,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: false, totp: String::new() }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.

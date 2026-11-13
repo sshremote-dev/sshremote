@@ -29,6 +29,8 @@ const ICONS = {
   pause: "M8 5v14|M16 5v14",
   window: "M3 5h18v14H3z|M3 9h18",
   sound: "M4 9h4l5-4v14l-5-4H4z|M16 9a4 4 0 0 1 0 6|M18.5 6.5a7.5 7.5 0 0 1 0 11",
+  phone: "M6.6 3.5 9.3 6.3 7.8 8.6a11 11 0 0 0 7.6 7.6l2.3-1.5 2.8 2.7-1 2.4a2 2 0 0 1-2.2 1.2A16 16 0 0 1 3.1 7.7a2 2 0 0 1 1.2-2.2z",
+  record: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z|M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
   below: "M3 4h18v16H3z|M3 13h18|M6.5 16l2 1.5-2 1.5",
   play: "M7 5l12 7-12 7z",
   clipboard: "M9 3.5h6v3H9z|M7 5H5v16h14V5h-2",
@@ -536,6 +538,30 @@ function soundPlayer() {
   };
 }
 
+// This side's voice in a call: the microphone as 20 ms Opus packets (WebCodecs), each handed to
+// `send`. Null where the browser cannot; the call goes on with their voice only.
+async function voiceSender(send) {
+  if (!window.AudioEncoder || !navigator.mediaDevices?.getUserMedia) return null;
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); } catch { return null; }
+  const ac = new AudioContext({ sampleRate: 48000 });
+  const enc = new AudioEncoder({ output: chunk => { const b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); send(b); }, error: () => {} });
+  enc.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1, bitrate: 24000 });
+  const src = ac.createMediaStreamSource(stream);
+  // A plain processor: every browser has it, and 20 ms at a time is all a voice needs.
+  const node = ac.createScriptProcessor(1024, 1, 1);
+  let ts = 0;
+  node.onaudioprocess = e => {
+    if (enc.state !== "configured") return;
+    const data = new Float32Array(e.inputBuffer.getChannelData(0));
+    enc.encode(new AudioData({ format: "f32", sampleRate: 48000, numberOfFrames: data.length, numberOfChannels: 1, timestamp: ts, data }));
+    ts += Math.round(data.length / 48000 * 1e6);
+  };
+  src.connect(node);
+  node.connect(ac.destination);
+  return { close() { try { enc.close(); } catch { /* closed */ } stream.getTracks().forEach(t => t.stop()); ac.close(); } };
+}
+
 // A ZIP file (stored, not compressed: what is sent is already as small as it gets over the
 // link) built from parts as they arrive, so a folder downloads as one file.
 const CRC = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
@@ -691,6 +717,9 @@ class Client {
     clearInterval(this.retryTimer);
     this.sound?.close();
     this.sound = null;
+    this.voice?.close(); this.callPlayer?.close();
+    this.voice = this.callPlayer = null;
+    this.recorder?.stop();
     $("views").classList.remove("split");
     try { this.ws?.close(); } catch { /* gone */ }
     this.term?.dispose();
@@ -711,6 +740,7 @@ class Client {
       }
       else if (b[0] === 4) this.show(m.data);
       else if (b[0] === 6) this.sound?.packet(b.subarray(1));
+      else if (b[0] === 7) this.callPlayer?.packet(b.subarray(1));
       else if (b[0] === 5) {
         saveBlob(new Blob([b.subarray(1)], { type: "image/png" }), "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
         toast("A lossless picture of the screen was saved.");
@@ -783,6 +813,7 @@ class Client {
       if (at && this.computerMenu) this.computerMenu(at);
     }
     if (v.allowed) this.allowed = v.allowed;
+    if (typeof v.call === "number") this.callState(v.call);
     if (v.end || v.error) {
       const why = v.end || v.error;
       this.term.write("\r\n\x1b[31m[" + why + "]\x1b[0m\r\n");
@@ -1252,6 +1283,52 @@ class Client {
     if (on) { this.unread = 0; this.chatRender(); $("chatin").focus(); } else if (this.view === "screen") this.keyboard();
     this.screenTools();
   }
+  // Where the call is: answered there (voices both ways), not answered, or ended.
+  async callState(state) {
+    const was = this.call;
+    this.call = state;
+    if (state === 2) {
+      this.callPlayer = soundPlayer();
+      this.voice = await voiceSender(p => { if (this.ws?.readyState === 1) this.ws.send(new Uint8Array([7, ...p])); });
+      toast(this.voice ? "In a call with the person at that computer." : "In a call: this browser cannot send your voice, but you hear them.");
+    } else if (state === 0 || state === 3) {
+      this.voice?.close(); this.callPlayer?.close();
+      this.voice = this.callPlayer = null;
+      if (state === 3) toast("They did not answer the call.");
+      else if (was === 2) toast("The call ended.");
+    }
+    this.screenTools();
+  }
+  toggleCall() {
+    if (this.call === 1 || this.call === 2) { this.send({ call: false }); this.callState(0); }
+    else { this.call = 1; this.send({ call: true }); toast("Calling the person at that computer…"); this.screenTools(); }
+  }
+  // Records the screen as it shows here, into a video file the browser saves.
+  toggleRecord() {
+    if (this.recorder) { this.recorder.stop(); return; }
+    const canvas = $("canvas");
+    if (!canvas.captureStream || !window.MediaRecorder) { toast("This browser cannot record the screen.", { bad: true }); return; }
+    const type = ["video/webm;codecs=vp9", "video/webm", "video/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+    const rec = new MediaRecorder(canvas.captureStream(15), type ? { mimeType: type } : {});
+    const parts = [];
+    rec.ondataavailable = e => { if (e.data.size) parts.push(e.data); };
+    rec.onstop = () => {
+      this.recorder = null;
+      const blob = new Blob(parts, { type: rec.mimeType });
+      const a = h("a", { href: URL.createObjectURL(blob), download: "sshremote-" + (this.t?.address || "screen") + "-" + new Date().toISOString().replace(/[:.]/g, "-") + (rec.mimeType.includes("mp4") ? ".mp4" : ".webm") });
+      // Firefox saves only from a link in the page.
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      toast("The recording is saved.");
+      this.screenTools();
+    };
+    rec.start(1000);
+    this.recorder = rec;
+    toast("Recording the screen; the button again stops it and saves the video.");
+    this.screenTools();
+  }
   chatRender() {
     const log = $("chatlog");
     log.textContent = "";
@@ -1367,6 +1444,8 @@ class Client {
           ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
           ["Share…", () => shareMenu(more), { icon: "window", on: kind !== 0 }],
           ["Sound", sound, { icon: "sound", on: !!this.sound }],
+          [this.call === 2 ? "Hang up" : "Call the person there", () => this.toggleCall(), { icon: "phone", on: this.call === 1 || this.call === 2 }],
+          [this.recorder ? "Stop recording" : "Record the screen", () => this.toggleRecord(), { icon: "record", on: !!this.recorder }],
           ["The terminal below", below, { icon: "below", on: !!this.split }],
         ];
         if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
@@ -1409,7 +1488,13 @@ class Client {
     const share = button("window", null, { title: "Share the whole screen, one window or one program" });
     share.classList.toggle("on", kind !== 0);
     share.onclick = () => shareMenu(share);
-    bar.append(keys, computer, clip, quality, share, chat, hear, term);
+    const phone = button("phone", null, { title: this.call === 2 ? "Hang up" : this.call === 1 ? "Calling… (click to call off)" : "Call the person at that computer: talk through the microphones" });
+    phone.classList.toggle("on", this.call === 1 || this.call === 2);
+    phone.onclick = () => this.toggleCall();
+    const rec = button("record", null, { title: this.recorder ? "Stop recording and save the video" : "Record the screen to a video file" });
+    rec.classList.toggle("on", !!this.recorder);
+    rec.onclick = () => this.toggleRecord();
+    bar.append(keys, computer, clip, quality, share, chat, hear, phone, rec, term);
     if (several) {
       const mon = button("screens", null, { title: "Which of the host's screens" });
       mon.onclick = () => monitorMenu(mon);
