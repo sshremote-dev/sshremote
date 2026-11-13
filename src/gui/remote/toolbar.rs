@@ -401,6 +401,24 @@ impl Remote {
         // Chat is with the person at the screen: shown with the screen only.
         let chat = screen && crate::modules::on("chat") && icon(ui, &chat_glyph, chat_tip, self.chat.is_some()).clicked();
         let shot = screen && icon(ui, ic::CAMERA, shot_tip, false).clicked();
+        // Recording: the button shows how long it has gone on.
+        if screen {
+            let tip = match &self.recording {
+                Some(r) => {
+                    let s = r.started.elapsed().as_secs();
+                    format!("Recording for {}:{:02}: click to stop and save it", s / 60, s % 60)
+                }
+                None => "Record the screen to a video file (MP4, in Videos)".to_string(),
+            };
+            let b = tool_button(ic::RECORD, self.recording.is_some());
+            let b = if self.recording.is_some() { b.fill(crate::gui::bad().gamma_multiply(0.35)) } else { b };
+            if ui.add(b).on_hover_text(tip).clicked() {
+                *action = Some(Box::new(|r, _| {
+                    r.toggle_recording();
+                    Ok(())
+                }));
+            }
+        }
         // Paused: the play button shows as on, so the frozen state is plain to see.
         let (mut pause, mut frame, mut helper) = (false, false, false);
         if screen {

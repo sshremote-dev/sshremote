@@ -100,6 +100,8 @@ pub(super) struct Remote {
     pub(super) call: u8,
     call_mic: Option<crate::audio::Capture>,
     call_player: Option<crate::audio::Player>,
+    /// The screen being recorded to a video file.
+    pub(super) recording: Option<crate::record::Recording>,
     /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
     wheel: Vec2,
     inbox: crate::files::Inbox,
@@ -284,6 +286,7 @@ impl Remote {
             call: crate::chat::CALL_ENDED,
             call_mic: None,
             call_player: None,
+            recording: None,
             wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
@@ -381,6 +384,16 @@ impl Remote {
             && let Some(crate::clip::Copied::Text(text)) = self.clip.poll()
         {
             self.send(ToAgent::Clipboard(text))?;
+        }
+        // The picture as it is now goes into the recording, at most fifteen times a second; one
+        // that changed just after a frame was kept goes in a moment later.
+        if let Some(r) = self.recording.as_mut() {
+            if r.due() {
+                r.frame(&self.fb.rgb, self.fb.w, self.fb.h);
+            } else if r.dirty {
+                ctx.request_repaint_after(std::time::Duration::from_millis(70));
+            }
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         // This side's voice, as it comes.
         let voice: Vec<Vec<u8>> = self.call_mic.as_ref().map(|m| m.packets.try_iter().collect()).unwrap_or_default();
@@ -503,6 +516,9 @@ impl Remote {
             match self.rx.try_recv() {
                 Ok(Ev::Net(ToClient::Frame(f))) => {
                     let resized = self.fb.apply(&f).map_err(|e| e.to_string())?;
+                    if let Some(r) = self.recording.as_mut() {
+                        r.dirty = true;
+                    }
                     self.upload(ctx, resized, &f);
                     self.ctl.frame_done(f.covered() * 2 >= self.fb.w * self.fb.h);
                     self.send(ToAgent::Ack(f.id))?;
@@ -1067,6 +1083,25 @@ impl Remote {
             } else if was == CALL_TALKING {
                 self.notify("The call ended");
             }
+        }
+    }
+}
+
+impl Remote {
+    /// Starts recording the screen to a video file, or stops and says where it went.
+    pub(super) fn toggle_recording(&mut self) {
+        match self.recording.take() {
+            None => {
+                self.recording = Some(crate::record::Recording::start(self.host()));
+                self.notify("Recording the screen (at most 15 frames a second, only as it changes)");
+            }
+            Some(r) => match r.stop() {
+                Ok(files) => {
+                    let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+                    self.notify(&format!("Recorded: {}", list.join(", ")));
+                }
+                Err(e) => self.notify(&format!("The recording failed: {e}")),
+            },
         }
     }
 }
