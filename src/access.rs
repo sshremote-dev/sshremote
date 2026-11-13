@@ -10,7 +10,6 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-#[cfg(any(not(windows), test))]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -291,7 +290,6 @@ static SINCE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
 /// What remote access shows to anyone at this computer, its secrets left out: for the icon in the
 /// notification area, which runs without the rights to read the settings (`service`).
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn public_state() -> serde_json::Value {
     let c = load();
     let state = match state() {
@@ -305,6 +303,33 @@ pub fn public_state() -> serde_json::Value {
         "enabled": c.enabled, "id": c.id, "relay": c.relay, "ask": c.ask, "allow": c.allow, "punch": c.punch,
         "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "state": state, "viewers": viewers(),
     })
+}
+
+/// Where remote access run by the service says how it stands (`public_state`), for the icon in
+/// the notification area: under ProgramData on Windows (every user reads it, only the service
+/// writes it), in the user's runtime folder elsewhere.
+pub fn state_file() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return Some(PathBuf::from(std::env::var_os("ProgramData")?).join("SSH Remote").join("state.json"));
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).or_else(crate::hosts::config_dir)?;
+        Some(base.join("sshremote-state.json"))
+    }
+}
+
+/// Writes `public_state` to `state_file` when it is not what `said` holds.
+pub fn publish_state(said: &mut String) {
+    let now = public_state().to_string();
+    if now == *said {
+        return;
+    }
+    let Some(f) = state_file() else { return };
+    let _ = f.parent().map(std::fs::create_dir_all);
+    let tmp = f.with_extension("new");
+    if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
+        *said = now;
+    }
 }
 
 /// How many viewers this program serves by ID now (remote access run inside the app).
@@ -866,7 +891,7 @@ pub fn service_runs() -> bool {
     }
     #[cfg(unix)]
     {
-        return Command::new("systemctl").args(["--user", "is-active", "--quiet", UNIT]).status().is_ok_and(|s| s.success());
+        return Command::new("systemctl").args(["--user", "is-active", "--quiet", UNIT]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     }
     #[allow(unreachable_code)]
     false
@@ -874,6 +899,13 @@ pub fn service_runs() -> bool {
 
 #[cfg(unix)]
 const UNIT: &str = "sshremote-access.service";
+
+/// The sign-in entry that starts the icon in the top bar.
+#[cfg(unix)]
+fn autostart_file() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("autostart").join("sshremote-tray.desktop"))
+}
 
 #[cfg(unix)]
 fn unit_file() -> Option<PathBuf> {
@@ -901,6 +933,17 @@ pub fn install_service() -> Result<(), String> {
         ok(&["--user", "enable", "--now", UNIT])?;
         // Lingering starts the user's units at boot, before anyone signs in; it may need rights.
         let _ = Command::new("loginctl").args(["enable-linger"]).status();
+        // Its icon in the top bar, with every sign-in and now.
+        if let Some(a) = autostart_file() {
+            let _ = std::fs::create_dir_all(a.parent().ok_or("bad path")?);
+            let entry = format!(
+                "[Desktop Entry]\nType=Application\nName=SSH Remote\nComment=Remote access by ID: its icon in the top bar\nExec=\"{}\" --tray\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",
+                exe.display()
+            );
+            if std::fs::write(&a, entry).is_ok() {
+                let _ = Command::new(&exe).arg("--tray").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            }
+        }
         return Ok(());
     }
     #[allow(unreachable_code)]
@@ -942,6 +985,10 @@ pub fn uninstall_service() -> Result<(), String> {
         let _ = Command::new("systemctl").args(["--user", "disable", "--now", UNIT]).status();
         if let Some(f) = unit_file() {
             let _ = std::fs::remove_file(f);
+        }
+        // The icon notices the service went and goes too.
+        if let Some(a) = autostart_file() {
+            let _ = std::fs::remove_file(a);
         }
         let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
         return Ok(());
@@ -1077,6 +1124,16 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             let service = args.iter().any(|a| a == "--service") || unit_started;
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", crate::computers::spaced(&c.id), c.relay);
+            // The service says how it stands, for the icon in the notification area.
+            if service {
+                thread::spawn(|| {
+                    let mut said = String::new();
+                    loop {
+                        publish_state(&mut said);
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                });
+            }
             let keep = || {
                 if parent.is_some_and(|p| !alive(p)) {
                     std::process::exit(0);

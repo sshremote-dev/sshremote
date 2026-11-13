@@ -67,14 +67,6 @@ pub fn installed_exe() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(base).join("SSH Remote").join("sshremote.exe"))
 }
 
-/// Where the service tells programs without administrator rights (the icon in the notification
-/// area) how remote access stands, its secrets left out: under ProgramData, which every user may
-/// read and only administrators and SYSTEM write.
-pub fn state_file() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("ProgramData")?;
-    Some(std::path::PathBuf::from(base).join("SSH Remote").join("state.json"))
-}
-
 /// The icon in the notification area starts with every sign-in, from here.
 const RUN_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "SSH Remote";
@@ -166,7 +158,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
     let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
-    if let Some(f) = state_file() {
+    if let Some(f) = crate::access::state_file() {
         let _ = std::fs::remove_file(&f);
         let _ = f.parent().map(std::fs::remove_dir);
     }
@@ -220,16 +212,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
         let mut said = String::new();
         let mut shown = false;
         loop {
-            let now = crate::access::public_state().to_string();
-            if now != said
-                && let Some(f) = state_file()
-            {
-                let _ = f.parent().map(std::fs::create_dir_all);
-                let tmp = f.with_extension("new");
-                if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
-                    said = now;
-                }
-            }
+            crate::access::publish_state(&mut said);
             if !shown
                 && let Some(u) = crate::console_user::User::at_console()
                 && let Some(exe) = installed_exe()

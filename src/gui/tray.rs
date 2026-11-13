@@ -56,6 +56,63 @@ mod item {
     pub const QUIT: usize = 99;
 }
 
+/// A line of the menu, the same on every system: a choice (its item number; 0 for a line that
+/// only says something), a separator, or a submenu.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub(super) enum Entry {
+    Item { id: usize, label: String, enabled: bool, checked: Option<bool> },
+    Separator,
+    Sub { label: String, entries: Vec<Entry> },
+}
+
+/// The menu for `s`.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub(super) fn entries(s: &Status) -> Vec<Entry> {
+    let it = |id: usize, label: &str, enabled: bool, checked: Option<bool>| Entry::Item { id, label: label.to_string(), enabled, checked };
+    let mut m = vec![it(item::OPEN, "Open SSH Remote", true, None), Entry::Separator];
+    match &s.access {
+        Some((on, id)) => {
+            m.push(it(item::ACCESS, "Remote access by ID", true, Some(*on)));
+            m.push(it(item::COPY_ID, &format!("Copy the ID {}", crate::computers::spaced(id)), *on, None));
+        }
+        None => m.push(it(0, "Remote access by ID: not set up", false, None)),
+    }
+    // Who comes in and how: the switches of the remote access settings, as worded there and in
+    // their order.
+    let mut who = match s.settings {
+        Some([ask, straight, nearby, direct]) => vec![
+            it(item::ASK, "Ask the person at this computer before letting anyone in", true, Some(ask)),
+            it(item::NEARBY, "Let computers on this network find this one", true, Some(nearby)),
+            it(item::DIRECT, "Let viewers on this network come straight in", true, Some(direct)),
+            it(item::STRAIGHT, "Let viewers by ID go straight through the routers", true, Some(straight)),
+        ],
+        None => vec![it(0, "Not set up", false, None)],
+    };
+    who.push(Entry::Separator);
+    who.push(it(item::SETTINGS, "All remote access settings\u{2026}", true, None));
+    m.push(Entry::Sub { label: "Who comes in".into(), entries: who });
+    let connected = match s.viewers {
+        0 => "Nobody is connected".to_string(),
+        1 => "1 connected: show the window".to_string(),
+        n => format!("{n} connected: show their windows"),
+    };
+    m.push(it(item::SHOW, &connected, s.viewers > 0, None));
+    let svc = match s.service {
+        Some((true, runs)) => vec![it(item::START, "Start", !runs, None), it(item::STOP, "Stop", runs, None), it(item::REMOVE, "Remove", true, None)],
+        Some((false, _)) => vec![it(item::INSTALL, "Install: start remote access with the computer", true, None)],
+        None => vec![it(0, "Looking\u{2026}", false, None)],
+    };
+    let label = match s.service {
+        Some((true, true)) => "Service: running",
+        Some((true, false)) => "Service: stopped",
+        _ => "Service",
+    };
+    m.push(Entry::Sub { label: label.into(), entries: svc });
+    m.push(Entry::Separator);
+    m.push(it(item::QUIT, if s.alone { "Hide this icon until the next sign-in" } else { "Quit" }, true, None));
+    m
+}
+
 /// Does what the menu's item `n` asks; says what went wrong, if anything did.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn act(n: usize, status: &Status) -> Result<(), String> {
@@ -65,7 +122,8 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
         // A change of the settings or the service: here when this program has the rights (the
         // window asks for them at start), else by the command line through the prompt for them.
         let as_admin = |args: &[&str], here: &dyn Fn() -> Result<(), String>| -> Result<(), String> {
-            if crate::admin::elevated() {
+            // Elsewhere than Windows the settings and the service are the user's own.
+            if crate::admin::elevated() || !cfg!(windows) {
                 return here();
             }
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -111,21 +169,30 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
     Ok(())
 }
 
-/// The icon's own program's view: the service's state file, and the service manager.
-#[cfg(all(windows, feature = "remote"))]
+/// The icon's own program's view: the service's state file and the service manager; on Linux
+/// the settings themselves too, which are the user's.
+#[cfg(all(any(windows, target_os = "linux"), feature = "remote"))]
 fn read_status() -> Status {
     let mut st = Status { alone: true, ..Default::default() };
     st.service = Some((crate::access::service_installed(), crate::access::service_runs()));
     let v: Option<serde_json::Value> =
-        crate::service::state_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok());
-    if let Some(v) = v {
+        crate::access::state_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok());
+    if let Some(v) = &v {
         let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
         let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if !id.is_empty() {
             st.access = Some((b("enabled"), id));
             st.settings = Some([b("ask"), b("punch"), b("lan"), b("direct")]);
         }
-        st.viewers = v.get("viewers").and_then(|x| x.as_array()).map_or(0, |a| a.len());
+        // Who is connected counts only while the service runs.
+        if st.service.is_some_and(|s| s.1) {
+            st.viewers = v.get("viewers").and_then(|x| x.as_array()).map_or(0, |a| a.len());
+        }
+    }
+    #[cfg(not(windows))]
+    if let Ok(Some(c)) = crate::access::stored() {
+        st.access = Some((c.enabled, c.id.clone()));
+        st.settings = Some([c.ask, c.punch, c.lan, c.direct]);
     }
     st
 }
@@ -159,6 +226,349 @@ pub fn run_alone() -> Result<(), String> {
     drop(tray);
     unsafe { CloseHandle(mutex) };
     Ok(())
+}
+
+/// `sshremote --tray` on Linux: the icon in the top bar (a StatusNotifierItem, which GNOME shows
+/// with its AppIndicator extension, as Ubuntu has on), with the same menu as on Windows.
+#[cfg(all(target_os = "linux", feature = "remote"))]
+pub fn run_alone() -> Result<(), String> {
+    sni::run()
+}
+
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod sni {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use zbus::object_server::SignalEmitter;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, StructureBuilder, Value};
+
+    use super::{Entry, QUIT, Shared, Status, act, entries, item, read_status};
+
+    type Pixmap = Vec<(i32, i32, Vec<u8>)>;
+
+    fn tip(s: &Status) -> String {
+        let mut t = match &s.access {
+            Some((true, id)) => format!("Reachable by ID {}", crate::computers::spaced(id)),
+            Some((false, _)) => "Remote access is off".to_string(),
+            None => "Remote access is not set up".to_string(),
+        };
+        if s.viewers > 0 {
+            t.push_str(&format!("; {} connected now", s.viewers));
+        }
+        t
+    }
+
+    /// The window: started (a second one is harmless; the first stays as it is).
+    fn open_app() {
+        if let Ok(exe) = std::env::current_exe() {
+            use std::process::Stdio;
+            let _ = std::process::Command::new(exe).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        }
+    }
+
+    /// A line of the menu as dbusmenu has it: its number, properties and lines under it.
+    struct Node {
+        id: i32,
+        props: Vec<(&'static str, Value<'static>)>,
+        children: Vec<Node>,
+    }
+
+    /// The menu as nodes: choices keep their item numbers, other lines get their own above 1000.
+    fn nodes(list: &[Entry], next: &mut i32) -> Vec<Node> {
+        list.iter()
+            .map(|e| match e {
+                Entry::Separator => {
+                    *next += 1;
+                    Node { id: *next, props: vec![("type", Value::from("separator"))], children: Vec::new() }
+                }
+                Entry::Item { id, label, enabled, checked } => {
+                    let id = if *id == 0 {
+                        *next += 1;
+                        *next
+                    } else {
+                        *id as i32
+                    };
+                    let mut props = vec![("label", Value::from(label.replace('_', "__"))), ("enabled", Value::from(*enabled))];
+                    if let Some(on) = checked {
+                        props.push(("toggle-type", Value::from("checkmark")));
+                        props.push(("toggle-state", Value::from(if *on { 1i32 } else { 0 })));
+                    }
+                    Node { id, props, children: Vec::new() }
+                }
+                Entry::Sub { label, entries } => {
+                    *next += 1;
+                    let id = *next;
+                    let children = nodes(entries, next);
+                    Node { id, props: vec![("label", Value::from(label.clone())), ("children-display", Value::from("submenu"))], children }
+                }
+            })
+            .collect()
+    }
+
+    fn props(n: &Node, wanted: &[String]) -> HashMap<String, OwnedValue> {
+        n.props
+            .iter()
+            .filter(|(k, _)| wanted.is_empty() || wanted.iter().any(|w| w == k))
+            .filter_map(|(k, v)| v.try_to_owned().ok().map(|v| (k.to_string(), v)))
+            .collect()
+    }
+
+    fn as_value(n: &Node, wanted: &[String], depth: i32) -> Option<OwnedValue> {
+        let children: Vec<OwnedValue> =
+            if depth == 0 { Vec::new() } else { n.children.iter().filter_map(|c| as_value(c, wanted, depth - 1)).collect() };
+        let s = StructureBuilder::new()
+            .append_field(Value::I32(n.id))
+            .append_field(Value::from(props(n, wanted)))
+            .append_field(Value::from(children))
+            .build()
+            .ok()?;
+        Value::Structure(s).try_to_owned().ok()
+    }
+
+    fn find(list: &[Node], id: i32) -> Option<&Node> {
+        list.iter().find_map(|n| if n.id == id { Some(n) } else { find(&n.children, id) })
+    }
+
+    fn root(s: &Status) -> Node {
+        let mut next = 1000;
+        Node { id: 0, props: vec![("children-display", Value::from("submenu"))], children: nodes(&entries(s), &mut next) }
+    }
+
+    struct Item {
+        status: Shared,
+        icon: Pixmap,
+    }
+
+    #[zbus::interface(name = "org.kde.StatusNotifierItem")]
+    impl Item {
+        #[zbus(property)]
+        fn category(&self) -> String {
+            "ApplicationStatus".into()
+        }
+        #[zbus(property)]
+        fn id(&self) -> String {
+            "sshremote".into()
+        }
+        #[zbus(property)]
+        fn title(&self) -> String {
+            "SSH Remote".into()
+        }
+        #[zbus(property)]
+        fn status(&self) -> String {
+            "Active".into()
+        }
+        #[zbus(property)]
+        fn window_id(&self) -> i32 {
+            0
+        }
+        #[zbus(property)]
+        fn icon_name(&self) -> String {
+            String::new()
+        }
+        #[zbus(property)]
+        fn icon_pixmap(&self) -> Pixmap {
+            self.icon.clone()
+        }
+        #[zbus(property)]
+        fn overlay_icon_name(&self) -> String {
+            String::new()
+        }
+        #[zbus(property)]
+        fn attention_icon_name(&self) -> String {
+            String::new()
+        }
+        #[zbus(property)]
+        fn tool_tip(&self) -> (String, Pixmap, String, String) {
+            let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
+            (String::new(), Vec::new(), "SSH Remote".into(), tip(&s))
+        }
+        /// A click opens the window; the menu comes with the other button.
+        #[zbus(property)]
+        fn item_is_menu(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn menu(&self) -> OwnedObjectPath {
+            OwnedObjectPath::try_from("/MenuBar").expect("a path")
+        }
+        fn activate(&self, _x: i32, _y: i32) {
+            open_app();
+        }
+        fn secondary_activate(&self, _x: i32, _y: i32) {}
+        fn context_menu(&self, _x: i32, _y: i32) {}
+        fn scroll(&self, _delta: i32, _orientation: String) {}
+        #[zbus(signal)]
+        async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    }
+
+    struct Menu {
+        status: Shared,
+        revision: Arc<AtomicU32>,
+    }
+
+    #[zbus::interface(name = "com.canonical.dbusmenu")]
+    impl Menu {
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            3
+        }
+        #[zbus(property)]
+        fn text_direction(&self) -> String {
+            "ltr".into()
+        }
+        #[zbus(property)]
+        fn status(&self) -> String {
+            "normal".into()
+        }
+        #[zbus(property)]
+        fn icon_theme_path(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn get_layout(&self, parent_id: i32, recursion_depth: i32, property_names: Vec<String>) -> (u32, (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>)) {
+            let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
+            let r = root(&s);
+            let n = if parent_id == 0 { Some(&r) } else { find(&r.children, parent_id) };
+            let depth = if recursion_depth < 0 { i32::MAX } else { recursion_depth };
+            let (id, p, children) = match n {
+                Some(n) => (n.id, props(n, &property_names), if depth == 0 { Vec::new() } else { n.children.iter().filter_map(|c| as_value(c, &property_names, depth - 1)).collect() }),
+                None => (parent_id, HashMap::new(), Vec::new()),
+            };
+            (self.revision.load(Ordering::Relaxed), (id, p, children))
+        }
+        fn get_group_properties(&self, ids: Vec<i32>, property_names: Vec<String>) -> Vec<(i32, HashMap<String, OwnedValue>)> {
+            let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
+            let r = root(&s);
+            ids.iter().filter_map(|id| if *id == 0 { Some(&r) } else { find(&r.children, *id) }).map(|n| (n.id, props(n, &property_names))).collect()
+        }
+        fn get_property(&self, id: i32, name: String) -> OwnedValue {
+            let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
+            let r = root(&s);
+            find(&r.children, id).and_then(|n| props(n, &[name]).into_values().next()).unwrap_or_else(|| OwnedValue::from(0i32))
+        }
+        fn event(&self, id: i32, event_id: String, _data: OwnedValue, _timestamp: u32) {
+            if event_id == "clicked" {
+                self.chosen(id);
+            }
+        }
+        fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
+            for (id, event_id, ..) in events {
+                if event_id == "clicked" {
+                    self.chosen(id);
+                }
+            }
+            Vec::new()
+        }
+        fn about_to_show(&self, _id: i32) -> bool {
+            false
+        }
+        fn about_to_show_group(&self, _ids: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
+            (Vec::new(), Vec::new())
+        }
+        #[zbus(signal)]
+        async fn layout_updated(emitter: &SignalEmitter<'_>, revision: u32, parent: i32) -> zbus::Result<()>;
+    }
+
+    impl Menu {
+        fn chosen(&self, id: i32) {
+            let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
+            match id as usize {
+                item::OPEN | item::SETTINGS | item::SHOW => open_app(),
+                item::QUIT => QUIT.store(true, Ordering::Relaxed),
+                n if n < 1000 => {
+                    let _ = act(n, &s);
+                    // Read again at once, and shown so.
+                    *self.status.lock().unwrap_or_else(|e| e.into_inner()) = read_status();
+                    self.revision.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The program's icon at `size`, as ARGB in network order.
+    fn pixmap(icon: &eframe::egui::IconData, size: usize) -> (i32, i32, Vec<u8>) {
+        let (w, h) = (icon.width as usize, icon.height as usize);
+        let mut out = vec![0u8; size * size * 4];
+        if w == 0 || h == 0 {
+            return (size as i32, size as i32, out);
+        }
+        for y in 0..size {
+            for x in 0..size {
+                let (x0, x1) = (x * w / size, ((x + 1) * w / size).max(x * w / size + 1).min(w));
+                let (y0, y1) = (y * h / size, ((y + 1) * h / size).max(y * h / size + 1).min(h));
+                let (mut sum, mut n) = ([0u32; 4], 0u32);
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let o = (sy * w + sx) * 4;
+                        for c in 0..4 {
+                            sum[c] += icon.rgba[o + c] as u32;
+                        }
+                        n += 1;
+                    }
+                }
+                let n = n.max(1);
+                let o = (y * size + x) * 4;
+                out[o..o + 4].copy_from_slice(&[(sum[3] / n) as u8, (sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8]);
+            }
+        }
+        (size as i32, size as i32, out)
+    }
+
+    pub(super) fn run() -> Result<(), String> {
+        let e = |e: zbus::Error| e.to_string();
+        let status: Shared = Arc::new(Mutex::new(read_status()));
+        let revision = Arc::new(AtomicU32::new(1));
+        let icon = crate::gui::app_icon().map(|i| vec![pixmap(&i, 32), pixmap(&i, 64)]).unwrap_or_default();
+        let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
+        let conn = zbus::blocking::connection::Builder::session()
+            .map_err(e)?
+            .serve_at("/StatusNotifierItem", Item { status: status.clone(), icon })
+            .map_err(e)?
+            .serve_at("/MenuBar", Menu { status: status.clone(), revision: revision.clone() })
+            .map_err(e)?
+            .build()
+            .map_err(e)?;
+        // One icon for each signed-in user.
+        let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
+        match conn.request_name_with_flags("dev.sshremote.Tray", flags) {
+            Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {}
+            _ => return Ok(()),
+        }
+        conn.request_name(name.as_str()).map_err(e)?;
+        let watcher = zbus::blocking::Proxy::new(&conn, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher").map_err(e)?;
+        watcher
+            .call_method("RegisterStatusNotifierItem", &(name.as_str(),))
+            .map_err(|_| "the top bar shows no icons here (GNOME needs its AppIndicator extension)".to_string())?;
+        let mut last = (String::new(), 0u32);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if QUIT.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let now = read_status();
+            if now.service.is_some_and(|s| !s.0) {
+                return Ok(());
+            }
+            *status.lock().unwrap_or_else(|e| e.into_inner()) = now.clone();
+            // A change of what the menu says: told, so an open one is made again.
+            let said = (format!("{:?}{:?}{:?}{}", now.access, now.service, now.settings, now.viewers), revision.load(Ordering::Relaxed));
+            if said.0 != last.0 || said.1 != last.1 {
+                if said.0 != last.0 {
+                    revision.fetch_add(1, Ordering::Relaxed);
+                }
+                let rev = revision.load(Ordering::Relaxed);
+                if let Ok(menu) = conn.object_server().interface::<_, Menu>("/MenuBar") {
+                    let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), rev, 0));
+                }
+                if let Ok(item) = conn.object_server().interface::<_, Item>("/StatusNotifierItem") {
+                    let _ = zbus::block_on(Item::new_tool_tip(item.signal_emitter()));
+                }
+                last = (said.0, rev);
+            }
+        }
+    }
 }
 
 /// Whether the icon's own program runs in this sign-in (the window then makes no second icon).
@@ -448,62 +858,31 @@ mod win {
 
     /// The menu at the pointer; the item chosen, 0 for none.
     fn menu(hwnd: HWND, s: &super::Status) -> usize {
-        let text = |t: &str| wide(t);
+        fn fill(m: windows_sys::Win32::UI::WindowsAndMessaging::HMENU, entries: &[super::Entry]) {
+            for e in entries {
+                unsafe {
+                    match e {
+                        super::Entry::Separator => {
+                            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+                        }
+                        super::Entry::Item { id, label, enabled, checked } => {
+                            let flags = MF_STRING | if *enabled { 0 } else { MF_GRAYED } | if *checked == Some(true) { MF_CHECKED } else { 0 };
+                            let w = wide(label);
+                            AppendMenuW(m, flags, *id, w.as_ptr());
+                        }
+                        super::Entry::Sub { label, entries } => {
+                            let sub = CreatePopupMenu();
+                            fill(sub, entries);
+                            let w = wide(label);
+                            AppendMenuW(m, MF_STRING | MF_POPUP, sub as usize, w.as_ptr());
+                        }
+                    }
+                }
+            }
+        }
         unsafe {
             let m = CreatePopupMenu();
-            let add = |m, flags, id: usize, t: &str| {
-                let w = text(t);
-                AppendMenuW(m, flags, id, w.as_ptr());
-            };
-            add(m, MF_STRING, item::OPEN, "Open SSH Remote");
-            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
-            let check = |on: bool| if on { MF_CHECKED } else { 0 };
-            match &s.access {
-                Some((on, id)) => {
-                    add(m, MF_STRING | check(*on), item::ACCESS, "Remote access by ID");
-                    add(m, MF_STRING | if *on { 0 } else { MF_GRAYED }, item::COPY_ID, &format!("Copy the ID {}", crate::computers::spaced(id)));
-                }
-                None => add(m, MF_STRING | MF_GRAYED, 0, "Remote access by ID: not set up"),
-            }
-            // Who comes in and how: the switches of the remote access settings.
-            let who = CreatePopupMenu();
-            match s.settings {
-                Some([ask, straight, nearby, direct]) => {
-                    // As the remote access settings have them, in their order.
-                    add(who, MF_STRING | check(ask), item::ASK, "Ask the person at this computer before letting anyone in");
-                    add(who, MF_STRING | check(nearby), item::NEARBY, "Let computers on this network find this one");
-                    add(who, MF_STRING | check(direct), item::DIRECT, "Let viewers on this network come straight in");
-                    add(who, MF_STRING | check(straight), item::STRAIGHT, "Let viewers by ID go straight through the routers");
-                }
-                None => add(who, MF_STRING | MF_GRAYED, 0, "Not set up"),
-            }
-            AppendMenuW(who, MF_SEPARATOR, 0, std::ptr::null());
-            add(who, MF_STRING, item::SETTINGS, "All remote access settings\u{2026}");
-            add(m, MF_STRING | MF_POPUP, who as usize, "Who comes in");
-            let connected = match s.viewers {
-                0 => "Nobody is connected".to_string(),
-                1 => "1 connected: show the window".to_string(),
-                n => format!("{n} connected: show their windows"),
-            };
-            add(m, MF_STRING | if s.viewers == 0 { MF_GRAYED } else { 0 }, item::SHOW, &connected);
-            let svc = CreatePopupMenu();
-            match s.service {
-                Some((true, runs)) => {
-                    add(svc, MF_STRING | if runs { MF_GRAYED } else { 0 }, item::START, "Start");
-                    add(svc, MF_STRING | if runs { 0 } else { MF_GRAYED }, item::STOP, "Stop");
-                    add(svc, MF_STRING, item::REMOVE, "Remove");
-                }
-                Some((false, _)) => add(svc, MF_STRING, item::INSTALL, "Install: start remote access with the computer"),
-                None => add(svc, MF_STRING | MF_GRAYED, 0, "Looking\u{2026}"),
-            }
-            let service_label = match s.service {
-                Some((true, true)) => "Service: running",
-                Some((true, false)) => "Service: stopped",
-                _ => "Service",
-            };
-            add(m, MF_STRING | MF_POPUP, svc as usize, service_label);
-            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
-            add(m, MF_STRING, item::QUIT, if s.alone { "Hide this icon until the next sign-in" } else { "Quit" });
+            fill(m, &super::entries(s));
             let mut p = POINT { x: 0, y: 0 };
             GetCursorPos(&mut p);
             // The menu closes when clicked away only if its window is in front.

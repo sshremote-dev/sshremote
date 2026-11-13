@@ -457,10 +457,10 @@ pub(crate) fn ask_settings(page: &'static str) {
 
 /// `sshremote --tray`: the icon in the notification area for the service, on its own.
 pub fn run_tray() -> Result<(), String> {
-    #[cfg(all(windows, feature = "remote"))]
+    #[cfg(all(any(windows, target_os = "linux"), feature = "remote"))]
     return tray::run_alone();
-    #[cfg(not(all(windows, feature = "remote")))]
-    Err("the icon in the notification area is for Windows; on Linux the systemd user service keeps remote access up".into())
+    #[cfg(not(all(any(windows, target_os = "linux"), feature = "remote")))]
+    Err("the icon in the notification area is not made on this system".into())
 }
 
 pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
