@@ -731,6 +731,7 @@ class Client {
       if (this.t.kind === "id") this.remember();
       else this.keepTimer = setTimeout(() => this.remember(), 5000);
       if (this.view === "term") this.term.focus();
+      if (this.t.monitor !== undefined) this.send({ monitor: this.t.monitor });
     }
     if (v.agent) this.agentUp(v.agent.screen);
     if (v.agentError) this.agentDown(v.agentError);
@@ -1178,6 +1179,22 @@ class Client {
     if (this.stats && this.view === "screen") parts.push(this.stats.kbps.toFixed(this.stats.kbps < 10 ? 1 : 0) + " KB/s", Math.round(this.stats.rtt) + " ms");
     this.state(parts.join(" · "), "up");
   }
+  // Each of the host's other screens in a browser window of its own, reaching the host the same
+  // way (what it needs is handed over between the windows, never put in the address). Where the
+  // browser may place windows (Chrome, Edge), each opens on the monitor of the same number here.
+  async spread() {
+    const others = this.monitors.list.map((_, i) => i).filter(i => i !== this.monitors.current);
+    let screens = null;
+    try { screens = window.getScreenDetails ? (await window.getScreenDetails()).screens : null; } catch { /* not allowed */ }
+    for (const [k, i] of others.entries()) {
+      const s = screens?.[i];
+      const features = s ? `left=${s.availLeft},top=${s.availTop},width=${s.availWidth},height=${s.availHeight}` : `left=${80 + 40 * k},top=${80 + 40 * k},width=1100,height=720`;
+      const win = window.open(location.pathname + "#screen=" + i, "_blank", features);
+      if (!win) { toast("The browser kept the new window from opening: allow pop-ups for this page.", { bad: true }); return; }
+      spreads.set(win, { t: { ...this.t, view: "screen", monitor: i, retry: 0 }, gateway: gatewayAuth() });
+    }
+    if (screens && screens.length > 1) toast("Press the full-screen button in each window to fill its monitor.");
+  }
   // The terminal below the screen, as the app shows it, while the screen is the view.
   splitView() {
     const on = !!this.split && this.view === "screen";
@@ -1286,8 +1303,9 @@ class Client {
       ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
       ["One window or program…", () => this.send({ windows: 1 })],
     ], at);
-    const monitorMenu = at => menu(this.monitors.list.map((m, i) =>
-      [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]), at);
+    const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
+      [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
+      null, ["All its screens, a window each", () => this.spread()]], at);
     const viewOnly = () => {
       this.viewOnly = !this.viewOnly;
       if (this.viewOnly) this.releaseKeys();
@@ -1802,6 +1820,25 @@ async function dropped(dt) {
 }
 
 // ----- Start ------------------------------------------------------------------------------------------
+
+// Windows opened for the host's other screens, and what each is to reach; a window asks for its
+// part once it is ready to hear it.
+const spreads = new Map();
+addEventListener("message", e => {
+  if (e.origin !== location.origin) return;
+  if (e.data === "spread-ready" && spreads.has(e.source)) {
+    e.source.postMessage({ spread: spreads.get(e.source) }, location.origin);
+    spreads.delete(e.source);
+  }
+  // In the opened window: the host to reach, as the window that opened it reaches it.
+  if (e.data?.spread && e.source === window.opener) {
+    const { t, gateway: g } = e.data.spread;
+    if (g?.token) gateway.token ||= g.token;
+    if (g?.password) gateway.password ||= g.password;
+    connect(t);
+  }
+});
+if (/^#screen=\d+$/.test(location.hash) && window.opener) window.opener.postMessage("spread-ready", location.origin);
 
 // A link can name what to open: #id=123456789 or #ssh=user@host.
 {
