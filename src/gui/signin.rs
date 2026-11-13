@@ -53,6 +53,8 @@ impl SignIn {
                 "The password was right; this computer wants the code of its authenticator app too.".to_string()
             } else if why.contains("wrong password") {
                 "That password was not accepted.".to_string()
+            } else if why == crate::net::NO_REQUESTS {
+                "That computer lets nobody in without its password.".to_string()
             } else {
                 why
             };
@@ -175,6 +177,18 @@ impl SignIn {
                 let ready = !self.password.is_empty() || !self.key.trim().is_empty();
                 if ui.add_enabled(ready, super::theme::primary(format!("{}  Connect", ic::ARROW_CLOCKWISE))).clicked() || (enter && ready) {
                     answer = Some(Answer::Connect(self.target(target)));
+                }
+                // By ID, someone without the password may ask the person there to let them in.
+                #[cfg(feature = "remote")]
+                if self.by_id.is_some()
+                    && !self.wants_code
+                    && ui.button("Ask without the password").on_hover_text("The person at that computer is asked; both screens show a code to compare").clicked()
+                {
+                    let mut t = target.clone();
+                    if let Target::Direct { password, .. } = &mut t {
+                        password.clear();
+                    }
+                    answer = Some(Answer::Connect(t));
                 }
                 if ui.button("Cancel").clicked() {
                     answer = Some(Answer::Cancel);

@@ -105,6 +105,25 @@ pub fn grant() -> u8 {
     GRANT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The viewer asked without a password: the code it was shown, for the person at the screen to
+/// compare (six digits).
+static CODE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_code(code: &str) {
+    if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+        *CODE.lock().unwrap_or_else(|e| e.into_inner()) = Some(code.to_string());
+    }
+}
+
+pub fn code() -> Option<String> {
+    CODE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The code as given on to the helper or the window: ` --code 482913`, or nothing.
+pub fn code_arg() -> String {
+    code().map(|c| format!(" --code {c}")).unwrap_or_default()
+}
+
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
 pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
     #[cfg(windows)]

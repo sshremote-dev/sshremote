@@ -648,7 +648,11 @@ fn preset_text(p: &crate::proto::Preset) -> String {
 fn friendly(e: &str) -> (String, &'static str) {
     let first = e.lines().find(|l| !l.trim().is_empty()).unwrap_or(e).trim().to_string();
     let l = e.to_lowercase();
-    let hint = if l.contains("straight path") {
+    let hint = if l.contains("without its password") {
+        "Ask the person at that computer for its password, or for them to let you ask (Remote access settings, Who comes in)."
+    } else if l.contains("answering someone else") {
+        "Someone else is asking that computer just now. Try again in a few seconds."
+    } else if l.contains("straight path") {
         "The straight connection through the routers stopped working (a network that cuts UDP, say); it connects through the relay instead."
     } else if l.contains("permission denied") {
         "The host refused the login. Enter the password, or install your key on the host with ssh-copy-id."
@@ -1005,7 +1009,7 @@ impl App {
         #[cfg(feature = "remote")]
         {
             st.access = self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone()));
-            st.settings = self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct]);
+            st.settings = self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct, c.requests]);
             st.connected = crate::access::viewers();
             st.service = self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs)));
         }
@@ -1501,7 +1505,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1557,7 +1561,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

@@ -149,6 +149,8 @@ struct Line {
     /// Attempts at a straight path so far.
     tried: AtomicU8,
     ended: AtomicBool,
+    /// Asked without a password: the code this side shows.
+    code: Option<String>,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -289,6 +291,11 @@ impl Ender {
     /// Where the straight path goes, once the stream runs on one.
     pub fn straight(&self) -> Option<SocketAddr> {
         *guard(&self.0.straight)
+    }
+
+    /// Asked to be let in without a password: the code to compare with the person at the screen.
+    pub fn code(&self) -> Option<String> {
+        self.0.code.clone()
     }
 }
 
@@ -464,18 +471,29 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> i
 
 /// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
 fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
-    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None } };
+    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None } };
     handshake_side(stream, side, judge, totp, punch).map(|(r, w, _)| (r, w))
 }
 
-/// Which side of the exchange, with what it knows: the viewer the password it was given, the
-/// agent the passwords it takes.
+/// Which side of the exchange, with what it knows: the viewer the password it was given (none:
+/// it asks to be let in), the agent the passwords it takes and whether it takes such requests
+/// now (`requests` says yes or no to each, once the exchange is made).
 enum Side<'a> {
     Viewer(&'a str),
-    Agent { permanent: Option<&'a str>, one_time: Option<&'a str> },
+    Agent { permanent: Option<&'a str>, one_time: Option<&'a str>, requests: Option<&'a dyn Fn() -> bool> },
 }
 
-fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, bool)> {
+/// How a viewer came in, as the agent saw it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Came {
+    Lasting,
+    OneTime,
+    /// Without a password, asking: the person at the screen decides, comparing the code both
+    /// sides were shown.
+    Request(String),
+}
+
+fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
     let closer = stream.try_clone()?;
     let result = handshake_on(stream, side, judge, totp, punch);
     if result.is_err() {
@@ -486,6 +504,16 @@ fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str
 
 /// The bit of the key exchange's length that says the viewer gives a one-time password.
 const ONE_TIME: u16 = 0x8000;
+/// The bit that says it gives none and asks to be let in: the exchange is then made with words
+/// everyone knows, and the code both sides show (`code`) is what tells a stranger in the middle.
+const REQUEST: u16 = 0x4000;
+const REQUEST_WORDS: &str = "sshremote request";
+/// What the agent answers a request it does not take, or not now (the size of `CONFIRM`).
+const NEEDS_PASSWORD: &[u8] = b"sshremote/1 needs";
+const BUSY: &[u8] = b"sshremote/1 busy!";
+/// What a viewer is told then.
+pub const NO_REQUESTS: &str = "that computer lets nobody in without its password: ask for it";
+pub const REQUEST_BUSY: &str = "the person at that computer is answering someone else now; try again in a moment";
 /// What one-time passwords are made of: no letters or digits that read alike.
 const ONE_TIME_SET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
@@ -501,7 +529,7 @@ pub fn new_one_time() -> String {
     format!("{}-{}", &c[..4], &c[4..])
 }
 
-fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, bool)> {
+fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
     let viewer = matches!(side, Side::Viewer(_));
     // A viewer may be given the two-step code with the password.
     let (password, code) = match side {
@@ -543,12 +571,19 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
     // The viewer speaks first, saying whether it gives a one-time password; the agent answers
     // with the password that says (older agents speak at once: the viewer's turn comes first
     // either way).
-    let (state, msg, theirs, one_time_used) = match side {
+    let (state, msg, theirs, mut came) = match side {
         Side::Viewer(_) => {
             let once = looks_one_time(password);
-            let given = if once { password.trim().to_ascii_lowercase() } else { password.trim().to_string() };
+            let request = password.trim().is_empty();
+            let given = if once {
+                password.trim().to_ascii_lowercase()
+            } else if request {
+                REQUEST_WORDS.to_string()
+            } else {
+                password.trim().to_string()
+            };
             let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(given.as_bytes()), &a, &b);
-            let flag = if once { ONE_TIME } else { 0 };
+            let flag = if once { ONE_TIME } else if request { REQUEST } else { 0 };
             s.write_all(&(msg.len() as u16 | flag).to_le_bytes())?;
             s.write_all(&msg)?;
             let mut len = [0u8; 2];
@@ -566,26 +601,46 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             }
             let mut theirs = vec![0u8; msg.len()];
             s.read_exact(&mut theirs)?;
-            (state, msg, theirs, once)
+            let came = if once {
+                Came::OneTime
+            } else if request {
+                Came::Request(String::new())
+            } else {
+                Came::Lasting
+            };
+            (state, msg, theirs, came)
         }
-        Side::Agent { permanent, one_time } => {
+        Side::Agent { permanent, one_time, .. } => {
             let mut len = [0u8; 2];
             s.read_exact(&mut len)?;
             let len = u16::from_le_bytes(len);
-            let once = len & ONE_TIME != 0;
+            let (once, request) = (len & ONE_TIME != 0, len & REQUEST != 0 && len & ONE_TIME == 0);
             // A password this computer does not take (one-time passwords off, or only they on)
             // is one nobody knows: the guess is checked, and counted, as any wrong one.
             let unknown = crate::sys::hex(&crate::sys::random(24));
-            let pw = if once { one_time.or(permanent) } else { permanent }.unwrap_or(&unknown);
+            let pw = if request {
+                REQUEST_WORDS
+            } else if once {
+                one_time.or(permanent).unwrap_or(&unknown)
+            } else {
+                permanent.unwrap_or(&unknown)
+            };
             let (state, msg) = Spake2::<Ed25519Group>::start_b(&Password::new(pw.trim().as_bytes()), &a, &b);
-            if (len & !ONE_TIME) as usize != msg.len() {
+            if (len & !(ONE_TIME | REQUEST)) as usize != msg.len() {
                 return Err(io::Error::other("bad key exchange"));
             }
             let mut theirs = vec![0u8; msg.len()];
             s.read_exact(&mut theirs)?;
             s.write_all(&(msg.len() as u16).to_le_bytes())?;
             s.write_all(&msg)?;
-            (state, msg, theirs, once && one_time.is_some())
+            let came = if request {
+                Came::Request(String::new())
+            } else if once && one_time.is_some() {
+                Came::OneTime
+            } else {
+                Came::Lasting
+            };
+            (state, msg, theirs, came)
         }
     };
     let _ = &msg;
@@ -595,6 +650,13 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
     hk.expand(b"viewer to agent", &mut v2a).map_err(|_| io::Error::other("hkdf"))?;
     hk.expand(b"agent to viewer", &mut a2v).map_err(|_| io::Error::other("hkdf"))?;
     let (send, recv) = if viewer { (v2a, a2v) } else { (a2v, v2a) };
+    // Without a password, the code both sides show: the same only when nobody stands between.
+    if let Came::Request(code) = &mut came {
+        let mut c = [0u8; 4];
+        hk.expand(b"sshremote code", &mut c).map_err(|_| io::Error::other("hkdf"))?;
+        let n = u32::from_be_bytes(c) % 1_000_000;
+        *code = format!("{:03} {:03}", n / 1000, n % 1000);
+    }
     let line = Arc::new(Line {
         out: Mutex::new(Out { seal: Sealer::new(&send), wire: Wire::Tcp(s.try_clone()?) }),
         tcp: s.try_clone()?,
@@ -606,6 +668,7 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
         answer: Mutex::new(None),
         tried: AtomicU8::new(0),
         ended: AtomicBool::new(false),
+        code: if let Came::Request(c) = &came { Some(c.clone()) } else { None },
     });
     let mut w = SealedWriter { line: line.clone(), buf: Vec::new() };
     let mut r = SealedReader { line, wire: Wire::Tcp(s), seal: Sealer::new(&recv), plain: Vec::new(), at: 0, limit: CONFIRM.len() };
@@ -623,6 +686,13 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             _ => e,
         };
         r.read_exact(&mut got).map_err(|e| refused(e, "wrong password"))?;
+        // A request the computer does not take, or not now.
+        if got == NEEDS_PASSWORD {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, NO_REQUESTS));
+        }
+        if got == BUSY {
+            return Err(io::Error::other(REQUEST_BUSY));
+        }
         // The password was right; the computer wants the code too.
         if got == CODE_PLEASE {
             let Some(code) = code.filter(|c| !c.is_empty()) else {
@@ -632,6 +702,28 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             w.flush()?;
             extend(VERDICT_LIMIT);
             r.read_exact(&mut got).map_err(|e| refused(e, "wrong code (the password was right)"))?;
+        }
+    } else if let Came::Request(_) = &came {
+        // No password to check (and no guess to count): the request is taken or not, and the
+        // person at the screen decides after.
+        let ct = r.stream_frame()?;
+        if !r.open(&ct).is_ok_and(|p| p == CONFIRM) {
+            return Err(io::Error::other("bad key exchange"));
+        }
+        let Side::Agent { requests, .. } = side else { unreachable!() };
+        let answer = match requests {
+            None => NEEDS_PASSWORD,
+            Some(take) if !take() => BUSY,
+            Some(_) => CONFIRM,
+        };
+        w.write_all(answer)?;
+        w.flush()?;
+        if answer != CONFIRM {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a request without the password, not taken"));
+        }
+        got.copy_from_slice(CONFIRM);
+        if w.line.punch.is_some() {
+            w.line.frame(&[], false)?;
         }
     } else {
         // The proof is read as it comes; checking it waits on the judge, with no deadline
@@ -667,7 +759,7 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
     }
     r.limit = MAX_FRAME;
-    Ok((r, w, one_time_used))
+    Ok((r, w, came))
 }
 
 /// The agent's side of the handshake, for remote access by ID; `judge` checks the viewer's proof
@@ -686,15 +778,17 @@ pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>
 
 /// The agent's side with the passwords it takes: the lasting one, a one-time one, or both (None:
 /// that kind is not taken). Also says whether the viewer came in with the one-time password.
+/// `requests`: a viewer without a password may ask, and is taken when it says yes (one at a time).
 pub fn handshake_agent_passwords(
     stream: TcpStream,
     permanent: Option<&str>,
     one_time: Option<&str>,
+    requests: Option<&dyn Fn() -> bool>,
     totp: Option<&str>,
     judge: Judge,
     punch: Option<Punch>,
-) -> io::Result<(SealedReader, SealedWriter, bool)> {
-    handshake_side(stream, Side::Agent { permanent, one_time }, judge, totp, punch)
+) -> io::Result<(SealedReader, SealedWriter, Came)> {
+    handshake_side(stream, Side::Agent { permanent, one_time, requests }, judge, totp, punch)
 }
 
 /// A judge that checks at once.
@@ -1067,7 +1161,7 @@ mod tests {
             let port = l.local_addr().unwrap().port();
             let agent = thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
-                handshake_agent_passwords(s, lasting, once, None, &now, None).map(|(_, _, used)| used)
+                handshake_agent_passwords(s, lasting, once, None, None, &now, None).map(|(_, _, came)| came == Came::OneTime)
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ());
             let used = agent.join().unwrap();
@@ -1082,6 +1176,31 @@ mod tests {
         assert!(try_with(None, once, "a lasting one").is_err(), "one-time passwords alone");
         assert!(try_with(lasting, once, "k7qp-2mz8").is_err(), "a wrong one-time password");
         assert!(looks_one_time(&new_one_time()) && !looks_one_time("abcdefgh") && !looks_one_time("k7qp-2mz0"));
+    }
+
+    /// Without a password a viewer asks: taken where requests are, refused (with why) where they
+    /// are not or one is being answered; both sides show the same code.
+    #[test]
+    fn a_request_without_a_password_is_taken_only_where_asked_for() {
+        let ask = |take: Option<bool>| -> (Result<Option<String>, String>, Result<Came, String>) {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let agent = thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let gate = move || take == Some(true);
+                let requests: Option<&dyn Fn() -> bool> = take.map(|_| &gate as &dyn Fn() -> bool);
+                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None).map(|(_, _, c)| c).map_err(|e| e.to_string())
+            });
+            let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now).map(|(_, w)| w.ender().code()).map_err(|e| e.to_string());
+            (viewer, agent.join().unwrap())
+        };
+        let (v, a) = ask(Some(true));
+        let code = v.unwrap().expect("a code");
+        assert_eq!(a.unwrap(), Came::Request(code.clone()), "the same code on both sides");
+        assert!(code.len() == 7 && code.as_bytes()[3] == b' ');
+        assert_eq!(ask(Some(false)).0.unwrap_err(), REQUEST_BUSY);
+        assert_eq!(ask(None).0.unwrap_err(), NO_REQUESTS);
+        assert_eq!((CONFIRM.len(), NEEDS_PASSWORD.len(), BUSY.len()), (17, 17, 17));
     }
 
     #[test]

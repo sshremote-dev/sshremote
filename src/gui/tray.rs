@@ -16,8 +16,8 @@ pub(super) struct Status {
     /// The service: installed, running.
     pub service: Option<(bool, bool)>,
     /// Who comes in and how: asked first, straight through the routers, found on this network,
-    /// straight in from it.
-    pub settings: Option<[bool; 4]>,
+    /// straight in from it, asking without a password.
+    pub settings: Option<[bool; 5]>,
     /// Viewers connected by the ID now.
     #[cfg(feature = "remote")]
     pub connected: Vec<crate::access::Viewer>,
@@ -54,6 +54,7 @@ mod item {
     pub const START: usize = 11;
     pub const STOP: usize = 12;
     pub const REMOVE: usize = 13;
+    pub const REQUESTS: usize = 14;
     /// Ending the connection of the viewer listed n-th, from here.
     pub const END: usize = 200;
     pub const END_MOST: usize = 50;
@@ -84,8 +85,9 @@ pub(super) fn entries(s: &Status) -> Vec<Entry> {
     // Who comes in and how: the switches of the remote access settings, as worded there and in
     // their order.
     let mut who = match s.settings {
-        Some([ask, straight, nearby, direct]) => vec![
+        Some([ask, straight, nearby, direct, requests]) => vec![
             it(item::ASK, "Ask the person at this computer before letting anyone in", true, Some(ask)),
+            it(item::REQUESTS, "Let people without the password ask to come in", true, Some(requests)),
             it(item::NEARBY, "Let computers on this network find this one", true, Some(nearby)),
             it(item::DIRECT, "Let viewers on this network come straight in", true, Some(direct)),
             it(item::STRAIGHT, "Let viewers by ID go straight through the routers", true, Some(straight)),
@@ -165,6 +167,7 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
             item::STRAIGHT => as_admin(&["straight", word(!set[1])], &|| change(&|c| c.punch = !set[1]))?,
             item::NEARBY => as_admin(&["lan", word(!set[2])], &|| change(&|c| c.lan = !set[2]))?,
             item::DIRECT => as_admin(&["direct", word(!set[3])], &|| change(&|c| c.direct = !set[3]))?,
+            item::REQUESTS => as_admin(&["requests", word(!set[4])], &|| change(&|c| c.requests = !set[4]))?,
             item::COPY_ID => {
                 if let Some((_, id)) = &status.access {
                     arboard::Clipboard::new().and_then(|mut c| c.set_text(id.clone())).map_err(|e| e.to_string())?;
@@ -202,7 +205,7 @@ fn read_status() -> Status {
         let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if !id.is_empty() {
             st.access = Some((b("enabled"), id));
-            st.settings = Some([b("ask"), b("punch"), b("lan"), b("direct")]);
+            st.settings = Some([b("ask"), b("punch"), b("lan"), b("direct"), b("requests")]);
         }
         // Who is connected counts only while the service runs.
         if st.service.is_some_and(|s| s.1) {
@@ -212,7 +215,7 @@ fn read_status() -> Status {
     #[cfg(not(windows))]
     if let Ok(Some(c)) = crate::access::stored() {
         st.access = Some((c.enabled, c.id.clone()));
-        st.settings = Some([c.ask, c.punch, c.lan, c.direct]);
+        st.settings = Some([c.ask, c.punch, c.lan, c.direct, c.requests]);
     }
     st
 }

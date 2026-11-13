@@ -1355,6 +1355,10 @@ fn plain(e: &str) -> String {
     let l = e.to_lowercase();
     if l.contains("offline") || l.contains("no agent with that id") {
         "That computer is not online: its remote access is off, or it has no network.".into()
+    } else if l.contains("without its password") {
+        "That computer lets nobody in without its password: type it.".into()
+    } else if l.contains("answering someone else") {
+        "Someone else is asking that computer just now; try again in a few seconds.".into()
     } else if l.contains("authenticator") {
         "The password was right; that computer wants the code of its authenticator app too.".into()
     } else if l.contains("wrong code") {

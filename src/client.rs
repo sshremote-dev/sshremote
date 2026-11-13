@@ -892,7 +892,9 @@ impl Viewer {
 }
 
 pub fn run(opt: Options) -> Result<(), String> {
-    let (sess, tx, rx) = Session::connect(&opt)?;
+    // What is said before the screen comes (asking the person there, and the code to compare
+    // when asking without a password) is shown on the terminal while it waits.
+    let (sess, tx, rx) = Session::open_noting(&opt.target()?, opt.gui, &|t: &str| eprintln!("sshremote: {}", t.replace('\n', "\n           ")))?;
     let mut v = Viewer::new(&opt, sess, if opt.probe.is_some() { Box::new(io::sink()) } else { Box::new(io::stdout()) });
     let interactive = opt.probe.is_none();
     let deadline = opt.probe.as_ref().map(|p| Instant::now() + Duration::from_secs_f64(p.0));

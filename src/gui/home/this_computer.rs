@@ -348,6 +348,16 @@ impl App {
                                 .wrap(),
                         );
                         ui.add_space(8.0);
+                        if ui.checkbox(&mut cfg.requests, "Let people without the password ask to come in").changed() {
+                            changed = true;
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Someone helping you needs only this computer's ID: you are asked each time, and both screens show a code to compare first. One at a time.").weak().size(12.0),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(8.0);
                         ui.label(RichText::new("Viewers may").strong());
                         ui.scope(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;

@@ -29,6 +29,11 @@ impl Link {
         }
     }
 
+    /// For a link by ID that asked without a password: the code to compare with the person there.
+    pub fn code(&self) -> Option<String> {
+        self.ender.as_ref().and_then(|e| e.code())
+    }
+
     /// For a link by ID: where its straight path goes, or None while it runs through the relay.
     pub fn straight(&self) -> Option<Option<std::net::SocketAddr>> {
         self.ender.as_ref().map(|e| e.straight())

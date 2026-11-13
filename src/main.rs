@@ -131,7 +131,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
-                                straight|lan|direct on|off|passwords lasting|one-time|both|one-time|
+                                straight|lan|direct|requests on|off|passwords lasting|one-time|both|one-time|
                                 viewers|end N|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay
        sshremote --tray                Windows: the icon in the notification area for the service (remote
@@ -474,7 +474,8 @@ fn run(args: &[String]) -> Result<(), String> {
         #[cfg(all(feature = "gui", feature = "remote"))]
         "--chat-window" => {
             let grant = args.iter().position(|a| a == "--grant").and_then(|i| args.get(i + 1)).and_then(|g| g.parse().ok());
-            chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant)
+            let code = args.iter().position(|a| a == "--code").and_then(|i| args.get(i + 1)).filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit())).cloned();
+            chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant, code)
         }
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
         #[cfg(feature = "gui")]
@@ -520,6 +521,9 @@ fn run(args: &[String]) -> Result<(), String> {
             // Started for a viewer who came by this computer's ID: the person at the screen is told.
             if args.iter().any(|a| a == "--by-id") {
                 agent::mark_by_id(get("--grant").and_then(|g| g.parse().ok()).unwrap_or(grant::ALL));
+                if let Some(c) = get("--code") {
+                    agent::set_code(c);
+                }
             }
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
             // A relay helper has no visible stderr; keep its failure where it can be found: beside

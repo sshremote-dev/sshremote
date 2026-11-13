@@ -254,9 +254,9 @@ impl App {
             if mode == PaneMode::Terminal {
                 return Err("A computer reached by its ID shows its screen and files, not a terminal.".into());
             }
-            let Some(password) = password else {
-                return Err("Enter the password set on that computer for its remote access ID.".into());
-            };
+            // Without a password it asks to be let in; a computer that takes no such requests says
+            // so, and the password is asked for then.
+            let password = password.unwrap_or_default();
             // In the list once reached, as other computers are.
             self.pending_ports.insert(host.clone(), String::new());
             let label = crate::computers::get(&host).map_or_else(|| format!("ID {}", crate::computers::spaced(&addr.id)), |c| c.label());

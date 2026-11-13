@@ -100,13 +100,14 @@ pub fn run(backend: &str) -> Result<(), String> {
     // without it a one-shot scheduled task starts it as the logged-on user.
     // A viewer by ID is said to the person at the screen by the helper, which is there.
     let grant = crate::agent::grant();
-    let request = if crate::agent::by_id() { format!("spawn {base} {backend} id {grant}") } else { format!("spawn {base} {backend}") };
+    let code = crate::agent::code().map(|c| format!(" {c}")).unwrap_or_default();
+    let request = if crate::agent::by_id() { format!("spawn {base} {backend} id {grant}{code}") } else { format!("spawn {base} {backend}") };
     match crate::service::ask(&request) {
         Some(Ok(())) => {}
         service => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // A headless console host keeps a console window from appearing on the remote screen.
-            let by_id = if crate::agent::by_id() { format!(" --by-id --grant {grant}") } else { String::new() };
+            let by_id = if crate::agent::by_id() { format!(" --by-id --grant {grant}{}", crate::agent::code_arg()) } else { String::new() };
             let cmd = format!("conhost.exe --headless \"{}\" --agent --capture {backend} --pipe {base}{by_id}", exe.display());
             let task = format!("sshremote-agent-{}", std::process::id());
             schtasks(&["/create", "/tn", &task, "/tr", &cmd, "/sc", "once", "/st", "00:00", "/it", "/f"])?;

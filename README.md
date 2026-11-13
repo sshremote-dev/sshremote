@@ -196,6 +196,8 @@ sshremote remote-access service start|stop       # the service, without removing
 sshremote remote-access viewers | end N          # who is connected now; end one
 sshremote remote-access passwords lasting|one-time|both  # which passwords viewers may give
 sshremote remote-access one-time                 # a new one-time password now
+sshremote remote-access requests on|off          # people without the password may ask
+sshremote sshremote://ID --password ""           # ask to come in, without a password
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN
@@ -205,6 +207,11 @@ Viewers give the lasting password, a **one-time password** (as `k7qp-2mz9`, show
 either, as chosen in the settings (new installs take both). A one-time password works for one
 connection and the minute after it, so a viewer whose network dropped comes back in; then a new
 one takes its place and nobody comes back later with what they were told once.
+
+Where the person at the computer allows it, someone with only the ID may **ask to come in**:
+they leave the password empty, the person there is asked, and both screens show the same
+six-digit code (from the key exchange itself), which someone standing between the two could not
+match. One request at a time, and always a click to let them in.
 
 Who comes in and what they may do is the person at the computer's choice: **ask first** (a viewer
 with the right password waits for a click there, turned away after a minute), and rights for the

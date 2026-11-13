@@ -97,6 +97,7 @@ fn windows_shell(error: &str) -> bool {
 
 impl Session {
     /// Starts the agent and waits for its hello.
+    #[cfg(test)]
     pub fn connect(opt: &Options) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
         Session::open(&opt.target()?, opt.gui)
     }
@@ -151,6 +152,16 @@ impl Session {
 
     fn open_once(target: &Target, hidden: bool, note: &dyn Fn(&str)) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
         let mut link = transport::open(target, hidden)?;
+        // Asked without a password: this side's own code goes with every word from there, so the
+        // two can be compared (never one the other side sends, which someone between could copy).
+        let code = link.code();
+        let say = |t: &str| match &code {
+            Some(c) => note(&format!("{t}\nYour code is {c}: the person there must see the same one.")),
+            None => note(t),
+        };
+        if code.is_some() {
+            say("Asking the person at that computer to let you in\u{2026}");
+        }
         let reader = std::mem::replace(&mut link.reader, Box::new(io::empty()));
         let writer = std::mem::replace(&mut link.writer, Box::new(io::sink()));
         let mut errors = std::mem::replace(&mut link.errors, Box::new(io::empty()));
@@ -222,7 +233,7 @@ impl Session {
         let first = loop {
             match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Ev::Net(ToClient::Notice(t))) => {
-                    note(&t);
+                    say(&t);
                     until = until.max(Instant::now() + Duration::from_secs(75));
                 }
                 other => break other,

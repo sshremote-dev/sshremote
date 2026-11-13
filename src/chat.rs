@@ -169,7 +169,7 @@ impl Window {
     fn open(&mut self) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let name = if self.by_id.is_some() { "Someone connected by this computer's ID".to_string() } else { viewer_name() };
-        let by_id = self.by_id.map(|g| format!(" --by-id --grant {g}")).unwrap_or_default();
+        let by_id = self.by_id.map(|g| format!(" --by-id --grant {g}{}", crate::agent::code_arg())).unwrap_or_default();
         // An agent run as SYSTEM shows it as the person signed in at the screen, never as SYSTEM.
         #[cfg(windows)]
         match crate::console_user::acting() {
@@ -251,7 +251,8 @@ fn viewer_name() -> String {
 
 /// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
 #[cfg(feature = "gui")]
-pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), String> {
+/// `code`: the viewer asked without a password, and was shown this code.
+pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<String>) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -296,6 +297,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), St
                 rights_open: false,
                 call: None,
                 minimized_once: false,
+                code,
             }))
         }),
     )
@@ -324,6 +326,8 @@ struct ChatApp {
     call: Option<bool>,
     /// Closed once while they were connected: it went to the taskbar, and says so.
     minimized_once: bool,
+    /// They asked without a password: the code their screen shows, to compare before letting them in.
+    code: Option<String>,
 }
 
 /// Tests: the window shown on the remote screen, as one connected by ID sees it (asking first,
@@ -343,6 +347,7 @@ pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut 
         rights_open,
         call: None,
         minimized_once: false,
+        code: asking.then(|| "482913".to_string()),
     };
     move |ui| app.draw(ui)
 }
@@ -405,9 +410,21 @@ impl ChatApp {
                     ui.label(RichText::new(crate::gui::ic::USER).size(30.0).color(crate::gui::brand()));
                     ui.vertical(|ui| {
                         ui.label(RichText::new("Someone wants to connect").strong().size(16.0));
-                        ui.label(RichText::new("They have this computer's ID and its password.").weak());
+                        let how = if self.code.is_some() { "They have this computer's ID, not its password." } else { "They have this computer's ID and its password." };
+                        ui.label(RichText::new(how).weak());
                     });
                 });
+                // Asked without a password: the code both screens show tells whether it is really them.
+                if let Some(code) = &self.code {
+                    ui.add_space(10.0);
+                    egui::Frame::new().fill(crate::gui::brand().gamma_multiply(0.12)).corner_radius(egui::CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Code").weak());
+                            ui.label(RichText::new(format!("{} {}", &code[..3], &code[3..])).monospace().size(22.0).strong());
+                        });
+                        ui.add(egui::Label::new(RichText::new("Their screen shows a code too. Let them in only if it is this one: someone else in the middle would show another.").small()).wrap());
+                    });
+                }
                 ui.add_space(14.0);
                 ui.label(RichText::new("If you let them in, they may:").strong());
                 ui.add_space(4.0);
@@ -508,6 +525,8 @@ impl ChatApp {
                     ui.label(RichText::new(&self.name).strong().size(15.0));
                     let state = if self.ended.is_some() {
                         "the connection closed; this window closes shortly"
+                    } else if self.by_id && self.code.is_some() {
+                        "sees this screen and can use it: you let them in, without the password"
                     } else if self.by_id {
                         "sees this screen and can use it, with this computer's ID and password"
                     } else {

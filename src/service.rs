@@ -292,11 +292,16 @@ fn serve() {
         let _ = BufReader::new(&*pipe).read_line(&mut line);
         let answer = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["sas"] => send_sas(),
-            ["spawn", base, capture] => spawn_helper(base, capture, None),
-            ["spawn", base, capture, "id"] => spawn_helper(base, capture, Some(crate::grant::ALL)),
+            ["spawn", base, capture] => spawn_helper(base, capture, None, None),
+            ["spawn", base, capture, "id"] => spawn_helper(base, capture, Some(crate::grant::ALL), None),
             ["spawn", base, capture, "id", grant] => match grant.parse() {
-                Ok(g) => spawn_helper(base, capture, Some(g)),
+                Ok(g) => spawn_helper(base, capture, Some(g), None),
                 Err(_) => Err("bad request".into()),
+            },
+            // Asked without a password: the code to show with the question.
+            ["spawn", base, capture, "id", grant, code] => match grant.parse() {
+                Ok(g) if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) => spawn_helper(base, capture, Some(g), Some(code)),
+                _ => Err("bad request".into()),
             },
             _ => Err("unknown request".into()),
         };
@@ -321,13 +326,14 @@ fn send_sas() -> Result<(), String> {
 }
 
 /// Starts `sshremote --agent --pipe BASE` as SYSTEM in the active console session.
-fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>) -> Result<(), String> {
+fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>, code: Option<&str>) -> Result<(), String> {
     let name = base.strip_prefix(r"\\.\pipe\sshremote-").unwrap_or("");
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("bad request".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let by_id = by_id.map(|g| format!(" --by-id --grant {g}")).unwrap_or_default();
+    let code = code.map(|c| format!(" --code {c}")).unwrap_or_default();
+    let by_id = by_id.map(|g| format!(" --by-id --grant {g}{code}")).unwrap_or_default();
     let mut cmd = wide(&format!("\"{}\" --agent --capture {capture} --pipe {base}{by_id}", exe.display()));
     let mut desktop = wide(r"winsta0\default");
     unsafe {
