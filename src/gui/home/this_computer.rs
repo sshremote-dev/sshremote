@@ -163,7 +163,7 @@ impl App {
                             ui.label(RichText::new(ic::DESKTOP).size(14.0).color(good()));
                             ui.label(RichText::new(format!("A viewer, {}", crate::hosts::ago(since))).size(13.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(kit::danger("Disconnect", false).min_size(Vec2::new(0.0, 26.0))).clicked() {
+                                if ui.add(kit::danger("End", false).min_size(Vec2::new(0.0, 26.0))).on_hover_text("End this connection now").clicked() {
                                     access::disconnect(n);
                                 }
                             });

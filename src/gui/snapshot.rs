@@ -330,6 +330,21 @@ mod pictures {
         }
     }
 
+    /// The window on the remote screen for a viewer by ID, on a small screen: asking first, and
+    /// with what they may do unfolded; nothing cut off.
+    #[cfg(feature = "remote")]
+    #[test]
+    #[ignore]
+    fn menus_host_window() {
+        for dark in [true, false] {
+            for (asking, open, name) in [(true, false, "asking"), (false, true, "rights"), (false, false, "chat")] {
+                let mut draw = crate::chat::host_window_for_test(asking, open);
+                let mut s = Shot::new("host", Vec2::new(380.0, 360.0), dark, |ui| draw(ui));
+                s.save(name);
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn menus_home() {

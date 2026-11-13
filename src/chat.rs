@@ -264,7 +264,8 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), St
     });
     let grant = grant.unwrap_or(crate::grant::ALL);
     let asking = by_id && grant & crate::grant::ASK != 0;
-    let mut native = crate::gui::native_options(if asking { "SSH Remote: someone wants to connect" } else { "SSH Remote chat" }, [400.0, if asking { 600.0 } else { 460.0 }]);
+    let title = if asking { "SSH Remote: someone wants to connect" } else if by_id { CONNECTED_TITLE } else { "SSH Remote chat" };
+    let mut native = crate::gui::native_options(title, [400.0, if asking { 600.0 } else { 460.0 }]);
     native.viewport = native.viewport.with_always_on_top();
     #[cfg(feature = "drive")]
     crate::gui::drive::start();
@@ -294,6 +295,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), St
                 asking: asking.then(std::time::Instant::now),
                 rights_open: false,
                 call: None,
+                minimized_once: false,
             }))
         }),
     )
@@ -320,7 +322,34 @@ struct ChatApp {
     rights_open: bool,
     /// A call: ringing (false) or answered (true).
     call: Option<bool>,
+    /// Closed once while they were connected: it went to the taskbar, and says so.
+    minimized_once: bool,
 }
+
+/// Tests: the window shown on the remote screen, as one connected by ID sees it (asking first,
+/// or with what they may do unfolded), drawn into `ui`.
+#[cfg(all(test, feature = "gui"))]
+pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut egui::Ui) {
+    let (_tx, rx) = mpsc::channel();
+    let mut app = ChatApp {
+        incoming: rx,
+        lines: vec![(true, "Hello, I am looking at the printer settings.".into(), now())],
+        input: String::new(),
+        ended: None,
+        name: "Someone connected by this computer's ID".into(),
+        by_id: true,
+        allowed: crate::grant::ALL & !crate::grant::POWER,
+        asking: asking.then(std::time::Instant::now),
+        rights_open,
+        call: None,
+        minimized_once: false,
+    };
+    move |ui| app.draw(ui)
+}
+
+/// The window's title while someone is connected by this computer's ID: what the taskbar shows.
+#[cfg(feature = "gui")]
+const CONNECTED_TITLE: &str = "SSH Remote: someone is connected";
 
 /// Says something of the window's own to the agent.
 #[cfg(feature = "gui")]
@@ -354,20 +383,9 @@ impl ChatApp {
         let ctx = ui.ctx().clone();
         let left = 60u64.saturating_sub(since.elapsed().as_secs());
         let mut answer = None;
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::same(20))).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(crate::gui::ic::USER).size(30.0).color(crate::gui::brand()));
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Someone wants to connect").strong().size(16.0));
-                    ui.label(RichText::new("They have this computer's ID and its password.").weak());
-                });
-            });
-            ui.add_space(14.0);
-            ui.label(RichText::new("If you let them in, they may:").strong());
-            ui.add_space(4.0);
-            rights(ui, &mut self.allowed);
-            ui.label(RichText::new("They always see the screen. You can change these and end the connection at any time.").small().weak());
-            ui.add_space(16.0);
+        // The answer stays at the bottom; what is asked scrolls above it on a small screen.
+        let fill = ui.visuals().window_fill;
+        egui::Panel::bottom("ask-answer").frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(20, 12))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.add(crate::gui::kit::secondary("Turn away")).clicked() {
                     answer = Some(false);
@@ -381,6 +399,22 @@ impl ChatApp {
             ui.add_space(6.0);
             ui.label(RichText::new(format!("Turned away by itself in {left} s")).small().weak());
         });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::same(20))).show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::gui::ic::USER).size(30.0).color(crate::gui::brand()));
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Someone wants to connect").strong().size(16.0));
+                        ui.label(RichText::new("They have this computer's ID and its password.").weak());
+                    });
+                });
+                ui.add_space(14.0);
+                ui.label(RichText::new("If you let them in, they may:").strong());
+                ui.add_space(4.0);
+                rights(ui, &mut self.allowed);
+                ui.add(egui::Label::new(RichText::new("They always see the screen. You can change these and end the connection at any time; while they are connected this window stays in the taskbar.").small().weak()).wrap());
+            });
+        });
         if left == 0 {
             answer = Some(false);
         }
@@ -388,7 +422,7 @@ impl ChatApp {
             Some(true) => {
                 tell(&format!("{ALLOW}{}", self.allowed));
                 self.asking = None;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title("SSH Remote chat".into()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(CONNECTED_TITLE.into()));
             }
             Some(false) => {
                 tell(DENY);
@@ -407,6 +441,13 @@ impl eframe::App for ChatApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+#[cfg(feature = "gui")]
+impl ChatApp {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         #[cfg(feature = "drive")]
         crate::gui::drive::end_of_frame(&ctx);
@@ -424,17 +465,28 @@ impl eframe::App for ChatApp {
             }
         }
         crate::gui::chrome::behaviour(&ctx);
-        let title = if self.asking.is_some() { "SSH Remote" } else { "SSH Remote chat" };
-        if crate::gui::chrome::title_bar(ui, |ui| {
+        let title = if self.asking.is_some() || self.by_id { "SSH Remote" } else { "SSH Remote chat" };
+        let closed = crate::gui::chrome::title_bar(ui, |ui| {
             ui.label(RichText::new(title).size(13.0));
         })
-        .close
-        {
-            // Closing the question turns the viewer away.
+        .close;
+        let asked_to_close = ctx.input(|i| i.viewport().close_requested());
+        if closed || asked_to_close {
             if self.asking.is_some() {
+                // Closing the question turns the viewer away.
                 tell(DENY);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if self.ended.is_none() {
+                // While they are connected the window only goes to the taskbar: it is where the
+                // connection is ended and what they may do is changed, so it must stay at hand.
+                if asked_to_close {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                self.minimized_once = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if let Some(since) = self.asking {
             if self.ended.is_some() {
@@ -499,24 +551,22 @@ impl eframe::App for ChatApp {
             if self.by_id && self.ended.is_none() {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let end = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE).strong()).fill(crate::gui::bad());
+                    let end = egui::Button::new(RichText::new("End the connection").color(Color32::WHITE).strong()).fill(crate::gui::bad());
                     if ui.add(end).on_hover_text("End this connection now").clicked() {
                         tell(END);
                         self.ended = Some(std::time::Instant::now());
                     }
-                    let fold = if self.rights_open { crate::gui::ic::CARET_UP } else { crate::gui::ic::CARET_DOWN };
-                    if ui.add(crate::gui::kit::ghost(format!("What they may do  {fold}"))).clicked() {
+                    let label = if self.rights_open { format!("{}  Back to the chat", crate::gui::ic::CHAT) } else { format!("{}  What they may do", crate::gui::ic::SHIELD) };
+                    if ui.add(crate::gui::kit::ghost(label)).clicked() {
                         self.rights_open = !self.rights_open;
                     }
                 });
-                if self.rights_open {
-                    ui.add_space(4.0);
-                    if rights(ui, &mut self.allowed) {
-                        tell(&format!("{ALLOW}{}", self.allowed));
-                    }
-                } else if self.allowed != crate::grant::ALL {
+                if !self.rights_open && self.allowed != crate::grant::ALL {
                     ui.label(RichText::new(format!("They may use: {}", crate::grant::words(self.allowed))).small().weak());
                 }
+            }
+            if self.minimized_once && self.ended.is_none() {
+                ui.label(RichText::new("Closing this window keeps it in the taskbar while they are connected.").small().weak());
             }
         });
         let footer = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(12, 10));
@@ -530,6 +580,19 @@ impl eframe::App for ChatApp {
         });
         let body = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));
         egui::CentralPanel::default().frame(body).show(ui, |ui| {
+            // What they may do takes the chat's place, scrolled when the window is small.
+            if self.rights_open && self.by_id && self.ended.is_none() {
+                egui::ScrollArea::vertical().id_salt("rights").auto_shrink([false, false]).show(ui, |ui| {
+                    ui.label(RichText::new("What they may do").strong());
+                    ui.add_space(4.0);
+                    if rights(ui, &mut self.allowed) {
+                        tell(&format!("{ALLOW}{}", self.allowed));
+                    }
+                    ui.add_space(4.0);
+                    ui.add(egui::Label::new(RichText::new("They always see the screen. A change applies at once.").small().weak()).wrap());
+                });
+                return;
+            }
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
