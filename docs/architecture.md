@@ -12,9 +12,28 @@ extensions only add looks, commands and panels.
 | Coming in | Remote access by ID: on and off, password, two-step code, relay, start with the computer (Windows service); asking the person here first, and the rights viewers have (changed live in the window shown here); found on this network and reached straight; moved past the relay onto a straight path through both routers (`udp`, NAT hole punching); who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
 | Computers | One list: favorites, recent, `~/.ssh/config` aliases, computers by ID, this computer; per computer its user, port, key, saved password and tunnels |
 | Tunnels | Local, remote and SOCKS port forwards through an SSH computer, started by hand or with the app |
-| Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection; full screen; reconnecting; chat, voice calls, sound, clipboard with files, recording, sharing one window or program; the computer itself (lock, restart, its input kept out, its screen hidden) |
+| Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection, or a web app; full screen; reconnecting; chat, voice calls, sound, clipboard with files, recording, sharing one window or program; the computer itself (lock, restart, its input kept out, its screen hidden); files and screenshots dropped or pasted on a terminal copied to where its shell runs |
+| Web apps | A site (`https://…`, or a tool an extension lists) as a pane: a page of Chrome, Edge or Chromium run with no window (`capture::browser`), with back, forward and reload |
 | Settings | Appearance, SSH keys, saved passwords, backup, extensions, parts of the app on or off, about |
 | Servers and command line | Web gateway (`sshremote web`), MCP server (`sshremote mcp`), terminal viewer (`sshremote HOST`), `remote-access`, `ext`, `module` |
+
+## Roles
+
+Each part has one job, and new features go to the part whose job they are:
+
+| Part | Its job | Where |
+|---|---|---|
+| The window | Tabs, split panes, full screen, the home and Quick open, Settings | `gui/workspace`, `gui/home`, `gui/settings` |
+| A pane | Shows one thing: a terminal (`termwin`), a screen (`gui/remote`) or files (`filewin`) of one connection; a screen's toolbar fits what it shows (a computer's, or a page's: back, forward, reload) | `gui/remote`, `termwin`, `filewin` |
+| A screen's source | Pictures out, input in, through the `capture::Capture` trait: this computer (GNOME, Windows), a test desktop, a web page (`browser:URL`, which also takes the pane's size) | `capture` |
+| The agent | Serves one viewer from one source: frames, input, files, terminals, clipboard, sound, chat | `agent`, `files`, `clip`, `audio` |
+| Connections | Reaching the agent: a local child, `ssh`, or the relay by ID (sealed, maybe moved onto a straight path) | `transport`, `net`, `udp`, `relay` |
+| Coming in | Remote access by ID: the service, its settings, who is connected, the icon | `access`, `service`, `gui/tray` |
+| Computers | One list of what can be opened: SSH hosts, IDs, web apps, with names, tags and passwords | `computers`, `vault` |
+| Extensions | Add-ons declared in a manifest: looks (layers), scripts (WASM commands), resident programs, and tools in a pane (web apps) | `ext`, `exthost`, `script` |
+
+A web app is a screen like any other: its source is a page instead of a desktop, so the pane, the
+agent and the picture's path are the same; extensions add tools by naming addresses, not code.
 
 ## One app
 
@@ -23,7 +42,8 @@ extension provides them and no second program has to be fetched for them. A part
 want is turned off in Settings > Parts (`sshremote module off ID`).
 
 Extensions are add-ons only: style packs (background layers), WASM scripts and commands (text
-tools), and resident extensions (status bar, panels, palette commands, forms). They run as their own
+tools), resident extensions (status bar, panels, palette commands, forms), and tools that open in a
+pane (web apps). They run as their own
 processes or in a WASM sandbox and may do only what their manifest's permissions name.
 
 Port forwarding is SSH's own and is built in, per computer.

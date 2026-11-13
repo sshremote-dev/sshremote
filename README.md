@@ -52,7 +52,14 @@ Tests that reach other computers name them by ssh alias:
   its network card for **Wake-on-LAN** and its **tunnels** (`-L`, `-R` or SOCKS through an SSH
   computer; a port here to anything a computer by ID reaches), opened on demand or with the app.
   **On this network** lists the computers nearby with remote access on, to add without typing
-  their ID.
+  their ID. Computers can carry **tags** (work, servers), and the chips over the list show one
+  tag's.
+- **Web apps**: an `https://` address opens as a pane (**Open in a pane**, or + to keep it in the
+  list), and installed extensions list theirs under **Tools** (the Web apps extension: Google
+  Translate, Papago, DeepL, Claude, ChatGPT, Gemini, Gmail, Calendar, Keep, Notion). Each is a page
+  of Chrome, Edge or Chromium run with no window of its own, shown and driven as a screen is, laid
+  out at the pane's size, with back, forward and reload, and the sign-ins of its site kept in a
+  profile of its own. Ctrl+V pastes this computer's clipboard there, Ctrl+C copies back.
 - The gear opens **Settings**: Appearance, Connections, SSH keys, Passwords, Backup, Extensions,
   Parts and About.
 
@@ -67,6 +74,15 @@ What is opened goes into the workspace:
   panes) or the whole window as split, the title bar appearing at the top edge.
 - **Lost connections** are tried again in the same mode, the shells kept; after 30 s the pane
   offers Reconnect or Close.
+- **Files into a terminal**: files dropped on a terminal, or files and screenshots pasted into it
+  (Ctrl+V with a picture on the clipboard), are copied into a folder of their own where its shell
+  runs (over SFTP for an `ssh` tab, through the session for a remote screen's terminal; a local
+  shell takes its own paths) and their paths are typed at the prompt as a paste, the way an AI
+  agent like Claude Code takes a dropped file or screenshot. Progress shows in the pane; what is a
+  day old is cleared from that folder as new files come.
+- **Markdown view**: a terminal's output read as Markdown (its results gathered, live lines left
+  out), copied whole or downloaded as a `.md` or `.txt` file, and each code block copied or saved
+  as a file of its language.
 - Every window draws its own title bar and keeps the system's behaviour: drag and snap,
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
 - **Screen sharing**: quality (auto, five presets from black and white at half size and 5 fps to
@@ -144,9 +160,10 @@ headless server: `--features web,mcp`); what is left out says so when asked for.
 
 ## Extensions
 
-Style packs, WASM scripts, command-line programs and resident extensions that add status bar items,
+Style packs, WASM scripts, command-line programs, resident extensions that add status bar items,
 a side panel, palette commands (Ctrl+Shift+P), keys, forms and settings, each limited to the
-permissions it names. See [docs/extensions.md](docs/extensions.md).
+permissions it names, and tools that open in a pane (web apps). See
+[docs/extensions.md](docs/extensions.md).
 
 ```sh
 sshremote ext available            # from the signed registry
