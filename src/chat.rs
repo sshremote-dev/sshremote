@@ -332,15 +332,19 @@ fn tell(line: &str) {
 /// The rights as switches; true when one changed.
 #[cfg(feature = "gui")]
 fn rights(ui: &mut egui::Ui, allowed: &mut u8) -> bool {
-    let mut changed = false;
-    for (bit, label, _) in crate::grant::RIGHTS {
-        let mut on = *allowed & bit != 0;
-        if ui.checkbox(&mut on, label).changed() {
-            *allowed = if on { *allowed | bit } else { *allowed & !bit };
-            changed = true;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let mut changed = false;
+        for (bit, label, _) in crate::grant::RIGHTS {
+            let mut on = *allowed & bit != 0;
+            if ui.checkbox(&mut on, label).changed() {
+                *allowed = if on { *allowed | bit } else { *allowed & !bit };
+                changed = true;
+            }
         }
-    }
-    changed
+        changed
+    })
+    .inner
 }
 
 #[cfg(feature = "gui")]

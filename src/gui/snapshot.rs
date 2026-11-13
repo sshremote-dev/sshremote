@@ -252,6 +252,19 @@ mod pictures {
             }
         }
 
+        /// The wheel turned over the middle of the window, in points (negative: down).
+        fn scroll(&mut self, dy: f32) {
+            let at = Pos2::new(self.size.x / 2.0, self.size.y / 2.0);
+            self.frame(vec![Event::PointerMoved(at)]);
+            for _ in 0..10 {
+                let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, dy / 10.0), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+                self.frame(vec![wheel]);
+            }
+            for _ in 0..6 {
+                self.frame(Vec::new());
+            }
+        }
+
         fn escape(&mut self) {
             self.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
             self.frame(Vec::new());
@@ -325,14 +338,18 @@ mod pictures {
             let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);
             let mut s = Shot::new("home", Vec2::new(960.0, 620.0), dark, |ui| app.home(ui));
             s.save("home");
-            if !s.snap.find("Remote access settings").is_empty() {
-                s.click("Remote access settings", 0, PointerButton::Primary);
+            // Remote access's settings sheet, top and bottom.
+            let settings = format!("{}  Settings\u{2026}", ic::SLIDERS_HORIZONTAL);
+            if !s.snap.find(&settings).is_empty() {
+                s.click(&settings, 0, PointerButton::Primary);
                 s.save("access_settings");
+                s.scroll(-20000.0);
+                s.save("access_settings_end");
                 s.escape();
             }
             s.click(&format!("{}  Add", ic::PLUS), 0, PointerButton::Primary);
             s.save("add_computer");
-            s.click("By its ID", 0, PointerButton::Primary);
+            s.click("By its remote access ID", 0, PointerButton::Primary);
             s.save("add_computer_id");
             s.click("Cancel", 0, PointerButton::Primary);
             s.click(ic::GEAR, 0, PointerButton::Primary);

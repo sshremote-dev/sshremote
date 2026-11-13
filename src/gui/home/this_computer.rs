@@ -210,173 +210,176 @@ impl App {
             let r = modal.show(ctx, |ui| {
                 ui.set_width(fit.x);
                 kit::title(ui, "Remote access settings", "How this computer is reached by its ID.");
-                kit::heading(ui, "Start with the computer");
-                kit::card(ui, |ui| {
-                    let what = if cfg!(windows) {
-                        "The SSH Remote service: reachable after a restart, at the sign-in and lock screens, with no window open."
-                    } else {
-                        "A systemd user service: reachable whenever you are signed in, with no window open."
-                    };
-                    ui.add(egui::Label::new(RichText::new(what).size(12.5)).wrap());
-                    ui.add_space(6.0);
-                    let admin = !cfg!(windows) || crate::admin::elevated();
-                    ui.horizontal(|ui| {
-                        if !svc.known {
-                            kit::loading(ui, "Looking for the service\u{2026}");
-                        } else if svc.installed && !svc.this {
-                            ui.label(RichText::new(format!("{}  An older copy is installed", ic::WARNING)).color(warn()));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_enabled(admin, theme::primary(format!("{}  Update it", ic::DOWNLOAD))).on_disabled_hover_text("Needs administrator rights").clicked() {
-                                    service = Some(true);
-                                }
-                            });
-                        } else if svc.installed {
-                            ui.label(RichText::new(format!("{}  Installed{}", ic::CHECK_CIRCLE, if svc.runs { " and running" } else { "" })).color(good()));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_enabled(admin, kit::danger("Remove", false)).on_disabled_hover_text("Needs administrator rights").clicked() {
-                                    service = Some(false);
-                                }
-                            });
+                // What does not fit the window scrolls, between the title and Done.
+                let room = (ctx.content_rect().height() - 220.0).max(160.0);
+                egui::ScrollArea::vertical().id_salt("access-settings-body").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                    kit::heading(ui, "Start with the computer");
+                    kit::card(ui, |ui| {
+                        let what = if cfg!(windows) {
+                            "The SSH Remote service: reachable after a restart, at the sign-in and lock screens, with no window open."
                         } else {
-                            ui.label(RichText::new("Not installed: remote access works while this window is open.").weak().size(12.5));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if admin {
-                                    if ui.add(theme::primary(format!("{}  Install", ic::DOWNLOAD))).clicked() {
-                                        cfg.enabled = true;
-                                        changed = true;
+                            "A systemd user service: reachable whenever you are signed in, with no window open."
+                        };
+                        ui.add(egui::Label::new(RichText::new(what).size(12.5)).wrap());
+                        ui.add_space(6.0);
+                        let admin = !cfg!(windows) || crate::admin::elevated();
+                        ui.horizontal(|ui| {
+                            if !svc.known {
+                                kit::loading(ui, "Looking for the service\u{2026}");
+                            } else if svc.installed && !svc.this {
+                                ui.label(RichText::new(format!("{}  An older copy is installed", ic::WARNING)).color(warn()));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add_enabled(admin, theme::primary(format!("{}  Update it", ic::DOWNLOAD))).on_disabled_hover_text("Needs administrator rights").clicked() {
                                         service = Some(true);
                                     }
-                                } else if ui.add(kit::secondary(format!("{}  As administrator", ic::SHIELD_CHECK))).on_hover_text("Installing needs administrator rights").clicked() {
-                                    restart = true;
+                                });
+                            } else if svc.installed {
+                                ui.label(RichText::new(format!("{}  Installed{}", ic::CHECK_CIRCLE, if svc.runs { " and running" } else { "" })).color(good()));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add_enabled(admin, kit::danger("Remove", false)).on_disabled_hover_text("Needs administrator rights").clicked() {
+                                        service = Some(false);
+                                    }
+                                });
+                            } else {
+                                ui.label(RichText::new("Not installed: remote access works while this window is open.").weak().size(12.5));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if admin {
+                                        if ui.add(theme::primary(format!("{}  Install", ic::DOWNLOAD))).clicked() {
+                                            cfg.enabled = true;
+                                            changed = true;
+                                            service = Some(true);
+                                        }
+                                    } else if ui.add(kit::secondary(format!("{}  As administrator", ic::SHIELD_CHECK))).on_hover_text("Installing needs administrator rights").clicked() {
+                                        restart = true;
+                                    }
+                                });
+                            }
+                        });
+                    });
+                    ui.add_space(kit::GAP);
+                    kit::heading(ui, "Access");
+                    kit::card(ui, |ui| {
+                        kit::row(ui, "Your own password", |ui| {
+                            let ok = self.access.new_password.trim().chars().count() >= 8;
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(ok, kit::secondary("Set")).clicked() {
+                                    cfg.password = self.access.new_password.trim().to_string();
+                                    self.access.new_password.clear();
+                                    changed = true;
+                                }
+                                ui.add(kit::field(&mut self.access.new_password, "8 characters or more").password(true));
+                            });
+                        });
+                        kit::row(ui, "ID", |ui| {
+                            ui.label(RichText::new(crate::computers::spaced(&cfg.id)).monospace().size(14.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(kit::secondary("Take a new ID")).on_hover_text("Those who know the old ID can no longer use it").clicked() {
+                                    cfg.id = access::new_id();
+                                    changed = true;
                                 }
                             });
-                        }
-                    });
-                });
-                ui.add_space(kit::GAP);
-                kit::heading(ui, "Access");
-                kit::card(ui, |ui| {
-                    kit::row(ui, "Your own password", |ui| {
-                        let ok = self.access.new_password.trim().chars().count() >= 8;
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(ok, kit::secondary("Set")).clicked() {
-                                cfg.password = self.access.new_password.trim().to_string();
-                                self.access.new_password.clear();
-                                changed = true;
-                            }
-                            ui.add(kit::field(&mut self.access.new_password, "8 characters or more").password(true));
                         });
-                    });
-                    kit::row(ui, "ID", |ui| {
-                        ui.label(RichText::new(crate::computers::spaced(&cfg.id)).monospace().size(14.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(kit::secondary("Take a new ID")).on_hover_text("Those who know the old ID can no longer use it").clicked() {
-                                cfg.id = access::new_id();
-                                changed = true;
-                            }
+                        kit::row(ui, "Relay", |ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(self.access.relay.trim() != cfg.relay, kit::secondary("Use")).clicked() {
+                                    let r = self.access.relay.trim();
+                                    cfg.relay = if r.is_empty() { access::DEFAULT_RELAY.into() } else { r.to_string() };
+                                    self.access.relay = cfg.relay.clone();
+                                    changed = true;
+                                }
+                                ui.add(kit::field(&mut self.access.relay, access::DEFAULT_RELAY));
+                            });
                         });
+                        ui.add(
+                            egui::Label::new(RichText::new("The relay is where both ends meet; it passes on what it cannot read. sshremote.dev, or sshremote-relay on a server of your own. Computers added by ID go through it too.").weak().size(12.0))
+                                .wrap(),
+                        );
                     });
-                    kit::row(ui, "Relay", |ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(self.access.relay.trim() != cfg.relay, kit::secondary("Use")).clicked() {
-                                let r = self.access.relay.trim();
-                                cfg.relay = if r.is_empty() { access::DEFAULT_RELAY.into() } else { r.to_string() };
-                                self.access.relay = cfg.relay.clone();
-                                changed = true;
-                            }
-                            ui.add(kit::field(&mut self.access.relay, access::DEFAULT_RELAY));
-                        });
-                    });
-                    ui.add(
-                        egui::Label::new(RichText::new("The relay is where both ends meet; it passes on what it cannot read. sshremote.dev, or sshremote-relay on a server of your own. Computers added by ID go through it too.").weak().size(12.0))
-                            .wrap(),
-                    );
-                });
-                ui.add_space(kit::GAP);
-                kit::heading(ui, "Who comes in, and what they may do");
-                kit::card(ui, |ui| {
-                    if ui.checkbox(&mut cfg.ask, "Ask the person at this computer before letting anyone in").changed() {
-                        changed = true;
-                    }
-                    ui.add(
-                        egui::Label::new(RichText::new("With the right password a viewer waits for a click here; nobody answering within a minute turns them away. Off: the password is enough, for a computer nobody sits at.").weak().size(12.0))
-                            .wrap(),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Viewers may").strong());
-                    for (bit, label, _) in crate::grant::RIGHTS {
-                        let mut on = cfg.allow & bit != 0;
-                        if ui.checkbox(&mut on, label).changed() {
-                            cfg.allow = if on { cfg.allow | bit } else { cfg.allow & !bit };
+                    ui.add_space(kit::GAP);
+                    kit::heading(ui, "Who comes in, and what they may do");
+                    kit::card(ui, |ui| {
+                        if ui.checkbox(&mut cfg.ask, "Ask the person at this computer before letting anyone in").changed() {
                             changed = true;
                         }
-                    }
-                    ui.add(
-                        egui::Label::new(RichText::new("They always see the screen. The person at the computer can change these for a session in its window.").weak().size(12.0)).wrap(),
-                    );
-                    ui.add_space(8.0);
-                    if ui.checkbox(&mut cfg.lan, "Let computers on this network find this one").changed() {
-                        changed = true;
-                    }
-                    ui.add(egui::Label::new(RichText::new("They are told its ID, name and network card, never its password, and can add it without typing the ID.").weak().size(12.0)).wrap());
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Two-step sign-in").strong());
-                    if !cfg.totp.is_empty() {
-                        ui.horizontal(|ui| {
-                            kit::dot(ui, good());
-                            ui.label("On: viewers give the code of your authenticator app with the password.");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(kit::danger("Turn off", false)).clicked() {
-                                    cfg.totp.clear();
+                        ui.add(
+                            egui::Label::new(RichText::new("With the right password a viewer waits for a click here; nobody answering within a minute turns them away. Off: the password is enough, for a computer nobody sits at.").weak().size(12.0))
+                                .wrap(),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Viewers may").strong());
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            for (bit, label, _) in crate::grant::RIGHTS {
+                                let mut on = cfg.allow & bit != 0;
+                                if ui.checkbox(&mut on, label).changed() {
+                                    cfg.allow = if on { cfg.allow | bit } else { cfg.allow & !bit };
                                     changed = true;
                                 }
-                            });
-                        });
-                    } else if let Some(secret) = self.access.totp_new.clone() {
-                        ui.add(egui::Label::new(RichText::new("In your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…), add an account by its setup key:").size(12.5)).wrap());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(crate::totp::grouped(&secret)).monospace().size(14.0).strong());
-                            let at = egui::Id::unique("totp-copy");
-                            let copied = kit::copied(ui, at);
-                            if ui.add(kit::ghost(if copied { "Copied" } else { "Copy" })).clicked() {
-                                kit::copy(ui, &secret, at);
-                            }
-                            if ui.add(kit::ghost("Copy as a link")).on_hover_text("otpauth://, for apps that take a link").clicked() {
-                                kit::copy(ui, &crate::totp::uri(&secret, &cfg.id), at);
                             }
                         });
-                        kit::row(ui, "Its code now", |ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let ok = crate::totp::check(&secret, &self.access.totp_code);
-                                if ui.add_enabled(ok, kit::secondary("Turn on")).on_disabled_hover_text("Type the six digits the app shows").clicked() {
-                                    cfg.totp = secret.clone();
-                                    (self.access.totp_new, self.access.totp_code) = (None, String::new());
-                                    changed = true;
-                                }
-                                if ui.add(kit::ghost("Cancel")).clicked() {
-                                    (self.access.totp_new, self.access.totp_code) = (None, String::new());
-                                }
-                                ui.add(kit::field(&mut self.access.totp_code, "six digits"));
+                        ui.add(
+                            egui::Label::new(RichText::new("They always see the screen. The person at the computer can change these for a session in its window.").weak().size(12.0)).wrap(),
+                        );
+                        ui.add_space(8.0);
+                        if ui.checkbox(&mut cfg.lan, "Let computers on this network find this one").changed() {
+                            changed = true;
+                        }
+                        ui.add(egui::Label::new(RichText::new("They are told its ID, name and network card, never its password, and can add it without typing the ID.").weak().size(12.0)).wrap());
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Two-step sign-in").strong());
+                        if !cfg.totp.is_empty() {
+                            ui.horizontal(|ui| {
+                                kit::dot(ui, good());
+                                ui.label("On: viewers give the code of your authenticator app with the password.");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(kit::danger("Turn off", false)).clicked() {
+                                        cfg.totp.clear();
+                                        changed = true;
+                                    }
+                                });
                             });
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
+                        } else if let Some(secret) = self.access.totp_new.clone() {
+                            ui.add(egui::Label::new(RichText::new("In your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…), add an account by its setup key:").size(12.5)).wrap());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(crate::totp::grouped(&secret)).monospace().size(14.0).strong());
+                                let at = egui::Id::unique("totp-copy");
+                                let copied = kit::copied(ui, at);
+                                if ui.add(kit::ghost(if copied { "Copied" } else { "Copy" })).clicked() {
+                                    kit::copy(ui, &secret, at);
+                                }
+                                if ui.add(kit::ghost("Copy as a link")).on_hover_text("otpauth://, for apps that take a link").clicked() {
+                                    kit::copy(ui, &crate::totp::uri(&secret, &cfg.id), at);
+                                }
+                            });
+                            kit::row(ui, "Its code now", |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let ok = crate::totp::check(&secret, &self.access.totp_code);
+                                    if ui.add_enabled(ok, kit::secondary("Turn on")).on_disabled_hover_text("Type the six digits the app shows").clicked() {
+                                        cfg.totp = secret.clone();
+                                        (self.access.totp_new, self.access.totp_code) = (None, String::new());
+                                        changed = true;
+                                    }
+                                    if ui.add(kit::ghost("Cancel")).clicked() {
+                                        (self.access.totp_new, self.access.totp_code) = (None, String::new());
+                                    }
+                                    ui.add(kit::field(&mut self.access.totp_code, "six digits"));
+                                });
+                            });
+                        } else {
                             ui.add(egui::Label::new(RichText::new("Off: the password is enough. On, a viewer also gives the six-digit code of your authenticator app.").weak().size(12.0)).wrap());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(kit::secondary("Set up\u{2026}")).clicked() {
-                                    self.access.totp_new = Some(crate::totp::new_secret());
-                                }
-                            });
-                        });
-                    }
-                    ui.add_space(8.0);
-                    if ui.checkbox(&mut cfg.direct, "Let viewers on this network come straight in").changed() {
-                        changed = true;
-                    }
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("On port {}, with the same password, without the relay: quicker, and nothing leaves the network.", crate::net::DIRECT_PORT)).weak().size(12.0))
-                            .wrap(),
-                    );
+                            if ui.add(kit::secondary("Set up\u{2026}")).clicked() {
+                                self.access.totp_new = Some(crate::totp::new_secret());
+                            }
+                        }
+                        ui.add_space(8.0);
+                        if ui.checkbox(&mut cfg.direct, "Let viewers on this network come straight in").changed() {
+                            changed = true;
+                        }
+                        ui.add(
+                            egui::Label::new(RichText::new(format!("On port {}, with the same password, without the relay: quicker, and nothing leaves the network.", crate::net::DIRECT_PORT)).weak().size(12.0))
+                                .wrap(),
+                        );
+                    });
                 });
                 ui.add_space(kit::GAP);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(theme::primary("Done")).clicked()).inner

@@ -1903,10 +1903,11 @@ Host: x
             String::from_utf8_lossy(&seen).matches("e2e-77").count() >= 2
         });
 
-        // The screen: a JPEG once it shows.
+        // The screen: a picture update once it shows, the whole of it at first.
         json(&mut s, serde_json::json!({ "show": "screen" }));
-        let jpeg = until(&mut r, "picture", &mut |op, d| op == 2 && d.first() == Some(&2));
-        assert_eq!(&jpeg[1..3], &[0xFF, 0xD8]);
+        let update = until(&mut r, "picture", &mut |op, d| op == 2 && d.first() == Some(&4));
+        let (w, h) = (u16::from_le_bytes([update[5], update[6]]), u16::from_le_bytes([update[7], update[8]]));
+        assert!(w > 0 && h > 0 && update.len() > 20, "{w}x{h}, {} bytes", update.len());
         json(&mut s, serde_json::json!({ "show": "files" }));
 
         // The home folder, then the test's own.
