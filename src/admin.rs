@@ -64,11 +64,18 @@ pub fn set_ask_at_start(on: bool) {
 /// the user declined.
 #[cfg(windows)]
 pub fn relaunch(args: &[String]) -> Result<bool, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    run_elevated(&exe.to_string_lossy(), args, false)
+}
+
+/// Runs `file` with `args` and administrator rights, through the UAC prompt; `hidden` without a
+/// window of its own (a console tool's). Ok(false) when the user declined.
+#[cfg(windows)]
+pub fn run_elevated(file: &str, args: &[String], hidden: bool) -> Result<bool, String> {
     use crate::sys::wide;
     use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let file = wide(&exe.to_string_lossy());
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+    let file = wide(file);
     // Quoted the way the C runtime reads a command line: backslashes before a quote are doubled.
     let params = wide(&crate::sys::command_line(args));
     let verb = wide("runas");
@@ -78,7 +85,7 @@ pub fn relaunch(args: &[String]) -> Result<bool, String> {
     info.lpVerb = verb.as_ptr();
     info.lpFile = file.as_ptr();
     info.lpParameters = params.as_ptr();
-    info.nShow = SW_SHOWNORMAL;
+    info.nShow = if hidden { SW_HIDE } else { SW_SHOWNORMAL };
     if unsafe { ShellExecuteExW(&mut info) } != 0 {
         return Ok(true);
     }

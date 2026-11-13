@@ -815,6 +815,33 @@ pub fn install_service() -> Result<(), String> {
     Err("not on this system".into())
 }
 
+/// Starts or stops the service that runs remote access with the computer, without installing or
+/// removing it (on Windows through the UAC prompt, unless the rights are held).
+pub fn service_control(start: bool) -> Result<(), String> {
+    let verb = if start { "start" } else { "stop" };
+    #[cfg(windows)]
+    {
+        let args = [verb.to_string(), crate::service::NAME.to_string()];
+        if crate::admin::elevated() {
+            let s = Command::new("sc.exe").args(&args).output().map_err(|e| e.to_string())?;
+            // 1056: already running; 1062: not running. Either way it is as asked.
+            let code = s.status.code().unwrap_or(-1);
+            return if s.status.success() || code == 1056 || code == 1062 { Ok(()) } else { Err(format!("sc {verb}: {}", String::from_utf8_lossy(&s.stdout).trim())) };
+        }
+        return match crate::admin::run_elevated("sc.exe", &args, true)? {
+            true => Ok(()),
+            false => Err("administrator rights were not given".into()),
+        };
+    }
+    #[cfg(unix)]
+    {
+        let ok = Command::new("systemctl").args(["--user", verb, UNIT]).status().map_err(|e| e.to_string())?;
+        return if ok.success() { Ok(()) } else { Err(format!("systemctl --user {verb} {UNIT} failed")) };
+    }
+    #[allow(unreachable_code)]
+    Err("not on this system".into())
+}
+
 pub fn uninstall_service() -> Result<(), String> {
     #[cfg(windows)]
     return crate::service::uninstall();

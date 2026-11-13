@@ -24,6 +24,7 @@ pub(crate) mod chrome;
 mod home;
 pub(crate) mod kit;
 mod settings;
+mod tray;
 mod access_ui;
 #[cfg(feature = "remote")]
 mod remote;
@@ -307,6 +308,13 @@ pub struct App {
     sheet: Option<home::Sheet>,
     access_sheet_open: bool,
     settings: Option<settings::Settings>,
+    /// The icon in the notification area, once the window was closed with something to keep
+    /// going; what its menu shows; and whether the balloon said where the program went.
+    #[cfg(windows)]
+    tray: Option<tray::Tray>,
+    tray_status: tray::Shared,
+    #[cfg(windows)]
+    told_tray: bool,
     error: Option<String>,
     budget: Option<f64>,
     /// System keys taken from Windows while a session is in front.
@@ -660,6 +668,11 @@ impl App {
             sheet: None,
             access_sheet_open: false,
             settings: None,
+            #[cfg(windows)]
+            tray: None,
+            tray_status: Default::default(),
+            #[cfg(windows)]
+            told_tray: false,
             error: None,
             budget,
             grabbed,
@@ -896,16 +909,69 @@ impl eframe::App for App {
             self.home(ui);
             self.ask_before_quitting(&ctx);
         }
+        self.tray_sync();
         #[cfg(feature = "drive")]
         drive::end_of_frame(&ctx);
     }
 }
 
 impl App {
+    /// Whether closing the window would end something that should go on: remote access by ID
+    /// served by this program (not by the service), or open tunnels.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn keeps_going(&self) -> bool {
+        #[cfg(feature = "remote")]
+        {
+            let svc = self.access.service.lock().map(|s| s.is_some_and(|s| s.runs)).unwrap_or(false);
+            if !svc && self.access.cfg.as_ref().is_some_and(|c| c.enabled) {
+                return true;
+            }
+        }
+        crate::tunnels::any_open()
+    }
+
+    /// What the notification area's menu shows, and remote access read again when it changed it.
+    fn tray_sync(&mut self) {
+        if tray::CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            #[cfg(feature = "remote")]
+            {
+                self.access.cfg = None;
+                self.access.looked = None;
+            }
+        }
+        let mut st = tray::Status::default();
+        #[cfg(feature = "remote")]
+        {
+            st.access = self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone()));
+            st.service = self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs)));
+        }
+        if let Ok(mut s) = self.tray_status.lock() {
+            *s = st;
+        }
+    }
+
     /// Closing the open window ends the other windows and anyone connected by this computer's ID:
     /// that is asked first. With neither, it just closes.
     fn ask_before_quitting(&mut self, ctx: &egui::Context) {
         let requested = ctx.input(|i| i.viewport().close_requested()) || std::mem::take(&mut self.close_clicked);
+        // Closed while remote access by ID or tunnels are kept up here: the window goes to the
+        // notification area, and they go on (Quit in its menu ends them).
+        #[cfg(windows)]
+        if requested && !self.quitting && !tray::QUIT.load(std::sync::atomic::Ordering::Relaxed) && self.keeps_going()
+            && let Some(main) = tray::front_window()
+        {
+            if self.tray.is_none() {
+                self.tray = tray::Tray::start(main, self.tray_status.clone(), app_icon().as_ref());
+            }
+            if let Some(t) = &self.tray {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                tray::hide(main);
+                if !std::mem::replace(&mut self.told_tray, true) {
+                    t.say("SSH Remote goes on here: remote access and tunnels stay up. Right-click the icon for its menu, or Quit.");
+                }
+                return;
+            }
+        }
         if requested && !self.quitting {
             let others = self.windows.len();
             #[cfg(feature = "remote")]

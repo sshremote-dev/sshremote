@@ -258,6 +258,11 @@ pub fn open_count(address: &str, tunnels: &[Tunnel]) -> usize {
     tunnels.iter().filter(|t| matches!(state(address, t), State::On | State::Starting)).count()
 }
 
+/// Whether any tunnel is open or opening.
+pub fn any_open() -> bool {
+    RUNS.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().any(|r| r.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
+}
+
 /// Opens every tunnel set to start with the app; returns why those that could not, could not.
 pub fn start_with_app() -> Vec<String> {
     let mut out = Vec::new();
