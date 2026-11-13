@@ -68,7 +68,7 @@ impl Computer {
     }
 
     fn from_json(v: &Value) -> Option<Computer> {
-        let address = v.get("address")?.as_str()?.trim().to_string();
+        let address = canonical(v.get("address")?.as_str()?.trim());
         (!address.is_empty()).then(|| Computer {
             address,
             port: v.get("port").and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).filter(|&p| p > 0),
@@ -118,7 +118,39 @@ pub fn relay() -> String {
     #[cfg(feature = "remote")]
     return crate::access::relay();
     #[cfg(not(feature = "remote"))]
-    return "sshremote.dev".into();
+    return RELAY.into();
+}
+
+/// sshremote.dev's relay, by its own name.
+pub const RELAY: &str = "relay.sshremote.dev";
+/// The name it went by before it had one of its own (the site's), still in settings and
+/// addresses kept before 0.10: the same relay, on the same port.
+pub const OLD_RELAY: &str = "sshremote.dev";
+
+/// A relay as kept: sshremote.dev's by its own name, whichever name it was given.
+pub fn relay_name(relay: &str) -> String {
+    let r = relay.trim();
+    if r.eq_ignore_ascii_case(OLD_RELAY) || r.eq_ignore_ascii_case("sshremote.dev:7071") { RELAY.into() } else { r.to_string() }
+}
+
+/// An address as kept: by ID through sshremote.dev's relay, by the relay's own name.
+pub fn canonical(address: &str) -> String {
+    if let Some(rest) = address.strip_prefix("sshremote://")
+        && let Some((id, relay)) = rest.trim_end_matches('/').split_once('@')
+    {
+        let named = relay_name(relay);
+        if named != relay {
+            return format!("sshremote://{id}@{named}");
+        }
+    }
+    address.to_string()
+}
+
+/// What an address by ID through sshremote.dev's relay was kept as before (where its saved
+/// password may still be).
+pub fn older_name(address: &str) -> Option<String> {
+    let id = address.strip_prefix("sshremote://")?.strip_suffix(&format!("@{RELAY}"))?;
+    Some(format!("sshremote://{id}@{OLD_RELAY}"))
 }
 
 /// The list as kept, with when its file last changed: read again when another program (the
@@ -198,7 +230,29 @@ fn take_in_old_tunnels(dir: Option<&std::path::Path>, list: &mut Vec<Computer>) 
 
 /// The list in `computers.json`'s words.
 pub fn parse(text: &str) -> Vec<Computer> {
-    serde_json::from_str::<Value>(text).ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(Computer::from_json).collect())).unwrap_or_default()
+    let all: Vec<Computer> = serde_json::from_str::<Value>(text).ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(Computer::from_json).collect())).unwrap_or_default();
+    // One computer kept under both names of a relay: one entry, with what both knew.
+    let mut out: Vec<Computer> = Vec::with_capacity(all.len());
+    for c in all {
+        match out.iter_mut().find(|k| k.address == c.address) {
+            Some(k) => {
+                if k.name.is_empty() {
+                    k.name = c.name;
+                }
+                k.favorite |= c.favorite;
+                k.last_used = k.last_used.max(c.last_used);
+                k.tags = tags(&k.tags.iter().chain(&c.tags).cloned().collect::<Vec<_>>().join(","));
+                if k.tunnels.is_empty() {
+                    k.tunnels = c.tunnels;
+                }
+                if k.mac.is_empty() {
+                    k.mac = c.mac;
+                }
+            }
+            None => out.push(c),
+        }
+    }
+    out
 }
 
 /// Takes in `more` (a backup's): each replaces the one at its address and the others stay; or,
@@ -359,6 +413,26 @@ pub fn forget(address: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_relays_old_name_is_read_as_its_own() {
+        assert_eq!(relay_name("sshremote.dev"), RELAY);
+        assert_eq!(relay_name(" SSHREMOTE.DEV:7071 "), RELAY);
+        assert_eq!(relay_name("sshremote.dev:80"), "sshremote.dev:80", "another port is another way in");
+        assert_eq!(relay_name("relay.example.com"), "relay.example.com");
+        assert_eq!(canonical("sshremote://482913075@sshremote.dev"), "sshremote://482913075@relay.sshremote.dev");
+        assert_eq!(canonical("sshremote://482913075@relay.example.com"), "sshremote://482913075@relay.example.com");
+        assert_eq!(canonical("dev@build"), "dev@build");
+        assert_eq!(older_name("sshremote://482913075@relay.sshremote.dev").as_deref(), Some("sshremote://482913075@sshremote.dev"));
+        assert_eq!(older_name("sshremote://482913075@relay.example.com"), None);
+        // Kept under both names: one computer, with what both knew.
+        let list = parse(r#"[{"address":"sshremote://482913075@sshremote.dev","name":"Office PC","favorite":true,"last":5,"tags":["work"]},
+                             {"address":"sshremote://482913075@relay.sshremote.dev","last":9,"tags":["servers"]}]"#);
+        assert_eq!(list.len(), 1);
+        let c = &list[0];
+        assert_eq!((c.address.as_str(), c.name.as_str(), c.favorite, c.last_used), ("sshremote://482913075@relay.sshremote.dev", "Office PC", true, 9));
+        assert_eq!(c.tags, ["work", "servers"]);
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("sshremote-computers-{name}-{}", std::process::id()));

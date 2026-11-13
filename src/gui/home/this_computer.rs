@@ -326,7 +326,7 @@ impl App {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add_enabled(self.access.relay.trim() != cfg.relay, kit::secondary("Use")).clicked() {
                                     let r = self.access.relay.trim();
-                                    cfg.relay = if r.is_empty() { access::DEFAULT_RELAY.into() } else { r.to_string() };
+                                    cfg.relay = if r.is_empty() { access::DEFAULT_RELAY.into() } else { crate::computers::relay_name(r) };
                                     self.access.relay = cfg.relay.clone();
                                     changed = true;
                                 }
@@ -334,7 +334,7 @@ impl App {
                             });
                         });
                         ui.add(
-                            egui::Label::new(RichText::new("The relay is where both ends meet; it passes on what it cannot read. sshremote.dev, or sshremote-relay on a server of your own. Computers added by ID go through it too.").weak().size(12.0))
+                            egui::Label::new(RichText::new("The relay is where both ends meet; it passes on what it cannot read. relay.sshremote.dev, or sshremote-relay on a server of your own. Computers added by ID go through it too.").weak().size(12.0))
                                 .wrap(),
                         );
                     });

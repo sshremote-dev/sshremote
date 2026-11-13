@@ -264,10 +264,11 @@ mod sys {
     }
 }
 
-/// The saved password for `host`.
+/// The saved password for `host` (for a computer by ID, also where it was kept under its relay's
+/// old name).
 pub fn get(host: &str) -> Option<String> {
     backend()?;
-    sys::get(host)
+    sys::get(host).or_else(|| sys::get(&crate::computers::older_name(host)?))
 }
 
 /// Whether a password that just worked is worth keeping: not a one-time password given for a
@@ -293,13 +294,17 @@ pub fn set(host: &str, secret: &str) -> Result<(), String> {
 
 pub fn delete(host: &str) -> Result<(), String> {
     forget_list();
+    if let Some(old) = crate::computers::older_name(host) {
+        let _ = sys::delete(&old);
+    }
     sys::delete(host)
 }
 
 /// Whether `host` has a saved password, from the list kept (asking the store for the password
 /// itself can start a program each time).
 pub fn has(host: &str) -> bool {
-    list().iter().any(|h| h == host)
+    let old = crate::computers::older_name(host);
+    list().iter().any(|h| h == host || old.as_ref() == Some(h))
 }
 
 /// Hosts with a saved password, asked of the store once and kept until a password is saved or

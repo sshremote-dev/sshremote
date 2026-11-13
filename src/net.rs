@@ -34,7 +34,7 @@ impl Address {
         let rest = s.strip_prefix("sshremote://")?.trim_end_matches('/');
         let (id, relay) = rest.split_once('@').unwrap_or((rest, crate::access::DEFAULT_RELAY));
         let (host, _) = crate::access::relay_addr(relay);
-        (crate::access::valid_id(id) && !host.is_empty()).then(|| Address { id: id.into(), relay: relay.into() })
+        (crate::access::valid_id(id) && !host.is_empty()).then(|| Address { id: id.into(), relay: crate::computers::relay_name(relay) })
     }
 }
 

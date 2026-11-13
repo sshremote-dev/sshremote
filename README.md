@@ -101,7 +101,8 @@ What is opened goes into the workspace:
 
 ## In a browser
 
-`sshremote web` serves the same to a browser, a phone's too: terminals, screens and files of this
+[web.sshremote.dev](https://web.sshremote.dev/) reaches computers by ID from any browser, with
+nothing to install. `sshremote web` serves the same from a computer of your own to a browser, a phone's too: terminals, screens and files of this
 computer and its `~/.ssh/config` hosts, and computers by ID. The screen sends only what changed
 (moves for scrolling, lossless WebP for text, JPEG for photographs) at the app's qualities, auto
 and black and white included; it has zoom, touch (tap, long press for the right button, two
@@ -199,7 +200,7 @@ sshremote remote-access one-time                 # a new one-time password now
 sshremote remote-access requests on|off          # people without the password may ask
 sshremote remote-access from 203.0.113.7 10.0.0.0/8   # viewers only from there (or: anywhere)
 sshremote sshremote://ID --password ""           # ask to come in, without a password
-sshremote sshremote://ID@sshremote.dev --password P [--code C]
+sshremote sshremote://ID --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN
 ```
@@ -232,8 +233,9 @@ connected, so ending the connection and changing what they may do are always at 
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
-asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/thinkbigx/sshremote-relay); it is reached on TCP 7071, or on port 80 through a web server when
-7071 is shut.
+asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/thinkbigx/sshremote-relay); the one this project runs is `relay.sshremote.dev` (before 0.10 it went by
+`sshremote.dev`, which still reaches it and is read as the same relay), reached on TCP and UDP
+7071, or on port 80 through a web server when 7071 is shut.
 
 Both ends dial out to the relay, prove the password to each other with SPAKE2 and seal every byte
 with ChaCha20-Poly1305; the relay sees neither. Once in, the two look for a **straight path

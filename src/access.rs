@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::sys::{hex, random};
 
 /// The relay used when none is set.
-pub const DEFAULT_RELAY: &str = "sshremote.dev";
+pub const DEFAULT_RELAY: &str = crate::computers::RELAY;
 
 /// What remote access by ID keeps: its ID, the secret that holds the ID at the relay, the
 /// password viewers give, the relay, and whether it is on.
@@ -115,7 +115,7 @@ impl Config {
             id: s("id")?,
             token: s("token")?,
             password: s("password")?,
-            relay: s("relay").filter(|r| !r.trim().is_empty()).unwrap_or_else(default_relay),
+            relay: s("relay").filter(|r| !r.trim().is_empty()).map(|r| crate::computers::relay_name(&r)).unwrap_or_else(default_relay),
             enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
             ask: v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false),
             allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
@@ -326,7 +326,7 @@ pub fn relay_addr(relay: &str) -> (String, u16) {
 
 /// A viewer's address for an ID: `sshremote://ID@relay`.
 pub fn address(id: &str, relay: &str) -> String {
-    format!("sshremote://{}@{}", id.trim().replace(' ', ""), relay.trim())
+    format!("sshremote://{}@{}", id.trim().replace(' ', ""), crate::computers::relay_name(relay))
 }
 
 
@@ -1591,7 +1591,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("relay") => {
-            c.relay = args.get(1).cloned().unwrap_or_else(default_relay);
+            c.relay = args.get(1).map(|r| crate::computers::relay_name(r)).unwrap_or_else(default_relay);
             save(&c)?;
             println!("relay: {}", c.relay);
             Ok(())

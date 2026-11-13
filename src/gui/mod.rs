@@ -1510,7 +1510,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1524,7 +1524,7 @@ mod tests {
                     "tools" => app.settings = Some(settings::Settings::at("keys")),
                     _ => {}
                 }
-                let size = Vec2::new(900.0, 600.0);
+                let size = Vec2::new(1100.0, 700.0);
                 let mut snap = snapshot::Snap::default();
                 for k in 0..12 {
                     let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.05), ..Default::default() };
@@ -1566,7 +1566,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1594,10 +1594,10 @@ mod tests {
                         };
                         let now = crate::sys::now_secs();
                         app.computers = vec![
-                            tagged("sshremote://482913075@sshremote.dev", "Mum's laptop", &["family"], now - 3 * 86400),
+                            tagged("sshremote://482913075@relay.sshremote.dev", "Mum's laptop", &["family"], now - 3 * 86400),
                             tagged("dev@build.example", "Build box", &["work", "servers"], now - 3600),
                             tagged("web1", "", &["work", "servers"], now - 86400),
-                            tagged("sshremote://731004522@sshremote.dev", "Reception PC", &["work"], 0),
+                            tagged("sshremote://731004522@relay.sshremote.dev", "Reception PC", &["work"], 0),
                         ];
                         app.computers_at = Some(Instant::now());
                         if name == "tag_picked" {

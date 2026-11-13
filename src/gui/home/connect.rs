@@ -30,7 +30,7 @@ pub(in crate::gui) fn typed(text: &str) -> Typed {
     }
     if let Some(rest) = t.strip_prefix("sshremote://") {
         let id = rest.split('@').next().unwrap_or("").trim_end_matches('/');
-        return if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) { Typed::Id { address: t.into(), id: id.into() } } else { Typed::Words };
+        return if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) { Typed::Id { address: crate::computers::canonical(t), id: id.into() } } else { Typed::Words };
     }
     if t.contains(char::is_whitespace) || t.starts_with('-') {
         return Typed::Words;
