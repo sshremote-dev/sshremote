@@ -48,6 +48,8 @@ pub(in crate::gui) struct Sheet {
     password: String,
     /// Its network card's hardware address, for waking it.
     mac: String,
+    /// Its tags, comma separated.
+    tags: String,
     tunnels: Vec<TunnelForm>,
     problem: Option<String>,
     sure_to_remove: bool,
@@ -72,6 +74,7 @@ impl Sheet {
             relay: String::new(),
             password: String::new(),
             mac: String::new(),
+            tags: String::new(),
             tunnels: Vec::new(),
             problem: None,
             sure_to_remove: false,
@@ -115,6 +118,7 @@ impl Sheet {
         }
         s.tunnels = c.tunnels.iter().map(|t| TunnelForm { kind: t.kind, port: t.port.to_string(), dest: t.dest.clone(), auto: t.start_with_app }).collect();
         s.mac = c.mac.clone();
+        s.tags = c.tags.join(", ");
         s
     }
 
@@ -187,10 +191,11 @@ impl Sheet {
         if !mac.is_empty() && crate::lan::parse_mac(&mac).is_none() {
             return Err("The hardware address is six pairs of hex digits, such as 3c:52:82:1a:2b:3c.".into());
         }
-        let (name, favorite) = (self.name.trim().to_string(), self.favorite);
+        let (name, favorite, tags) = (self.name.trim().to_string(), self.favorite, crate::computers::tags(&self.tags));
         crate::computers::update(&address, |c| {
             c.name = name;
             c.favorite = favorite;
+            c.tags = tags;
             c.port = port;
             c.tunnels = tunnels;
             c.mac = mac;
@@ -269,6 +274,7 @@ impl App {
                 kit::card(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
                     kit::row(ui, "Name", |ui| ui.add(kit::field(&mut s.name, "as the list shows it (optional)")));
+                    kit::row(ui, "Tags", |ui| ui.add(kit::field(&mut s.tags, "work, servers (optional)"))).on_hover_text("Words to group it by: the list shows them, and picks the computers with one");
                     if s.by_id {
                         kit::row(ui, "ID", |ui| ui.add(kit::field(&mut s.id, "123 456 789")));
                         // Reached through the relay this computer uses, set in remote access's

@@ -311,6 +311,8 @@ pub struct App {
     /// The computers as listed, and when they were read (None: read them again).
     computers: Vec<crate::computers::Computer>,
     computers_at: Option<Instant>,
+    /// The tag whose computers the list shows; None: all of them.
+    tag: Option<String>,
     /// The row of the list the arrow keys are on, and whether they just moved it.
     picked: Option<usize>,
     picked_moved: bool,
@@ -650,6 +652,8 @@ fn friendly(e: &str) -> (String, &'static str) {
     let l = e.to_lowercase();
     let hint = if l.contains("without its password") {
         "Ask the person at that computer for its password, or for them to let you ask (Remote access settings, Who comes in)."
+    } else if l.contains("only from some addresses") {
+        "Its remote access settings list the addresses viewers may come from (Who comes in): ask the person there to add yours."
     } else if l.contains("answering someone else") {
         "Someone else is asking that computer just now. Try again in a few seconds."
     } else if l.contains("straight path") {
@@ -716,6 +720,7 @@ impl App {
             form,
             computers: Vec::new(),
             computers_at: None,
+            tag: None,
             picked: None,
             picked_moved: false,
             row_menu: None,
@@ -1505,7 +1510,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1538,7 +1543,7 @@ mod tests {
         let states = [
             "home", "home_off", "home_loading", "typed_ssh", "typed_id", "typed_words", "row_hover", "add_ssh", "add_id", "edit_config",
             "access_settings", "settings_appearance", "settings_connections", "settings_keys", "settings_passwords", "settings_backup",
-            "settings_extensions", "settings_parts", "settings_about", "quick", "narrow",
+            "settings_extensions", "settings_parts", "settings_about", "quick", "narrow", "tags", "tag_picked",
         ];
         for dark in [true, false] {
             for name in states {
@@ -1561,7 +1566,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1578,6 +1583,27 @@ mod tests {
                     "add_id" => app.sheet = Some(home::Sheet::new(&home::connect::typed("123456789"))),
                     "edit_config" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
                     "access_settings" => app.access_sheet_open = true,
+                    "tags" | "tag_picked" => {
+                        use crate::computers::Computer;
+                        let tagged = |a: &str, name: &str, tags: &[&str], last: u64| Computer {
+                            address: a.into(),
+                            name: name.into(),
+                            tags: tags.iter().map(|t| t.to_string()).collect(),
+                            last_used: last,
+                            ..Default::default()
+                        };
+                        let now = crate::sys::now_secs();
+                        app.computers = vec![
+                            tagged("sshremote://482913075@sshremote.dev", "Mum's laptop", &["family"], now - 3 * 86400),
+                            tagged("dev@build.example", "Build box", &["work", "servers"], now - 3600),
+                            tagged("web1", "", &["work", "servers"], now - 86400),
+                            tagged("sshremote://731004522@sshremote.dev", "Reception PC", &["work"], 0),
+                        ];
+                        app.computers_at = Some(Instant::now());
+                        if name == "tag_picked" {
+                            app.tag = Some("servers".into());
+                        }
+                    }
                     "quick" => w.picker = Some(Place::Tab),
                     n if n.starts_with("settings_") => app.settings = Some(settings::Settings::at(&n["settings_".len()..])),
                     _ => {}

@@ -176,6 +176,7 @@ pub fn ago(when: u64) -> String {
         0..60 => "just now".into(),
         60..3600 => format!("{} min ago", d / 60),
         3600..86_400 => format!("{} h ago", d / 3600),
+        86_400..172_800 => "yesterday".into(),
         _ => format!("{} days ago", d / 86_400),
     }
 }

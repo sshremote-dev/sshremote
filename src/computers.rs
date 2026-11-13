@@ -31,6 +31,8 @@ pub struct Computer {
     /// Where it answered on this network last (`IP:PORT`, comma separated), to reach it by its ID
     /// straight rather than through the relay.
     pub direct: String,
+    /// Words it is grouped by in the list ("work", "servers"), as typed, in order.
+    pub tags: Vec<String>,
 }
 
 impl Computer {
@@ -61,6 +63,7 @@ impl Computer {
             "tunnels": self.tunnels.iter().map(Tunnel::to_json).collect::<Vec<_>>(),
             "mac": self.mac,
             "direct": self.direct,
+            "tags": self.tags,
         })
     }
 
@@ -76,8 +79,33 @@ impl Computer {
             tunnels: v.get("tunnels").and_then(Value::as_array).map(|a| a.iter().filter_map(Tunnel::from_json).collect()).unwrap_or_default(),
             mac: v.get("mac").and_then(Value::as_str).filter(|m| crate::lan::parse_mac(m).is_some()).unwrap_or("").to_string(),
             direct: v.get("direct").and_then(Value::as_str).unwrap_or("").to_string(),
+            tags: tags(&v.get("tags").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         })
     }
+}
+
+/// Tags as typed ("work, servers"): trimmed, each once (whatever its case), at most 12 of 32
+/// characters.
+pub fn tags(typed: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in typed.split(',').map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ")) {
+        if !t.is_empty() && out.len() < 12 && !out.iter().any(|o| o.eq_ignore_ascii_case(&t)) {
+            out.push(t.chars().take(32).collect());
+        }
+    }
+    out
+}
+
+/// Every tag in the list, each once, in alphabetical order.
+pub fn all_tags(list: &[Computer]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in list.iter().flat_map(|c| &c.tags) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t.clone());
+        }
+    }
+    out.sort_by_key(|t| t.to_lowercase());
+    out
 }
 
 /// "123 456 789", to read out.
@@ -187,6 +215,7 @@ pub fn merge(more: Vec<Computer>, whole: bool) {
                     k.favorite |= c.favorite;
                     k.last_used = k.last_used.max(c.last_used);
                     k.port = k.port.or(c.port);
+                    k.tags = tags(&k.tags.iter().chain(&c.tags).cloned().collect::<Vec<_>>().join(","));
                 }
                 None => l.push(c),
             }

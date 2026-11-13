@@ -70,7 +70,37 @@ fn finds(c: &Computer, q: &str) -> bool {
     let digits: String = q.chars().filter(|c| !c.is_whitespace()).collect();
     c.name.to_lowercase().contains(q)
         || c.address.to_lowercase().contains(q)
+        || c.tags.iter().any(|t| t.to_lowercase().contains(q))
         || (!digits.is_empty() && c.id().is_some_and(|id| id.contains(&digits)))
+}
+
+/// A tag as a small rounded label, in a row of the list.
+fn tag_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let brand = super::super::brand();
+    egui::Frame::new()
+        .fill(brand.gamma_multiply(0.12))
+        .corner_radius(CornerRadius::same(7))
+        .inner_margin(egui::Margin::symmetric(6, 0))
+        .show(ui, |ui| ui.add(egui::Label::new(RichText::new(text).size(10.5).color(brand)).selectable(false)))
+        .response
+}
+
+/// A tag over the list, to pick its computers; `on`: the one the list is showing.
+fn tag_chip(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
+    let brand = super::super::brand();
+    let ink = if ui.visuals().dark_mode { ui.visuals().extreme_bg_color } else { egui::Color32::WHITE };
+    let (fill, color) = if on { (brand, ink) } else { (brand.gamma_multiply(0.14), brand) };
+    let r = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(10, 3))
+        .show(ui, |ui| ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).selectable(false)))
+        .response
+        .interact(egui::Sense::click());
+    if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    r
 }
 
 /// A line of the list.
@@ -187,10 +217,12 @@ impl App {
         };
         let here = self.here.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.name.to_lowercase()).unwrap_or_default();
         let mut out = Vec::new();
-        if q.is_empty() || "this computer".contains(&q) || here.contains(&q) {
+        let tag = self.tag.as_deref();
+        if tag.is_none() && (q.is_empty() || "this computer".contains(&q) || here.contains(&q)) {
             out.push(Entry::Here);
         }
-        out.extend(self.computers.iter().filter(|c| q.is_empty() || finds(c, &q)).cloned().map(Entry::Computer));
+        let tagged = |c: &&Computer| tag.is_none_or(|t| c.tags.iter().any(|k| k.eq_ignore_ascii_case(t)));
+        out.extend(self.computers.iter().filter(tagged).filter(|c| q.is_empty() || finds(c, &q)).cloned().map(Entry::Computer));
         out
     }
 
@@ -284,6 +316,10 @@ impl App {
                             crate::hosts::set_setting("remember_password", if self.form.remember { "yes" } else { "no" });
                         }
                     });
+                    if by_id && !saved && self.form.password.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("A one-time password works too. Without any, the person there is asked to let you in, where that computer allows it.").small().color(weak));
+                    }
                 }
         });
         if enter {
@@ -314,6 +350,32 @@ impl App {
         })
     }
 
+    /// Over the list, when computers have tags: one each, to show only its computers.
+    fn tag_chips(&mut self, ui: &mut egui::Ui) {
+        let all = crate::computers::all_tags(&self.computers);
+        if self.tag.as_ref().is_some_and(|t| !all.iter().any(|a| a.eq_ignore_ascii_case(t))) {
+            self.tag = None;
+        }
+        if all.is_empty() {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            if tag_chip(ui, "All", self.tag.is_none()).on_hover_text("Every computer").clicked() {
+                self.tag = None;
+                self.picked = None;
+            }
+            for t in all {
+                let on = self.tag.as_ref().is_some_and(|k| k.eq_ignore_ascii_case(&t));
+                if tag_chip(ui, &t, on).on_hover_text(if on { "Show every computer" } else { "Show only the computers with this tag" }).clicked() {
+                    self.tag = if on { None } else { Some(t) };
+                    self.picked = None;
+                }
+            }
+        });
+        ui.add_space(6.0);
+    }
+
     /// The computers: a heading with a way to add one, then a row each.
     fn computer_list(&mut self, ui: &mut egui::Ui, what: &Typed, entries: &[Entry], picked: Option<usize>, go: &mut Option<Choice>) {
         ui.horizontal(|ui| {
@@ -330,7 +392,8 @@ impl App {
             });
         });
         self.network_card(ui);
-        let searching = !matches!(what, Typed::Empty);
+        self.tag_chips(ui);
+        let searching = !matches!(what, Typed::Empty) || self.tag.is_some();
         let mut act: Option<(Entry, RowAct)> = None;
         egui::ScrollArea::vertical().id_salt("computers").auto_shrink([false, false]).show(ui, |ui| {
           kit::list(ui, |ui| {
@@ -353,7 +416,7 @@ impl App {
             let note = if self.computers.is_empty() && !searching {
                 "The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first."
             } else if searching && entries.iter().all(|e| matches!(e, Entry::Here)) {
-                "No computer in the list matches."
+                if self.tag.is_some() { "No computer with this tag matches." } else { "No computer in the list matches." }
             } else {
                 ""
             };
@@ -632,7 +695,16 @@ impl App {
             if open > 0 {
                 sub.push(format!("{open} tunnel{} open", if open == 1 { "" } else { "s" }));
             }
-            ui.add(egui::Label::new(RichText::new(sub.join("  \u{00b7}  ")).small().weak()).truncate());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for t in &c.tags {
+                    tag_pill(ui, t);
+                }
+                if !c.tags.is_empty() {
+                    ui.add_space(2.0);
+                }
+                ui.add(egui::Label::new(RichText::new(sub.join("  \u{00b7}  ")).small().weak()).truncate());
+            });
         });
         if act.is_none() {
             if r.double_clicked() {
