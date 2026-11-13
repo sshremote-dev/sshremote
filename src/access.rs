@@ -289,6 +289,24 @@ static SESSIONS: Mutex<Vec<(u64, String, crate::net::Ender)>> = Mutex::new(Vec::
 /// When each viewer came in, by its number, in seconds since 1970.
 static SINCE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
+/// What remote access shows to anyone at this computer, its secrets left out: for the icon in the
+/// notification area, which runs without the rights to read the settings (`service`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn public_state() -> serde_json::Value {
+    let c = load();
+    let state = match state() {
+        State::Off => "off".to_string(),
+        State::Connecting => "connecting".to_string(),
+        State::Online => "online".to_string(),
+        State::InUse(n) => format!("in use by {n}"),
+        State::Failed(why) => why,
+    };
+    serde_json::json!({
+        "enabled": c.enabled, "id": c.id, "relay": c.relay, "ask": c.ask, "allow": c.allow, "punch": c.punch,
+        "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "state": state, "viewers": viewers(),
+    })
+}
+
 /// How many viewers this program serves by ID now (remote access run inside the app).
 pub fn viewers_here() -> usize {
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -942,6 +960,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
         println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
         println!("viewers:  may use {}", crate::grant::words(c.allow));
+        println!("nearby:   {}", match (c.lan, c.direct) {
+            (true, true) => "found by computers on this network, which may come straight in",
+            (true, false) => "found by computers on this network",
+            (false, true) => "not found, but computers on this network may come straight in",
+            (false, false) => "not found by computers on this network",
+        });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
         println!("connect with: sshremote --gui {}", address(&c.id, &c.relay));
@@ -978,16 +1002,27 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             println!("ID: {}", crate::computers::spaced(&c.id));
             Ok(())
         }
-        Some("straight") => {
-            c.punch = match args.get(1).map(String::as_str) {
+        // Switches, each `on` or `off`.
+        Some(what @ ("straight" | "lan" | "direct")) => {
+            let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
-                _ => return Err("usage: sshremote remote-access straight on|off".into()),
+                _ => return Err(format!("usage: sshremote remote-access {what} on|off")),
             };
+            match what {
+                "straight" => c.punch = on,
+                "lan" => c.lan = on,
+                _ => c.direct = on,
+            }
             save(&c)?;
             show(&c);
             Ok(())
         }
+        Some("service") => match args.get(1).map(String::as_str) {
+            Some("start") => service_control(true),
+            Some("stop") => service_control(false),
+            _ => Err("usage: sshremote remote-access service start|stop".into()),
+        },
         Some("ask") => {
             c.ask = match args.get(1).map(String::as_str) {
                 Some("on") => true,
@@ -1058,7 +1093,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight on|off | install | uninstall]".into()),
+        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct on|off | install | uninstall | service start|stop]".into()),
     }
 }
 

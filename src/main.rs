@@ -130,8 +130,11 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
-       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|install|uninstall]
+       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
+                                straight|lan|direct on|off|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay
+       sshremote --tray                Windows: the icon in the notification area for the service (remote
+                                  access, who comes in, the service); started with each sign-in
        sshremote --install-service | --uninstall-service
                                   Windows: add or remove the service alone (remote-access install
                                   also turns remote access on)
@@ -373,7 +376,12 @@ fn note_crashes() {
 
 fn main() {
     note_crashes();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // A command the notification area's icon runs with administrator rights: no console for it.
+    let no_console = args.first().is_some_and(|a| a == "--no-console");
+    if no_console {
+        args.remove(0);
+    }
     // ssh runs this program as its askpass helper with the prompt as the only argument.
     if let Ok(secret) = std::env::var(vault::ASKPASS_SECRET)
         && args.len() == 1
@@ -432,7 +440,8 @@ fn main() {
     // Without a console of its own (a double click under the manifest's detached policy), command-line
     // use borrows the terminal it was started from, or opens one; window modes and helpers need none.
     #[cfg(windows)]
-    if !args.iter().any(|a| ["--gui", "--service", "--chat-window", "--agent", "--stats"].contains(&a.as_str()))
+    if !no_console
+        && !args.iter().any(|a| ["--gui", "--service", "--tray", "--chat-window", "--agent", "--stats"].contains(&a.as_str()))
         && args[0] != "terminal"
     {
         attach_console();
@@ -455,6 +464,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--uninstall-service" => service::uninstall(),
         #[cfg(all(windows, feature = "remote"))]
         "--service" => service::dispatch(),
+        #[cfg(feature = "gui")]
+        "--tray" => gui::run_tray(),
         #[cfg(feature = "remote")]
         // Remote access by ID through a relay: its settings, and the loop a service runs.
         #[cfg(feature = "remote")]

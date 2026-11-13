@@ -446,6 +446,23 @@ fn boot(native: eframe::NativeOptions, make: impl FnOnce(&eframe::CreationContex
 }
 
 /// Window options shared by the viewer and the chat window.
+/// A page of Settings asked for from a pane (a quick menu's link to the full settings); the main
+/// window opens it over whatever it shows.
+static SETTINGS_ASKED: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Opens Settings at `page` ("appearance", "connections", ...) in the main window.
+pub(crate) fn ask_settings(page: &'static str) {
+    *SETTINGS_ASKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(page);
+}
+
+/// `sshremote --tray`: the icon in the notification area for the service, on its own.
+pub fn run_tray() -> Result<(), String> {
+    #[cfg(all(windows, feature = "remote"))]
+    return tray::run_alone();
+    #[cfg(not(all(windows, feature = "remote")))]
+    Err("the icon in the notification area is for Windows; on Linux the systemd user service keeps remote access up".into())
+}
+
 pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
     #[cfg(windows)]
     if std::env::var_os("WGPU_BACKEND").is_none() {
@@ -943,9 +960,16 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_WORK)));
             }
         }
+        if let Some(page) = SETTINGS_ASKED.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            self.settings = Some(settings::Settings::at(page));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
         if open {
             self.home(ui);
             self.ask_before_quitting(&ctx);
+        } else if self.settings.is_some() {
+            // Over the panes too, when a pane's menu asked for it.
+            self.settings_window(&ctx);
         }
         self.tray_sync();
         #[cfg(feature = "drive")]
@@ -981,6 +1005,8 @@ impl App {
         #[cfg(feature = "remote")]
         {
             st.access = self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone()));
+            st.settings = self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct]);
+            st.viewers = crate::access::viewers_here();
             st.service = self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs)));
         }
         if let Ok(mut s) = self.tray_status.lock() {
@@ -995,7 +1021,7 @@ impl App {
         // Closed while remote access by ID or tunnels are kept up here: the window goes to the
         // notification area, and they go on (Quit in its menu ends them).
         #[cfg(windows)]
-        if requested && !self.quitting && !tray::QUIT.load(std::sync::atomic::Ordering::Relaxed) && self.keeps_going()
+        if requested && !self.quitting && !tray::QUIT.load(std::sync::atomic::Ordering::Relaxed) && self.keeps_going() && !tray::alone_runs()
             && let Some(main) = tray::front_window()
         {
             if self.tray.is_none() {

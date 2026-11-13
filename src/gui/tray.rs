@@ -1,18 +1,29 @@
-//! The icon in the notification area while SSH Remote goes on with its window closed: remote
-//! access by ID served by this program, or tunnels kept open. A click brings the window back; its
-//! menu turns remote access on or off, copies the ID, works the service and quits.
+//! The icon in the notification area. It stands for SSH Remote while its window is closed and
+//! remote access by ID or tunnels go on (a click brings the window back), and, as a program of its
+//! own (`sshremote --tray`, started with every sign-in once the service is installed), for the
+//! service: its menu turns remote access on or off, copies the ID, sets who comes in and how,
+//! shows the window of whoever is connected, works the service and quits.
 //!
 //! Its thread does all of that itself: a hidden window gets no frames, so nothing may wait for one.
 //! Windows only: a Wayland session lets no program hide its window and bring it back, and on
 //! Linux the systemd user service keeps remote access up with no window.
 
-/// What the menu shows, as the window last knew it.
+/// What the menu shows, as the window (or the service) last told.
 #[derive(Clone, Default)]
 pub(super) struct Status {
     /// Remote access by ID: whether it is on, and the ID.
     pub access: Option<(bool, String)>,
     /// The service: installed, running.
     pub service: Option<(bool, bool)>,
+    /// Who comes in and how: asked first, straight through the routers, found on this network,
+    /// straight in from it.
+    pub settings: Option<[bool; 4]>,
+    /// Viewers connected by the ID now.
+    pub viewers: usize,
+    /// The icon's own program: Quit hides the icon, and changes go through the administrator
+    /// prompt (the settings are the administrators').
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub alone: bool,
 }
 
 pub(super) type Shared = std::sync::Arc<std::sync::Mutex<Status>>;
@@ -32,6 +43,12 @@ mod item {
     pub const OPEN: usize = 1;
     pub const ACCESS: usize = 2;
     pub const COPY_ID: usize = 3;
+    pub const ASK: usize = 4;
+    pub const STRAIGHT: usize = 5;
+    pub const NEARBY: usize = 6;
+    pub const DIRECT: usize = 7;
+    pub const SETTINGS: usize = 8;
+    pub const SHOW: usize = 9;
     pub const INSTALL: usize = 10;
     pub const START: usize = 11;
     pub const STOP: usize = 12;
@@ -45,38 +62,117 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
     #[cfg(feature = "remote")]
     {
         use crate::access;
-        let elevated_cli = |what: &str| -> Result<(), String> {
+        // A change of the settings or the service: here when this program has the rights (the
+        // window asks for them at start), else by the command line through the prompt for them.
+        let as_admin = |args: &[&str], here: &dyn Fn() -> Result<(), String>| -> Result<(), String> {
             if crate::admin::elevated() {
-                if what == "install" { access::install_service() } else { access::uninstall_service() }
-            } else {
-                match crate::admin::relaunch(&["remote-access".to_string(), what.to_string()])? {
-                    true => Ok(()),
-                    false => Err("administrator rights were not given".into()),
-                }
+                return here();
             }
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let args: Vec<String> = ["--no-console", "remote-access"].into_iter().chain(args.iter().copied()).map(String::from).collect();
+            #[cfg(windows)]
+            let given = crate::admin::run_elevated(&exe.to_string_lossy(), &args, true)?;
+            #[cfg(not(windows))]
+            let given = crate::admin::relaunch(&args)?;
+            let _ = exe;
+            if given { Ok(()) } else { Err("administrator rights were not given".into()) }
         };
+        let change = |f: &dyn Fn(&mut access::Config)| -> Result<(), String> {
+            let mut c = access::stored()?.ok_or("remote access is not set up")?;
+            f(&mut c);
+            access::save(&c)
+        };
+        let set = status.settings.unwrap_or_default();
+        let word = |on: bool| if on { "on" } else { "off" };
         match n {
             item::ACCESS => {
-                let mut c = access::stored()?.ok_or("remote access is not set up")?;
-                c.enabled = !c.enabled;
-                access::save(&c)?;
-                CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
+                let on = !status.access.as_ref().is_some_and(|a| a.0);
+                as_admin(&[word(on)], &|| change(&|c| c.enabled = on))?;
             }
+            item::ASK => as_admin(&["ask", word(!set[0])], &|| change(&|c| c.ask = !set[0]))?,
+            item::STRAIGHT => as_admin(&["straight", word(!set[1])], &|| change(&|c| c.punch = !set[1]))?,
+            item::NEARBY => as_admin(&["lan", word(!set[2])], &|| change(&|c| c.lan = !set[2]))?,
+            item::DIRECT => as_admin(&["direct", word(!set[3])], &|| change(&|c| c.direct = !set[3]))?,
             item::COPY_ID => {
                 if let Some((_, id)) = &status.access {
                     arboard::Clipboard::new().and_then(|mut c| c.set_text(id.clone())).map_err(|e| e.to_string())?;
                 }
             }
-            item::INSTALL => elevated_cli("install")?,
-            item::REMOVE => elevated_cli("uninstall")?,
-            item::START => access::service_control(true)?,
-            item::STOP => access::service_control(false)?,
+            item::INSTALL => as_admin(&["install"], &access::install_service)?,
+            item::REMOVE => as_admin(&["uninstall"], &access::uninstall_service)?,
+            item::START => as_admin(&["service", "start"], &|| access::service_control(true))?,
+            item::STOP => as_admin(&["service", "stop"], &|| access::service_control(false))?,
             _ => {}
         }
+        CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     #[cfg(not(feature = "remote"))]
     let _ = (n, status);
     Ok(())
+}
+
+/// The icon's own program's view: the service's state file, and the service manager.
+#[cfg(all(windows, feature = "remote"))]
+fn read_status() -> Status {
+    let mut st = Status { alone: true, ..Default::default() };
+    st.service = Some((crate::access::service_installed(), crate::access::service_runs()));
+    let v: Option<serde_json::Value> =
+        crate::service::state_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok());
+    if let Some(v) = v {
+        let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
+        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if !id.is_empty() {
+            st.access = Some((b("enabled"), id));
+            st.settings = Some([b("ask"), b("punch"), b("lan"), b("direct")]);
+        }
+        st.viewers = v.get("viewers").and_then(|x| x.as_array()).map_or(0, |a| a.len());
+    }
+    st
+}
+
+/// `sshremote --tray`: the icon alone, for the service, until it is removed or the icon hidden.
+/// One for each signed-in user.
+#[cfg(all(windows, feature = "remote"))]
+pub fn run_alone() -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name = crate::sys::wide(win::ALONE);
+    let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return Ok(());
+    }
+    let status: Shared = std::sync::Arc::new(std::sync::Mutex::new(read_status()));
+    let tray = Tray::start(0, status.clone(), super::app_icon().as_ref()).ok_or("the notification area is not there")?;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if QUIT.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let now = read_status();
+        // The service was removed: its program file is let go with the icon.
+        if now.service.is_some_and(|s| !s.0) {
+            break;
+        }
+        *status.lock().unwrap_or_else(|e| e.into_inner()) = now;
+        tray.refresh();
+    }
+    drop(tray);
+    unsafe { CloseHandle(mutex) };
+    Ok(())
+}
+
+/// Whether the icon's own program runs in this sign-in (the window then makes no second icon).
+#[cfg(windows)]
+pub(super) fn alone_runs() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name = crate::sys::wide(win::ALONE);
+    let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if h.is_null() {
+        return false;
+    }
+    unsafe { CloseHandle(h) };
+    true
 }
 
 #[cfg(windows)]
@@ -104,6 +200,12 @@ mod win {
 
     const CALLBACK: u32 = WM_APP + 1;
     const SAY: u32 = WM_APP + 2;
+    /// The tip read again (the icon's own program, every few seconds).
+    const REFRESH: u32 = WM_APP + 3;
+    /// The icon's own program, one in each sign-in.
+    pub(in crate::gui) const ALONE: &str = "Local\\SshRemoteTray";
+    /// The windows of the person connected by the ID: what "show" brings to the front.
+    const CONNECTED_WINDOWS: &str = "SSH Remote: someone";
 
     /// What the window procedure works with: the window shown again, and the menu's status.
     struct Inner {
@@ -166,6 +268,12 @@ mod win {
             Some(Tray { hwnd })
         }
 
+        /// The tip and menu read the status again.
+        #[cfg_attr(not(feature = "remote"), allow(dead_code))]
+        pub(in crate::gui) fn refresh(&self) {
+            unsafe { PostMessageW(self.hwnd as HWND, REFRESH, 0, 0) };
+        }
+
         /// A balloon from the icon, once: where the program went.
         pub(in crate::gui) fn say(&self, text: &str) {
             if let Some(i) = INNER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -202,13 +310,19 @@ mod win {
         nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
         nid.uCallbackMessage = CALLBACK;
         nid.hIcon = inner.as_ref().map_or(std::ptr::null_mut(), |i| i.icon as HICON);
-        let tip = match inner.as_ref().and_then(|i| i.status.lock().ok().map(|s| s.access.clone())).flatten() {
-            Some((true, id)) => format!("SSH Remote: reachable by ID {}", crate::computers::spaced(&id)),
-            _ => "SSH Remote".to_string(),
+        let status = inner.as_ref().and_then(|i| i.status.lock().ok().map(|s| s.clone())).unwrap_or_default();
+        let mut tip = match &status.access {
+            Some((true, id)) => format!("SSH Remote: reachable by ID {}", crate::computers::spaced(id)),
+            Some((false, _)) => "SSH Remote: remote access is off".to_string(),
+            None => "SSH Remote".to_string(),
         };
+        if status.viewers > 0 {
+            tip.push_str(&format!("; {} connected now", status.viewers));
+        }
         copy(&mut nid.szTip, &tip);
+        let mut inner = inner;
         if what == NIM_MODIFY
-            && let Some(text) = inner.as_ref().and_then(|i| i.said.clone())
+            && let Some(text) = inner.as_mut().and_then(|i| i.said.take())
         {
             nid.uFlags |= NIF_INFO;
             copy(&mut nid.szInfoTitle, "SSH Remote");
@@ -222,6 +336,52 @@ mod win {
         let w: Vec<u16> = text.encode_utf16().take(to.len() - 1).collect();
         to[..w.len()].copy_from_slice(&w);
         to[w.len()] = 0;
+    }
+
+    /// A balloon from the icon now.
+    fn tell(hwnd: HWND, text: &str) {
+        if let Some(i) = INNER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            i.said = Some(text.to_string());
+        }
+        add(hwnd as isize, NIM_MODIFY);
+    }
+
+    /// The window: the one hidden (the window's icon), else SSH Remote's open window brought to the
+    /// front or, with none, started (the icon's own program).
+    fn open(main: isize) {
+        if main != 0 {
+            return show(main);
+        }
+        use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+        let title = wide("SSH Remote");
+        let w = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+        if !w.is_null() {
+            return show(w as isize);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            let mut c = std::process::Command::new(exe);
+            use std::os::windows::process::CommandExt;
+            // DETACHED_PROCESS: the window lives on its own, with no console.
+            c.creation_flags(0x0000_0008);
+            let _ = c.spawn();
+        }
+    }
+
+    /// Brings the windows of whoever is connected by the ID to the front; how many there were.
+    fn show_connected() -> usize {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW};
+        unsafe extern "system" fn each(h: HWND, found: LPARAM) -> windows_sys::core::BOOL {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
+            if String::from_utf16_lossy(&buf[..n]).starts_with(CONNECTED_WINDOWS) {
+                show(h as isize);
+                unsafe { *(found as *mut usize) += 1 };
+            }
+            1
+        }
+        let mut found = 0usize;
+        unsafe { EnumWindows(Some(each), &mut found as *mut usize as LPARAM) };
+        found
     }
 
     /// Shows the window again, in front.
@@ -245,12 +405,19 @@ mod win {
         };
         match msg {
             CALLBACK => match lp as u32 {
-                WM_LBUTTONUP => show(main),
+                WM_LBUTTONUP => open(main),
                 WM_RBUTTONUP | WM_CONTEXTMENU => {
                     let chosen = menu(hwnd, &status);
                     match chosen {
                         0 => {}
-                        item::OPEN => show(main),
+                        item::OPEN | item::SETTINGS => open(main),
+                        item::SHOW => {
+                            if show_connected() == 0 {
+                                tell(hwnd, "Nobody connected by this computer's ID has a window open here now.");
+                            }
+                        }
+                        // The icon's own program only goes; the window's quits with it.
+                        item::QUIT if main == 0 => QUIT.store(true, Ordering::Relaxed),
                         item::QUIT => {
                             QUIT.store(true, Ordering::Relaxed);
                             show(main);
@@ -258,17 +425,14 @@ mod win {
                         }
                         n => {
                             if let Err(e) = act(n, &status) {
-                                if let Some(i) = INNER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                                    i.said = Some(e);
-                                }
-                                add(hwnd as isize, NIM_MODIFY);
+                                tell(hwnd, &e);
                             }
                         }
                     }
                 }
                 _ => {}
             },
-            SAY => add(hwnd as isize, NIM_MODIFY),
+            SAY | REFRESH => add(hwnd as isize, NIM_MODIFY),
             WM_CLOSE => {
                 add(hwnd as isize, NIM_DELETE);
                 unsafe {
@@ -293,13 +457,35 @@ mod win {
             };
             add(m, MF_STRING, item::OPEN, "Open SSH Remote");
             AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+            let check = |on: bool| if on { MF_CHECKED } else { 0 };
             match &s.access {
                 Some((on, id)) => {
-                    add(m, MF_STRING | if *on { MF_CHECKED } else { 0 }, item::ACCESS, "Remote access by ID");
+                    add(m, MF_STRING | check(*on), item::ACCESS, "Remote access by ID");
                     add(m, MF_STRING | if *on { 0 } else { MF_GRAYED }, item::COPY_ID, &format!("Copy the ID {}", crate::computers::spaced(id)));
                 }
                 None => add(m, MF_STRING | MF_GRAYED, 0, "Remote access by ID: not set up"),
             }
+            // Who comes in and how: the switches of the remote access settings.
+            let who = CreatePopupMenu();
+            match s.settings {
+                Some([ask, straight, nearby, direct]) => {
+                    // As the remote access settings have them, in their order.
+                    add(who, MF_STRING | check(ask), item::ASK, "Ask the person at this computer before letting anyone in");
+                    add(who, MF_STRING | check(nearby), item::NEARBY, "Let computers on this network find this one");
+                    add(who, MF_STRING | check(direct), item::DIRECT, "Let viewers on this network come straight in");
+                    add(who, MF_STRING | check(straight), item::STRAIGHT, "Let viewers by ID go straight through the routers");
+                }
+                None => add(who, MF_STRING | MF_GRAYED, 0, "Not set up"),
+            }
+            AppendMenuW(who, MF_SEPARATOR, 0, std::ptr::null());
+            add(who, MF_STRING, item::SETTINGS, "All remote access settings\u{2026}");
+            add(m, MF_STRING | MF_POPUP, who as usize, "Who comes in");
+            let connected = match s.viewers {
+                0 => "Nobody is connected".to_string(),
+                1 => "1 connected: show the window".to_string(),
+                n => format!("{n} connected: show their windows"),
+            };
+            add(m, MF_STRING | if s.viewers == 0 { MF_GRAYED } else { 0 }, item::SHOW, &connected);
             let svc = CreatePopupMenu();
             match s.service {
                 Some((true, runs)) => {
@@ -310,9 +496,14 @@ mod win {
                 Some((false, _)) => add(svc, MF_STRING, item::INSTALL, "Install: start remote access with the computer"),
                 None => add(svc, MF_STRING | MF_GRAYED, 0, "Looking\u{2026}"),
             }
-            add(m, MF_STRING | MF_POPUP, svc as usize, "Service");
+            let service_label = match s.service {
+                Some((true, true)) => "Service: running",
+                Some((true, false)) => "Service: stopped",
+                _ => "Service",
+            };
+            add(m, MF_STRING | MF_POPUP, svc as usize, service_label);
             AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
-            add(m, MF_STRING, item::QUIT, "Quit");
+            add(m, MF_STRING, item::QUIT, if s.alone { "Hide this icon until the next sign-in" } else { "Quit" });
             let mut p = POINT { x: 0, y: 0 };
             GetCursorPos(&mut p);
             // The menu closes when clicked away only if its window is in front.

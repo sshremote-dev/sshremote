@@ -67,6 +67,18 @@ pub fn installed_exe() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(base).join("SSH Remote").join("sshremote.exe"))
 }
 
+/// Where the service tells programs without administrator rights (the icon in the notification
+/// area) how remote access stands, its secrets left out: under ProgramData, which every user may
+/// read and only administrators and SYSTEM write.
+pub fn state_file() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("ProgramData")?;
+    Some(std::path::PathBuf::from(base).join("SSH Remote").join("state.json"))
+}
+
+/// The icon in the notification area starts with every sign-in, from here.
+const RUN_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "SSH Remote";
+
 /// Whether the service is stopped (or not installed).
 fn stopped() -> bool {
     use std::os::windows::process::CommandExt;
@@ -141,6 +153,8 @@ pub fn install() -> Result<(), String> {
         "netsh",
         &["advfirewall", "firewall", "add", "rule", &format!("name={FIREWALL}"), "dir=in", "action=allow", "protocol=TCP", &format!("localport={}", crate::net::DIRECT_PORT), &format!("program={}", exe.display())],
     );
+    // Its icon in the notification area, from the next sign-in on (the service shows it now).
+    let _ = run("reg", &["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &format!("\"{}\" --tray", exe.display()), "/f"]);
     run("sc", &["start", NAME])?;
     println!("sshremote service installed and started ({bin})");
     Ok(())
@@ -151,9 +165,15 @@ pub fn uninstall() -> Result<(), String> {
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
     let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
-    // Its copy goes too, once its process has let go of it.
+    let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+    if let Some(f) = state_file() {
+        let _ = std::fs::remove_file(&f);
+        let _ = f.parent().map(std::fs::remove_dir);
+    }
+    // Its copy goes too, once its processes have let go of it (the icon's notices the service
+    // went within a few seconds).
     if let Some(exe) = installed_exe() {
-        for _ in 0..50 {
+        for _ in 0..100 {
             if !exe.exists() || std::fs::remove_file(&exe).is_ok() {
                 break;
             }
@@ -194,6 +214,31 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     let name = wide(NAME);
     unsafe { STATUS = RegisterServiceCtrlHandlerExW(name.as_ptr(), Some(control), null_mut()) };
     report(SERVICE_RUNNING);
+    // How remote access stands, for the icon in the notification area; and the icon itself for
+    // whoever is signed in now (a sign-in later starts it by itself).
+    std::thread::spawn(|| {
+        let mut said = String::new();
+        let mut shown = false;
+        loop {
+            let now = crate::access::public_state().to_string();
+            if now != said
+                && let Some(f) = state_file()
+            {
+                let _ = f.parent().map(std::fs::create_dir_all);
+                let tmp = f.with_extension("new");
+                if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
+                    said = now;
+                }
+            }
+            if !shown
+                && let Some(u) = crate::console_user::User::at_console()
+                && let Some(exe) = installed_exe()
+            {
+                shown = crate::console_user::spawn_piped(&u, &format!("\"{}\" --tray", exe.display())).is_ok();
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
     // Remote access by ID, from start-up and at the sign-in screen, while it is turned on.
     std::thread::spawn(|| {
         loop {
