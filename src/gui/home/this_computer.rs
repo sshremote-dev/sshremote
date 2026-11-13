@@ -150,25 +150,31 @@ impl App {
                 });
                 ui.add_space(6.0);
                 kit::heading(ui, "Connected now");
-                // Served by this window, each with a way to end it; by the service, apart from it.
-                if svc.runs {
-                    ui.label(RichText::new("The service serves them, with no window needed.").weak().size(12.5));
-                } else {
-                    let viewers = access::viewers();
-                    if viewers.is_empty() {
-                        ui.label(RichText::new("Nobody.").weak().size(12.5));
-                    }
-                    for (n, since) in viewers {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(ic::DESKTOP).size(14.0).color(good()));
-                            ui.label(RichText::new(format!("A viewer, {}", crate::hosts::ago(since))).size(13.0));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(kit::danger("End", false).min_size(Vec2::new(0.0, 26.0))).on_hover_text("End this connection now").clicked() {
-                                    access::disconnect(n);
+                // Served by this window or by the service: each with how it came and a way to end it.
+                let viewers = if svc.runs { access::service_viewers() } else { access::viewers() };
+                if viewers.is_empty() {
+                    ui.label(RichText::new("Nobody.").weak().size(12.5));
+                }
+                for v in viewers {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(ic::DESKTOP).size(14.0).color(good()));
+                        ui.label(RichText::new(format!("A viewer, {}", v.describe())).size(13.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(kit::danger("End", false).min_size(Vec2::new(0.0, 26.0))).on_hover_text("End this connection now").clicked() {
+                                if svc.runs {
+                                    if let Err(e) = access::ask_to_end(v.n) {
+                                        self.error = Some(e);
+                                    }
+                                } else {
+                                    access::disconnect(v.n);
                                 }
-                            });
+                            }
                         });
-                    }
+                    });
+                }
+                // The service's list is read again while it is shown.
+                if svc.runs {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
                 }
             }
             ui.add_space(4.0);

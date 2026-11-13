@@ -212,6 +212,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
         let mut said = String::new();
         let mut shown = false;
         loop {
+            crate::access::take_end_requests();
             crate::access::publish_state(&mut said);
             if !shown
                 && let Some(u) = crate::console_user::User::at_console()
@@ -219,7 +220,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
             {
                 shown = crate::console_user::spawn_piped(&u, &format!("\"{}\" --tray", exe.display())).is_ok();
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
     // Remote access by ID, from start-up and at the sign-in screen, while it is turned on.

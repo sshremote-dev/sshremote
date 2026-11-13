@@ -1006,7 +1006,7 @@ impl App {
         {
             st.access = self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone()));
             st.settings = self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct]);
-            st.viewers = crate::access::viewers_here();
+            st.connected = crate::access::viewers();
             st.service = self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs)));
         }
         if let Ok(mut s) = self.tray_status.lock() {

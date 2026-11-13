@@ -131,7 +131,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
-                                straight|lan|direct on|off|install|uninstall|service start|stop]
+                                straight|lan|direct on|off|viewers|end N|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay
        sshremote --tray                Windows: the icon in the notification area for the service (remote
                                   access, who comes in, the service); started with each sign-in

@@ -301,7 +301,7 @@ pub fn public_state() -> serde_json::Value {
     };
     serde_json::json!({
         "enabled": c.enabled, "id": c.id, "relay": c.relay, "ask": c.ask, "allow": c.allow, "punch": c.punch,
-        "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "state": state, "viewers": viewers(),
+        "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "state": state, "viewers": viewers().iter().map(Viewer::json).collect::<Vec<_>>(),
     })
 }
 
@@ -337,10 +337,71 @@ pub fn viewers_here() -> usize {
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
-/// The viewers this program serves by ID now: each one's number and when it came in.
-pub fn viewers() -> Vec<(u64, u64)> {
+/// A viewer connected by the ID, as anyone at this computer may see it: its number, when it came
+/// in (seconds since 1970), and where it is when its session went straight past the relay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Viewer {
+    pub n: u64,
+    pub since: u64,
+    pub straight: Option<String>,
+}
+
+impl Viewer {
+    /// "connected 5 min ago, through the relay", or "..., straight from 203.0.113.7".
+    pub fn describe(&self) -> String {
+        let how = match &self.straight {
+            Some(a) => format!("straight from {}", a.rsplit_once(':').map_or(a.as_str(), |(h, _)| h).trim_matches(['[', ']'])),
+            None => "through the relay".to_string(),
+        };
+        format!("connected {}, {how}", crate::hosts::ago(self.since))
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "n": self.n, "since": self.since, "straight": self.straight })
+    }
+
+    fn from_json(v: &serde_json::Value) -> Option<Viewer> {
+        Some(Viewer { n: v.get("n")?.as_u64()?, since: v.get("since").and_then(|x| x.as_u64()).unwrap_or(0), straight: v.get("straight").and_then(|x| x.as_str()).map(str::to_string) })
+    }
+}
+
+/// The viewers this program serves by ID now.
+pub fn viewers() -> Vec<Viewer> {
     let since = SINCE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(n, _, _)| (*n, since.iter().find(|s| s.0 == *n).map_or(0, |s| s.1))).collect()
+    SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(n, _, e)| Viewer { n: *n, since: since.iter().find(|s| s.0 == *n).map_or(0, |s| s.1), straight: e.straight().map(|a| a.to_string()) })
+        .collect()
+}
+
+/// The viewers the service serves, as it last said (`state_file`).
+pub fn service_viewers() -> Vec<Viewer> {
+    let v: Option<serde_json::Value> = state_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok());
+    v.and_then(|v| v.get("viewers").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Viewer::from_json).collect())).unwrap_or_default()
+}
+
+/// Where the window and the icon ask the service to end a viewer's connection: one number a line.
+fn end_file() -> Option<PathBuf> {
+    state_file().map(|f| f.with_file_name(if cfg!(windows) { "end.txt" } else { "sshremote-end.txt" }))
+}
+
+/// Asks the service to end viewer `n`'s connection (within a second or two).
+pub fn ask_to_end(n: u64) -> Result<(), String> {
+    let f = end_file().ok_or("no folder for the request")?;
+    let mut o = std::fs::OpenOptions::new().create(true).append(true).open(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    writeln!(o, "{n}").map_err(|e| e.to_string())
+}
+
+/// Ends the connections the window or the icon asked to end since last time (the service).
+pub fn take_end_requests() {
+    let Some(f) = end_file() else { return };
+    let Ok(text) = std::fs::read_to_string(&f) else { return };
+    let _ = std::fs::remove_file(&f);
+    for n in text.lines().filter_map(|l| l.trim().parse::<u64>().ok()) {
+        disconnect(n);
+    }
 }
 
 /// Ends one viewer's connection (the person at this screen chose to).
@@ -1065,6 +1126,23 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             show(&c);
             Ok(())
         }
+        // Who is connected through the service now, and ending one of them.
+        Some("viewers") => {
+            let list = service_viewers();
+            if list.is_empty() {
+                println!("nobody is connected");
+            }
+            for v in list {
+                println!("{}  {}", v.n, v.describe());
+            }
+            Ok(())
+        }
+        Some("end") => {
+            let n = args.get(1).and_then(|n| n.parse::<u64>().ok()).ok_or("usage: sshremote remote-access end N (N from: sshremote remote-access viewers)")?;
+            ask_to_end(n)?;
+            println!("asked: viewer {n}'s connection ends within a second or two");
+            Ok(())
+        }
         Some("service") => match args.get(1).map(String::as_str) {
             Some("start") => service_control(true),
             Some("stop") => service_control(false),
@@ -1129,8 +1207,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 thread::spawn(|| {
                     let mut said = String::new();
                     loop {
+                        take_end_requests();
                         publish_state(&mut said);
-                        thread::sleep(Duration::from_secs(2));
+                        thread::sleep(Duration::from_secs(1));
                     }
                 });
             }
@@ -1150,7 +1229,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct on|off | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct on|off | viewers | end N | install | uninstall | service start|stop]".into()),
     }
 }
 

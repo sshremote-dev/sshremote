@@ -193,6 +193,7 @@ sshremote remote-access ask on|off               # the person here lets each vie
 sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
 sshremote remote-access straight|lan|direct on|off  # past the relay; found nearby; straight in nearby
 sshremote remote-access service start|stop       # the service, without removing it
+sshremote remote-access viewers | end N          # who is connected now; end one
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN

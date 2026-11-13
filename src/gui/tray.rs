@@ -19,7 +19,8 @@ pub(super) struct Status {
     /// straight in from it.
     pub settings: Option<[bool; 4]>,
     /// Viewers connected by the ID now.
-    pub viewers: usize,
+    #[cfg(feature = "remote")]
+    pub connected: Vec<crate::access::Viewer>,
     /// The icon's own program: Quit hides the icon, and changes go through the administrator
     /// prompt (the settings are the administrators').
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -53,6 +54,9 @@ mod item {
     pub const START: usize = 11;
     pub const STOP: usize = 12;
     pub const REMOVE: usize = 13;
+    /// Ending the connection of the viewer listed n-th, from here.
+    pub const END: usize = 200;
+    pub const END_MOST: usize = 50;
     pub const QUIT: usize = 99;
 }
 
@@ -91,12 +95,22 @@ pub(super) fn entries(s: &Status) -> Vec<Entry> {
     who.push(Entry::Separator);
     who.push(it(item::SETTINGS, "All remote access settings\u{2026}", true, None));
     m.push(Entry::Sub { label: "Who comes in".into(), entries: who });
-    let connected = match s.viewers {
-        0 => "Nobody is connected".to_string(),
-        1 => "1 connected: show the window".to_string(),
-        n => format!("{n} connected: show their windows"),
-    };
-    m.push(it(item::SHOW, &connected, s.viewers > 0, None));
+    // Whoever is connected: their window brought up, or their connection ended, each.
+    #[cfg(feature = "remote")]
+    match s.connected.len() {
+        0 => m.push(it(0, "Nobody is connected", false, None)),
+        n => {
+            let mut sub = Vec::new();
+            if cfg!(windows) {
+                sub.push(it(item::SHOW, if n == 1 { "Show their window" } else { "Show their windows" }, true, None));
+                sub.push(Entry::Separator);
+            }
+            for (i, v) in s.connected.iter().take(item::END_MOST).enumerate() {
+                sub.push(it(item::END + i, &format!("End: {}", v.describe()), true, None));
+            }
+            m.push(Entry::Sub { label: if n == 1 { "1 connected now".into() } else { format!("{n} connected now") }, entries: sub });
+        }
+    }
     let svc = match s.service {
         Some((true, runs)) => vec![it(item::START, "Start", !runs, None), it(item::STOP, "Stop", runs, None), it(item::REMOVE, "Remove", true, None)],
         Some((false, _)) => vec![it(item::INSTALL, "Install: start remote access with the computer", true, None)],
@@ -156,6 +170,12 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
                     arboard::Clipboard::new().and_then(|mut c| c.set_text(id.clone())).map_err(|e| e.to_string())?;
                 }
             }
+            n if (item::END..item::END + item::END_MOST).contains(&n) => {
+                if let Some(v) = status.connected.get(n - item::END) {
+                    // The icon's own program asks the service; the window's ends its own.
+                    if status.alone { access::ask_to_end(v.n)? } else { access::disconnect(v.n) }
+                }
+            }
             item::INSTALL => as_admin(&["install"], &access::install_service)?,
             item::REMOVE => as_admin(&["uninstall"], &access::uninstall_service)?,
             item::START => as_admin(&["service", "start"], &|| access::service_control(true))?,
@@ -186,7 +206,7 @@ fn read_status() -> Status {
         }
         // Who is connected counts only while the service runs.
         if st.service.is_some_and(|s| s.1) {
-            st.viewers = v.get("viewers").and_then(|x| x.as_array()).map_or(0, |a| a.len());
+            st.connected = crate::access::service_viewers();
         }
     }
     #[cfg(not(windows))]
@@ -254,8 +274,8 @@ mod sni {
             Some((false, _)) => "Remote access is off".to_string(),
             None => "Remote access is not set up".to_string(),
         };
-        if s.viewers > 0 {
-            t.push_str(&format!("; {} connected now", s.viewers));
+        if !s.connected.is_empty() {
+            t.push_str(&format!("; {} connected now", s.connected.len()));
         }
         t
     }
@@ -553,7 +573,7 @@ mod sni {
             }
             *status.lock().unwrap_or_else(|e| e.into_inner()) = now.clone();
             // A change of what the menu says: told, so an open one is made again.
-            let said = (format!("{:?}{:?}{:?}{}", now.access, now.service, now.settings, now.viewers), revision.load(Ordering::Relaxed));
+            let said = (format!("{:?}{:?}{:?}{:?}", now.access, now.service, now.settings, now.connected), revision.load(Ordering::Relaxed));
             if said.0 != last.0 || said.1 != last.1 {
                 if said.0 != last.0 {
                     revision.fetch_add(1, Ordering::Relaxed);
@@ -726,8 +746,9 @@ mod win {
             Some((false, _)) => "SSH Remote: remote access is off".to_string(),
             None => "SSH Remote".to_string(),
         };
-        if status.viewers > 0 {
-            tip.push_str(&format!("; {} connected now", status.viewers));
+        #[cfg(feature = "remote")]
+        if !status.connected.is_empty() {
+            tip.push_str(&format!("; {} connected now", status.connected.len()));
         }
         copy(&mut nid.szTip, &tip);
         let mut inner = inner;
