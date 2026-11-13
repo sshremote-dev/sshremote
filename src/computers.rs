@@ -28,6 +28,9 @@ pub struct Computer {
     pub tunnels: Vec<Tunnel>,
     /// Its network card's hardware address, to wake it (Wake-on-LAN); empty: not known.
     pub mac: String,
+    /// Where it answered on this network last (`IP:PORT`, comma separated), to reach it by its ID
+    /// straight rather than through the relay.
+    pub direct: String,
 }
 
 impl Computer {
@@ -57,6 +60,7 @@ impl Computer {
             "last": self.last_used,
             "tunnels": self.tunnels.iter().map(Tunnel::to_json).collect::<Vec<_>>(),
             "mac": self.mac,
+            "direct": self.direct,
         })
     }
 
@@ -71,6 +75,7 @@ impl Computer {
             in_ssh_config: false,
             tunnels: v.get("tunnels").and_then(Value::as_array).map(|a| a.iter().filter_map(Tunnel::from_json).collect()).unwrap_or_default(),
             mac: v.get("mac").and_then(Value::as_str).filter(|m| crate::lan::parse_mac(m).is_some()).unwrap_or("").to_string(),
+            direct: v.get("direct").and_then(Value::as_str).unwrap_or("").to_string(),
         })
     }
 }

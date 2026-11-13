@@ -319,6 +319,13 @@ impl App {
                         changed = true;
                     }
                     ui.add(egui::Label::new(RichText::new("They are told its ID, name and network card, never its password, and can add it without typing the ID.").weak().size(12.0)).wrap());
+                    if ui.checkbox(&mut cfg.direct, "Let viewers on this network come straight in").changed() {
+                        changed = true;
+                    }
+                    ui.add(
+                        egui::Label::new(RichText::new(format!("On port {}, with the same password, without the relay: quicker, and nothing leaves the network.", crate::net::DIRECT_PORT)).weak().size(12.0))
+                            .wrap(),
+                    );
                 });
                 ui.add_space(kit::GAP);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(theme::primary("Done")).clicked()).inner

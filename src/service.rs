@@ -136,6 +136,11 @@ pub fn install() -> Result<(), String> {
         "netsh",
         &["advfirewall", "firewall", "add", "rule", &format!("name={FIREWALL}"), "dir=in", "action=allow", "protocol=UDP", &format!("localport={}", crate::lan::PORT), &format!("program={}", exe.display())],
     );
+    // And viewers on this network coming straight in.
+    let _ = run(
+        "netsh",
+        &["advfirewall", "firewall", "add", "rule", &format!("name={FIREWALL}"), "dir=in", "action=allow", "protocol=TCP", &format!("localport={}", crate::net::DIRECT_PORT), &format!("program={}", exe.display())],
+    );
     run("sc", &["start", NAME])?;
     println!("sshremote service installed and started ({bin})");
     Ok(())

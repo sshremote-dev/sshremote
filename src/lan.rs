@@ -18,6 +18,8 @@ pub struct Found {
     pub ip: IpAddr,
     /// Its hardware address, for waking it later; empty when it did not say.
     pub mac: String,
+    /// The port it takes viewers on straight, if it does.
+    pub port: Option<u16>,
 }
 
 impl Found {
@@ -25,19 +27,45 @@ impl Found {
     pub fn address(&self) -> String {
         format!("sshremote://{}@{}", self.id, self.relay)
     }
+
+    /// Where it is reached straight, if it is.
+    pub fn direct(&self) -> String {
+        self.port.map(|p| std::net::SocketAddr::new(self.ip, p).to_string()).unwrap_or_default()
+    }
+}
+
+/// Notes where the computers in the list that answered are now (their straight address and
+/// network card), so the next connection to one goes straight. Returns those that answered.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn refresh_known(wait: Duration) -> Vec<Found> {
+    let found = find(wait);
+    for c in crate::computers::all() {
+        if let Some(f) = c.id().and_then(|id| found.iter().find(|f| f.id == id)) {
+            let (direct, mac) = (f.direct(), f.mac.clone());
+            if c.direct != direct || (!mac.is_empty() && c.mac != mac) {
+                crate::computers::update(&c.address, |k| {
+                    k.direct = direct;
+                    if !mac.is_empty() {
+                        k.mac = mac;
+                    }
+                });
+            }
+        }
+    }
+    found
 }
 
 /// Answers finders on this network while `keep` gives this computer's ID and relay; at most a
 /// few answers a second, so it cannot be used to flood anyone.
-#[cfg_attr(not(feature = "remote"), allow(dead_code))]
-pub fn answer(keep: impl Fn() -> Option<(String, String)>) {
+#[cfg(feature = "remote")]
+pub fn answer(keep: impl Fn() -> Option<(String, String, bool)>) {
     let Ok(sock) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, PORT)) else { return };
     let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
     let name = crate::here::look().name;
     let mac = macs().into_iter().next().unwrap_or_default();
     let mut buf = [0u8; 64];
     let (mut window, mut told) = (Instant::now(), 0);
-    while let Some((id, relay)) = keep() {
+    while let Some((id, relay, direct)) = keep() {
         let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
         if &buf[..n] != ASK {
             continue;
@@ -49,7 +77,9 @@ pub fn answer(keep: impl Fn() -> Option<(String, String)>) {
         if told > 10 {
             continue;
         }
-        let reply = serde_json::json!({ "sshremote": 1, "id": id, "relay": relay, "name": name, "mac": mac });
+        // The port it takes viewers straight on, when it does.
+        let port = direct.then_some(crate::net::DIRECT_PORT);
+        let reply = serde_json::json!({ "sshremote": 1, "id": id, "relay": relay, "name": name, "mac": mac, "port": port });
         let _ = sock.send_to(reply.to_string().as_bytes(), from);
     }
 }
@@ -77,7 +107,8 @@ pub fn find(wait: Duration) -> Vec<Found> {
         if v.get("sshremote").is_none() || !id.bytes().all(|b| b.is_ascii_digit()) || id.is_empty() || out.iter().any(|f| f.id == id) {
             continue;
         }
-        out.push(Found { id, relay: s("relay"), name: s("name"), ip: from.ip(), mac: s("mac") });
+        let port = v.get("port").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok());
+        out.push(Found { id, relay: s("relay"), name: s("name"), ip: from.ip(), mac: s("mac"), port });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
@@ -186,11 +217,12 @@ mod tests {
     }
 
     /// A finder here finds an answerer here, by the general broadcast.
+    #[cfg(feature = "remote")]
     #[test]
     fn a_computer_answering_is_found() {
         let on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let keep = on.clone();
-        let t = std::thread::spawn(move || answer(|| keep.load(std::sync::atomic::Ordering::Relaxed).then(|| ("482913075".into(), "relay.example".into()))));
+        let t = std::thread::spawn(move || answer(|| keep.load(std::sync::atomic::Ordering::Relaxed).then(|| ("482913075".into(), "relay.example".into(), true))));
         std::thread::sleep(Duration::from_millis(200));
         let found = find(Duration::from_millis(800));
         on.store(false, std::sync::atomic::Ordering::Relaxed);

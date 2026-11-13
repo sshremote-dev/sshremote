@@ -403,7 +403,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::lan::find(std::time::Duration::from_millis(1500)));
+            let _ = tx.send(crate::lan::refresh_known(std::time::Duration::from_millis(1500)));
             ctx.request_repaint();
         });
         self.lan = Lan { coming: Some(rx), ..Default::default() };
@@ -463,6 +463,7 @@ impl App {
             crate::computers::update(&f.address(), |c| {
                 c.name = f.name.clone();
                 c.mac = f.mac.clone();
+                c.direct = f.direct();
             });
             self.computers_at = None;
             self.lan.said = format!("{} was added: open it with its password.", if f.name.is_empty() { "The computer" } else { &f.name });

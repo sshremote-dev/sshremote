@@ -280,6 +280,53 @@ fn now(check: &mut dyn FnMut() -> bool) -> io::Result<bool> {
     Ok(check())
 }
 
+/// The port a computer with remote access answers on directly, on its own network.
+pub const DIRECT_PORT: u16 = 7073;
+
+/// Viewer side: straight to the computer at one of `direct` (addresses it was last found at on
+/// this network), without the relay; None when none answers in a moment as that ID.
+fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Result<Option<(SealedReader, SealedWriter)>, String> {
+    use std::net::ToSocketAddrs;
+    for d in direct {
+        let Some(to) = d.to_socket_addrs().ok().and_then(|mut a| a.next()) else { continue };
+        let Ok(mut s) = TcpStream::connect_timeout(&to, Duration::from_millis(700)) else { continue };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        if writeln!(s, "direct {}", addr.id).is_err() || !crate::access::line(&mut s).is_ok_and(|l| l == "ok") {
+            continue;
+        }
+        let _ = s.set_read_timeout(Some(VERDICT_LIMIT + Duration::from_secs(15)));
+        // A wrong password is as wrong here as through the relay: no second try there.
+        let pair = match handshake(s, password, true, &now) {
+            Ok(p) => p,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e.to_string()),
+            Err(_) => continue,
+        };
+        if let Ok(t) = pair.1.stream() {
+            let _ = t.set_read_timeout(Some(Duration::from_secs(120)));
+        }
+        return Ok(Some(pair));
+    }
+    Ok(None)
+}
+
+/// The computer's side of a direct connection: the viewer names the ID it wants; anything else
+/// is turned away before a password is looked at.
+pub fn accept_direct(s: &mut TcpStream, id: &str) -> bool {
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let asked = crate::access::line(s).ok();
+    let ok = asked.as_deref().and_then(|l| l.strip_prefix("direct ")) == Some(id);
+    ok && writeln!(s, "ok").is_ok()
+}
+
+/// Viewer side: reaches the ID directly when it is on this network at an address it was found
+/// at, else through its relay, and runs the handshake.
+pub fn connect_via(addr: &Address, password: &str, direct: &[String]) -> Result<(SealedReader, SealedWriter), String> {
+    if let Some(pair) = connect_direct(addr, password, direct)? {
+        return Ok(pair);
+    }
+    connect(addr, password)
+}
+
 /// Viewer side: reaches the ID through its relay and runs the handshake.
 pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWriter), String> {
     // Dialled as remote access does: port 80 when the relay's own port is shut.
@@ -421,6 +468,33 @@ mod tests {
         let (v, a) = pair("123456789", "123456789");
         assert_eq!(v.unwrap(), "hello over the sealed stream");
         assert!(a.is_ok());
+    }
+
+    /// Straight to a computer on this network: in with its ID and password; a wrong password
+    /// is an answer (no second try through the relay); another ID is no answer at all.
+    #[test]
+    fn a_computer_on_this_network_is_reached_straight() {
+        let serve = |pw: &'static str| {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = l.local_addr().unwrap().to_string();
+            thread::spawn(move || {
+                let (mut s, _) = l.accept().unwrap();
+                if accept_direct(&mut s, "482913075") {
+                    let _ = handshake_agent(s, pw, &now);
+                }
+            });
+            at
+        };
+        let addr = Address { id: "482913075".into(), relay: "relay.example".into() };
+        let at = serve("right one");
+        assert!(matches!(connect_direct(&addr, "right one", &[at]), Ok(Some(_))));
+        let at = serve("right one");
+        assert!(connect_direct(&addr, "wrong one", &[at]).is_err());
+        let other = Address { id: "111222333".into(), relay: "relay.example".into() };
+        let at = serve("right one");
+        assert!(matches!(connect_direct(&other, "right one", &[at]), Ok(None)));
+        // Nobody there: no answer, quickly.
+        assert!(matches!(connect_direct(&addr, "right one", &["127.0.0.1:1".into()]), Ok(None)));
     }
 
     #[test]

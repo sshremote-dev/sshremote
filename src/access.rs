@@ -38,11 +38,13 @@ pub struct Config {
     pub allow: u8,
     /// Whether computers on this network may find this one by asking (`lan`).
     pub lan: bool,
+    /// Whether viewers on this network may come straight in (`net::DIRECT_PORT`), not through the relay.
+    pub direct: bool,
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -61,6 +63,7 @@ impl Config {
             ask: v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false),
             allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
             lan: v.get("lan").and_then(|x| x.as_bool()).unwrap_or(true),
+            direct: v.get("direct").and_then(|x| x.as_bool()).unwrap_or(true),
         })
     }
 }
@@ -181,7 +184,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: true }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -475,8 +478,12 @@ impl Guard {
 pub fn run(keep: impl Fn() -> Option<Config>) {
     // Computers on this network that ask are told this one's ID, while remote access is on and
     // that is allowed (one process answers: another that runs it too finds the port taken).
-    thread::spawn(|| crate::lan::answer(|| stored().ok().flatten().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay))));
+    thread::spawn(|| crate::lan::answer(|| stored().ok().flatten().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay, c.direct))));
     let guard = Arc::new(Guard::default());
+    {
+        let guard = guard.clone();
+        thread::spawn(move || listen_direct(guard));
+    }
     let mut wait = 2;
     let mut password = None;
     while let Some(mut cfg) = keep() {
@@ -594,6 +601,35 @@ fn sleep_while(keep: &impl Fn() -> Option<Config>, secs: u64) {
     }
 }
 
+/// Viewers on this network straight in, while remote access and that are on: the same password
+/// check, turn and limits as through the relay.
+fn listen_direct(guard: Arc<Guard>) {
+    // Another process running remote access holds it already.
+    let Ok(l) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, crate::net::DIRECT_PORT)) else { return };
+    let _ = l.set_nonblocking(true);
+    while let Some(cfg) = stored().ok().flatten().filter(|c| c.enabled && c.direct) {
+        match l.accept() {
+            Ok((mut s, _)) => {
+                let _ = s.set_nonblocking(false);
+                if guard.locked() || guard.calls.fetch_add(1, Ordering::AcqRel) >= MOST_CALLS {
+                    if !guard.locked() {
+                        guard.calls.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    continue;
+                }
+                let guard = guard.clone();
+                thread::spawn(move || {
+                    if crate::net::accept_direct(&mut s, &cfg.id) {
+                        serve_call(s, &cfg, &guard);
+                    }
+                    guard.calls.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
+            Err(_) => thread::sleep(Duration::from_millis(200)),
+        }
+    }
+}
+
 /// One viewer: a connection of its own through the relay at once (the relay waits only so
 /// long), then the password checked in turn, then the agent.
 fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
@@ -602,6 +638,11 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
     }
+    serve_call(s, cfg, guard);
+}
+
+/// A viewer's connection, by the relay or straight: the password checked in turn, then the agent.
+fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard) {
     // The exchange runs at the viewer's pace with nobody waiting on it; only checking its proof
     // of the password takes the turn, after the delay wrong ones have earned.
     let _ = s.set_read_timeout(Some(Duration::from_secs(20)));

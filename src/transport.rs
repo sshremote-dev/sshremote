@@ -48,7 +48,13 @@ impl Drop for Link {
 
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {
-        let (r, w) = crate::net::connect(addr, password)?;
+        // Where it was last found on this network: tried first, straight, before the relay.
+        let direct: Vec<String> = crate::computers::all()
+            .into_iter()
+            .find(|c| c.id() == Some(addr.id.as_str()))
+            .map(|c| c.direct.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect())
+            .unwrap_or_default();
+        let (r, w) = crate::net::connect_via(addr, password, &direct)?;
         let socket = w.stream().ok();
         return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, socket });
     }
