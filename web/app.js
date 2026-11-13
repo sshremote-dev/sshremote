@@ -12,6 +12,9 @@ const MAX_TRANSFER = 2 * 1024 ** 3, CHUNK = 64 * 1024, WINDOW = 1024 * 1024;
 // ----- Small helpers -------------------------------------------------------------------------------
 
 const ICONS = {
+  sun: "M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8z|M12 2v2|M12 20v2|M4.9 4.9l1.4 1.4|M17.7 17.7l1.4 1.4|M2 12h2|M20 12h2|M4.9 19.1l1.4-1.4|M17.7 6.3l1.4-1.4",
+  moon: "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z",
+  auto: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z|M12 3v18|M12 7.5h7|M12 12h9|M12 16.5h7",
   terminal: "M4 5h16v14H4z|M7.5 9.5 10 12l-2.5 2.5|M12.5 15h4",
   monitor: "M3 4h18v12H3z|M8 20h8|M12 16v4",
   folder: "M3 6.5h6l2 2h10V19H3z",
@@ -167,6 +170,8 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem("sshremote." + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { if (v === null) localStorage.removeItem("sshremote." + k); else localStorage.setItem("sshremote." + k, JSON.stringify(v)); } catch { /* private mode */ } },
 };
+// The theme chosen here (light or dark) wins over the system's, from the first paint on.
+{ const t = store.get("theme", ""); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; }
 const b64 = u => btoa(String.fromCharCode(...u));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
@@ -259,7 +264,31 @@ function refreshForm() {
   const match = p && saved().find(e => e.key === keyOf({ ...p, port: ssh ? $("port").value.trim() : "" }));
   $("pw").placeholder = match?.pw ? "Saved password (type to change)" : ssh ? "Password (none with SSH keys)" : "Password set on that computer";
   $("keep").parentElement.hidden = !canKeep;
+  // What was typed, named; and what the password is for it.
+  $("kind").textContent = !p ? "" : ssh ? "SSH host" : "ID";
+  $("pwlabel").textContent = ssh ? "SSH password" : "Password";
+  $("hint").textContent = !p ? "" : ssh
+    ? (signedIn() ? "SSH leaves from this gateway's server." : "")
+    : "A one-time password works too. Without any, leave it empty: the person there is asked to let you in, where that computer allows it.";
 }
+
+// The page's theme: the system's, or light or dark as chosen here (kept in this browser).
+function themeButton() {
+  const now = store.get("theme", "");
+  const [glyph, title] = { light: ["sun", "Light theme (click: dark)"], dark: ["moon", "Dark theme (click: the system's)"] }[now] || ["auto", "The system's theme (click: light)"];
+  const b = $("theme");
+  b.replaceChildren(icon(glyph));
+  b.title = title;
+  b.setAttribute("aria-label", title);
+}
+$("theme").onclick = () => {
+  const next = { "": "light", light: "dark", dark: "" }[store.get("theme", "")] ?? "";
+  store.set("theme", next);
+  if (next) document.documentElement.dataset.theme = next;
+  else delete document.documentElement.dataset.theme;
+  themeButton();
+};
+themeButton();
 
 $("addr").addEventListener("input", () => {
   // An ID is spaced in threes as the app shows it.
@@ -292,7 +321,8 @@ $("form").onsubmit = async e => {
   if (!typed && known?.pw) {
     try { password = await unseal(known.pw); } catch { fail("The saved password could not be read on this browser; type it again."); $("pw").focus(); return; }
   }
-  if (p.kind === "id" && !password) { fail("Enter the password set on that computer."); $("pw").focus(); return; }
+  // An ID without a password asks the person there to let this page in (where that computer
+  // takes such requests; else it says so and the password is asked for).
   if (p.kind === "ssh" && !signedIn()) {
     const gp = $("gatepw").value;
     if (!gp) { $("gatebox").hidden = false; fail("Sign in to this gateway first: its password."); $("gatepw").focus(); return; }
@@ -312,7 +342,8 @@ function renderSaved() {
   const box = $("saved");
   box.textContent = "";
   $("savedn").textContent = list.length ? list.length : "";
-  if (!list.length) { box.append(h("div", { class: "empty", text: "Connections you open are kept here, on this browser only." })); return; }
+  $("guide").hidden = list.length > 0;
+  if (!list.length) { box.append(h("div", { class: "empty", text: "Computers you open are kept here, to open again with a click." })); return; }
   for (const e of list) {
     const sub = [e.kind === "id" ? "Remote access by ID" : e.kind === "gw" ? "On this gateway" : "SSH" + (e.port ? " · port " + e.port : ""),
       e.pw ? "password kept" : null, e.last ? ago(e.last) : null].filter(Boolean).join(" · ");
@@ -357,13 +388,6 @@ async function openSaved(e) {
   let password = "";
   if (e.pw) {
     try { password = await unseal(e.pw); } catch { password = ""; }
-  }
-  if (e.kind === "id" && !password) {
-    $("addr").value = spaced(e.address);
-    refreshForm();
-    fail("Enter the password set on that computer.");
-    $("pw").focus();
-    return;
   }
   if ((e.kind === "ssh" || e.kind === "gw") && !signedIn()) {
     $("addr").value = e.address;
@@ -640,6 +664,7 @@ class Client {
 
   state(text, dot) {
     $("state").textContent = text;
+    $("state").title = text;
     $("dot").className = $("tabdot").className = "dot" + (dot ? " " + dot : "");
   }
   // Before the session is up, what is asked waits: the gateway reads the sign-in first, and a

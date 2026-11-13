@@ -13,8 +13,28 @@
     --fg: #e6e8ee; --dim: #9aa3b2; --faint: #6b7385;
     --primary: #2b59c3; --primary-hi: #3567d6; --accent: #5aa9ff; --sel: #1d3466; --sel-line: #2f5bb3;
     --good: #3fb950; --warn: #e3b341; --bad: #f06e64;
+    --bad-bg: #3a1820; --bad-line: #5a2430; --veil: #0f1115e0; --row-line: #14171d; --shadow: #0007;
     --r: 8px; --r-sm: 6px;
     --mono: "Cascadia Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  }
+  /* Light: chosen here, or the system's when nothing is chosen. */
+  :root[data-theme=light] {
+    color-scheme: light;
+    --bg: #f5f6f8; --panel: #ffffff; --raised: #eef0f4; --hover: #e6e9ef; --line: #d8dce4; --line-soft: #e7eaf0;
+    --fg: #1a1e26; --dim: #545e6e; --faint: #7a8392;
+    --primary: #2b59c3; --primary-hi: #2450b0; --accent: #2b6fd6; --sel: #dbe6fb; --sel-line: #9db7ea;
+    --good: #1f8a3a; --warn: #9a6b06; --bad: #c63b31;
+    --bad-bg: #fbe3e1; --bad-line: #efb7b2; --veil: #f5f6f8e8; --row-line: #eceef2; --shadow: #0002;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme=dark]) {
+      color-scheme: light;
+      --bg: #f5f6f8; --panel: #ffffff; --raised: #eef0f4; --hover: #e6e9ef; --line: #d8dce4; --line-soft: #e7eaf0;
+      --fg: #1a1e26; --dim: #545e6e; --faint: #7a8392;
+      --primary: #2b59c3; --primary-hi: #2450b0; --accent: #2b6fd6; --sel: #dbe6fb; --sel-line: #9db7ea;
+      --good: #1f8a3a; --warn: #9a6b06; --bad: #c63b31;
+      --bad-bg: #fbe3e1; --bad-line: #efb7b2; --veil: #f5f6f8e8; --row-line: #eceef2; --shadow: #0002;
+    }
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -34,28 +54,48 @@
   .btn.solid:hover { background: var(--hover); }
   .btn.primary { background: var(--primary); color: #fff; font-weight: 600; }
   .btn.primary:hover { background: var(--primary-hi); }
-  .btn.danger:hover { background: #3a1820; color: var(--bad); }
+  .btn.danger:hover { background: var(--bad-bg); color: var(--bad); }
   .btn.on { background: var(--sel); color: var(--fg); border-color: var(--sel-line); }
   .btn.icon { padding: 6px; }
 
   /* ---- The open page ---- */
-  #home { max-width: 620px; margin: 0 auto; padding: 8vh 20px 40px; }
-  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
-  .brand img { width: 34px; height: 34px; }
-  .brand h1 { margin: 0; font-size: 22px; font-weight: 650; } .brand h1 small { color: var(--dim); font-weight: 400; font-size: 15px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-  .card h2 { margin: 0 0 4px; font-size: 16px; } .card p.sub { margin: 0 0 14px; color: var(--dim); font-size: 13px; }
+  #home { max-width: 1040px; margin: 0 auto; padding: 0 24px 36px; }
+  .top { display: flex; align-items: center; gap: 12px; padding: 18px 0 26px; }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--fg); text-decoration: none; margin-right: auto; }
+  .brand img { width: 30px; height: 30px; }
+  .brand span { font-size: 19px; font-weight: 650; } .brand small { color: var(--dim); font-size: 14px; }
+  .top nav { display: flex; align-items: center; gap: 4px; }
+  .top nav a:not(.btn) { color: var(--dim); text-decoration: none; padding: 6px 10px; border-radius: var(--r-sm); font-size: 13.5px; }
+  .top nav a:not(.btn):hover { color: var(--fg); background: var(--hover); }
+  .top nav a.btn { text-decoration: none; font-size: 13.5px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+  .cols > div > .section:first-child { margin-top: 0; }
+  @media (max-width: 860px) { .cols { grid-template-columns: minmax(0, 1fr); } .top nav a.hide-narrow { display: none; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card h2 { margin: 0 0 4px; font-size: 17px; } .card p.sub { margin: 0 0 16px; color: var(--dim); font-size: 13px; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row + .row, .row + label, label + .row { margin-top: 8px; }
-  #addr { flex: 1; font-size: 16px; padding: 11px 12px; }
-  #go { padding: 11px 18px; font-size: 15px; }
+  label.field { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
+  label.field:first-of-type { margin-top: 0; }
+  .kind { font-weight: 600; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--sel); color: var(--accent); border: 1px solid var(--sel-line); }
+  .kind:empty { display: none; }
+  #addr { width: 100%; font-size: 16px; padding: 11px 12px; }
+  #go { width: 100%; margin-top: 16px; padding: 11px 18px; font-size: 15px; }
   #pw { flex: 1; } #port { width: 110px; } #code { width: 150px; }
-  label.check { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; cursor: pointer; margin-top: 10px; user-select: none; }
+  .hint { margin: 8px 0 0; color: var(--faint); font-size: 12.5px; } .hint:empty { display: none; }
+  label.check { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; cursor: pointer; margin-top: 12px; user-select: none; }
   label.check input { accent-color: var(--primary); width: 15px; height: 15px; margin: 0; }
   .note { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--raised); border: 1px solid var(--line); color: var(--dim); font-size: 13px; }
   .note b { color: var(--fg); font-weight: 600; }
   #gatebox .row { margin-top: 8px; } #gatepw { flex: 1; }
-  #error { color: var(--bad); font-size: 13px; min-height: 0; margin-top: 10px; } #error:empty { display: none; }
+  #error { color: var(--bad); font-size: 13px; min-height: 0; margin-top: 12px; } #error:empty { display: none; }
+  .guide { margin-top: 24px; }
+  .guide h3 { margin: 0 0 10px; font-size: 14px; }
+  .guide ol { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 10px; }
+  .guide li { counter-increment: step; display: grid; grid-template-columns: 24px 1fr; gap: 10px; color: var(--dim); font-size: 13px; }
+  .guide li::before { content: counter(step); width: 22px; height: 22px; border-radius: 11px; display: grid; place-items: center;
+                      background: var(--raised); border: 1px solid var(--line); color: var(--fg); font-size: 12px; font-weight: 600; }
+  .guide li b { color: var(--fg); font-weight: 600; }
   .section { margin-top: 26px; }
   .section h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
   .section h3 .count { color: var(--faint); font-weight: 500; }
@@ -74,16 +114,20 @@
   .item .acts { display: flex; gap: 4px; opacity: 0; }
   .item:hover .acts, .item.sel .acts, .item:focus-within .acts { opacity: 1; }
   .item .acts .btn.primary { padding: 5px 12px; }
-  footer { margin-top: 28px; color: var(--faint); font-size: 12px; text-align: center; }
+  /* No pointer to hover with: the row opens it, and its menu is always there. */
+  @media (hover: none) and (pointer: coarse), (max-width: 600px) { .item .acts { opacity: 1; } .item .acts .btn.primary { display: none; } }
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 12px; text-align: center; }
   footer a { color: var(--dim); }
 
   /* ---- A connection ---- */
   #client { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
   #bar { flex: none; height: 44px; display: flex; align-items: center; gap: 4px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
   #client.folded #bar { display: none; }
-  #who { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 6px; }
-  #who b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
-  #who span { color: var(--faint); font-size: 12px; white-space: nowrap; }
+  /* The name keeps its place; the state gives way, cut short, when the tools need the room. */
+  #who { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; overflow: hidden; padding: 0 6px; }
+  #who .dot { flex: none; }
+  #who b { flex: 0 0 auto; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+  #who span { flex: 0 1 auto; min-width: 0; color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
   .dot.up { background: var(--good); } .dot.down { background: var(--bad); }
   .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r); padding: 2px; margin: 0 8px; }
@@ -141,7 +185,7 @@
   .wait .bad { color: var(--bad); }
   .spin { width: 22px; height: 22px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; margin: 0 auto 10px; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #banner { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #3a1820; color: var(--fg); border-bottom: 1px solid #5a2430; font-size: 13px; }
+  #banner { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bad-bg); color: var(--fg); border-bottom: 1px solid var(--bad-line); font-size: 13px; }
   #banner .grow { color: var(--dim); }
 
   /* Files */
@@ -153,7 +197,7 @@
   #ftable .head { position: sticky; top: 0; height: 30px; background: var(--panel); border-bottom: 1px solid var(--line); color: var(--dim); font-size: 12px; z-index: 1; }
   #ftable .head span { cursor: pointer; } #ftable .head span:hover { color: var(--fg); }
   #ftable .head .r, #ftable .f .r { text-align: right; }
-  #ftable .f { height: 32px; cursor: default; border-bottom: 1px solid #14171d; }
+  #ftable .f { height: 32px; cursor: default; border-bottom: 1px solid var(--row-line); }
   #ftable .f:hover { background: var(--raised); }
   #ftable .f.sel { background: var(--sel); }
   #ftable .f .n { display: flex; align-items: center; gap: 9px; min-width: 0; }
@@ -172,7 +216,7 @@
   .xfer .state { color: var(--dim); font-size: 12px; } .xfer.bad .state { color: var(--bad); } .xfer.ok .state { color: var(--good); }
   .xfer progress { grid-column: 1 / -1; width: 100%; height: 3px; accent-color: var(--accent); }
   .xfer .btn { padding: 2px 6px; }
-  #drop { position: absolute; inset: 8px; border: 2px dashed var(--accent); border-radius: 12px; background: #0f1115e0; display: none;
+  #drop { position: absolute; inset: 8px; border: 2px dashed var(--accent); border-radius: 12px; background: var(--veil); display: none;
           align-items: center; justify-content: center; font-size: 17px; pointer-events: none; z-index: 5; }
   #vfiles.dragging #drop { display: flex; }
 
@@ -211,38 +255,60 @@
 </head>
 <body>
 <main id="home">
-  <div class="brand"><img src="favicon.svg" alt=""><h1>SSH Remote <small>web</small></h1></div>
-  <section class="card">
-    <h2>Connect</h2>
-    <p class="sub">A computer by its remote access ID, or an SSH host such as user@192.168.1.20.</p>
-    <form id="form" autocomplete="off">
-      <div class="row">
-        <input id="addr" placeholder="ID or user@host" spellcheck="false" autocapitalize="off" aria-label="ID or SSH host" autofocus>
-        <button class="btn primary" id="go">Connect</button>
-      </div>
-      <div class="row">
-        <input id="pw" type="password" placeholder="Password" aria-label="Password" autocomplete="off">
-        <input id="code" placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" autocomplete="one-time-code" hidden>
-        <input id="port" placeholder="Port 22" inputmode="numeric" aria-label="Port" hidden>
-      </div>
-      <label class="check"><input type="checkbox" id="keep"> Remember the password on this browser</label>
-      <div id="gatebox" class="note" hidden>
-        <b>SSH leaves from this gateway's server.</b> Sign in to it once with its password; it then knows this browser.
-        <div class="row"><input id="gatepw" type="password" placeholder="Gateway password" aria-label="Gateway password" autocomplete="current-password"></div>
-        <label class="check"><input type="checkbox" id="gatekeep" checked> Keep this browser signed in for 30 days</label>
-      </div>
-      <div id="error" role="alert"></div>
-    </form>
-  </section>
-  <section class="section">
-    <h3>Saved <span class="count" id="savedn"></span></h3>
-    <div class="list" id="saved"></div>
-  </section>
-  <section class="section" id="gatesec" hidden>
-    <h3>On this gateway <button class="btn" id="signout" type="button">Sign out</button></h3>
-    <div class="list" id="ghosts"></div>
-  </section>
-  <footer>Saved connections stay in this browser only. <a href="#" id="gatelink">Sign in to this gateway</a></footer>
+  <header class="top">
+    <a class="brand" href="/"><img src="favicon.svg" alt=""><span>SSH Remote</span><small>web</small></a>
+    <nav>
+      <a href="/docs.html#relay" class="hide-narrow">How it works</a>
+      <a href="/#download" class="btn solid">Get the app</a>
+      <button class="btn icon" id="theme" type="button"></button>
+    </nav>
+  </header>
+  <div class="cols">
+    <div>
+      <section class="card">
+        <h2>Connect to a computer</h2>
+        <p class="sub">Its terminal, screen and files, here in the page, with nothing to install.</p>
+        <form id="form" autocomplete="off">
+          <label class="field" for="addr">Remote access ID or SSH host <span class="kind" id="kind"></span></label>
+          <input id="addr" placeholder="123 456 789  or  user@192.168.1.20" spellcheck="false" autocapitalize="off" aria-label="ID or SSH host" autofocus>
+          <label class="field" for="pw" id="pwlabel">Password</label>
+          <div class="row">
+            <input id="pw" type="password" placeholder="Password" aria-label="Password" autocomplete="off">
+            <input id="code" placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" autocomplete="one-time-code" hidden>
+            <input id="port" placeholder="Port 22" inputmode="numeric" aria-label="Port" hidden>
+          </div>
+          <p class="hint" id="hint"></p>
+          <label class="check"><input type="checkbox" id="keep"> Remember the password on this browser</label>
+          <div id="gatebox" class="note" hidden>
+            <b>SSH leaves from this gateway's server.</b> Sign in to it once with its password; it then knows this browser.
+            <div class="row"><input id="gatepw" type="password" placeholder="Gateway password" aria-label="Gateway password" autocomplete="current-password"></div>
+            <label class="check"><input type="checkbox" id="gatekeep" checked> Keep this browser signed in for 30 days</label>
+          </div>
+          <div id="error" role="alert"></div>
+          <button class="btn primary" id="go">Connect</button>
+        </form>
+      </section>
+    </div>
+    <div>
+      <section class="section">
+        <h3>Computers <span class="count" id="savedn"></span></h3>
+        <div class="list" id="saved"></div>
+      </section>
+      <section class="section" id="gatesec" hidden>
+        <h3>On this gateway <button class="btn" id="signout" type="button">Sign out</button></h3>
+        <div class="list" id="ghosts"></div>
+      </section>
+      <section class="card guide" id="guide">
+        <h3>Reaching a computer by its ID</h3>
+        <ol>
+          <li><span><b>On that computer</b>, install SSH Remote and turn on <b>Remote access by ID</b>: it shows a 9-digit ID and its passwords.</span></li>
+          <li><span><b>Here</b>, type the ID and a password it shows. Without one, leave it empty: the person there is asked to let you in, and both screens show a code to compare.</span></li>
+          <li><span>Pick <b>Terminal</b>, <b>Screen</b> or <b>Files</b> at the top, and switch at any time.</span></li>
+        </ol>
+      </section>
+    </div>
+  </div>
+  <footer>What you save stays in this browser only. <a href="#" id="gatelink">Sign in to this gateway</a></footer>
 </main>
 
 <div id="client" hidden>
