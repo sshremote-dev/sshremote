@@ -54,6 +54,23 @@ pub fn clip_file(path: &Path) -> crate::proto::ClipFile {
 /// Where an upload goes that is to be pasted from the clipboard: `CLIPBOARD` and a batch number
 /// in place of the folder.
 pub const CLIPBOARD: &str = "\u{0}clipboard/";
+/// Where an upload goes for a terminal: `DROP` and a batch name, into `drop_dir`.
+pub const DROP: &str = "\u{0}drop/";
+
+/// The folder of files dropped or pasted on a terminal for one copy, in the user's own cache (as
+/// `sshremote`'s ssh copies use too); those over a day old are cleared as a new one is made.
+pub fn drop_dir(batch: &str) -> PathBuf {
+    let base = if cfg!(windows) { home().join(r"AppData\Local\Temp\sshremote-drop") } else { home().join(".cache/sshremote/drop") };
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 24 * 3600);
+            if old {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    base.join(clean(batch))
+}
 
 /// The folder of files copied over for one paste, out of the way in the user's own temporary
 /// folder; those of other days are cleared as a new one is made.

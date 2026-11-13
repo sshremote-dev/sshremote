@@ -19,6 +19,8 @@ mod input;
 mod paint;
 mod collect;
 mod reader;
+#[cfg(feature = "remote")]
+mod drop;
 
 use input::*;
 pub(crate) use paint::open_url;
@@ -449,6 +451,13 @@ struct Tab {
     /// Alt+arrows move between this window's own panes (not in a pane of the workspace, which
     /// takes them itself when it has panes to move between, and lets the shell have them else).
     nav_keys: bool,
+    /// Files dropped or pasted on it, being copied to where its shell runs (`drop`); whether
+    /// that host turned out to be Windows; and whether the last Ctrl+V pasted text.
+    #[cfg(feature = "remote")]
+    drop: Option<drop::Job>,
+    #[cfg(feature = "remote")]
+    drop_windows: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pasted: bool,
 }
 
 /// The Markdown view's document and what it was built from (a record's change count, or the
@@ -540,6 +549,11 @@ pub struct Profile {
 pub enum Cmd {
     Send(ToAgent),
     Close,
+    /// Copy these files into the host's drop folder for tab `tab`'s shell, then tell
+    /// `upload_done` where they went (an agent's shell; `drop`).
+    Upload { tab: u32, paths: Vec<std::path::PathBuf> },
+    /// Stop the copy for tab `tab`.
+    CancelUpload { tab: u32 },
 }
 
 pub struct TermWindow {
@@ -753,6 +767,11 @@ impl TermWindow {
             typed_at: 0.0,
             seek: None,
             nav_keys: true,
+            #[cfg(feature = "remote")]
+            drop: None,
+            #[cfg(feature = "remote")]
+            drop_windows: None,
+            pasted: false,
             md_heights: Default::default(),
             built_at: 0.0,
             seen_rev: 0,
@@ -816,6 +835,24 @@ impl TermWindow {
             keep.push(c);
         }
         *out = keep;
+    }
+
+    /// How far the copy for tab `tab` has come (`Cmd::Upload`): bytes sent of how many.
+    #[cfg(feature = "remote")]
+    pub fn upload_progress(&mut self, tab: u32, done: u64, total: u64) {
+        if let Some(job) = self.tabs.iter_mut().find(|t| t.id == tab).and_then(|t| t.drop.as_mut()) {
+            job.done.store(done, std::sync::atomic::Ordering::Release);
+            job.total.store(total, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// How the copy for tab `tab` ended: the paths there, typed at its prompt, or why not.
+    #[cfg(feature = "remote")]
+    pub fn upload_done(&mut self, tab: u32, r: Result<Vec<String>, String>) {
+        if let Some(job) = self.tabs.iter_mut().find(|t| t.id == tab).and_then(|t| t.drop.as_mut()) {
+            job.windows = r.as_ref().is_ok_and(|p| p.iter().any(|p| p.contains('\\') || p.as_bytes().get(1) == Some(&b':')));
+            *job.end.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        }
     }
 
     pub fn output(&mut self, id: u32, data: &[u8]) {
@@ -1397,6 +1434,8 @@ impl TermWindow {
             };
         }
         let keys = self.keys_on && self.renaming.is_none() && !ui.ctx().any_popup_open();
+        #[cfg(feature = "remote")]
+        let takes_drops = self.keys_on;
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The background, with the picture chosen in Appearance behind the text.
@@ -1422,6 +1461,27 @@ impl TermWindow {
                         }
                     }
                 };
+                // Files dropped on the focused pane go where its shell runs, their paths typed there.
+                #[cfg(feature = "remote")]
+                {
+                    // Where the pointer let go, when the system says: on this pane, or the focused
+                    // pane when it does not (a terminal beside a remote screen takes only its own).
+                    let on_pane = crate::sys::pointer_on_screen()
+                        .map(|(x, y)| crate::gui::workspace::window_point(ui.ctx(), Pos2::new(x as f32, y as f32)))
+                        .is_none_or(|p| r.contains(p));
+                    if focused && takes_drops && on_pane {
+                        if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
+                            drop::hint(t, ui, r);
+                        }
+                        let dropped: Vec<std::path::PathBuf> =
+                            ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+                        if !dropped.is_empty() {
+                            ui.ctx().input_mut(|i| i.raw.dropped_files.clear());
+                            drop::start(t, dropped, out);
+                        }
+                    }
+                    drop::tick(t, ui, r, out);
+                }
                 if several {
                     // The focused pane is outlined, as in Windows Terminal.
                     let color = if focused { ACCENT } else { Color32::from_white_alpha(18) };

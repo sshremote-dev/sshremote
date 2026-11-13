@@ -1102,3 +1102,44 @@ fn tabs_move_along_the_strip_and_session_shells_stay() {
     w.move_group(before[0], before[1]);
     assert_eq!(order(&w), before);
 }
+
+/// A file dropped (as the system hands it) on a shell of a remote session's agent goes to the
+/// host first; once it is there its path is typed at the prompt, as a pasted path is, and only once.
+#[cfg(feature = "remote")]
+#[test]
+fn a_dropped_file_is_copied_there_then_its_path_typed() {
+    #[derive(Debug)]
+    struct Dropped(std::path::PathBuf);
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+    let file = std::env::temp_dir().join(format!("sshremote-drop-test-{}.png", std::process::id()));
+    std::fs::write(&file, b"picture").unwrap();
+    let ctx = egui::Context::default();
+    let mut w = TermWindow::new(None);
+    frame(&ctx, &mut w, Vec::new());
+    let id = w.tabs[0].id;
+    // Bracketed paste on, as a prompt like Claude Code's turns it on.
+    w.output(id, b"\x1b[?2004h");
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))),
+        focused: true,
+        dropped_files: vec![std::sync::Arc::new(Dropped(file.clone()))],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let _ = ctx.run_test(input, |ui| out.extend(w.embedded(ui)));
+    let asked: Vec<_> = out.iter().filter_map(|c| if let Cmd::Upload { tab, paths } = c { Some((*tab, paths.clone())) } else { None }).collect();
+    assert_eq!(asked, vec![(id, vec![file.clone()])], "an agent's shell gets it through the session");
+    assert_eq!(typed(&frame(&ctx, &mut w, Vec::new())), "", "nothing typed before it is there");
+    w.upload_progress(id, 3, 7);
+    w.upload_done(id, Ok(vec!["/home/alex/.cache/sshremote/drop/1-1/my shot.png".into()]));
+    assert_eq!(typed(&frame(&ctx, &mut w, Vec::new())), "\x1b[200~'/home/alex/.cache/sshremote/drop/1-1/my shot.png' \x1b[201~");
+    assert_eq!(typed(&frame(&ctx, &mut w, Vec::new())), "", "typed once");
+    let _ = std::fs::remove_file(file);
+}

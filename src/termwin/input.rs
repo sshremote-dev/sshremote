@@ -184,6 +184,7 @@ pub(super) fn keyboard_with(
             Event::Cut if ui.input(|i| i.modifiers.shift && !i.modifiers.ctrl) => send.extend_from_slice(b"\x1b[3;2~"),
             Event::Cut => send.push(0x18),
             Event::Paste(s) => {
+                t.pasted = true;
                 let s = s.replace("\r\n", "\r").replace('\n', "\r").replace("\x1b[201~", "");
                 if mode.contains(TermMode::BRACKETED_PASTE) {
                     send.extend_from_slice(b"\x1b[200~");
@@ -199,7 +200,16 @@ pub(super) fn keyboard_with(
                 }
             }
             Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.ctrl && modifiers.shift => {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                if !paste_files(t, out) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
+            }
+            // A picture or files alone on the clipboard make no paste event, only the V let go:
+            // they are pasted as files (copied to where the shell runs, their paths typed).
+            Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command && !modifiers.shift => {
+                if !std::mem::take(&mut t.pasted) {
+                    paste_files(t, out);
+                }
             }
             // Ctrl+Insert copies and Shift+Insert pastes, as in GNOME Terminal and xterm (on
             // Windows they arrive as copy and paste already).
@@ -209,7 +219,9 @@ pub(super) fn keyboard_with(
                 }
             }
             Event::Key { key: Key::Insert, pressed: true, modifiers, .. } if modifiers.shift && !modifiers.ctrl => {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                if !paste_files(t, out) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
             }
             Event::Key { key, pressed: true, modifiers, .. } => {
                 // The window's own shortcuts (new or close tab, next tab, text size) are not typed.
@@ -458,4 +470,22 @@ pub(super) fn forward_wheel(ui: &egui::Ui, t: &Tab, area: Rect, ch: f32, out: &m
         let send = wheel_bytes(*t.term.mode(), lines, grid.columns() / 2, grid.screen_lines() / 2);
         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: send }));
     }
+}
+
+/// A paste of what is on the clipboard when it holds no text: files copied in a file manager, or
+/// a picture (a screenshot), go where the shell runs and their paths are typed (`drop`).
+/// Whether it did so.
+fn paste_files(t: &mut Tab, out: &mut Vec<Cmd>) -> bool {
+    #[cfg(feature = "remote")]
+    {
+        if crate::clip::text_here() {
+            return false;
+        }
+        if let Some(files) = drop::clipboard_files() {
+            drop::start(t, files, out);
+            return true;
+        }
+    }
+    let _ = (t, out);
+    false
 }

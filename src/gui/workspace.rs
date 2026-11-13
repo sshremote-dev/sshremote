@@ -1335,7 +1335,7 @@ pub(super) fn screen_point(ctx: &egui::Context, p: Pos2) -> Pos2 {
 }
 
 /// The point in this window at a place on the screen in pixels: the opposite of `screen_point`.
-pub(super) fn window_point(ctx: &egui::Context, px: Pos2) -> Pos2 {
+pub(crate) fn window_point(ctx: &egui::Context, px: Pos2) -> Pos2 {
     let (origin, native) = window_origin(ctx);
     ((px.to_vec2() - origin * native) / ctx.pixels_per_point()).to_pos2()
 }

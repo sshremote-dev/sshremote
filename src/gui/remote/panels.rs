@@ -94,6 +94,8 @@ impl Remote {
         for c in cmds {
             match c {
                 crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Upload { tab, paths } => self.term_upload(tab, paths)?,
+                crate::termwin::Cmd::CancelUpload { tab } => self.term_upload_cancel(tab)?,
                 crate::termwin::Cmd::Close => {
                     self.terms = None;
                     self.term_split = false;
@@ -167,6 +169,8 @@ impl Remote {
         for c in cmds {
             match c {
                 crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Upload { tab, paths } => self.term_upload(tab, paths)?,
+                crate::termwin::Cmd::CancelUpload { tab } => self.term_upload_cancel(tab)?,
                 crate::termwin::Cmd::Close => {
                     self.terms = None;
                     self.term_inline = false;
@@ -190,6 +194,8 @@ impl Remote {
         for c in cmds {
             match c {
                 crate::termwin::Cmd::Send(m) => self.send(m)?,
+                crate::termwin::Cmd::Upload { tab, paths } => self.term_upload(tab, paths)?,
+                crate::termwin::Cmd::CancelUpload { tab } => self.term_upload_cancel(tab)?,
                 crate::termwin::Cmd::Close => {
                     self.terms = None;
                     self.term_detached = false;

@@ -575,6 +575,8 @@ fn serve_with(
                         inbox.start(id, size, &name)
                     } else if let Some(batch) = dir.strip_prefix(crate::files::CLIPBOARD) {
                         inbox.start_in(id, size, &crate::files::clipboard_dir(batch), &name)
+                    } else if let Some(batch) = dir.strip_prefix(crate::files::DROP) {
+                        inbox.start_in(id, size, &crate::files::drop_dir(batch), &name)
                     } else {
                         inbox.start_in(id, size, std::path::Path::new(&dir), &name)
                     };

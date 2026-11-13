@@ -92,6 +92,8 @@ pub(super) struct Remote {
     pub(super) paste_seen: bool,
     /// Files copied here going over to be pasted there: the batch, its uploads, and their names.
     pub(super) pasting: Option<(String, Vec<u32>, Vec<String>)>,
+    /// Files dropped or pasted on a terminal of this session, going to the host's drop folder.
+    pub(super) term_drops: Vec<transfer::TermDrop>,
     /// Files copied there coming over for the clipboard here: the folder, fetches left, and the
     /// paths to put on the clipboard.
     pub(super) clip_in: Option<(Vec<u32>, Vec<std::path::PathBuf>)>,
@@ -281,6 +283,7 @@ impl Remote {
             host_asked: false,
             paste_seen: false,
             pasting: None,
+            term_drops: Vec::new(),
             clip_in: None,
             batches: 0,
             call: crate::chat::CALL_ENDED,
@@ -405,8 +408,8 @@ impl Remote {
             self.feed_uploads()?;
             return self.files_view(ui);
         }
-        self.take_drops(&ctx)?;
         self.feed_uploads()?;
+        self.term_drop_progress();
         let screen = ui.available_rect_before_wrap();
         let area = screen;
         let ppp = ctx.pixels_per_point();
@@ -443,6 +446,8 @@ impl Remote {
             let focused = if self.term_focus { r } else { pic_area };
             ui.painter().rect_stroke(focused.shrink(0.5), CornerRadius::ZERO, egui::Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
         }
+        // Files dropped on the picture are uploaded; those dropped on the terminal were its own.
+        self.take_drops(&ctx)?;
         self.last_shown = shown;
         let chat_rect = match chat_area {
             Some(r) => self.chat_panel(ui, r)?,
@@ -687,6 +692,10 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
+                    // Part of a terminal's drop: once all of it is there, its paths are typed.
+                    if self.term_drop_done(id, ok, &text) {
+                        continue;
+                    }
                     // Part of a paste: once all of it is there, it goes on the clipboard there and is pasted.
                     if let Some((batch, left, names)) = self.pasting.as_mut()
                         && left.contains(&id)

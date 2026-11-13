@@ -39,6 +39,25 @@ pub fn files_here() -> Vec<PathBuf> {
     arboard::Clipboard::new().ok().and_then(|mut b| b.get().file_list().ok()).unwrap_or_default()
 }
 
+/// Whether this computer's clipboard holds text.
+pub fn text_here() -> bool {
+    arboard::Clipboard::new().ok().and_then(|mut b| b.get_text().ok()).is_some_and(|t| !t.is_empty())
+}
+
+/// A picture on this computer's clipboard (a screenshot), kept as a PNG file in a folder of its
+/// own (`files::drop_dir`, cleared after a day) to be pasted as a file; None without one.
+pub fn image_here() -> Option<PathBuf> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let pixels = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())?;
+    let now = crate::sys::now_secs();
+    let dir = crate::files::drop_dir(&format!("{now}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let stamp: String = crate::sys::local_time(now).chars().filter(|c| c.is_ascii_digit()).collect();
+    let path = dir.join(format!("screenshot-{stamp}.png"));
+    pixels.save_with_format(&path, image::ImageFormat::Png).ok()?;
+    Some(path)
+}
+
 /// Puts files on this computer's clipboard, for its file manager to paste.
 pub fn put_files_here(paths: &[PathBuf]) -> Result<(), String> {
     arboard::Clipboard::new().and_then(|mut b| b.set().file_list(paths)).map_err(|e| e.to_string())

@@ -101,6 +101,96 @@ impl Remote {
         Ok(())
     }
 
+    /// Files dropped or pasted on this session's terminal: into a folder of their own in the
+    /// host's drop folder, their paths then typed at that terminal's prompt.
+    pub(in crate::gui) fn term_upload(&mut self, tab: u32, paths: Vec<std::path::PathBuf>) -> Result<(), String> {
+        self.batches += 1;
+        let batch = format!("{}-{}", std::process::id(), self.batches);
+        let dir = format!("{}{batch}", crate::files::DROP);
+        let first = self.next_upload;
+        self.upload_into(&paths, &dir)?;
+        let ids: Vec<u32> = (first..self.next_upload).collect();
+        if ids.is_empty() {
+            if let Some(t) = self.terms.as_mut() {
+                t.upload_done(tab, Err("nothing could be read".into()));
+            }
+            return Ok(());
+        }
+        let total = self.uploads.iter().filter(|u| ids.contains(&u.id)).map(|u| u.size).sum();
+        self.term_drops.push(TermDrop { tab, batch, left: ids, total, finished: 0, tops: Vec::new(), failed: None });
+        Ok(())
+    }
+
+    /// Stops a terminal's drop: what is under way is cancelled, and the terminal told.
+    pub(in crate::gui) fn term_upload_cancel(&mut self, tab: u32) -> Result<(), String> {
+        let Some(k) = self.term_drops.iter().position(|d| d.tab == tab) else { return Ok(()) };
+        let d = self.term_drops.remove(k);
+        for id in d.left {
+            if let Some(i) = self.uploads.iter().position(|u| u.id == id) {
+                let u = &mut self.uploads[i];
+                if u.file.is_none() && !u.ended {
+                    self.uploads.remove(i);
+                } else if !u.ended {
+                    u.cancelled = true;
+                    (u.ended, u.file) = (true, None);
+                    self.send(ToAgent::FileEnd { id })?;
+                }
+            }
+        }
+        if let Some(t) = self.terms.as_mut() {
+            t.upload_done(tab, Err("stopped".into()));
+        }
+        Ok(())
+    }
+
+    /// Tells the terminals how far their drops have come.
+    pub(in crate::gui) fn term_drop_progress(&mut self) {
+        let Some(t) = self.terms.as_mut() else { return };
+        for d in &self.term_drops {
+            let going: u64 = self.uploads.iter().filter(|u| d.left.contains(&u.id)).map(|u| u.acked.min(u.size)).sum();
+            t.upload_progress(d.tab, d.finished + going, d.total);
+        }
+    }
+
+    /// An upload that was part of a terminal's drop has ended: whether it was one. Once the whole
+    /// drop is there, the terminal types the paths of what was dropped (a folder's, not each file's).
+    pub(in crate::gui) fn term_drop_done(&mut self, id: u32, ok: bool, text: &str) -> bool {
+        let Some(k) = self.term_drops.iter().position(|d| d.left.contains(&id)) else { return false };
+        let size = self.uploads.iter().find(|u| u.id == id).map_or(0, |u| u.size);
+        self.uploads.retain(|u| u.id != id);
+        let d = &mut self.term_drops[k];
+        d.left.retain(|u| *u != id);
+        d.finished += size;
+        if !ok {
+            d.failed.get_or_insert_with(|| text.to_string());
+        } else if let Some(at) = text.find(&d.batch) {
+            // DROPDIR/BATCH/NAME[/...]: the path of what was dropped is DROPDIR/BATCH/NAME.
+            let after = at + d.batch.len();
+            let sep = text[after..].chars().next().unwrap_or('/');
+            let rest = &text[after + sep.len_utf8()..];
+            let name = rest.split(['/', '\\']).next().unwrap_or(rest);
+            let top = format!("{}{sep}{name}", &text[..after]);
+            if !d.tops.contains(&top) {
+                d.tops.push(top);
+            }
+        } else {
+            d.tops.push(text.to_string());
+        }
+        if d.left.is_empty() {
+            let d = self.term_drops.remove(k);
+            let r = match d.failed {
+                // An agent older than drops takes the folder's name for a path, and says so.
+                Some(e) if e.contains('\0') || e.to_lowercase().contains("nul") => Err("the host's SSH Remote is older: update it there".to_string()),
+                Some(e) => Err(e),
+                None => Ok(d.tops),
+            };
+            if let Some(t) = self.terms.as_mut() {
+                t.upload_done(d.tab, r);
+            }
+        }
+        true
+    }
+
     /// Uploads files or whole folders into `dir` on the remote host.
     pub(in crate::gui) fn upload_into(&mut self, paths: &[std::path::PathBuf], dir: &str) -> Result<(), String> {
         for path in paths {
@@ -339,4 +429,16 @@ impl Remote {
             _ => self.tex = Some(ctx.load_texture("remote", ColorImage::from_rgb([w, h], &self.fb.rgb), opts)),
         }
     }
+}
+
+/// A drop on one of the session's terminals: its tab, the folder of this copy, the uploads still
+/// going, the bytes of all and of those done, the paths of what was dropped, and the first error.
+pub(in crate::gui) struct TermDrop {
+    tab: u32,
+    batch: String,
+    left: Vec<u32>,
+    total: u64,
+    finished: u64,
+    tops: Vec<String>,
+    failed: Option<String>,
 }
