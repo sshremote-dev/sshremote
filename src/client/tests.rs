@@ -206,3 +206,54 @@ fn cell_report() {
     assert_eq!(super::parse_cell_report(b"junk[6;17;8t"), Some((8, 17)));
     assert_eq!(super::parse_cell_report(b"[4;600;1200t"), None);
 }
+
+/// A picture pasted from here lands on the host's clipboard, and one copied there comes back as
+/// PNG (run in the desktop session, whose clipboard both use here).
+#[test]
+#[ignore]
+fn pictures_cross_the_clipboard_both_ways() {
+    use super::*;
+    use crate::proto::ToAgent;
+    let opt = crate::parse_client(&["--local".into()]).unwrap();
+    let (mut sess, _tx, rx) = Session::connect(&opt).expect("a local agent (SSHREMOTE_EXE)");
+    std::thread::sleep(Duration::from_millis(800));
+    // From here: a 64x48 picture goes over, and the clipboard there holds it.
+    let (w, h) = (64usize, 48usize);
+    let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8 | 1).collect();
+    let mut png = Vec::new();
+    {
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8).unwrap();
+    }
+    sess.send(ToAgent::ClipImage(png)).unwrap();
+    let started = Instant::now();
+    let mut there = None;
+    while there.is_none() && started.elapsed() < Duration::from_secs(5) {
+        there = arboard::Clipboard::new().ok().and_then(|mut b| b.get_image().ok()).filter(|i| (i.width, i.height) == (w, h));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if there.is_none() {
+        let targets = std::process::Command::new("xclip").args(["-selection", "clipboard", "-t", "TARGETS", "-o"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let said: Vec<String> = rx.try_iter().filter_map(|e| if let Ev::Net(ToClient::Notice(n)) = e { Some(n) } else { None }).collect();
+        eprintln!("clipboard targets: {targets:?}; notices: {said:?}; agent said: {}", sess.log());
+    }
+    let there = there.expect("the picture on the host's clipboard");
+    assert_eq!(&there.bytes[..], &rgba[..]);
+    // Copied there: another picture comes back to the viewer, as PNG.
+    let other: Vec<u8> = (0..32 * 32 * 4).map(|i| (i * 3 % 251) as u8 | 1).collect();
+    arboard::Clipboard::new()
+        .unwrap()
+        .set_image(arboard::ImageData { width: 32, height: 32, bytes: std::borrow::Cow::Owned(other.clone()) })
+        .unwrap();
+    let started = Instant::now();
+    let mut came = None;
+    while came.is_none() && started.elapsed() < Duration::from_secs(8) {
+        if let Ok(Ev::Net(ToClient::ClipImage(png))) = rx.recv_timeout(Duration::from_millis(100)) {
+            came = Some(png);
+        }
+    }
+    let came = came.expect("the picture copied there");
+    let img = image::load_from_memory(&came).unwrap().to_rgba8();
+    assert_eq!((img.width(), img.height()), (32, 32));
+    assert_eq!(img.into_raw(), other);
+}

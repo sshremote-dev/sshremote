@@ -78,6 +78,9 @@ pub enum ToAgent {
     },
     /// Text now on the viewer's clipboard.
     Clipboard(String),
+    /// A picture on the viewer's clipboard (a screenshot), as PNG, put on the host's for the
+    /// paste that follows.
+    ClipImage(Vec<u8>),
     /// Ctrl+Alt+Del, which no viewer can capture locally.
     SecureAttention,
     /// A file upload begins, into `dir` (empty: the remote user's Downloads folder); `name` may
@@ -315,6 +318,8 @@ pub enum ToClient {
     Pong(u32),
     /// Text now on the remote clipboard.
     Clipboard(String),
+    /// A picture copied on the remote computer (a screenshot), as PNG.
+    ClipImage(Vec<u8>),
     /// Bytes of an upload written so far.
     FileProgress {
         id: u32,
@@ -589,6 +594,10 @@ impl ToAgent {
                 b.extend_from_slice(t.as_bytes());
                 11
             }
+            ToAgent::ClipImage(png) => {
+                b.extend_from_slice(png);
+                45
+            }
             ToAgent::SecureAttention => 12,
             // The short forms (Downloads, tag 0) keep their first codes, which every agent knows.
             ToAgent::FileStart { id, size, dir, name } if dir.is_empty() => {
@@ -760,6 +769,7 @@ impl ToAgent {
             9 => ToAgent::KeyState { keysym: c.u32()?, down: c.u8()? != 0 },
             10 => ToAgent::HScroll { steps: c.u8()? as i8 },
             11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
+            45 => ToAgent::ClipImage(c.rest().to_vec()),
             12 => ToAgent::SecureAttention,
             13 => ToAgent::FileStart {
                 id: c.u32()?,
@@ -889,6 +899,10 @@ impl ToClient {
             ToClient::Clipboard(t) => {
                 b.extend_from_slice(t.as_bytes());
                 105
+            }
+            ToClient::ClipImage(png) => {
+                b.extend_from_slice(png);
+                135
             }
             ToClient::FileProgress { id, received } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -1137,6 +1151,7 @@ impl ToClient {
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
             105 => ToClient::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
+            135 => ToClient::ClipImage(c.rest().to_vec()),
             106 => {
                 ToClient::FileProgress { id: c.u32()?, received: u64::from_le_bytes(c.take(8)?.try_into().unwrap()) }
             }

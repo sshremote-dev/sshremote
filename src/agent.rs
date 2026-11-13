@@ -578,6 +578,12 @@ fn serve_with(
                 }
                 ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
                 ToAgent::Clipboard(text) => clip.set(text),
+                // A picture for the paste the viewer sends next.
+                ToAgent::ClipImage(png) => {
+                    if !clip.set_image(png) {
+                        send(enc, &ToClient::Notice("The picture could not be put on this computer's clipboard".into())).map_err(io_err)?;
+                    }
+                }
                 ToAgent::FileStart { id, size, dir, name } => {
                     let note = if dir.is_empty() {
                         inbox.start(id, size, &name)
@@ -818,6 +824,10 @@ fn serve_with(
         match clip.poll() {
             Some(crate::clip::Copied::Text(text)) if allowed & crate::grant::CLIPBOARD != 0 => {
                 send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
+            }
+            // A picture copied here (a screenshot): onto the viewer's clipboard.
+            Some(crate::clip::Copied::Image(png)) if allowed & crate::grant::CLIPBOARD != 0 => {
+                send(enc, &ToClient::ClipImage(png)).map_err(io_err)?;
             }
             // Files copied here: the viewer may fetch them onto its own clipboard.
             Some(crate::clip::Copied::Files(paths)) if allowed & (crate::grant::CLIPBOARD | crate::grant::FILES) == crate::grant::CLIPBOARD | crate::grant::FILES => {

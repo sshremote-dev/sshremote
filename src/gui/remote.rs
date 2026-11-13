@@ -600,6 +600,12 @@ impl Remote {
                         self.clip.set(t);
                     }
                 }
+                // A picture copied there (a screenshot): on this clipboard, to paste here.
+                Ok(Ev::Net(ToClient::ClipImage(png))) => {
+                    if self.share_clipboard && self.active && self.clip.set_image(png) {
+                        self.notify("A picture copied there is on this computer's clipboard");
+                    }
+                }
                 Ok(Ev::Net(ToClient::FileProgress { id, received })) => {
                     if let Some(u) = self.uploads.iter_mut().find(|u| u.id == id) {
                         u.acked = received;

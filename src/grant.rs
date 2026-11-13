@@ -52,7 +52,7 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::UiAct { .. }
         | ToAgent::PickOnRemote
         | ToAgent::InstallHelper => CONTROL,
-        ToAgent::Clipboard(_) => CLIPBOARD,
+        ToAgent::Clipboard(_) | ToAgent::ClipImage(_) => CLIPBOARD,
         ToAgent::FileStart { .. }
         | ToAgent::FileData { .. }
         | ToAgent::FileEnd { .. }

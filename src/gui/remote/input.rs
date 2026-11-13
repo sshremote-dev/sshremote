@@ -111,7 +111,12 @@ impl Remote {
                 // Files alone on the clipboard make no paste event, only the V let go after it.
                 Event::Key { key: Key::V, pressed: false, modifiers, .. } if !local && modifiers.command && !std::mem::take(&mut self.paste_seen) => {
                     let files = if self.share_clipboard { crate::clip::files_here() } else { Vec::new() };
-                    if files.is_empty() {
+                    // A picture alone (a screenshot): onto the host's clipboard, then pasted there.
+                    let picture = if self.share_clipboard && files.is_empty() && !self.view_only { crate::clip::image_png() } else { None };
+                    if let Some(png) = picture {
+                        self.send(ToAgent::ClipImage(png))?;
+                        self.tap('v' as u32)?;
+                    } else if files.is_empty() {
                         self.key('v' as u32, false)?;
                     } else {
                         self.paste_files(files)?;

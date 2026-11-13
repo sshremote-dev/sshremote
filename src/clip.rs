@@ -20,13 +20,59 @@ enum Req {
     Paste(String, Sender<bool>),
     /// Puts files on the clipboard, as a file manager's copy does; true once they are there.
     Files(Vec<PathBuf>, Sender<bool>),
+    /// Puts a picture (PNG) on the clipboard; true once it is there.
+    Image(Vec<u8>, Sender<bool>),
 }
+
+/// A copied picture larger than this, as PNG, does not go over by itself (it would hold up the
+/// screen): it is pasted by hand as a file instead.
+pub const IMAGE_MAX: usize = 4 << 20;
+/// Pictures are looked at every this many polls: reading one is costlier than text.
+const IMAGE_EVERY: u32 = 3;
 
 /// What was copied.
 pub enum Copied {
     Text(String),
     /// Files and folders, by their paths.
     Files(Vec<PathBuf>),
+    /// A picture (a screenshot), as PNG.
+    Image(Vec<u8>),
+}
+
+/// A picture's mark: its size and a hash of its pixels.
+fn mark_image(w: usize, h: usize, rgba: &[u8]) -> (usize, u64) {
+    use std::hash::Hasher;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    hash.write_usize(w);
+    hash.write(rgba);
+    (w * h * 4 + 1, hash.finish())
+}
+
+/// RGBA pixels as PNG, quickly (a screenshot of a large screen takes a moment otherwise).
+fn to_png(w: usize, h: usize, rgba: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(&mut out, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Adaptive)
+        .write_image(rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(out)
+}
+
+/// A PNG as the clipboard's pixels.
+fn from_png(png: &[u8]) -> Option<arboard::ImageData<'static>> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    Some(arboard::ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(img.into_raw()) })
+}
+
+/// The picture on this computer's clipboard now, as PNG, if it holds one (and no text).
+pub fn image_png() -> Option<Vec<u8>> {
+    let mut b = arboard::Clipboard::new().ok()?;
+    if b.get_text().is_ok_and(|t| !t.is_empty()) {
+        return None;
+    }
+    let img = b.get_image().ok()?;
+    to_png(img.width, img.height, &img.bytes)
 }
 
 pub struct Clip {
@@ -120,11 +166,13 @@ impl Clip {
         Clip::watching(false)
     }
 
-    /// Text both ways and copied files, as an agent keeps it.
+    /// Text both ways, copied files and pictures, as an agent keeps it.
     pub fn with_files() -> Clip {
         Clip::watching(true)
     }
 
+    /// `files`: copied files and pictures are watched too (an agent's; a viewer sends its own
+    /// files and pictures only when they are pasted there).
     fn watching(files: bool) -> Clip {
         // An agent started over ssh needs the desktop session's display; Xwayland mirrors its clipboard.
         #[cfg(target_os = "linux")]
@@ -136,6 +184,10 @@ impl Clip {
             // What was on the clipboard before the session started is not news; a text too large
             // to send is known by its mark, so it is not read and weighed again every poll.
             let mut last = board.get_text().ok().map(|t| mark(&t));
+            if files && last.is_none() {
+                last = board.get_image().ok().map(|i| mark_image(i.width, i.height, &i.bytes));
+            }
+            let mut polls = 0u32;
             // Text put there only to be pasted, what to put back afterwards, and when.
             let mut restore: Option<(Before, (usize, u64), std::time::Instant)> = None;
             loop {
@@ -152,6 +204,26 @@ impl Clip {
                         if ok {
                             last = Some(mark_files(&paths));
                         }
+                        let _ = done.send(ok);
+                    }
+                    Ok(Req::Image(png, done)) => {
+                        let ok = match from_png(&png) {
+                            Some(img) => {
+                                let m = mark_image(img.width, img.height, &img.bytes);
+                                let set = board.set_image(img);
+                                if let Err(e) = &set {
+                                    eprintln!("clipboard: the picture was not taken: {e}");
+                                }
+                                if set.is_ok() {
+                                    last = Some(m);
+                                }
+                                set.is_ok()
+                            }
+                            None => {
+                                eprintln!("clipboard: not a PNG picture");
+                                false
+                            }
+                        };
                         let _ = done.send(ok);
                     }
                     Ok(Req::Paste(text, done)) => {
@@ -193,7 +265,22 @@ impl Clip {
                             return;
                         }
                     }
+                } else if files && polls.is_multiple_of(IMAGE_EVERY)
+                    && let Ok(img) = board.get_image()
+                {
+                    // A picture copied (a screenshot): over by itself when it is not too large.
+                    let m = mark_image(img.width, img.height, &img.bytes);
+                    if last != Some(m) {
+                        last = Some(m);
+                        if img.width * img.height <= 40_000_000
+                            && let Some(png) = to_png(img.width, img.height, &img.bytes).filter(|p| p.len() <= IMAGE_MAX)
+                            && notify.send(Copied::Image(png)).is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
+                polls = polls.wrapping_add(1);
             }
         });
         Clip { to_board, changed }
@@ -219,6 +306,12 @@ impl Clip {
         }
     }
 
+    /// Puts a picture (PNG) from the other side on the local clipboard; true once it is there.
+    pub fn set_image(&mut self, png: Vec<u8>) -> bool {
+        let (tx, rx) = mpsc::channel();
+        self.to_board.send(Req::Image(png, tx)).is_ok() && rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
+    }
+
     /// Puts text on the clipboard for a paste; true once it is there.
     pub fn stage_paste(&mut self, text: String) -> bool {
         let (tx, rx) = mpsc::channel();
@@ -231,6 +324,19 @@ mod tests {
     use super::*;
 
     /// The same text gets the same mark, another text another; a huge one is marked by its ends.
+    #[test]
+    fn pictures_go_as_png_and_come_back_the_same() {
+        let (w, h) = (40usize, 30usize);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i * 7 % 251) as u8).collect();
+        let png = to_png(w, h, &rgba).unwrap();
+        let back = from_png(&png).unwrap();
+        assert_eq!((back.width, back.height), (w, h));
+        assert_eq!(mark_image(back.width, back.height, &back.bytes), mark_image(w, h, &rgba), "the same picture is known again");
+        let mut other = rgba.clone();
+        other[5] ^= 1;
+        assert_ne!(mark_image(w, h, &other), mark_image(w, h, &rgba));
+    }
+
     #[test]
     fn marks_tell_texts_apart() {
         assert_eq!(mark("hello"), mark("hello"));
