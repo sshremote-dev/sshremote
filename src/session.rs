@@ -736,6 +736,56 @@ mod tests {
     /// the new size, and frames come at it, scaled to fit as before. Needs SSHREMOTE_GNOME_HOST
     /// (an ssh alias of a host signed in to GNOME with one monitor, which is turned and turned
     /// back), and optionally SSHREMOTE_GNOME_ENV (variables pointing at that session, such as a
+    /// A voice call on GNOME: it rings in the window there, is answered there (by the window's
+    /// driver: SSHREMOTE_DRIVE names its command file on the host, SSHREMOTE_ANSWER_AT where the
+    /// Answer button is), and the microphone there is heard here; then it is hung up.
+    #[test]
+    #[ignore]
+    fn a_gnome_call_rings_is_answered_and_heard() {
+        use crate::proto::ToAgent;
+        let (Ok(host), Ok(drive)) = (std::env::var("SSHREMOTE_GNOME_HOST"), std::env::var("SSHREMOTE_DRIVE")) else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let at = std::env::var("SSHREMOTE_ANSWER_AT").unwrap_or_default();
+        let target = Target::Ssh {
+            host: host.clone(),
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} SSHREMOTE_DRIVE={drive} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let sh = |cmd: &str| drop(std::process::Command::new("ssh").arg(&host).arg(cmd).output());
+        sh(&format!(": > {drive}"));
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let next = |want: &dyn Fn(&ToClient) -> bool, secs: u64| loop {
+            match rx.recv_timeout(Duration::from_secs(secs)) {
+                Ok(Ev::Net(m)) if want(&m) => return Some(m),
+                Ok(Ev::Net(_)) => {}
+                _ => return None,
+            }
+        };
+        sess.send(ToAgent::Call(true)).unwrap();
+        assert_eq!(next(&|m| matches!(m, ToClient::CallState(_)), 20), Some(ToClient::CallState(crate::chat::CALL_RINGING)));
+        std::thread::sleep(Duration::from_secs(3));
+        if at.is_empty() {
+            sh(&format!("echo 'shot ringing' >> {drive}"));
+            std::thread::sleep(Duration::from_secs(2));
+            return;
+        }
+        sh(&format!("echo 'click {at}' >> {drive}"));
+        assert_eq!(next(&|m| matches!(m, ToClient::CallState(_)), 20), Some(ToClient::CallState(crate::chat::CALL_TALKING)));
+        let heard = next(&|m| matches!(m, ToClient::Voice(_) | ToClient::Notice(_)), 10);
+        assert!(matches!(heard, Some(ToClient::Voice(_))), "the microphone there is heard: {heard:?}");
+        let mut enc = opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        for _ in 0..25 {
+            sess.send(ToAgent::Voice(enc.encode_vec_float(&[0.0; 960], 1500).unwrap())).unwrap();
+        }
+        sess.send(ToAgent::Call(false)).unwrap();
+        assert_eq!(next(&|m| matches!(m, ToClient::CallState(_)), 20), Some(ToClient::CallState(crate::chat::CALL_ENDED)));
+    }
+
     /// Files through the clipboard, on a host whose clipboard is an X display's (SSHREMOTE_CLIP_DISPLAY,
     /// say an Xvfb; with xclip there): files sent for a paste land on its clipboard as files, and
     /// files copied there are told to the viewer.

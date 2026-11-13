@@ -40,6 +40,17 @@ pub const END: &str = "\u{0}end";
 pub const ALLOW: &str = "\u{0}allow ";
 /// What it writes when the person turns the viewer away.
 pub const DENY: &str = "\u{0}deny";
+/// A voice call, as the viewer is told where it is (`ToClient::CallState`).
+pub const CALL_ENDED: u8 = 0;
+pub const CALL_RINGING: u8 = 1;
+pub const CALL_TALKING: u8 = 2;
+pub const CALL_DECLINED: u8 = 3;
+/// What the agent tells the window of a call, and what the window answers.
+pub const RING: &str = "\u{0}ring";
+pub const HUNG_UP: &str = "\u{0}hungup";
+pub const ANSWER: &str = "\u{0}answer";
+pub const DECLINE: &str = "\u{0}decline";
+pub const HANG_UP: &str = "\u{0}hangup";
 /// What a viewer is told while the person at the screen is asked.
 pub const WAITING: &str = "Waiting for the person at that computer to let you in\u{2026}";
 
@@ -123,6 +134,27 @@ impl Window {
         }
         self.by_id = answer;
         Ok(answer)
+    }
+
+    /// The viewer calls: the window opens if it was closed and rings, for the person at the
+    /// screen to answer or decline.
+    pub fn ring(&mut self) -> Result<(), String> {
+        if !self.alive() {
+            self.open()?;
+        }
+        self.say(RING)
+    }
+
+    /// The viewer hung up.
+    pub fn hung_up(&mut self) {
+        if self.alive() {
+            let _ = self.say(HUNG_UP);
+        }
+    }
+
+    fn say(&mut self, line: &str) -> Result<(), String> {
+        let (_, stdin) = self.child.as_mut().ok_or("no chat window")?;
+        writeln!(stdin, "{line}").and_then(|_| stdin.flush()).map_err(|e| e.to_string())
     }
 
     /// Shows a message from the viewer, opening the window if the user closed it.
@@ -261,6 +293,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), St
                 allowed: grant & crate::grant::ALL,
                 asking: asking.then(std::time::Instant::now),
                 rights_open: false,
+                call: None,
             }))
         }),
     )
@@ -285,6 +318,8 @@ struct ChatApp {
     asking: Option<std::time::Instant>,
     /// The list of what they may do is unfolded.
     rights_open: bool,
+    /// A call: ringing (false) or answered (true).
+    call: Option<bool>,
 }
 
 /// Says something of the window's own to the agent.
@@ -374,6 +409,11 @@ impl eframe::App for ChatApp {
         for m in self.incoming.try_iter() {
             if m == "\u{0}" {
                 self.ended = Some(std::time::Instant::now());
+            } else if m == RING {
+                self.call = Some(false);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else if m == HUNG_UP {
+                self.call = None;
             } else {
                 self.lines.push((true, m, now()));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -420,6 +460,37 @@ impl eframe::App for ChatApp {
                     ui.label(RichText::new(state).small().weak());
                 });
             });
+            // A call: answered here, or not; hung up from here too.
+            if let Some(talking) = self.call
+                && self.ended.is_none()
+            {
+                ui.add_space(6.0);
+                egui::Frame::new().fill(crate::gui::good().gamma_multiply(0.14)).corner_radius(egui::CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(crate::gui::ic::PHONE).size(18.0).color(crate::gui::good()));
+                        ui.label(RichText::new(if talking { "In a call" } else { "They are calling" }).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if talking {
+                                let hang = egui::Button::new(RichText::new(format!("{}  Hang up", crate::gui::ic::PHONE_HANG_UP)).color(Color32::WHITE)).fill(crate::gui::bad());
+                                if ui.add(hang).clicked() {
+                                    tell(HANG_UP);
+                                    self.call = None;
+                                }
+                            } else {
+                                if ui.add(crate::gui::kit::secondary("Decline")).clicked() {
+                                    tell(DECLINE);
+                                    self.call = None;
+                                }
+                                let answer = egui::Button::new(RichText::new(format!("{}  Answer", crate::gui::ic::PHONE)).color(Color32::WHITE)).fill(crate::gui::good());
+                                if ui.add(answer).clicked() {
+                                    tell(ANSWER);
+                                    self.call = Some(true);
+                                }
+                            }
+                        });
+                    });
+                });
+            }
             // The person at the screen can end it, and change what they may do, at any time.
             if self.by_id && self.ended.is_none() {
                 ui.add_space(6.0);

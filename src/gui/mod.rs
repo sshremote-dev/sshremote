@@ -62,6 +62,9 @@ pub(crate) mod ic {
     pub const CARET_LEFT: &str = "\u{E138}";
     pub const CARET_RIGHT: &str = "\u{E13A}";
     pub const DESKTOP: &str = "\u{E560}";
+    pub const PHONE: &str = "\u{E3B8}";
+    pub const PHONE_HANG_UP: &str = "\u{E3BC}";
+    pub const RECORD: &str = "\u{E3EE}";
     pub const ARROW_CLOCKWISE: &str = "\u{E036}";
     pub const ARROW_LEFT: &str = "\u{E058}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";

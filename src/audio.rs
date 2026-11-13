@@ -14,7 +14,6 @@ const FRAME: usize = 960;
 const BITRATE: i32 = 64_000;
 
 /// Converts interleaved samples at `from` Hz with `ch` channels to stereo at `to` Hz, linearly.
-#[cfg_attr(not(windows), allow(dead_code))]
 struct Resampler {
     from: u32,
     to: u32,
@@ -23,7 +22,6 @@ struct Resampler {
     last: [f32; 2],
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 impl Resampler {
     pub fn new(from: u32, to: u32, ch: usize) -> Resampler {
         Resampler { from, to, ch: ch.max(1), pos: 0.0, last: [0.0; 2] }
@@ -53,6 +51,49 @@ impl Resampler {
             self.last = *l;
         }
     }
+}
+
+/// One voice: mono at 24 kbit/s is plenty for talking.
+const VOICE_BITRATE: i32 = 24_000;
+
+/// The default microphone here as Opus packets (mono, 20 ms), for a call; recording stops when
+/// this is dropped. The player takes them as it takes stereo.
+pub fn microphone() -> Result<Capture, String> {
+    #[cfg(target_os = "linux")]
+    crate::capture::ensure_session_env();
+    let device = cpal::default_host().default_input_device().ok_or("no microphone")?;
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let (rate, ch) = (config.sample_rate(), config.channels() as usize);
+    let (tx, rx) = mpsc::channel();
+    let mut enc = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).map_err(|e| e.to_string())?;
+    enc.set_bitrate(opus::Bitrate::Bits(VOICE_BITRATE)).map_err(|e| e.to_string())?;
+    let mut rs = Resampler::new(rate, RATE, ch);
+    let (mut stereo, mut mono) = (Vec::new(), Vec::new());
+    let mut take = move |data: &[f32]| {
+        rs.push(data, &mut stereo);
+        mono.extend(stereo.chunks(2).map(|f| (f[0] + f[1]) * 0.5));
+        stereo.clear();
+        while mono.len() >= FRAME {
+            if let Ok(p) = enc.encode_vec_float(&mono[..FRAME], 1500) {
+                let _ = tx.send(p);
+            }
+            mono.drain(..FRAME);
+        }
+    };
+    let err = |e: cpal::Error| eprintln!("sshremote: microphone: {e}");
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream::<f32, _, _>(config.config(), move |d: &[f32], _| take(d), err, None),
+        cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
+            config.config(),
+            move |d: &[i16], _| take(&d.iter().map(|s| *s as f32 / 32768.0).collect::<Vec<_>>()),
+            err,
+            None,
+        ),
+        f => return Err(format!("unsupported microphone format {f:?}")),
+    }
+    .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok(Capture { packets: rx, _keep: Box::new(stream) })
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

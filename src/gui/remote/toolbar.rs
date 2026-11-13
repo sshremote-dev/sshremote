@@ -409,6 +409,27 @@ impl Remote {
             frame = self.paused && icon(ui, ic::ARROW_CLOCKWISE, "Fetch one frame", false).clicked();
         }
 
+        // A voice call with the person at that computer: started, called off while it rings, hung up.
+        if screen && crate::modules::on("sound") {
+            use crate::chat::{CALL_ENDED, CALL_RINGING, CALL_TALKING};
+            let (glyph, tip, on) = match self.call {
+                CALL_TALKING => (ic::PHONE_HANG_UP, "Hang up", true),
+                CALL_RINGING => (ic::PHONE, "Calling\u{2026} (click to call off)", true),
+                _ => (ic::PHONE, "Call the person at that computer: talk through the microphones", false),
+            };
+            if icon(ui, glyph, tip, on).clicked() {
+                let start = self.call == CALL_ENDED || self.call > CALL_TALKING;
+                *action = Some(Box::new(move |r, _| {
+                    if start {
+                        r.call = CALL_RINGING;
+                        r.send(ToAgent::Call(true))
+                    } else {
+                        r.call_now(CALL_ENDED);
+                        r.send(ToAgent::Call(false))
+                    }
+                }));
+            }
+        }
         let mut sound = self.sound.is_some();
         let mut sound_clicked = false;
         // The screen's options (view only, sound, system keys...): only where the screen is shown.

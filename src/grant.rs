@@ -27,7 +27,7 @@ pub const RIGHTS: [(u8, &str, &str); 7] = [
     (CONTROL, "Use the keyboard and mouse", "keyboard and mouse"),
     (CLIPBOARD, "Copy and paste", "clipboard"),
     (FILES, "Send and fetch files", "files"),
-    (SOUND, "Hear this computer's sound", "sound"),
+    (SOUND, "Hear this computer's sound and call it", "sound and calls"),
     (TERMINAL, "Open terminals", "terminals"),
     (POWER, "Restart or lock this computer, block its keyboard and hide its screen", "restart and lock"),
     (PORTS, "Reach ports through this computer (tunnels)", "ports"),
@@ -62,7 +62,7 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::FetchCancel { .. }
         | ToAgent::FileOp { .. }
         | ToAgent::PasteFiles { .. } => FILES,
-        ToAgent::Audio(true) => SOUND,
+        ToAgent::Audio(true) | ToAgent::Call(true) | ToAgent::Voice(_) => SOUND,
         ToAgent::TermOpen { .. } | ToAgent::TermInput { .. } | ToAgent::TermResize { .. } => TERMINAL,
         ToAgent::Host { act, .. } if *act != crate::hostctl::QUERY => POWER,
         ToAgent::PortOpen { .. } | ToAgent::PortData { .. } => PORTS,

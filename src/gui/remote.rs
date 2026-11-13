@@ -96,6 +96,10 @@ pub(super) struct Remote {
     /// paths to put on the clipboard.
     pub(super) clip_in: Option<(Vec<u32>, Vec<std::path::PathBuf>)>,
     pub(super) batches: u32,
+    /// A voice call (`chat::CALL_*`), and while talking the microphone here and a player for theirs.
+    pub(super) call: u8,
+    call_mic: Option<crate::audio::Capture>,
+    call_player: Option<crate::audio::Player>,
     /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
     wheel: Vec2,
     inbox: crate::files::Inbox,
@@ -277,6 +281,9 @@ impl Remote {
             pasting: None,
             clip_in: None,
             batches: 0,
+            call: crate::chat::CALL_ENDED,
+            call_mic: None,
+            call_player: None,
             wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
@@ -374,6 +381,11 @@ impl Remote {
             && let Some(crate::clip::Copied::Text(text)) = self.clip.poll()
         {
             self.send(ToAgent::Clipboard(text))?;
+        }
+        // This side's voice, as it comes.
+        let voice: Vec<Vec<u8>> = self.call_mic.as_ref().map(|m| m.packets.try_iter().collect()).unwrap_or_default();
+        for p in voice {
+            self.send(ToAgent::Voice(p))?;
         }
         self.ctl.tick(&mut self.sess).map_err(|e| e.to_string())?;
         if self.files_only {
@@ -499,6 +511,12 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::Pong(t))) => self.ctl.pong(t),
+                Ok(Ev::Net(ToClient::Voice(p))) => {
+                    if let Some(pl) = self.call_player.as_mut() {
+                        pl.push(&p);
+                    }
+                }
+                Ok(Ev::Net(ToClient::CallState(state))) => self.call_now(state),
                 Ok(Ev::Net(ToClient::Audio(p))) => {
                     if let Some(pl) = self.sound.as_mut() {
                         pl.push(&p);
@@ -1024,3 +1042,31 @@ impl Remote {
 /// SSHREMOTE_EXE=target/release/sshremote.exe cargo test --release -- --ignored --test-threads=1 toolbar_actions
 #[cfg(test)]
 mod actions;
+
+impl Remote {
+    /// Where the call is now, as the computer says: answered (the microphone and speakers here
+    /// join), declined or ended (they let go).
+    pub(super) fn call_now(&mut self, state: u8) {
+        use crate::chat::{CALL_DECLINED, CALL_ENDED, CALL_TALKING};
+        let was = self.call;
+        self.call = state;
+        if state == CALL_TALKING {
+            match crate::audio::microphone() {
+                Ok(m) => self.call_mic = Some(m),
+                Err(e) => self.notify(&format!("The microphone here: {e}; you can still hear them")),
+            }
+            match crate::audio::Player::new() {
+                Ok(p) => self.call_player = Some(p),
+                Err(e) => self.notify(&format!("The speakers here: {e}")),
+            }
+            self.notify("In a call with the person at that computer");
+        } else if state == CALL_DECLINED || state == CALL_ENDED {
+            (self.call_mic, self.call_player) = (None, None);
+            if state == CALL_DECLINED {
+                self.notify("They did not answer the call");
+            } else if was == CALL_TALKING {
+                self.notify("The call ended");
+            }
+        }
+    }
+}

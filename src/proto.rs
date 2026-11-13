@@ -172,6 +172,10 @@ pub enum ToAgent {
         batch: String,
         names: Vec<String>,
     },
+    /// A voice call started (true) or hung up; the person at the screen answers it.
+    Call(bool),
+    /// A piece of the viewer's voice: 20 ms of Opus.
+    Voice(Vec<u8>),
     /// A connection to `host`:`port` as the computer sees it, for the viewer's forwarded port.
     PortOpen {
         id: u32,
@@ -417,6 +421,10 @@ pub enum ToClient {
     },
     /// Files copied at the host, for the viewer to fetch onto its own clipboard.
     ClipFiles(Vec<ClipFile>),
+    /// A piece of the voice at the computer, 20 ms of Opus.
+    Voice(Vec<u8>),
+    /// Where the call is (`chat::CALL_*`).
+    CallState(u8),
     /// Whether the connection for a forwarded port was made, and why not.
     PortOpened {
         id: u32,
@@ -690,6 +698,14 @@ impl ToAgent {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
             }
+            ToAgent::Call(on) => {
+                b.push(*on as u8);
+                43
+            }
+            ToAgent::Voice(p) => {
+                b.extend_from_slice(p);
+                44
+            }
             ToAgent::PortOpen { id, host, port } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&port.to_le_bytes());
@@ -783,6 +799,8 @@ impl ToAgent {
             35 => ToAgent::PickOnRemote,
             36 => ToAgent::UiState { text: c.u8()? != 0, max: c.u16()? },
             38 => ToAgent::Host { act: c.u8()?, on: c.u8()? != 0 },
+            43 => ToAgent::Call(c.u8()? != 0),
+            44 => ToAgent::Voice(c.rest().to_vec()),
             40 => ToAgent::PortOpen { id: c.u32()?, port: c.u16()?, host: String::from_utf8_lossy(c.rest()).into_owned() },
             41 => ToAgent::PortData { id: c.u32()?, data: c.rest().to_vec() },
             42 => ToAgent::PortClose { id: c.u32()? },
@@ -1007,6 +1025,14 @@ impl ToClient {
                 b.extend_from_slice(&[*can, *on]);
                 128
             }
+            ToClient::Voice(p) => {
+                b.extend_from_slice(p);
+                133
+            }
+            ToClient::CallState(c) => {
+                b.push(*c);
+                134
+            }
             ToClient::PortOpened { id, ok, text } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.push(*ok as u8);
@@ -1189,6 +1215,8 @@ impl ToClient {
             124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             127 => ToClient::Allowed(c.u8()?),
             128 => ToClient::HostState { can: c.u8()?, on: c.u8()? },
+            133 => ToClient::Voice(c.rest().to_vec()),
+            134 => ToClient::CallState(c.u8()?),
             130 => ToClient::PortOpened { id: c.u32()?, ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             131 => ToClient::PortData { id: c.u32()?, data: c.rest().to_vec() },
             132 => ToClient::PortClosed { id: c.u32()? },
@@ -1279,6 +1307,8 @@ mod tests {
             ToAgent::UiState { text: true, max: 150 },
             ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
             ToAgent::Host { act: 4, on: true },
+            ToAgent::Call(true),
+            ToAgent::Voice(vec![7, 8]),
             ToAgent::PortOpen { id: 2, host: "localhost".into(), port: 3389 },
             ToAgent::PortData { id: 2, data: vec![1, 2, 3] },
             ToAgent::PortClose { id: 2 },
@@ -1328,6 +1358,8 @@ mod tests {
             ToClient::UiDone { ok: true, text: "clicked".into() },
             ToClient::Allowed(5),
             ToClient::HostState { can: 0b111110, on: 0b1000 },
+            ToClient::Voice(vec![1, 2, 3]),
+            ToClient::CallState(2),
             ToClient::PortOpened { id: 2, ok: false, text: "refused".into() },
             ToClient::PortData { id: 2, data: vec![9; 5] },
             ToClient::PortClosed { id: 2 },

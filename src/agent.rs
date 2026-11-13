@@ -333,6 +333,8 @@ fn serve_with(
     let mut host = crate::hostctl::HostCtl::default();
     // Connections for the viewer's forwarded ports.
     let mut ports = crate::porttunnel::Ports::default();
+    // A voice call: ringing (None) or answered, with the microphone here and a player for theirs.
+    let mut call: Option<Option<(Option<crate::audio::Capture>, Option<crate::audio::Player>)>> = None;
     let mut pending = String::new();
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
@@ -432,6 +434,27 @@ fn serve_with(
                 ToAgent::Ack(_) => {
                     in_flight = in_flight.saturating_sub(1);
                     flight_sizes.pop_front();
+                }
+                ToAgent::Call(true) => match chat.ring() {
+                    Ok(()) => {
+                        call = Some(None);
+                        send(enc, &ToClient::CallState(crate::chat::CALL_RINGING)).map_err(io_err)?;
+                    }
+                    Err(e) => {
+                        send(enc, &ToClient::Notice(format!("Nobody can answer at that computer: {e}"))).map_err(io_err)?;
+                        send(enc, &ToClient::CallState(crate::chat::CALL_ENDED)).map_err(io_err)?;
+                    }
+                },
+                ToAgent::Call(false) => {
+                    if call.take().is_some() {
+                        chat.hung_up();
+                        send(enc, &ToClient::CallState(crate::chat::CALL_ENDED)).map_err(io_err)?;
+                    }
+                }
+                ToAgent::Voice(p) => {
+                    if let Some(Some((_, Some(player)))) = call.as_mut() {
+                        player.push(&p);
+                    }
                 }
                 ToAgent::PortOpen { id, host, port } => ports.open(id, host, port),
                 ToAgent::PortData { id, data } => ports.data(id, data),
@@ -674,7 +697,26 @@ fn serve_with(
             send(enc, &ToClient::Notice("The person at that computer took its keyboard and mouse back (Ctrl+P).".into())).map_err(io_err)?;
             send(enc, &ToClient::HostState { can: crate::hostctl::can(), on: host.on() }).map_err(io_err)?;
         }
+        if let Some(Some((Some(mic), _))) = call.as_ref() {
+            for p in mic.packets.try_iter() {
+                send(enc, &ToClient::Voice(p)).map_err(io_err)?;
+            }
+        }
         for text in chat.replies() {
+            // The call answered here: the microphone and the speakers here join it.
+            if text == crate::chat::ANSWER && call.is_some() {
+                let mic = crate::audio::microphone().map_err(|e| send(enc, &ToClient::Notice(format!("The microphone there: {e}")))).ok();
+                let player = crate::audio::Player::new().map_err(|e| send(enc, &ToClient::Notice(format!("The speakers there: {e}")))).ok();
+                call = Some(Some((mic, player)));
+                send(enc, &ToClient::CallState(crate::chat::CALL_TALKING)).map_err(io_err)?;
+                continue;
+            }
+            if text == crate::chat::DECLINE || text == crate::chat::HANG_UP {
+                let state = if text == crate::chat::DECLINE { crate::chat::CALL_DECLINED } else { crate::chat::CALL_ENDED };
+                call = None;
+                send(enc, &ToClient::CallState(state)).map_err(io_err)?;
+                continue;
+            }
             // The person at the screen ended it.
             if text == crate::chat::END || text == crate::chat::DENY {
                 return Err("The person at that computer's screen ended the connection.".into());
@@ -690,6 +732,10 @@ fn serve_with(
                 }
                 if taken & crate::grant::SOUND != 0 {
                     sound = None;
+                    if call.take().is_some() {
+                        chat.hung_up();
+                        send(enc, &ToClient::CallState(crate::chat::CALL_ENDED)).map_err(io_err)?;
+                    }
                 }
                 if taken & crate::grant::TERMINAL != 0 {
                     terms = crate::pty::Terms::default();
