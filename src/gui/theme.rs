@@ -281,7 +281,7 @@ fn terminals_draw_korean() {
 #[cfg(test)]
 mod contrast {
     use super::*;
-    use crate::gui::{ACCENT, bad, good, selected_fill, warn};
+    use crate::gui::{ACCENT, bad_in, good_in, selected_fill, warn_in};
 
     /// A colour over `bg` as egui paints it: `Color32` holds premultiplied alpha.
     fn over(c: Color32, bg: Color32) -> Color32 {
@@ -318,6 +318,7 @@ mod contrast {
             let bar = crate::gui::chrome::bar_fill(&v);
             let on_tint = over(selected_fill(), bar);
             let hover = over(v.widgets.hovered.weak_bg_fill, bar);
+            // The theme's own status colours: other tests switch the global theme meanwhile.
             let pairs: Vec<(&str, Color32, Color32, f32)> = vec![
                 ("text on panel", text, v.panel_fill, 4.5),
                 ("text on window", text, v.window_fill, 4.5),
@@ -332,13 +333,13 @@ mod contrast {
                 ("weak text on title bar", weak, bar, 4.5),
                 ("weak text on field", weak, v.extreme_bg_color, 4.5),
                 ("selected icon on its tint", text, on_tint, 4.5),
-                ("red cross on the dock", bad(), bar, 4.5),
+                ("red cross on the dock", bad_in(dark), bar, 4.5),
                 ("link on panel", v.hyperlink_color, v.panel_fill, 4.5),
-                ("good text on panel", good(), v.panel_fill, 4.5),
-                ("warning text on panel", warn(), v.panel_fill, 4.5),
-                ("error text on panel", bad(), v.panel_fill, 4.5),
-                ("good on title bar", good(), bar, 4.5),
-                ("error text on its notice", bad(), over(bad().gamma_multiply(0.15), v.panel_fill), 4.5),
+                ("good text on panel", good_in(dark), v.panel_fill, 4.5),
+                ("warning text on panel", warn_in(dark), v.panel_fill, 4.5),
+                ("error text on panel", bad_in(dark), v.panel_fill, 4.5),
+                ("good on title bar", good_in(dark), bar, 4.5),
+                ("error text on its notice", bad_in(dark), over(bad_in(dark).gamma_multiply(0.15), v.panel_fill), 4.5),
                 ("focus outline on panel", ACCENT, v.panel_fill, 3.0),
                 ("check box edge on a menu", v.widgets.inactive.bg_stroke.color, v.window_fill, 1.8),
                 ("own chat bubble", text, if dark { Color32::from_rgb(52, 56, 66) } else { Color32::from_rgb(220, 225, 233) }, 4.5),

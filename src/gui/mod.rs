@@ -463,15 +463,28 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
 
 /// Status colours for text and icons, a shade for each theme so they read on its background.
 pub(crate) fn good() -> Color32 {
-    if theme::dark() { Color32::from_rgb(70, 190, 110) } else { Color32::from_rgb(16, 112, 52) }
+    good_in(theme::dark())
 }
 
 pub(crate) fn warn() -> Color32 {
-    if theme::dark() { Color32::from_rgb(230, 170, 50) } else { Color32::from_rgb(161, 98, 7) }
+    warn_in(theme::dark())
 }
 
 pub(crate) fn bad() -> Color32 {
-    if theme::dark() { Color32::from_rgb(240, 110, 100) } else { Color32::from_rgb(168, 24, 24) }
+    bad_in(theme::dark())
+}
+
+/// The status colours of the dark or the light theme.
+pub(crate) fn good_in(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(70, 190, 110) } else { Color32::from_rgb(16, 112, 52) }
+}
+
+pub(crate) fn warn_in(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(230, 170, 50) } else { Color32::from_rgb(161, 98, 7) }
+}
+
+pub(crate) fn bad_in(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(240, 110, 100) } else { Color32::from_rgb(168, 24, 24) }
 }
 
 
