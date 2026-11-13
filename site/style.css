@@ -2,6 +2,8 @@
   --bg: #fbfbfa; --bg2: #ffffff; --sunk: #f3f3f1; --fg: #18181b; --dim: #63636b; --faint: #9b9ba3;
   --line: #e6e6e3; --line2: #d4d4d0;
   --accent: #2b59c3; --on-accent: #fff; --ok: #1e7a46; --gold: #9a6a12;
+  /* Buttons: the app's and the web page's blue, the same in both themes, with white text. */
+  --btn: #2b59c3; --btn-hi: #2450b0; --on-btn: #fff;
   --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace;
   --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, Ubuntu, sans-serif;
   color-scheme: light;
@@ -67,10 +69,10 @@ header.top .wrap { display: flex; align-items: center; gap: 20px; height: 60px; 
 
 /* Buttons */
 .btns { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.btn { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 18px; border-radius: 8px; background: var(--fg); color: var(--bg); text-decoration: none; font-weight: 500; font-size: 15px; border: 1px solid var(--fg); cursor: pointer; transition: opacity .15s; }
-.btn:hover { opacity: .86; }
-.btn.alt { background: transparent; color: var(--fg); border-color: var(--line2); }
-.btn.alt:hover { opacity: 1; background: var(--sunk); }
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 18px; border-radius: 8px; background: var(--btn); color: var(--on-btn); text-decoration: none; font-weight: 600; font-size: 15px; border: 1px solid var(--btn); cursor: pointer; transition: background .15s, border-color .15s; }
+.btn:hover { background: var(--btn-hi); border-color: var(--btn-hi); }
+.btn.alt { background: var(--bg2); color: var(--fg); border-color: var(--line2); font-weight: 500; }
+.btn.alt:hover { background: var(--sunk); border-color: var(--line2); }
 .btn .k { font: 12px var(--mono); opacity: .6; }
 .btn.sm { height: 34px; padding: 0 12px; font-size: 14px; gap: 6px; white-space: nowrap; }
 #webapp { margin-left: 4px; }
@@ -207,7 +209,7 @@ input[type="search"]:focus { outline: none; border-color: var(--fg); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; border: 1px solid var(--line2); border-radius: 9px; }
 .chip { font: inherit; font-size: 14px; border: 0; background: none; color: var(--dim); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 .chip:hover { color: var(--fg); }
-.chip[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.chip[aria-pressed="true"] { background: var(--btn); border-color: var(--btn); color: var(--on-btn); }
 .ext { display: flex; flex-direction: column; gap: 14px; transition: border-color .15s; }
 .ext:hover { border-color: var(--line2); }
 .ext .row { display: flex; gap: 14px; align-items: flex-start; }
