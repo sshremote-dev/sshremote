@@ -77,6 +77,9 @@ pub fn find(prev: &Plane, cur: &Plane, rects: &[Rect]) -> Option<Move> {
     if n < 16 {
         return None;
     }
+    // Columns that keep their place (a scroll bar's thumb, a fixed side panel) would cut the run
+    // short at every row they differ in; the move is looked for without them.
+    let (x0, x1) = moving_columns(prev, cur, dy, (x0, x1), (y0, y1));
     // The longest run of rows that match exactly after the shift.
     let (mut best, mut start, mut run) = ((0, 0), 0, 0);
     for y in y0..y1 {
@@ -95,6 +98,45 @@ pub fn find(prev: &Plane, cur: &Plane, rects: &[Rect]) -> Option<Move> {
         }
     }
     (best.1 >= 32).then_some(Move { x: x0, y: best.0, w: x1 - x0, h: best.1, dy })
+}
+
+/// The widest span of columns of `x0..x1` that moved by `dy` with the rest: a column that differs
+/// after the shift in clearly more rows than the typical (median) column stayed put. All of them
+/// when no such span is at least 64 pixels wide.
+fn moving_columns(prev: &Plane, cur: &Plane, dy: isize, (x0, x1): (usize, usize), (y0, y1): (usize, usize)) -> (usize, usize) {
+    let bpp = cur.mode.bpp();
+    let mut off = vec![0u32; x1 - x0];
+    let mut rows = 0u32;
+    for y in y0..y1 {
+        let src = y as isize - dy;
+        if src < y0 as isize || src >= y1 as isize {
+            continue;
+        }
+        rows += 1;
+        let (a, b) = (row(cur, y, x0, x1), row(prev, src as usize, x0, x1));
+        if a == b {
+            continue;
+        }
+        for (i, (pa, pb)) in a.chunks_exact(bpp).zip(b.chunks_exact(bpp)).enumerate() {
+            if pa != pb {
+                off[i] += 1;
+            }
+        }
+    }
+    let mut sorted = off.clone();
+    sorted.sort_unstable();
+    let limit = sorted[sorted.len() / 2] + (rows / 32).max(4);
+    let (mut best, mut start) = ((0, 0), None);
+    for (i, &o) in off.iter().chain(std::iter::once(&u32::MAX)).enumerate() {
+        if o <= limit {
+            start.get_or_insert(i);
+        } else if let Some(s) = start.take()
+            && i - s > best.1 - best.0
+        {
+            best = (s, i);
+        }
+    }
+    if best.1 - best.0 < 64 { (x0, x1) } else { (x0 + best.0, x0 + best.1) }
 }
 
 /// Applies `m` to a row-major buffer of `w`-pixel rows with `bpp` bytes per pixel.
@@ -145,5 +187,27 @@ mod tests {
         let rest: usize = diff(Some(&moved), &cur).iter().map(|r| r.w * r.h).sum();
         let all: usize = rects.iter().map(|r| r.w * r.h).sum();
         assert!(rest * 5 < all, "rest {rest} of {all}");
+    }
+
+    #[test]
+    fn a_scroll_bar_that_stays_put_does_not_cut_the_move_short() {
+        let mut prev = text(300, 400, 0);
+        let mut cur = text(300, 400, 25);
+        // A short thumb at the right edge, rows 40..60 before and 41..61 after: it moves, but not
+        // with the text, and differs in only a tenth of the rows.
+        for (p, top) in [(&mut prev, 40), (&mut cur, 41)] {
+            for y in 0..400 {
+                p.data[y * 300 + 292..y * 300 + 300].fill(if (top..top + 20).contains(&y) { 120 } else { 30 });
+            }
+        }
+        let rects = diff(Some(&prev), &cur);
+        let m = find(&prev, &cur, &rects).expect("scroll");
+        assert_eq!(m.dy, -25);
+        assert!(m.h > 330, "{m:?}");
+        let mut moved = prev.clone();
+        apply(&mut moved.data, 300, 1, &m);
+        let rest: usize = diff(Some(&moved), &cur).iter().map(|r| r.w * r.h).sum();
+        // The new rows at the bottom and the thumb's column, little else.
+        assert!(rest < 25 * 300 + 8 * 400 + 2000, "rest {rest}");
     }
 }

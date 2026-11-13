@@ -259,10 +259,13 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
     let mut reducer: Option<Reducer> = None;
     let mut last: Option<Image> = None;
     let mut fresh = false;
+    // The frame being made waited a moment for a second paint (see below).
+    let mut waited = false;
     // Paused: no frames unless the viewer asks for one with Refresh.
     let (mut paused, mut one_shot) = (false, false);
     let mut prev: Option<Plane> = None;
     let mut vid = video::Video::new();
+    let mut colours = crate::color::Palette::default();
     // The picture's size changed: tell the viewer and start the stream over.
     macro_rules! resized {
         () => {
@@ -646,11 +649,24 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             continue;
         }
         fresh = false;
-        one_shot = false;
         let plane = red.reduce(img);
+        // A whole new picture: the viewer starts its palette over too.
+        let whole = prev.is_none();
         let mut rects = diff(prev.as_ref(), &plane);
+        let found = prev.as_ref().and_then(|p| scroll::find(p, &plane, &rects));
+        // Most of the screen changing often comes as two paints a moment apart (a window, then
+        // what is in it): one frame's wait sends them as one. Not a scroll, a film or a frame asked for.
+        let most = rects.iter().map(|r| r.w * r.h).sum::<usize>() * 2 > plane.w * plane.h;
+        if most && !whole && !one_shot && !waited && found.is_none() && vid.region.is_none() {
+            waited = true;
+            fresh = true;
+            due = now + Duration::from_millis(34);
+            continue;
+        }
+        waited = false;
+        one_shot = false;
         let mut moves = Vec::new();
-        if let Some(m) = prev.as_ref().and_then(|p| scroll::find(p, &plane, &rects))
+        if let Some(m) = found
             && let Some(mut moved) = prev.take()
         {
             // The previous screen is replaced below anyway, so it is moved in place, not copied.
@@ -660,8 +676,18 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
         }
         let mut video_part = None;
         if matches!(plane.mode, Mode::Color256 | Mode::True) {
-            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects) {
-                rects.push(r);
+            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects, !moves.is_empty(), &|r| crate::color::rich(&plane, r)) {
+                // Its pixels went as a film: they go again losslessly, tile by tile, but for the
+                // tiles this frame sends whole anyway.
+                let inside = |c: &crate::color::Rect, t: &crate::color::Rect| c.x <= t.x && c.y <= t.y && c.x + c.w >= t.x + t.w && c.y + c.h >= t.y + t.h;
+                for ty in (r.y..r.y + r.h).step_by(32) {
+                    for tx in (r.x..r.x + r.w).step_by(32) {
+                        let t = crate::color::Rect { x: tx, y: ty, w: 32.min(r.x + r.w - tx), h: 32.min(r.y + r.h - ty) };
+                        if !rects.iter().any(|c| inside(c, &t)) {
+                            rects.push(t);
+                        }
+                    }
+                }
             }
             if let Some(reg) = vid.region {
                 if rects.iter().any(|r| video::overlaps(r, &reg)) {
@@ -680,15 +706,16 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             continue;
         }
         let plane = prev.as_ref().unwrap();
+        let (palette, data) = if plane.mode == Mode::True && s.formats & crate::proto::FORMAT_PALETTE != 0 {
+            let (fresh, changed, data) = colours.pack(plane, &rects, whole);
+            (Some((fresh, changed)), data)
+        } else {
+            (None, rects.iter().map(|r| pack(plane, r.x, r.y, r.w, r.h)).collect())
+        };
         let tiles = rects
             .iter()
-            .map(|r| Tile {
-                x: r.x as u16,
-                y: r.y as u16,
-                w: r.w as u16,
-                h: r.h as u16,
-                data: pack(plane, r.x, r.y, r.w, r.h),
-            })
+            .zip(data)
+            .map(|(r, data)| Tile { x: r.x as u16, y: r.y as u16, w: r.w as u16, h: r.h as u16, data })
             .collect();
         let frame = Frame {
             id: next_id,
@@ -696,6 +723,7 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             h: plane.h as u16,
             mode: plane.mode,
             moves,
+            palette,
             tiles,
             video: video_part,
         };
@@ -762,7 +790,7 @@ mod tests {
     use super::*;
 
     fn view(w: u16, h: u16, scale: u8) -> Settings {
-        Settings { view_w: w, view_h: h, scale, mode: Mode::True, fps: 30 }
+        Settings { view_w: w, view_h: h, scale, mode: Mode::True, fps: 30, formats: 0 }
     }
 
     /// The picture keeps the host's shape at the viewer's size exactly on the limiting side, is

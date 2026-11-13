@@ -252,7 +252,7 @@ impl Server {
             let (mut sess, tx, rx) = Session::open(&self.target, true)?;
             let desk = sess.desk;
             // Full resolution in true colour, but no stream: screenshots are taken on request.
-            let s = Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5 };
+            let s = Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5, formats: crate::proto::FORMATS };
             sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
             sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
             self.screen = (desk.0 as u32, desk.1 as u32);

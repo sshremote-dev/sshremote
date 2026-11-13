@@ -17,6 +17,11 @@ const TILE: usize = 32;
 const HOT: u32 = 5;
 /// Fewest hot tiles that make a region (about 160x160 pixels).
 const MIN_TILES: usize = 25;
+/// Fewest tiles that make a region at once when they changed in two frames in a row (about
+/// 256x256 pixels): a film's first frames would otherwise each go losslessly, a large burst.
+const FAST_TILES: usize = 64;
+/// Changes further apart than this are not frame after frame: the heat starts over.
+const GAP: Duration = Duration::from_millis(400);
 const QUIET: Duration = Duration::from_millis(1200);
 
 pub enum Event {
@@ -35,6 +40,7 @@ pub struct Video {
     yuv: Option<YUVBuffer>,
     crop: Vec<u8>,
     last_change: Instant,
+    last_seen: Option<Instant>,
 }
 
 impl Video {
@@ -49,6 +55,7 @@ impl Video {
             yuv: None,
             crop: Vec::new(),
             last_change: Instant::now(),
+            last_seen: None,
         }
     }
 
@@ -57,16 +64,27 @@ impl Video {
         *self = Video::new();
     }
 
-    /// Updates tile heat from this frame's changed rectangles and moves the region.
-    pub fn observe(&mut self, w: usize, h: usize, rects: &[Rect]) -> Event {
+    /// Updates tile heat from this frame's changed rectangles and moves the region. The rows a
+    /// scroll uncovered (`scrolled`) are new text, not a film, and heat nothing. `rich` says
+    /// whether an area now looks like a photograph: only such an area becomes a region, and a
+    /// region that stops looking like one ends at once, since text and drawings cost little
+    /// losslessly and blur in a film.
+    pub fn observe(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool) -> Event {
+        self.observe_at(w, h, rects, scrolled, rich, Instant::now())
+    }
+
+    fn observe_at(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool, now: Instant) -> Event {
         if (w, h) != self.size {
             self.reset();
             self.size = (w, h);
             (self.cols, self.rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
             self.heat = vec![0; self.cols * self.rows];
         }
+        if self.last_seen.replace(now).is_some_and(|t| now.duration_since(t) > GAP) {
+            self.heat.fill(0);
+        }
         let mut changed = vec![false; self.heat.len()];
-        for r in rects {
+        for r in rects.iter().filter(|_| !scrolled) {
             for ty in r.y / TILE..(r.y + r.h).div_ceil(TILE) {
                 for tx in r.x / TILE..(r.x + r.w).div_ceil(TILE) {
                     changed[ty * self.cols + tx] = true;
@@ -82,7 +100,8 @@ impl Video {
             *heat = (*heat << 1) | c as u8;
         }
         if let Some(reg) = self.region {
-            if self.last_change.elapsed() > QUIET {
+            let plain = rects.iter().any(|r| overlaps(r, &reg)) && !rich(&reg);
+            if plain || self.last_change.elapsed() > QUIET {
                 self.region = None;
                 self.enc = None;
                 // Heat only decays on processed frames; start the area cold so it is not taken back at once.
@@ -95,19 +114,25 @@ impl Video {
             }
             return Event::None;
         }
-        let hot: Vec<(usize, usize)> = (0..self.heat.len())
-            .filter(|&i| self.heat[i].count_ones() >= HOT)
-            .map(|i| (i % self.cols, i / self.cols))
-            .collect();
-        if hot.len() < MIN_TILES {
-            return Event::None;
-        }
-        let (x0, x1) = (hot.iter().map(|t| t.0).min().unwrap(), hot.iter().map(|t| t.0).max().unwrap() + 1);
-        let (y0, y1) = (hot.iter().map(|t| t.1).min().unwrap(), hot.iter().map(|t| t.1).max().unwrap() + 1);
+        let tiles = |hot: &dyn Fn(u8) -> bool| -> Vec<(usize, usize)> {
+            (0..self.heat.len()).filter(|&i| hot(self.heat[i])).map(|i| (i % self.cols, i / self.cols)).collect()
+        };
         // Scattered changes (a clock here, a cursor there) do not make a video.
-        if hot.len() * 2 < (x1 - x0) * (y1 - y0) {
+        let dense = |hot: &[(usize, usize)], least: usize| {
+            if hot.len() < least {
+                return None;
+            }
+            let (x0, x1) = (hot.iter().map(|t| t.0).min()?, hot.iter().map(|t| t.0).max()? + 1);
+            let (y0, y1) = (hot.iter().map(|t| t.1).min()?, hot.iter().map(|t| t.1).max()? + 1);
+            (hot.len() * 2 >= (x1 - x0) * (y1 - y0)).then_some((x0, x1, y0, y1))
+        };
+        let box_of = |(x0, x1, y0, y1): (usize, usize, usize, usize)| Rect { x: x0 * TILE, y: y0 * TILE, w: ((x1 * TILE).min(w) - x0 * TILE), h: ((y1 * TILE).min(h) - y0 * TILE) };
+        let Some((x0, x1, y0, y1)) = dense(&tiles(&|heat| heat.count_ones() >= HOT), MIN_TILES)
+            .or_else(|| dense(&tiles(&|heat| heat & 3 == 3), FAST_TILES))
+            .filter(|b| rich(&box_of(*b)))
+        else {
             return Event::None;
-        }
+        };
         let rw = ((x1 * TILE).min(w) - x0 * TILE) & !1;
         let rh = ((y1 * TILE).min(h) - y0 * TILE) & !1;
         if rw < 16 || rh < 16 {
@@ -222,7 +247,7 @@ mod tests {
         let mut v = Video::new();
         let busy = [Rect { x: 64, y: 64, w: 256, h: 192 }];
         for _ in 0..8 {
-            v.observe(w, h, &busy);
+            v.observe(w, h, &busy, false, &|_| true);
         }
         let r = v.region.expect("region");
         assert_eq!((r.x, r.y, r.w, r.h), (64, 64, 256, 192));
@@ -235,5 +260,41 @@ mod tests {
         let mut p = Player::default();
         let rgb = p.decode((r.x, r.y, r.w, r.h), &au).unwrap().expect("picture");
         assert_eq!(rgb.len(), r.w * r.h * 3);
+    }
+
+    #[test]
+    fn a_large_area_changing_twice_in_a_row_is_a_film_at_once() {
+        let (w, h) = (1280, 800);
+        let film = [Rect { x: 200, y: 160, w: 854, h: 480 }];
+        let t = Instant::now();
+        let mut v = Video::new();
+        v.observe_at(w, h, &film, false, &|_| true, t);
+        assert!(v.region.is_none());
+        v.observe_at(w, h, &film, false, &|_| true, t + Duration::from_millis(33));
+        assert!(v.region.is_some());
+        // Text over it ends it at once, to be sent losslessly.
+        assert!(matches!(v.observe_at(w, h, &film, false, &|_| false, t + Duration::from_millis(66)), Event::Ended(_)));
+        // A window drawn twice as it opens is no film.
+        let mut v = Video::new();
+        v.observe_at(w, h, &film, false, &|_| false, t);
+        v.observe_at(w, h, &film, false, &|_| false, t + Duration::from_millis(33));
+        assert!(v.region.is_none());
+    }
+
+    #[test]
+    fn pages_turned_seconds_apart_and_scrolling_are_no_film() {
+        let (w, h) = (1280, 800);
+        let page = [Rect { x: 40, y: 0, w: 1200, h: 800 }];
+        let t = Instant::now();
+        let mut v = Video::new();
+        for i in 0..10 {
+            v.observe_at(w, h, &page, false, &|_| true, t + Duration::from_secs(2 * i));
+        }
+        assert!(v.region.is_none());
+        let strip = [Rect { x: 40, y: 750, w: 1200, h: 50 }];
+        for i in 0..20 {
+            v.observe_at(w, h, &strip, true, &|_| true, t + Duration::from_secs(30) + Duration::from_millis(100 * i));
+        }
+        assert!(v.region.is_none());
     }
 }

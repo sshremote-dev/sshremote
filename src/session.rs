@@ -298,6 +298,7 @@ pub struct Framebuffer {
     /// The video could not be decoded (a decoder started over met frames of the stream before
     /// it): the viewer asks the agent to start the picture over, with a fresh stream.
     pub need_key: bool,
+    colours: crate::color::Colours,
 }
 
 impl Framebuffer {
@@ -312,6 +313,9 @@ impl Framebuffer {
         if self.mode != Some(f.mode) {
             self.pal = f.mode.palette();
             self.mode = Some(f.mode);
+        }
+        if let Some((fresh, changed)) = &f.palette {
+            self.colours.update(*fresh, changed);
         }
         if !resized {
             for m in &f.moves {
@@ -342,7 +346,17 @@ impl Framebuffer {
             if tx + tw > w || ty + th > h {
                 return Err(io::Error::other("a tile outside the picture"));
             }
-            let px = unpack(&t.data, f.mode, tw, th).ok_or_else(|| io::Error::other("short tile"))?;
+            let px = match &f.palette {
+                Some(_) => match self.colours.unpack(&t.data, tw, th) {
+                    Some(px) => px,
+                    // A colour this side was never told: ask for a whole new picture.
+                    None => {
+                        self.need_key = true;
+                        continue;
+                    }
+                },
+                None => unpack(&t.data, f.mode, tw, th).ok_or_else(|| io::Error::other("short tile"))?,
+            };
             for row in 0..th {
                 let o = ((ty + row) * w + tx) * 3;
                 let line = &mut self.rgb[o..o + tw * 3];
@@ -481,6 +495,9 @@ pub enum Action {
     Send(ToAgent),
 }
 
+/// A picture unchanged this long is pinged this seldom.
+const STILL: Duration = Duration::from_secs(3);
+
 /// Settings, the menu that edits them, and live statistics.
 pub struct Control {
     pub s: Settings,
@@ -491,6 +508,10 @@ pub struct Control {
     budget: Option<f64>,
     epoch: Instant,
     ping: Option<(u32, Instant)>,
+    /// When the last ping went, and when the picture last changed: a still screen is pinged
+    /// less often, so it costs no more than a few bytes a second.
+    pinged: Instant,
+    busy: Instant,
     stat_at: Instant,
     stat_rx: u64,
     stat_frames: u32,
@@ -526,7 +547,7 @@ impl Control {
         let level = opt.0.unwrap_or(2).min(PRESETS.len() - 1);
         let p = &PRESETS[level];
         let mode = if p.mode.to_u8() > max_mode.to_u8() { max_mode } else { p.mode };
-        let mut s = Settings { view_w: 0, view_h: 0, scale: p.scale, mode, fps: p.fps };
+        let mut s = Settings { view_w: 0, view_h: 0, scale: p.scale, mode, fps: p.fps, formats: crate::proto::FORMATS };
         let custom = opt.2.is_some() || opt.3.is_some() || opt.4.is_some();
         s.mode = opt.2.unwrap_or(s.mode);
         s.scale = opt.3.unwrap_or(s.scale).clamp(10, 100);
@@ -540,6 +561,8 @@ impl Control {
             budget: opt.1,
             epoch: now,
             ping: None,
+            pinged: now,
+            busy: now,
             stat_at: now,
             stat_rx: 0,
             stat_frames: 0,
@@ -649,13 +672,19 @@ impl Control {
         let rx = sess.rx();
         self.kbps = (rx - self.stat_rx) as f64 / 1024.0 / dt;
         self.fps_now = self.stat_frames as f64 / dt;
+        if self.stat_frames > 0 {
+            self.busy = Instant::now();
+        }
         (self.stat_rx, self.stat_frames, self.stat_at) = (rx, 0, Instant::now());
+        let still = self.busy.elapsed() > STILL && self.pinged.elapsed() < STILL;
         match self.ping {
             // An unanswered ping is at least as slow as its age.
             Some((_, at)) => self.rtt = self.rtt.max(at.elapsed().as_secs_f64() * 1000.0),
+            None if still => {}
             None => {
                 let t = self.epoch.elapsed().as_millis() as u32;
                 self.ping = Some((t, Instant::now()));
+                self.pinged = Instant::now();
                 sess.send(ToAgent::Ping(t))?;
             }
         }
@@ -724,7 +753,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
         let (w, h) = (sess.desk.0 as u16, sess.desk.1 as u16);
         assert!(w > h, "a screen wider than tall to start with: {w}x{h}");
-        sess.send(ToAgent::Settings(Settings { view_w: 640, view_h: 640, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        sess.send(ToAgent::Settings(Settings { view_w: 640, view_h: 640, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         // The next frame for which `want` holds, acknowledging every frame meanwhile; the sizes
         // announced on the way are returned with it.
         let mut frame = |want: &dyn Fn(u16, u16) -> bool| -> (Vec<(u16, u16)>, (u16, u16)) {
@@ -800,7 +829,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
         let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
-        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         // Sends `first`, then waits for a frame for which `want` holds.
         let mut fb = Framebuffer::default();
         let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Vec<(u16, u16)>, (u16, u16)) {
@@ -872,7 +901,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let target = Target::Ssh { host, port: None, args: Vec::new(), remote: format!("env {env} {agent} --agent"), capture: "gnome".into(), password: None, unattended: true };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
         let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
-        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::True, fps: 10 })).unwrap();
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::True, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         let mut fb = Framebuffer::default();
         // Frames for `secs` seconds (or until one for which `want` holds), applied to `fb`.
         let frames = |sess: &mut Session, fb: &mut Framebuffer, secs: u64, want: &dyn Fn(u16, u16) -> bool| -> bool {
@@ -932,7 +961,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
         let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
-        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10 })).unwrap();
+        sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         let mut fb = Framebuffer::default();
         let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Option<(u8, String)>, (u16, u16), Vec<u8>) {
             if let Some(m) = first {

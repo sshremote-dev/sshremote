@@ -13,7 +13,15 @@ pub struct Settings {
     pub scale: u8,
     pub mode: Mode,
     pub fps: u8,
+    /// Picture forms the viewer reads beyond the first ones (`FORMAT_*`); an older viewer sends
+    /// none, so its agent keeps to those.
+    pub formats: u8,
 }
+
+/// True colour frames whose text and drawings index a palette kept for the session (`color::Palette`).
+pub const FORMAT_PALETTE: u8 = 1;
+/// Every form this program reads.
+pub const FORMATS: u8 = FORMAT_PALETTE;
 
 pub struct Preset {
     pub name: &'static str,
@@ -244,6 +252,9 @@ pub struct Frame {
     pub mode: Mode,
     /// Applied before the tiles: areas the client already has, shifted vertically.
     pub moves: Vec<Move>,
+    /// With a palette (whether the viewer forgets its own first, and the slots that changed),
+    /// every tile's data starts with its form (`color::Palette`).
+    pub palette: Option<(bool, Vec<(u8, [u8; 3])>)>,
     pub tiles: Vec<Tile>,
     /// One H.264 access unit for the video region, which no tile covers.
     pub video: Option<Tile>,
@@ -472,7 +483,7 @@ impl ToAgent {
             ToAgent::Settings(s) => {
                 b.extend_from_slice(&s.view_w.to_le_bytes());
                 b.extend_from_slice(&s.view_h.to_le_bytes());
-                b.extend_from_slice(&[s.scale, s.mode.to_u8(), s.fps]);
+                b.extend_from_slice(&[s.scale, s.mode.to_u8(), s.fps, s.formats]);
                 1
             }
             ToAgent::Ack(id) => {
@@ -639,6 +650,7 @@ impl ToAgent {
                 scale: c.u8()?,
                 mode: c.mode()?,
                 fps: c.u8()?,
+                formats: c.u8().unwrap_or(0),
             }),
             2 => ToAgent::Ack(c.u32()?),
             3 => ToAgent::Key { keysym: c.u32()?, mods: c.u8()? },
@@ -722,11 +734,18 @@ impl ToClient {
                 b.extend_from_slice(&f.id.to_le_bytes());
                 b.extend_from_slice(&f.w.to_le_bytes());
                 b.extend_from_slice(&f.h.to_le_bytes());
-                b.push(f.mode.to_u8());
+                b.push(f.mode.to_u8() | if f.palette.is_some() { 0x80 } else { 0 });
                 b.extend_from_slice(&(f.moves.len() as u16).to_le_bytes());
                 for m in &f.moves {
                     for v in [m.x as u16, m.y as u16, m.w as u16, m.h as u16, m.dy as i16 as u16] {
                         b.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                if let Some((fresh, changed)) = &f.palette {
+                    b.extend_from_slice(&(changed.len() as u16 | if *fresh { 0x8000 } else { 0 }).to_le_bytes());
+                    for (n, c) in changed {
+                        b.push(*n);
+                        b.extend_from_slice(c);
                     }
                 }
                 b.extend_from_slice(&(f.tiles.len() as u32).to_le_bytes());
@@ -913,7 +932,8 @@ impl ToClient {
                 ToClient::Hello { w: c.u16()?, h: c.u16()?, backend: String::from_utf8_lossy(c.rest()).into_owned() }
             }
             102 => {
-                let (id, w, h, mode) = (c.u32()?, c.u16()?, c.u16()?, c.mode()?);
+                let (id, w, h, form) = (c.u32()?, c.u16()?, c.u16()?, c.u8()?);
+                let mode = Mode::from_u8(form & 0x7f).ok_or_else(bad)?;
                 // The viewer keeps a picture this big: one no screen sends is refused, not allocated.
                 if w as usize > MAX_SIDE || h as usize > MAX_SIDE || w as usize * h as usize > MAX_PIXELS {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a {w}x{h} picture is too big")));
@@ -928,6 +948,16 @@ impl ToClient {
                     }
                     moves.push(Move { x, y, w: mw, h: mh, dy });
                 }
+                let palette = if form & 0x80 != 0 {
+                    let n = c.u16()?;
+                    let (fresh, n) = (n & 0x8000 != 0, (n & 0x7fff) as usize);
+                    if n > 256 {
+                        return Err(bad());
+                    }
+                    Some((fresh, c.take(n * 4)?.chunks_exact(4).map(|p| (p[0], [p[1], p[2], p[3]])).collect()))
+                } else {
+                    None
+                };
                 let n = c.u32()? as usize;
                 let mut tiles = Vec::with_capacity(n.min(1 << 16));
                 for _ in 0..n {
@@ -949,7 +979,7 @@ impl ToClient {
                     }
                     video = Some(Tile { x, y, w: tw, h: th, data });
                 }
-                ToClient::Frame(Frame { id, w, h, mode, moves, tiles, video })
+                ToClient::Frame(Frame { id, w, h, mode, moves, palette, tiles, video })
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
@@ -1076,7 +1106,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let msgs = [
-            ToAgent::Settings(Settings { view_w: 1900, view_h: 1000, scale: 75, mode: Mode::Gray16, fps: 10 }),
+            ToAgent::Settings(Settings { view_w: 1900, view_h: 1000, scale: 75, mode: Mode::Gray16, fps: 10, formats: FORMATS }),
             ToAgent::Ack(7),
             ToAgent::Key { keysym: xk::RETURN, mods: MOD_CTRL },
             ToAgent::Pointer { x: 3, y: 4 },
@@ -1164,10 +1194,10 @@ mod tests {
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);
         }
         // A picture no screen sends is refused before anything is allocated for it.
-        let huge = ToClient::Frame(Frame { id: 1, w: 65535, h: 65535, mode: Mode::Mono, moves: vec![], tiles: vec![], video: None });
+        let huge = ToClient::Frame(Frame { id: 1, w: 65535, h: 65535, mode: Mode::Mono, moves: vec![], palette: None, tiles: vec![], video: None });
         let (k, p) = huge.encode();
         assert!(ToClient::decode(k, &p).is_err());
-        let wide = ToClient::Frame(Frame { id: 1, w: 15360, h: 2160, mode: Mode::Mono, moves: vec![], tiles: vec![], video: None });
+        let wide = ToClient::Frame(Frame { id: 1, w: 15360, h: 2160, mode: Mode::Mono, moves: vec![], palette: None, tiles: vec![], video: None });
         let (k, p) = wide.encode();
         assert!(ToClient::decode(k, &p).is_ok(), "four 4K screens side by side");
         let f = ToClient::Frame(Frame {
@@ -1176,6 +1206,7 @@ mod tests {
             h: 32,
             mode: Mode::Mono,
             moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3 }],
+            palette: None,
             tiles: vec![Tile { x: 1, y: 2, w: 3, h: 4, data: vec![1, 2] }],
             video: Some(Tile { x: 0, y: 0, w: 16, h: 16, data: vec![0, 0, 1] }),
         });
@@ -1184,6 +1215,22 @@ mod tests {
         write_msg(&mut wire, k, &p).unwrap();
         let (k, p) = read_msg(&mut wire.as_slice()).unwrap().unwrap();
         assert_eq!(ToClient::decode(k, &p).unwrap(), f);
+        let f = ToClient::Frame(Frame {
+            id: 10,
+            w: 64,
+            h: 32,
+            mode: Mode::True,
+            moves: vec![],
+            palette: Some((true, vec![(0, [255, 255, 255]), (7, [0, 0, 0])])),
+            tiles: vec![Tile { x: 0, y: 0, w: 2, h: 1, data: vec![1, 0, 1] }],
+            video: None,
+        });
+        let (k, p) = f.encode();
+        assert_eq!(ToClient::decode(k, &p).unwrap(), f);
+        // An older viewer's settings, without the forms it reads.
+        let (k, mut p) = ToAgent::Settings(Settings { view_w: 9, view_h: 9, scale: 100, mode: Mode::True, fps: 5, formats: 0 }).encode();
+        p.pop();
+        assert!(matches!(ToAgent::decode(k, &p).unwrap(), ToAgent::Settings(Settings { formats: 0, .. })));
     }
 
     #[test]
