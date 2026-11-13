@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,7 @@ const MAX_RTO: Duration = Duration::from_secs(3);
 const DEAD: Duration = Duration::from_secs(20);
 const KEEPALIVE: Duration = Duration::from_secs(2);
 /// How long both sides try before the session stays on the relay.
-pub const PUNCH_LIMIT: Duration = Duration::from_secs(10);
+pub const PUNCH_LIMIT: Duration = Duration::from_secs(6);
 const ACK_DELAY: Duration = Duration::from_millis(3);
 /// One side waits this long before it probes (or until it hears from the other), so the other
 /// side's router has seen its side send first. A probe that reaches a router before its side sent
@@ -37,6 +37,23 @@ const ACK_DELAY: Duration = Duration::from_millis(3);
 /// routers answered so drop the mapping of the side that sent it. Long enough for the addresses
 /// to cross the relay.
 const OPENING: Duration = Duration::from_millis(1000);
+/// When both sides' routers may turn away the other's first probes (a third try), both first
+/// send IPv4 probes that die two hops out for this long: past their own router, which then
+/// knows the way, but not as far as the other's.
+const LOW_FOR: Duration = Duration::from_millis(600);
+const LOW_TTL: u32 = 2;
+
+/// Who probes first.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Start {
+    /// This side, at once.
+    Now,
+    /// The other side: this one waits `OPENING`, or until it hears from it.
+    Second,
+    /// Both, opening their own routers only for `LOW_FOR`.
+    Low,
+}
+
 /// After the first answer, how long the viewer waits for an answer on a private network (the
 /// two on one network, or one router apart) before it names the path.
 const SETTLE: Duration = Duration::from_millis(100);
@@ -92,6 +109,8 @@ struct State {
     nominate_at: Option<Instant>,
     /// This side still waits for the other to probe first (`OPENING`).
     opening: bool,
+    /// Its IPv4 probes still die two hops out until then (`Start::Low`).
+    low_until: Option<Instant>,
     // Sending: packets numbered from 0, kept until the other side has them.
     seq: u32,
     queue: VecDeque<u8>,
@@ -143,6 +162,7 @@ impl State {
             working: Vec::new(),
             nominate_at: None,
             opening: false,
+            low_until: None,
             seq: 0,
             queue: VecDeque::new(),
             flight: BTreeMap::new(),
@@ -196,7 +216,8 @@ impl State {
 }
 
 struct Inner {
-    sock: UdpSocket,
+    /// IPv4, and IPv6 where this computer has it.
+    socks: Vec<UdpSocket>,
     me: u8,
     st: Mutex<State>,
     cv: Condvar,
@@ -208,6 +229,10 @@ struct Inner {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sock_for(&self, to: SocketAddr) -> Option<&UdpSocket> {
+        if to.is_ipv6() { self.socks.get(1) } else { self.socks.first() }
     }
 
     fn send(&self, st: &mut State, kind: u8, body: &[&[u8]], to: SocketAddr) {
@@ -235,7 +260,9 @@ impl Inner {
                 }
             }
         }
-        let _ = self.sock.send_to(&p, to);
+        if let Some(s) = self.sock_for(to) {
+            let _ = s.send_to(&p, to);
+        }
     }
 
     fn up(&self, st: &mut State, to: SocketAddr, now: Instant) {
@@ -541,8 +568,17 @@ impl Inner {
                     if st.probes.len() > 64 {
                         st.probes.pop_front();
                     }
+                    let low = st.low_until.is_some_and(|t| now < t);
+                    let v4 = &self.socks[0];
+                    let ttl = v4.ttl().unwrap_or(64);
+                    if low {
+                        let _ = v4.set_ttl(LOW_TTL);
+                    }
                     for p in st.peers.clone() {
                         self.send(st, PROBE, &[&id.to_le_bytes()], p);
+                    }
+                    if low {
+                        let _ = v4.set_ttl(ttl);
                     }
                     let early = now - st.started < Duration::from_secs(2);
                     st.next_probe = now + Duration::from_millis(if early { 100 } else { 250 });
@@ -553,7 +589,7 @@ impl Inner {
                     && let Some(at) = st.nominate_at
                     && now >= at
                 {
-                    st.nominee = st.working.iter().find(|a| private(a.ip())).or(st.working.first()).copied();
+                    st.nominee = st.working.iter().min_by_key(|a| rank(a)).copied();
                     st.next_nominate = now;
                 }
                 let mut next = if st.opening { st.started + OPENING } else { st.next_probe.min(st.started + PUNCH_LIMIT) };
@@ -638,7 +674,9 @@ impl Inner {
         }
     }
 
-    fn run(self: Arc<Self>) {
+    /// Receives on one socket; each socket's thread also keeps the timers.
+    fn run(self: Arc<Self>, which: usize) {
+        let sock = &self.socks[which];
         let mut buf = vec![0u8; 2048];
         loop {
             let next = {
@@ -649,10 +687,10 @@ impl Inner {
                 }
             };
             let wait = next.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(200));
-            let _ = self.sock.set_read_timeout(Some(wait));
+            let _ = sock.set_read_timeout(Some(wait));
             // Errors include a port that said it was closed (Windows reports it on the next
             // read): the timers decide when the path is gone.
-            if let Ok((n, from)) = self.sock.recv_from(&mut buf) {
+            if let Ok((n, from)) = sock.recv_from(&mut buf) {
                 let mut st = self.lock();
                 self.receive(&mut st, &buf[..n], from);
             }
@@ -660,7 +698,7 @@ impl Inner {
     }
 }
 
-/// One session's socket, from finding the path to the stream on it.
+/// One session's sockets, from finding the path to the stream on it.
 pub struct Path {
     inner: Arc<Inner>,
     /// The relay is on this computer: the other side may be too.
@@ -670,10 +708,12 @@ pub struct Path {
 
 impl Path {
     pub fn bind(viewer: bool) -> io::Result<Path> {
-        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        bigger_buffers(&sock);
+        let mut socks = vec![UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?];
+        // IPv6 has no router in the way but a firewall: the same probes open it.
+        socks.extend(UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok());
+        socks.iter().for_each(bigger_buffers);
         let inner = Inner {
-            sock,
+            socks,
             me: if viewer { VIEWER } else { 1 },
             st: Mutex::new(State::new()),
             cv: Condvar::new(),
@@ -683,49 +723,63 @@ impl Path {
         Ok(Path { inner: Arc::new(inner), local_relay: false, taken: false })
     }
 
-    /// Where the other side may reach this socket: as the relay sees it from outside (the
-    /// router's address and the port it gave), and on this computer's own networks.
+    /// Where the other side may reach these sockets: as the relay sees the IPv4 one from outside
+    /// (the router's address and the port it gave), and on this computer's own networks, IPv6
+    /// addresses (which no router changes) included.
     pub fn candidates(&mut self, relay: &str) -> Vec<SocketAddr> {
-        let port = self.inner.sock.local_addr().map_or(0, |a| a.port());
+        let port = |s: &UdpSocket| s.local_addr().map_or(0, |a| a.port());
         let (host, rport) = crate::access::relay_addr(relay);
-        let server = (host.as_str(), rport).to_socket_addrs().ok().and_then(|mut a| a.find(|a| a.is_ipv4()));
+        let servers: Vec<SocketAddr> = (host.as_str(), rport).to_socket_addrs().map(|a| a.collect()).unwrap_or_default();
+        let server = servers.iter().find(|a| a.is_ipv4()).copied();
         self.local_relay = server.is_some_and(|s| s.ip().is_loopback());
+        let v4 = &self.inner.socks[0];
         let mut out = Vec::new();
         if self.local_relay {
-            out.push(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+            out.push(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port(v4)));
         }
-        if let Some(r) = server.and_then(|s| reflect(&self.inner.sock, s))
+        if let Some(r) = server.and_then(|s| reflect(v4, s))
             && usable(r.ip())
         {
             out.push(r);
         }
         for ip in local_ips(server) {
-            let a = SocketAddr::new(ip, port);
+            let a = SocketAddr::new(ip, port(v4));
             if !out.contains(&a) {
                 out.push(a);
             }
         }
         out.truncate(8);
+        if let Some(v6) = self.inner.socks.get(1) {
+            if self.local_relay {
+                out.push(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port(v6)));
+            }
+            for ip in local_ips6(servers.iter().find(|a| a.is_ipv6()).copied()) {
+                out.push(SocketAddr::new(ip, port(v6)));
+            }
+        }
+        out.truncate(12);
         out
     }
 
-    /// Starts trying the other side's addresses, with the tag both were given; `second`: the
-    /// other side probes first.
-    pub fn punch(&mut self, tag: [u8; 8], peers: &[SocketAddr], second: bool) {
-        let local = self.local_relay;
+    /// Starts trying the other side's addresses, with the tag both were given.
+    pub fn punch(&mut self, tag: [u8; 8], peers: &[SocketAddr], start: Start) {
+        let (local, v6) = (self.local_relay, self.inner.socks.len() > 1);
         let mut st = self.inner.lock();
         if st.phase != Phase::Idle {
             return;
         }
         st.tag = tag;
-        st.peers = peers.iter().copied().filter(|p| p.port() != 0 && (usable(p.ip()) || (local && p.ip().is_loopback()))).take(16).collect();
+        st.peers = peers.iter().copied().filter(|p| p.port() != 0 && (p.is_ipv4() || v6) && (usable(p.ip()) || (local && p.ip().is_loopback()))).take(20).collect();
         st.phase = Phase::Punching;
         st.started = Instant::now();
         st.next_probe = st.started;
-        st.opening = second;
+        st.opening = start == Start::Second;
+        st.low_until = (start == Start::Low).then(|| st.started + LOW_FOR);
         drop(st);
-        let inner = self.inner.clone();
-        std::thread::spawn(move || inner.run());
+        for which in 0..self.inner.socks.len() {
+            let inner = self.inner.clone();
+            std::thread::spawn(move || inner.run(which));
+        }
     }
 
     /// Waits for the path: where it goes, or None when none was found.
@@ -861,11 +915,17 @@ impl Write for Stream {
     }
 }
 
-/// An address the other side may send to: not this computer's own, nor a link's alone.
+/// An address the other side may send to: not this computer's own, nor a link's alone (an IPv6
+/// one needs the link named), nor one only for documents.
 fn usable(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => !(v.is_loopback() || v.is_unspecified() || v.is_link_local() || v.is_broadcast() || v.is_multicast()),
-        IpAddr::V6(_) => false,
+        IpAddr::V6(v) => {
+            let s = v.segments();
+            let global = s[0] & 0xe000 == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8);
+            let unique_local = s[0] & 0xfe00 == 0xfc00;
+            global || unique_local
+        }
     }
 }
 
@@ -873,7 +933,17 @@ fn usable(ip: IpAddr) -> bool {
 fn private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => v.is_private() || (v.octets()[0] == 100 && v.octets()[1] & 0xc0 == 64),
-        IpAddr::V6(_) => false,
+        IpAddr::V6(v) => v.segments()[0] & 0xfe00 == 0xfc00,
+    }
+}
+
+/// Which path the viewer names when several answer: on one network first, then IPv6 (no router
+/// that may forget the mapping), then IPv4.
+fn rank(a: &SocketAddr) -> u8 {
+    match a.ip() {
+        ip if private(ip) => 0,
+        IpAddr::V6(_) => 1,
+        IpAddr::V4(_) => 2,
     }
 }
 
@@ -916,17 +986,54 @@ pub fn reflect_answer(q: &[u8], from: SocketAddr) -> Option<Vec<u8>> {
     (q.len() >= 64).then(|| format!("{}{nonce} {from}", String::from_utf8_lossy(REFLECT)).into_bytes())
 }
 
-/// This computer's own addresses on its networks: the one it reaches the relay from first.
+/// This computer's own IPv4 addresses on its networks: the one it reaches the relay from first.
 fn local_ips(toward: Option<SocketAddr>) -> Vec<IpAddr> {
     let mut out = Vec::new();
     if let Some(t) = toward
-        && let Ok(s) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        && s.connect(t).is_ok()
-        && let Ok(a) = s.local_addr()
-        && usable(a.ip())
+        && let Some(a) = source_toward(t)
     {
-        out.push(a.ip());
+        out.push(a);
     }
+    for a in interface_addrs().into_iter().filter(|a| a.is_ipv4()) {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out.truncate(6);
+    out
+}
+
+/// This computer's own IPv6 addresses: first the one it sends from to the internet (a temporary
+/// one where those are used, which is what the other side's firewall then sees), then the rest.
+fn local_ips6(toward: Option<SocketAddr>) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    // Choosing a source sends nothing: a documentation address stands for the internet.
+    let t = toward.unwrap_or_else(|| SocketAddr::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into(), 9));
+    if let Some(a) = source_toward(t) {
+        out.push(a);
+    }
+    for a in interface_addrs().into_iter().filter(|a| a.is_ipv6()) {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out.truncate(4);
+    out
+}
+
+/// The address this computer would send from to `t`, if usable; found without sending.
+fn source_toward(t: SocketAddr) -> Option<IpAddr> {
+    let any: IpAddr = if t.is_ipv6() { Ipv6Addr::UNSPECIFIED.into() } else { Ipv4Addr::UNSPECIFIED.into() };
+    let s = UdpSocket::bind((any, 0)).ok()?;
+    s.connect(t).ok()?;
+    let a = s.local_addr().ok()?.ip();
+    usable(a).then_some(a)
+}
+
+/// The usable addresses of this computer's network cards that are up (not those of containers
+/// and virtual machines it hosts).
+fn interface_addrs() -> Vec<IpAddr> {
+    let mut out = Vec::new();
     #[cfg(unix)]
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -937,10 +1044,14 @@ fn local_ips(toward: Option<SocketAddr>) -> Vec<IpAddr> {
                 let name = std::ffi::CStr::from_ptr(i.ifa_name).to_string_lossy();
                 let inner = ["lo", "docker", "br-", "veth", "virbr", "lxc", "cni", "podman"].iter().any(|p| name.starts_with(p));
                 let up = i.ifa_flags & libc::IFF_UP as u32 != 0;
-                if up && !inner && !i.ifa_addr.is_null() && (*i.ifa_addr).sa_family as i32 == libc::AF_INET {
-                    let a = Ipv4Addr::from(u32::from_be((*(i.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr));
-                    if usable(a.into()) && !out.contains(&a.into()) {
-                        out.push(a.into());
+                if up && !inner && !i.ifa_addr.is_null() {
+                    let a: Option<IpAddr> = match (*i.ifa_addr).sa_family as i32 {
+                        libc::AF_INET => Some(Ipv4Addr::from(u32::from_be((*(i.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr)).into()),
+                        libc::AF_INET6 => Some(Ipv6Addr::from((*(i.ifa_addr as *const libc::sockaddr_in6)).sin6_addr.s6_addr).into()),
+                        _ => None,
+                    };
+                    if let Some(a) = a.filter(|a| usable(*a) && !out.contains(a)) {
+                        out.push(a);
                     }
                 }
                 at = i.ifa_next;
@@ -948,7 +1059,6 @@ fn local_ips(toward: Option<SocketAddr>) -> Vec<IpAddr> {
             libc::freeifaddrs(list);
         }
     }
-    out.truncate(6);
     out
 }
 
@@ -978,7 +1088,50 @@ mod tests {
     use std::thread;
 
     fn local(p: &Path) -> SocketAddr {
-        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), p.inner.sock.local_addr().unwrap().port())
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), p.inner.socks[0].local_addr().unwrap().port())
+    }
+
+    fn local6(p: &Path) -> Option<SocketAddr> {
+        p.inner.socks.get(1).map(|s| SocketAddr::new(Ipv6Addr::LOCALHOST.into(), s.local_addr().unwrap().port()))
+    }
+
+    /// Whether IPv6 works on this computer at all (it can be turned off).
+    fn ipv6_here() -> bool {
+        let (Ok(a), Ok(b)) = (UdpSocket::bind("[::1]:0"), UdpSocket::bind("[::1]:0")) else { return false };
+        let _ = b.set_read_timeout(Some(Duration::from_secs(1)));
+        a.send_to(b"x", b.local_addr().unwrap()).is_ok() && b.recv_from(&mut [0u8; 4]).is_ok()
+    }
+
+    /// Both families answer: IPv6 is named, and the stream runs on it.
+    #[test]
+    fn ipv6_is_found_and_taken_before_ipv4() {
+        if !ipv6_here() {
+            return;
+        }
+        let (mut v, mut a) = (Path::bind(true).unwrap(), Path::bind(false).unwrap());
+        let (Some(v6), Some(a6)) = (local6(&v), local6(&a)) else { return };
+        v.local_relay = true;
+        a.local_relay = true;
+        let tag = [3u8; 8];
+        a.punch(tag, &[local(&v), v6], Start::Second);
+        v.punch(tag, &[local(&a), a6], Start::Now);
+        assert_eq!(v.wait(Duration::from_secs(5)), Some(a6));
+        assert_eq!(a.wait(Duration::from_secs(5)), Some(v6));
+        let (mut vs, mut at) = (v.stream(), a.stream());
+        vs.write_all(&pattern(200 << 10, 5)).unwrap();
+        let mut got = vec![0u8; 200 << 10];
+        at.read_exact(&mut got).unwrap();
+        assert!(got == pattern(200 << 10, 5));
+    }
+
+    /// Only addresses another computer can send to are offered or tried.
+    #[test]
+    fn addresses_worth_trying() {
+        let ok = |s: &str| usable(s.parse().unwrap());
+        assert!(ok("203.0.113.7") && ok("192.168.1.20") && ok("2a01:4f8:241:134f::2") && ok("fd6a::2"));
+        assert!(!ok("127.0.0.1") && !ok("169.254.3.4") && !ok("::1") && !ok("fe80::1") && !ok("2001:db8::1") && !ok("::ffff:1.2.3.4") && !ok("ff02::1"));
+        let r = |s: &str| rank(&SocketAddr::new(s.parse().unwrap(), 1));
+        assert!(r("192.168.1.20") < r("2a01:4f8::2") && r("fd6a::2") < r("2a01:4f8::2") && r("2a01:4f8::2") < r("203.0.113.7"));
     }
 
     /// Two sides on this computer find each other and agree on one path.
@@ -988,8 +1141,8 @@ mod tests {
         a.local_relay = true;
         let (vl, al) = (local(&v), local(&a));
         let tag = [7u8; 8];
-        a.punch(tag, &[vl], true);
-        v.punch(tag, &[al], false);
+        a.punch(tag, &[vl], Start::Second);
+        v.punch(tag, &[al], Start::Now);
         assert_eq!(v.wait(Duration::from_secs(5)), Some(al));
         assert_eq!(a.wait(Duration::from_secs(5)), Some(vl));
         v.lossy(one_in);
@@ -1087,7 +1240,7 @@ mod tests {
         let mut v = Path::bind(true).unwrap();
         v.local_relay = true;
         let nowhere = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        v.punch([1; 8], &[nowhere], false);
+        v.punch([1; 8], &[nowhere], Start::Now);
         let started = Instant::now();
         assert_eq!(v.wait(PUNCH_LIMIT + Duration::from_secs(2)), None);
         assert!(started.elapsed() >= PUNCH_LIMIT - Duration::from_millis(100));

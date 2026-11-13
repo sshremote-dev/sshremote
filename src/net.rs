@@ -155,6 +155,16 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How a side starts probing, given which the offer named first.
+fn start(first: &str, viewer: bool) -> crate::udp::Start {
+    use crate::udp::Start;
+    match first {
+        "both" => Start::Low,
+        f if (f == "viewer") == viewer => Start::Now,
+        _ => Start::Second,
+    }
+}
+
 fn addresses(list: &[SocketAddr]) -> String {
     list.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ")
 }
@@ -203,8 +213,9 @@ impl Line {
     }
 
     /// The agent said it can look for a straight path: the viewer starts, if it looks for one.
-    /// Twice at most: the agent probes second the first time, first the second time, each on new
-    /// ports (a router that turned the first probes away may keep that way shut).
+    /// Three times at most, each on new ports (a router that turned the first probes away may
+    /// keep that way shut): the viewer probes first, then the agent, then both, each first
+    /// opening only its own router.
     fn agent_can(self: &Arc<Self>) {
         let Some(p) = self.punch.clone().filter(|p| p.viewer) else { return };
         if self.tried.fetch_add(1, Ordering::AcqRel) > 0 {
@@ -212,7 +223,7 @@ impl Line {
         }
         let line = self.clone();
         std::thread::spawn(move || {
-            for first in ["viewer", "agent"] {
+            for first in ["viewer", "agent", "both"] {
                 if line.ended.load(Ordering::Acquire) {
                     return;
                 }
@@ -225,7 +236,7 @@ impl Line {
                     return;
                 }
                 let Ok(peers) = rx.recv_timeout(MOVE_WAIT) else { return };
-                path.punch(tag, &peers, first != "viewer");
+                path.punch(tag, &peers, start(first, true));
                 if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
                     line.go_straight(path.stream(), to);
                     return;
@@ -237,18 +248,18 @@ impl Line {
     /// The viewer offered its addresses: the agent answers with its own and tries them.
     fn offered(self: &Arc<Self>, tag: [u8; 8], first: &str, peers: Vec<SocketAddr>) {
         let Some(p) = self.punch.clone().filter(|p| !p.viewer) else { return };
-        if self.tried.fetch_add(1, Ordering::AcqRel) >= 2 || self.moved.load(Ordering::Acquire) != 0 {
+        if self.tried.fetch_add(1, Ordering::AcqRel) >= 3 || self.moved.load(Ordering::Acquire) != 0 {
             return;
         }
         let line = self.clone();
-        let second = first != "agent";
+        let start = start(first, false);
         std::thread::spawn(move || {
             let Ok(mut path) = crate::udp::Path::bind(false) else { return };
             let mine = path.candidates(&p.relay);
             if line.frame(format!("answer {}", addresses(&mine)).as_bytes(), true).is_err() {
                 return;
             }
-            path.punch(tag, &peers, second);
+            path.punch(tag, &peers, start);
             if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
                 line.go_straight(path.stream(), to);
             }
@@ -368,7 +379,7 @@ impl SealedReader {
     fn control(&mut self, msg: &[u8]) -> io::Result<()> {
         let text = String::from_utf8_lossy(msg);
         let mut words = text.split_whitespace();
-        let peers = |w: std::str::SplitWhitespace| w.filter_map(|a| a.parse::<SocketAddr>().ok()).take(16).collect::<Vec<_>>();
+        let peers = |w: std::str::SplitWhitespace| w.filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect::<Vec<_>>();
         match words.next() {
             // From here on its frames come on the straight path.
             Some("move") => {
