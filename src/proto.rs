@@ -166,6 +166,12 @@ pub enum ToAgent {
         max: u16,
     },
     /// Operates an element from the last `UiState`, or brings a window (`target` = window id) forward.
+    /// Files uploaded into the clipboard folder of `batch` (`files::CLIPBOARD`), to put on the
+    /// clipboard by their names there and paste (Ctrl+V).
+    PasteFiles {
+        batch: String,
+        names: Vec<String>,
+    },
     /// Something done to the computer itself (`hostctl`): restart, lock, keep its own keyboard
     /// and mouse out, hide its screen, lock it on leaving; `QUERY` asks what can be done.
     Host {
@@ -396,6 +402,16 @@ pub enum ToClient {
         can: u8,
         on: u8,
     },
+    /// Files copied at the host, for the viewer to fetch onto its own clipboard.
+    ClipFiles(Vec<ClipFile>),
+}
+
+/// A file or folder copied at the host: its path there, and its size (a folder's, all of it).
+#[derive(Debug, PartialEq, Clone)]
+pub struct ClipFile {
+    pub path: String,
+    pub size: u64,
+    pub dir: bool,
 }
 
 /// The largest picture a viewer takes: 16384 a side (four 4K screens in a row) and 64 megapixels.
@@ -648,6 +664,14 @@ impl ToAgent {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
             }
+            ToAgent::PasteFiles { batch, names } => {
+                put_str(&mut b, batch);
+                b.extend_from_slice(&(names.len() as u16).to_le_bytes());
+                for n in names {
+                    put_str(&mut b, n);
+                }
+                39
+            }
             ToAgent::Share(share) => {
                 let (kind, id) = share.to_wire();
                 b.push(kind);
@@ -718,6 +742,15 @@ impl ToAgent {
             35 => ToAgent::PickOnRemote,
             36 => ToAgent::UiState { text: c.u8()? != 0, max: c.u16()? },
             38 => ToAgent::Host { act: c.u8()?, on: c.u8()? != 0 },
+            39 => {
+                let batch = c.str()?;
+                let n = c.u16()? as usize;
+                let mut names = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    names.push(c.str()?);
+                }
+                ToAgent::PasteFiles { batch, names }
+            }
             37 => ToAgent::UiAct {
                 target: c.u64()?,
                 act: match c.u8()? {
@@ -930,6 +963,15 @@ impl ToClient {
                 b.extend_from_slice(&[*can, *on]);
                 128
             }
+            ToClient::ClipFiles(list) => {
+                b.extend_from_slice(&(list.len() as u16).to_le_bytes());
+                for f in list {
+                    put_str(&mut b, &f.path);
+                    b.extend_from_slice(&f.size.to_le_bytes());
+                    b.push(f.dir as u8);
+                }
+                129
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -1088,6 +1130,14 @@ impl ToClient {
             124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             127 => ToClient::Allowed(c.u8()?),
             128 => ToClient::HostState { can: c.u8()?, on: c.u8()? },
+            129 => {
+                let n = c.u16()? as usize;
+                let mut list = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    list.push(ClipFile { path: c.str()?, size: c.u64()?, dir: c.u8()? != 0 });
+                }
+                ToClient::ClipFiles(list)
+            }
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchStart {
                 id: c.u32()?,
@@ -1167,6 +1217,7 @@ mod tests {
             ToAgent::UiState { text: true, max: 150 },
             ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
             ToAgent::Host { act: 4, on: true },
+            ToAgent::PasteFiles { batch: "3".into(), names: vec!["a.txt".into(), "photos".into()] },
         ];
         for m in [
             ToClient::DirList {
@@ -1212,6 +1263,7 @@ mod tests {
             ToClient::UiDone { ok: true, text: "clicked".into() },
             ToClient::Allowed(5),
             ToClient::HostState { can: 0b111110, on: 0b1000 },
+            ToClient::ClipFiles(vec![ClipFile { path: "C:/a.txt".into(), size: 5, dir: false }, ClipFile { path: "/home/x/photos".into(), size: 1 << 33, dir: true }]),
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

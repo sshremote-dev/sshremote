@@ -87,6 +87,15 @@ pub(super) struct Remote {
     /// What can be done to the computer itself and what is on (`hostctl` bits), once asked.
     pub(super) host: Option<(u8, u8)>,
     pub(super) host_asked: bool,
+    /// A paste the keys of this frame already made (text or files), so the key's release does not
+    /// make another.
+    pub(super) paste_seen: bool,
+    /// Files copied here going over to be pasted there: the batch, its uploads, and their names.
+    pub(super) pasting: Option<(String, Vec<u32>, Vec<String>)>,
+    /// Files copied there coming over for the clipboard here: the folder, fetches left, and the
+    /// paths to put on the clipboard.
+    pub(super) clip_in: Option<(Vec<u32>, Vec<std::path::PathBuf>)>,
+    pub(super) batches: u32,
     /// Wheel movement not yet a whole step at the host (trackpads send many small ones).
     wheel: Vec2,
     inbox: crate::files::Inbox,
@@ -264,6 +273,10 @@ impl Remote {
             allowed: crate::grant::ALL,
             host: None,
             host_asked: false,
+            paste_seen: false,
+            pasting: None,
+            clip_in: None,
+            batches: 0,
             wheel: Vec2::ZERO,
             inbox: crate::files::Inbox::default(),
             downloads: Vec::new(),
@@ -358,7 +371,7 @@ impl Remote {
         // it was copied meanwhile; the others do not get it.
         if self.share_clipboard
             && self.active
-            && let Some(text) = self.clip.poll()
+            && let Some(crate::clip::Copied::Text(text)) = self.clip.poll()
         {
             self.send(ToAgent::Clipboard(text))?;
         }
@@ -494,6 +507,25 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
                 Ok(Ev::Net(ToClient::Allowed(bits))) => self.allowed = bits,
                 Ok(Ev::Net(ToClient::HostState { can, on })) => self.host = Some((can, on)),
+                Ok(Ev::Net(ToClient::ClipFiles(list))) => {
+                    if self.share_clipboard && self.active {
+                        self.files_copied_there(list)?;
+                    }
+                }
+                Ok(Ev::Net(ToClient::FetchDone { tag })) => {
+                    if let Some((left, paths)) = self.clip_in.as_mut() {
+                        left.retain(|t| *t != tag);
+                        if left.is_empty() {
+                            let paths = std::mem::take(paths);
+                            self.clip_in = None;
+                            let n = paths.len();
+                            match crate::clip::put_files_here(&paths) {
+                                Ok(()) => self.notify(&format!("{n} {} copied there now on the clipboard here: paste them in a folder", if n == 1 { "item" } else { "items" })),
+                                Err(e) => self.notify(&format!("The files copied there could not go on the clipboard here: {e}")),
+                            }
+                        }
+                    }
+                }
                 Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::session::save_snapshot(&png)),
                 Ok(Ev::Net(ToClient::Chat(t))) => {
                     // A message is cut where a chat stops being one.
@@ -605,7 +637,9 @@ impl Remote {
                     let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
                     let tag = self.downloads.iter().find(|d| d.0 == id).map_or(0, |d| d.2);
                     self.downloads.retain(|d| d.0 != id);
+                    let for_clipboard = self.clip_in.as_ref().is_some_and(|(left, _)| left.contains(&tag));
                     match self.inbox.end(id, ok, &text) {
+                        Some(crate::files::Note::Done { ok: true, .. }) if for_clipboard => {}
                         Some(crate::files::Note::Done { ok: true, .. }) => {
                             let folder = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
                             self.got.add(name, folder.display().to_string());
@@ -619,6 +653,22 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::FileDone { id, ok, text })) => {
+                    // Part of a paste: once all of it is there, it goes on the clipboard there and is pasted.
+                    if let Some((batch, left, names)) = self.pasting.as_mut()
+                        && left.contains(&id)
+                    {
+                        left.retain(|u| *u != id);
+                        self.uploads.retain(|u| u.id != id);
+                        if !ok {
+                            self.pasting = None;
+                            self.notify(&format!("The paste failed: {text}"));
+                        } else if left.is_empty() {
+                            let (batch, names) = (batch.clone(), std::mem::take(names));
+                            self.pasting = None;
+                            self.send(ToAgent::PasteFiles { batch, names })?;
+                        }
+                        continue;
+                    }
                     let name = self.uploads.iter().find(|u| u.id == id).map(|u| u.name.clone()).unwrap_or_default();
                     let cancelled = self.uploads.iter().any(|u| u.id == id && u.cancelled);
                     let error = self.uploads.iter().find(|u| u.id == id).and_then(|u| u.error.clone());

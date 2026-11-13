@@ -311,7 +311,7 @@ fn serve_with(
             vid.reset();
         };
     }
-    let mut clip = crate::clip::Clip::new();
+    let mut clip = crate::clip::Clip::with_files();
     let mut inbox = crate::files::Inbox::default();
     let mut terms = crate::pty::Terms::default();
     let mut ui = crate::ui::Ui::new();
@@ -393,7 +393,12 @@ fn serve_with(
             // with nobody signed in there are none to hand out.
             #[cfg(windows)]
             let _as_user = match &m {
-                ToAgent::ListDir { .. } | ToAgent::Fetch { .. } | ToAgent::FileStart { .. } | ToAgent::FileEnd { .. } | ToAgent::FileOp { .. } => {
+                ToAgent::ListDir { .. }
+                | ToAgent::Fetch { .. }
+                | ToAgent::FileStart { .. }
+                | ToAgent::FileEnd { .. }
+                | ToAgent::FileOp { .. }
+                | ToAgent::PasteFiles { .. } => {
                     match files_as_user() {
                         Ok(g) => g,
                         Err(why) => {
@@ -425,6 +430,20 @@ fn serve_with(
                 ToAgent::Ack(_) => {
                     in_flight = in_flight.saturating_sub(1);
                     flight_sizes.pop_front();
+                }
+                // Files copied at the viewer and sent over: on the clipboard here, then pasted.
+                ToAgent::PasteFiles { batch, names } => {
+                    let dir = crate::files::clipboard_dir(&batch);
+                    let paths: Vec<_> = names.iter().map(|n| dir.join(n)).filter(|p| p.starts_with(&dir) && p.exists()).collect();
+                    if allowed & crate::grant::CLIPBOARD == 0 {
+                        send(enc, &ToClient::Notice("The person at that computer does not let you use the clipboard.".into())).map_err(io_err)?;
+                    } else if paths.is_empty() || !clip.set_files(paths) {
+                        send(enc, &ToClient::Notice("The files could not be put on that computer's clipboard.".into())).map_err(io_err)?;
+                    } else {
+                        for (k, down) in [(xk::CONTROL_L, true), ('v' as u32, true), ('v' as u32, false), (xk::CONTROL_L, false)] {
+                            report(cap.input(Input::KeyState { keysym: k, down }));
+                        }
+                    }
                 }
                 ToAgent::Host { act, on } => {
                     if act != crate::hostctl::QUERY {
@@ -507,6 +526,8 @@ fn serve_with(
                 ToAgent::FileStart { id, size, dir, name } => {
                     let note = if dir.is_empty() {
                         inbox.start(id, size, &name)
+                    } else if let Some(batch) = dir.strip_prefix(crate::files::CLIPBOARD) {
+                        inbox.start_in(id, size, &crate::files::clipboard_dir(batch), &name)
                     } else {
                         inbox.start_in(id, size, std::path::Path::new(&dir), &name)
                     };
@@ -708,10 +729,15 @@ fn serve_with(
         for m in outbox.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
         }
-        if let Some(text) = clip.poll()
-            && allowed & crate::grant::CLIPBOARD != 0
-        {
-            send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
+        match clip.poll() {
+            Some(crate::clip::Copied::Text(text)) if allowed & crate::grant::CLIPBOARD != 0 => {
+                send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
+            }
+            // Files copied here: the viewer may fetch them onto its own clipboard.
+            Some(crate::clip::Copied::Files(paths)) if allowed & (crate::grant::CLIPBOARD | crate::grant::FILES) == crate::grant::CLIPBOARD | crate::grant::FILES => {
+                send(enc, &ToClient::ClipFiles(paths.iter().map(|p| crate::files::clip_file(p)).collect())).map_err(io_err)?;
+            }
+            _ => {}
         }
         // The choice made in the desktop's sharing dialog, even while the picture is paused.
         match cap.poll_share() {

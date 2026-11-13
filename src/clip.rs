@@ -1,8 +1,10 @@
-//! Text clipboard shared between viewer and agent. Each side watches its own
+//! Clipboard shared between viewer and agent. Each side watches its own
 //! clipboard on a separate thread (opening a clipboard another program holds
-//! blocks and retries) and sends changes; text that just arrived from the other
-//! side is not sent back.
+//! blocks and retries) and sends changes; what just arrived from the other
+//! side is not sent back. The agent also watches for copied files, and puts
+//! files the viewer pasted on its clipboard as files.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -16,11 +18,34 @@ enum Req {
     Set(String, Sender<()>),
     /// Holds text on the clipboard just long enough to paste it, then puts the old text back.
     Paste(String, Sender<bool>),
+    /// Puts files on the clipboard, as a file manager's copy does; true once they are there.
+    Files(Vec<PathBuf>, Sender<bool>),
+}
+
+/// What was copied.
+pub enum Copied {
+    Text(String),
+    /// Files and folders, by their paths.
+    Files(Vec<PathBuf>),
 }
 
 pub struct Clip {
     to_board: Sender<Req>,
-    changed: Receiver<String>,
+    changed: Receiver<Copied>,
+}
+
+/// Files on this computer's clipboard now (copied in its file manager), if any.
+pub fn files_here() -> Vec<PathBuf> {
+    arboard::Clipboard::new().ok().and_then(|mut b| b.get().file_list().ok()).unwrap_or_default()
+}
+
+/// Puts files on this computer's clipboard, for its file manager to paste.
+pub fn put_files_here(paths: &[PathBuf]) -> Result<(), String> {
+    arboard::Clipboard::new().and_then(|mut b| b.set().file_list(paths)).map_err(|e| e.to_string())
+}
+
+fn mark_files(paths: &[PathBuf]) -> (usize, u64) {
+    mark(&paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join("\n"))
 }
 
 /// What was on the clipboard before a paste put text there, to put back after it.
@@ -71,7 +96,17 @@ fn mark(text: &str) -> (usize, u64) {
 }
 
 impl Clip {
+    /// Text both ways, as a viewer keeps it.
     pub fn new() -> Clip {
+        Clip::watching(false)
+    }
+
+    /// Text both ways and copied files, as an agent keeps it.
+    pub fn with_files() -> Clip {
+        Clip::watching(true)
+    }
+
+    fn watching(files: bool) -> Clip {
         // An agent started over ssh needs the desktop session's display; Xwayland mirrors its clipboard.
         #[cfg(target_os = "linux")]
         crate::capture::ensure_session_env();
@@ -92,6 +127,13 @@ impl Clip {
                             last = Some(mark(&text));
                         }
                         let _ = done.send(());
+                    }
+                    Ok(Req::Files(paths, done)) => {
+                        let ok = board.set().file_list(&paths).is_ok();
+                        if ok {
+                            last = Some(mark_files(&paths));
+                        }
+                        let _ = done.send(ok);
                     }
                     Ok(Req::Paste(text, done)) => {
                         // A paste right after another keeps what was there before the first one.
@@ -115,11 +157,20 @@ impl Clip {
                         last = put.map(|t| mark(&t)).or(last);
                     }
                 }
-                if let Ok(text) = board.get_text() {
+                // Copied files first: a file manager may offer their paths as text as well.
+                if let Some(paths) = files.then(|| board.get().file_list().ok()).flatten().filter(|p| !p.is_empty()) {
+                    let m = mark_files(&paths);
+                    if last != Some(m) {
+                        last = Some(m);
+                        if notify.send(Copied::Files(paths)).is_err() {
+                            return;
+                        }
+                    }
+                } else if let Ok(text) = board.get_text() {
                     let m = mark(&text);
                     if last != Some(m) {
                         last = Some(m);
-                        if text.len() <= MAX && notify.send(text).is_err() {
+                        if text.len() <= MAX && notify.send(Copied::Text(text)).is_err() {
                             return;
                         }
                     }
@@ -129,9 +180,15 @@ impl Clip {
         Clip { to_board, changed }
     }
 
-    /// Text copied locally since the last call.
-    pub fn poll(&mut self) -> Option<String> {
+    /// What was copied locally since the last call.
+    pub fn poll(&mut self) -> Option<Copied> {
         self.changed.try_iter().last()
+    }
+
+    /// Puts files on the local clipboard as files; true once they are there.
+    pub fn set_files(&mut self, paths: Vec<PathBuf>) -> bool {
+        let (tx, rx) = mpsc::channel();
+        self.to_board.send(Req::Files(paths, tx)).is_ok() && rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
     }
 
     /// Puts text from the other side on the local clipboard.

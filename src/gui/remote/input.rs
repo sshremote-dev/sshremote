@@ -108,6 +108,15 @@ impl Remote {
             match e {
                 // Full screen here: the host does not see this one key.
                 Event::Key { key: Key::Enter, modifiers, .. } if modifiers.ctrl && modifiers.alt => {}
+                // Files alone on the clipboard make no paste event, only the V let go after it.
+                Event::Key { key: Key::V, pressed: false, modifiers, .. } if !local && modifiers.command && !std::mem::take(&mut self.paste_seen) => {
+                    let files = if self.share_clipboard { crate::clip::files_here() } else { Vec::new() };
+                    if files.is_empty() {
+                        self.key('v' as u32, false)?;
+                    } else {
+                        self.paste_files(files)?;
+                    }
+                }
                 Event::Key { key, physical_key, pressed, modifiers, .. } if !local => {
                     self.sync_mods(modifiers)?;
                     let Some(sym) = keysym(physical_key.unwrap_or(key)) else { continue };
@@ -125,6 +134,13 @@ impl Remote {
                 Event::Copy if !local => self.tap(if crate::sys::insert_held() { xk::INSERT } else { 'c' as u32 })?,
                 Event::Cut if !local => self.tap(if self.mods.shift && !self.mods.ctrl { xk::DELETE } else { 'x' as u32 })?,
                 Event::Paste(text) if !local => {
+                    self.paste_seen = true;
+                    // Files copied in a file manager here are sent over and pasted there as files.
+                    let files = if self.share_clipboard { crate::clip::files_here() } else { Vec::new() };
+                    if !files.is_empty() {
+                        self.paste_files(files)?;
+                        continue;
+                    }
                     // What was copied here a moment ago may not have gone over yet (the clipboard
                     // is looked at twice a second): it goes first, then the keys that paste it.
                     if self.share_clipboard && !text.is_empty() {

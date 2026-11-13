@@ -50,6 +50,57 @@ impl Remote {
         Ok(())
     }
 
+    /// Files copied here pasted there: they go over into a folder of their own on the host, then
+    /// onto its clipboard, and are pasted where its keyboard is.
+    pub(in crate::gui) fn paste_files(&mut self, paths: Vec<std::path::PathBuf>) -> Result<(), String> {
+        if self.view_only || !self.share_clipboard {
+            self.notify("Files are not pasted there while the clipboard is not shared or the view is only for looking");
+            return Ok(());
+        }
+        self.batches += 1;
+        let batch = format!("{}-{}", std::process::id(), self.batches);
+        let dir = format!("{}{batch}", crate::files::CLIPBOARD);
+        let first = self.next_upload;
+        self.upload_into(&paths, &dir)?;
+        let ids: Vec<u32> = (first..self.next_upload).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let names = paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        self.notify(&format!("Pasting {} {} there\u{2026}", paths.len(), if paths.len() == 1 { "item" } else { "items" }));
+        self.pasting = Some((batch, ids, names));
+        Ok(())
+    }
+
+    /// Files copied there: fetched into a folder of their own here, then put on this clipboard,
+    /// unless they are too large to bring over unasked.
+    pub(in crate::gui) fn files_copied_there(&mut self, list: Vec<crate::proto::ClipFile>) -> Result<(), String> {
+        const MOST: u64 = 200 << 20;
+        let total: u64 = list.iter().map(|f| f.size).sum();
+        if list.is_empty() {
+            return Ok(());
+        }
+        if total > MOST {
+            self.notify(&format!("{} MB copied there: too much to bring over by itself; fetch it in Files", total >> 20));
+            return Ok(());
+        }
+        self.batches += 1;
+        let dir = crate::files::clipboard_dir(&format!("{}-in-{}", std::process::id(), self.batches));
+        let mut tags = Vec::new();
+        let mut paths = Vec::new();
+        for f in list {
+            let name = f.path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("file").to_string();
+            let tag = self.next_tag | crate::files::DONE_TAG;
+            self.next_tag += 1;
+            self.fetch_dirs.insert(tag, dir.clone());
+            tags.push(tag);
+            paths.push(dir.join(&name));
+            self.send(ToAgent::Fetch { tag, path: f.path })?;
+        }
+        self.clip_in = Some((tags, paths));
+        Ok(())
+    }
+
     /// Uploads files or whole folders into `dir` on the remote host.
     pub(in crate::gui) fn upload_into(&mut self, paths: &[std::path::PathBuf], dir: &str) -> Result<(), String> {
         for path in paths {

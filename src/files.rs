@@ -37,6 +37,39 @@ pub fn downloads() -> PathBuf {
     home().join("Downloads")
 }
 
+/// A copied file or folder as the viewer is told of it, with the size of all of it (counted up
+/// to a limit, past which it is only "large").
+pub fn clip_file(path: &Path) -> crate::proto::ClipFile {
+    let dir = path.is_dir();
+    let size = if dir {
+        let mut files = Vec::new();
+        walk(path, "", &mut files);
+        files.iter().take(20_000).filter_map(|(p, _)| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+    } else {
+        std::fs::metadata(path).map_or(0, |m| m.len())
+    };
+    crate::proto::ClipFile { path: path.to_string_lossy().into_owned(), size, dir }
+}
+
+/// Where an upload goes that is to be pasted from the clipboard: `CLIPBOARD` and a batch number
+/// in place of the folder.
+pub const CLIPBOARD: &str = "\u{0}clipboard/";
+
+/// The folder of files copied over for one paste, out of the way in the user's own temporary
+/// folder; those of other days are cleared as a new one is made.
+pub fn clipboard_dir(batch: &str) -> PathBuf {
+    let base = if cfg!(windows) { home().join(r"AppData\Local\Temp\sshremote-clipboard") } else { home().join(".cache/sshremote/clipboard") };
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 24 * 3600);
+            if old {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    base.join(clean(batch))
+}
+
 /// Names Windows keeps for devices, whatever their extension: "aux.c" opens the AUX device.
 const RESERVED: [&str; 24] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",

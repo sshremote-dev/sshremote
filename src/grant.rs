@@ -57,7 +57,8 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::Fetch { .. }
         | ToAgent::FetchAck { .. }
         | ToAgent::FetchCancel { .. }
-        | ToAgent::FileOp { .. } => FILES,
+        | ToAgent::FileOp { .. }
+        | ToAgent::PasteFiles { .. } => FILES,
         ToAgent::Audio(true) => SOUND,
         ToAgent::TermOpen { .. } | ToAgent::TermInput { .. } | ToAgent::TermResize { .. } => TERMINAL,
         ToAgent::Host { act, .. } if *act != crate::hostctl::QUERY => POWER,

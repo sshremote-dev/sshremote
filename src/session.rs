@@ -736,6 +736,56 @@ mod tests {
     /// the new size, and frames come at it, scaled to fit as before. Needs SSHREMOTE_GNOME_HOST
     /// (an ssh alias of a host signed in to GNOME with one monitor, which is turned and turned
     /// back), and optionally SSHREMOTE_GNOME_ENV (variables pointing at that session, such as a
+    /// Files through the clipboard, on a host whose clipboard is an X display's (SSHREMOTE_CLIP_DISPLAY,
+    /// say an Xvfb; with xclip there): files sent for a paste land on its clipboard as files, and
+    /// files copied there are told to the viewer.
+    #[test]
+    #[ignore]
+    fn a_gnome_files_cross_the_clipboard() {
+        use crate::proto::ToAgent;
+        let (Ok(host), Ok(display)) = (std::env::var("SSHREMOTE_GNOME_HOST"), std::env::var("SSHREMOTE_CLIP_DISPLAY")) else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let home = format!("/tmp/sshremote-clip-test-{}", std::process::id());
+        let target = Target::Ssh {
+            host: host.clone(),
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} DISPLAY={display} HOME={home} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let sh = |cmd: &str| {
+            let out = std::process::Command::new("ssh").arg(&host).arg(cmd).output().expect("ssh");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let next = |want: &dyn Fn(&ToClient) -> bool| loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Ev::Net(m)) if want(&m) => return m,
+                Ok(Ev::Net(_)) => {}
+                other => panic!("{:?}", other.err()),
+            }
+        };
+        let batch = format!("test-{}", std::process::id());
+        sess.send(ToAgent::FileStart { id: 1, size: 5, dir: format!("{}{batch}", crate::files::CLIPBOARD), name: "hello.txt".into() }).unwrap();
+        sess.send(ToAgent::FileData { id: 1, data: b"hello".to_vec() }).unwrap();
+        sess.send(ToAgent::FileEnd { id: 1 }).unwrap();
+        let ToClient::FileDone { ok, text, .. } = next(&|m| matches!(m, ToClient::FileDone { .. })) else { unreachable!() };
+        assert!(ok, "{text}");
+        assert!(text.ends_with(&format!("{batch}/hello.txt")), "{text}");
+        sess.send(ToAgent::PasteFiles { batch, names: vec!["hello.txt".into()] }).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let on_board = sh(&format!("DISPLAY={display} xclip -o -selection clipboard -t text/uri-list"));
+        assert!(on_board.contains("hello.txt") && on_board.starts_with("file://"), "{on_board}");
+        // Copied there: the viewer is told, with the size.
+        sh(&format!("printf hi! > {home}/copied.txt; printf 'file://{home}/copied.txt\\r\\n' | DISPLAY={display} xclip -selection clipboard -t text/uri-list -i > /dev/null 2>&1"));
+        let ToClient::ClipFiles(list) = next(&|m| matches!(m, ToClient::ClipFiles(_))) else { unreachable!() };
+        assert_eq!(list, vec![crate::proto::ClipFile { path: format!("{home}/copied.txt"), size: 3, dir: false }]);
+        sh(&format!("rm -rf {home}"));
+    }
+
     /// The computer itself on GNOME: it says what it can do, refuses to keep out its keyboard or
     /// hide its screen, and with SSHREMOTE_GNOME_LOCK=1 locks (the test session stays locked).
     #[test]
