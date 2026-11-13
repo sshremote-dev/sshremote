@@ -1143,3 +1143,44 @@ fn a_dropped_file_is_copied_there_then_its_path_typed() {
     assert_eq!(typed(&frame(&ctx, &mut w, Vec::new())), "", "typed once");
     let _ = std::fs::remove_file(file);
 }
+
+#[test]
+fn a_tabs_title_names_its_saved_record() {
+    assert_eq!(reader::file_stem("claude — ~/proj"), "claude-proj");
+    assert_eq!(reader::file_stem("  "), "terminal");
+}
+
+/// The Markdown view's tools and a code block's buttons, to look at:
+/// SSHREMOTE_SNAP_DIR=folder cargo test markdown_tools_picture -- --ignored
+#[test]
+#[ignore]
+fn markdown_tools_picture() {
+    let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) else { return };
+    let ctx = egui::Context::default();
+    crate::gui::theme::style(&ctx);
+    crate::gui::theme::apply_theme(&ctx, true);
+    let mut w = TermWindow::new(None);
+    let size = Vec2::new(900.0, 520.0);
+    let mut snap = crate::gui::snapshot::Snap::default();
+    let mut clock = 0.0;
+    let mut run = |w: &mut TermWindow, snap: &mut crate::gui::snapshot::Snap, events: Vec<Event>| {
+        clock += 0.3;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), focused: true, time: Some(clock), events, ..Default::default() };
+        snap.frame(&ctx, input, |ui| {
+            w.embedded(ui);
+        });
+    };
+    run(&mut w, &mut snap, Vec::new());
+    let t = &mut w.tabs[0];
+    t.parser.advance(&mut t.term, b"\x1b[?1049h");
+    draw(t, &["## Answer".into(), "Run this to build it:".into(), "```rust".into(), "fn main() {".into(), "    println!(\"hello\");".into(), "}".into(), "```".into(), "Then **run** it.".into()]);
+    w.tabs[0].view = View::Markdown;
+    for _ in 0..8 {
+        run(&mut w, &mut snap, Vec::new());
+    }
+    // Over the code block, its copy and download buttons show.
+    for _ in 0..3 {
+        run(&mut w, &mut snap, vec![Event::PointerMoved(Pos2::new(400.0, 210.0))]);
+    }
+    snap.save(&ctx, size, &dir.join("markdown-tools.png"));
+}

@@ -172,6 +172,7 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
     }
     find_bar(ui, t, Rect::from_min_size(area.min, Vec2::new(area.width(), bar_h)), keys);
     md_tools(ui, t, view_rect, &read.0);
+    crate::markdown::saved_note(ui, view_rect);
 }
 
 /// The record as Markdown rows: a full-screen program's gathered rows, or a shell's scrollback
@@ -260,7 +261,7 @@ fn find_bar(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, keys: bool) {
 /// click anywhere over it.
 fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
     let mut act = None;
-    let tools = Rect::from_min_size(Pos2::new(rect.right() - 86.0, rect.top() + 8.0), Vec2::new(70.0, 30.0));
+    let tools = Rect::from_min_size(Pos2::new(rect.right() - 154.0, rect.top() + 8.0), Vec2::new(138.0, 30.0));
     // On a backing of the view's colour, so text scrolled under them does not show through.
     let back = scheme_bg().gamma_multiply(0.92);
     ui.painter().rect_filled(tools.expand(3.0), CornerRadius::same(8), back);
@@ -270,6 +271,13 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
     }
     if bar.add(crate::gui::tool_button(ic::SEARCH, t.find.is_some())).on_hover_text("Search (Ctrl+F)").clicked() {
         act = Some(MdAct::FindToggle);
+    }
+    // As a chat's answer is kept: copied whole, or saved as a Markdown file.
+    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::DOWNLOAD, false)).on_hover_text("Download as Markdown (.md)").clicked() {
+        act = Some(MdAct::SaveMd);
+    }
+    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::COPY, false)).on_hover_text("Copy all as Markdown").clicked() {
+        act = Some(MdAct::CopyMd);
     }
     let menu_id = egui::Id::unique(("md-menu", t.id));
     let (secondary, pos) = ui.input(|i| (i.pointer.secondary_clicked(), i.pointer.interact_pos()));
@@ -285,10 +293,12 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
                         (MdAct::Copy, format!("{}  Copy (Ctrl+C)", ic::COPY), selected),
                         (MdAct::CopyMd, format!("{}  Copy all as Markdown", ic::ARTICLE), !markdown.is_empty()),
                         (MdAct::CopyText, format!("{}  Copy all as text", ic::TEXT_T), !markdown.is_empty()),
+                        (MdAct::SaveMd, format!("{}  Download as Markdown (.md)", ic::DOWNLOAD), !markdown.is_empty()),
+                        (MdAct::SaveText, format!("{}  Download as text (.txt)", ic::DOWNLOAD), !markdown.is_empty()),
                         (MdAct::Find, format!("{}  Search  (Ctrl+F)", ic::SEARCH), true),
                         (MdAct::Clear, format!("{}  Clear", ic::ERASER), true),
                     ] {
-                        if a == MdAct::Clear {
+                        if matches!(a, MdAct::Clear | MdAct::SaveMd | MdAct::Find) {
                             ui.separator();
                         }
                         if ui.add_enabled(on, egui::Button::new(text)).clicked() {
@@ -307,6 +317,12 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
         Some(MdAct::Copy) => t.md_copy = true,
         Some(MdAct::CopyMd) => ui.ctx().copy_text(markdown.to_string()),
         Some(MdAct::CopyText) => ui.ctx().copy_text(record_plain(t)),
+        Some(MdAct::SaveMd) => {
+            let _ = crate::markdown::save_download(ui.ctx(), &crate::markdown::stamped(&file_stem(&t.title), "md"), markdown);
+        }
+        Some(MdAct::SaveText) => {
+            let _ = crate::markdown::save_download(ui.ctx(), &crate::markdown::stamped(&file_stem(&t.title), "txt"), &record_plain(t));
+        }
         Some(MdAct::Find) => t.find.get_or_insert_with(Find::default).focus = true,
         Some(MdAct::FindToggle) if t.find.is_some() => t.find = None,
         Some(MdAct::FindToggle) => t.find = Some(Find { focus: true, ..Default::default() }),
@@ -315,8 +331,17 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
     }
 }
 
+/// A tab's title as the start of a file name: "terminal" when it says nothing usable.
+pub(super) fn file_stem(title: &str) -> String {
+    let s: String = title.chars().map(|c| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '-' }).collect();
+    let s = s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    if s.is_empty() { "terminal".into() } else { s.chars().take(40).collect() }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum MdAct {
+    SaveMd,
+    SaveText,
     Copy,
     CopyMd,
     CopyText,

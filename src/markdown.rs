@@ -1005,6 +1005,122 @@ fn code_block(ui: &mut egui::Ui, th: &Theme, lang: &str, code: &str, id: egui::I
         .response
         .rect;
     hover_copy(ui, th, rect, id, code);
+    hover_save(ui, th, rect, id.with("save"), lang, code);
+}
+
+/// A file name ending for a code block's language, as its own file would have.
+fn ext_of(lang: &str) -> &'static str {
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "rust" | "rs" => "rs",
+        "python" | "py" => "py",
+        "javascript" | "js" | "node" => "js",
+        "typescript" | "ts" => "ts",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "bash" | "sh" | "shell" | "zsh" | "console" => "sh",
+        "powershell" | "ps1" | "pwsh" => "ps1",
+        "bat" | "cmd" | "batch" => "bat",
+        "json" => "json",
+        "yaml" | "yml" => "yml",
+        "toml" => "toml",
+        "html" => "html",
+        "css" => "css",
+        "sql" => "sql",
+        "c" => "c",
+        "cpp" | "c++" | "cc" => "cpp",
+        "csharp" | "cs" | "c#" => "cs",
+        "go" => "go",
+        "java" => "java",
+        "kotlin" | "kt" => "kt",
+        "swift" => "swift",
+        "ruby" | "rb" => "rb",
+        "php" => "php",
+        "markdown" | "md" => "md",
+        "xml" => "xml",
+        "diff" | "patch" => "diff",
+        "dockerfile" => "Dockerfile",
+        _ => "txt",
+    }
+}
+
+/// Keeps `text` as a new file named `name` in the Downloads folder (never over another: "name
+/// (2).md"), as a browser saves a chat's answer; its path, also shown by `saved_note` for a while.
+pub fn save_download(ctx: &egui::Context, name: &str, text: &str) -> Result<std::path::PathBuf, String> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from).ok_or("no home folder")?;
+    let dir = home.join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let (stem, ext) = name.rsplit_once('.').map_or((name, String::new()), |(s, e)| (s, format!(".{e}")));
+    for n in 1..10_000 {
+        let path = if n == 1 { dir.join(name) } else { dir.join(format!("{stem} ({n}){ext}")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+                let now = ctx.input(|i| i.time);
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("md-saved"), (path.clone(), now)));
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err("too many files of that name".into())
+}
+
+/// A name for a file saved now: "PREFIX-20261113-2154.EXT".
+pub fn stamped(prefix: &str, ext: &str) -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let stamp: String = crate::sys::local_time(secs).chars().filter(|c| c.is_ascii_digit()).collect();
+    let (day, time) = stamp.split_at(stamp.len().min(8));
+    format!("{prefix}-{day}-{}.{ext}", &time[..time.len().min(4)])
+}
+
+/// Where the last thing saved went, at the bottom right of `area` for a few seconds, with a way
+/// to its folder.
+pub fn saved_note(ui: &mut egui::Ui, area: Rect) {
+    let id = egui::Id::unique("md-saved");
+    let Some((path, at)) = ui.ctx().data(|d| d.get_temp::<(std::path::PathBuf, f64)>(id)) else { return };
+    let now = ui.input(|i| i.time);
+    if now - at > 5.0 {
+        ui.ctx().data_mut(|d| d.remove_temp::<(std::path::PathBuf, f64)>(id));
+        return;
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    egui::Area::new(id.with("note")).order(egui::Order::Foreground).fixed_pos(Pos2::new(area.right() - 12.0, area.bottom() - 12.0)).pivot(egui::Align2::RIGHT_BOTTOM).show(ui.ctx(), |ui| {
+        let v = ui.visuals().clone();
+        egui::Frame::new().fill(v.window_fill).stroke(Stroke::new(1.0, v.window_stroke.color)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                ui.label(egui::RichText::new(format!("{}  Saved to Downloads: {name}", crate::gui::ic::CHECK)).size(12.5));
+                if ui.small_button(format!("{}  Show", crate::gui::ic::FOLDER_OPEN)).on_hover_text(path.display().to_string()).clicked() {
+                    crate::tools::open_path(path.parent().unwrap_or(&path));
+                }
+            });
+        });
+    });
+}
+
+/// A code block's download button, beside its copy button while the pointer is over it.
+fn hover_save(ui: &mut egui::Ui, th: &Theme, rect: Rect, id: egui::Id, lang: &str, text: &str) {
+    let now = ui.input(|i| i.time);
+    let saved = ui.ctx().data(|d| d.get_temp::<f64>(id)).is_some_and(|t| now - t < 1.5);
+    if !saved && !ui.rect_contains_pointer(rect) {
+        return;
+    }
+    let glyph = if saved { crate::gui::ic::CHECK } else { crate::gui::ic::DOWNLOAD };
+    let at = Rect::from_min_size(Pos2::new(rect.right() - 66.0, rect.top() + 6.0), Vec2::splat(28.0));
+    let b = egui::Button::new(egui::RichText::new(glyph).size(14.0).color(th.fg))
+        .fill(th.code_bg)
+        .stroke(Stroke::new(1.0, th.rule))
+        .corner_radius(crate::gui::theme::R_SM);
+    let tip = if saved { "Saved to Downloads".to_string() } else { format!("Download as a .{} file", ext_of(lang)) };
+    if ui.put(at, b).on_hover_text(tip).clicked() {
+        let ext = ext_of(lang);
+        let name = if ext == "Dockerfile" { "Dockerfile".to_string() } else { stamped("code", ext) };
+        if save_download(ui.ctx(), &name, text).is_ok() {
+            ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        }
+    }
 }
 
 /// Command output and other aligned text: the terminal's font, every column where it was.
@@ -1477,5 +1593,35 @@ mod speed {
         });
         eprintln!("{} blocks: whole {whole:.2} ms a frame, in view {lazy:.2} ms a frame", doc.blocks.len());
         assert!(lazy * 5.0 < whole, "drawing what is in view is much quicker");
+    }
+}
+
+#[cfg(test)]
+mod saving_tests {
+    #[test]
+    fn code_is_saved_under_its_languages_ending() {
+        assert_eq!((super::ext_of("Rust"), super::ext_of("python"), super::ext_of("sh"), super::ext_of("")), ("rs", "py", "sh", "txt"));
+        let name = super::stamped("code", "rs");
+        assert!(name.starts_with("code-") && name.ends_with(".rs") && name.len() == "code-20261113-2154.rs".len(), "{name}");
+    }
+
+    #[test]
+    fn a_saved_answer_never_replaces_another() {
+        let home = std::env::temp_dir().join(format!("sshremote-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let before = std::env::var_os(key);
+        // SAFETY: this test alone reads the home folder here.
+        unsafe { std::env::set_var(key, &home) };
+        let ctx = eframe::egui::Context::default();
+        let a = super::save_download(&ctx, "answer.md", "# one").unwrap();
+        let b = super::save_download(&ctx, "answer.md", "# two").unwrap();
+        if let Some(h) = before {
+            unsafe { std::env::set_var(key, h) };
+        }
+        assert_eq!(a.file_name().unwrap(), "answer.md");
+        assert_eq!(b.file_name().unwrap(), "answer (2).md");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "# one");
+        let _ = std::fs::remove_dir_all(home);
     }
 }
