@@ -298,6 +298,7 @@ $("theme").onclick = () => {
   themeButton();
 };
 themeButton();
+$("sitelink").prepend(icon("home"));
 
 if (idOnly) {
   $("addrlabel").textContent = "Remote access ID";
