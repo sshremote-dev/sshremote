@@ -319,6 +319,57 @@ impl App {
                         changed = true;
                     }
                     ui.add(egui::Label::new(RichText::new("They are told its ID, name and network card, never its password, and can add it without typing the ID.").weak().size(12.0)).wrap());
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Two-step sign-in").strong());
+                    if !cfg.totp.is_empty() {
+                        ui.horizontal(|ui| {
+                            kit::dot(ui, good());
+                            ui.label("On: viewers give the code of your authenticator app with the password.");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(kit::danger("Turn off", false)).clicked() {
+                                    cfg.totp.clear();
+                                    changed = true;
+                                }
+                            });
+                        });
+                    } else if let Some(secret) = self.access.totp_new.clone() {
+                        ui.add(egui::Label::new(RichText::new("In your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…), add an account by its setup key:").size(12.5)).wrap());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(crate::totp::grouped(&secret)).monospace().size(14.0).strong());
+                            let at = egui::Id::unique("totp-copy");
+                            let copied = kit::copied(ui, at);
+                            if ui.add(kit::ghost(if copied { "Copied" } else { "Copy" })).clicked() {
+                                kit::copy(ui, &secret, at);
+                            }
+                            if ui.add(kit::ghost("Copy as a link")).on_hover_text("otpauth://, for apps that take a link").clicked() {
+                                kit::copy(ui, &crate::totp::uri(&secret, &cfg.id), at);
+                            }
+                        });
+                        kit::row(ui, "Its code now", |ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let ok = crate::totp::check(&secret, &self.access.totp_code);
+                                if ui.add_enabled(ok, kit::secondary("Turn on")).on_disabled_hover_text("Type the six digits the app shows").clicked() {
+                                    cfg.totp = secret.clone();
+                                    (self.access.totp_new, self.access.totp_code) = (None, String::new());
+                                    changed = true;
+                                }
+                                if ui.add(kit::ghost("Cancel")).clicked() {
+                                    (self.access.totp_new, self.access.totp_code) = (None, String::new());
+                                }
+                                ui.add(kit::field(&mut self.access.totp_code, "six digits"));
+                            });
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(RichText::new("Off: the password is enough. On, a viewer also gives the six-digit code of your authenticator app.").weak().size(12.0)).wrap());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(kit::secondary("Set up\u{2026}")).clicked() {
+                                    self.access.totp_new = Some(crate::totp::new_secret());
+                                }
+                            });
+                        });
+                    }
+                    ui.add_space(8.0);
                     if ui.checkbox(&mut cfg.direct, "Let viewers on this network come straight in").changed() {
                         changed = true;
                     }

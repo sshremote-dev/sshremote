@@ -13,6 +13,11 @@ pub(super) struct AccessUi {
     pub(super) show_password: bool,
     pub(super) new_password: String,
     pub(super) relay: String,
+    /// Two-step sign-in being set up: the new secret, and the code typed to show the app has it.
+    #[cfg(feature = "remote")]
+    pub(super) totp_new: Option<String>,
+    #[cfg(feature = "remote")]
+    pub(super) totp_code: String,
     /// Whether the relay sees this ID now (for which ID and relay), looked up in the background
     /// every few seconds, one lookup at a time.
     pub(super) online: Shared<Option<Online>>,

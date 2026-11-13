@@ -49,7 +49,7 @@
   .row + .row, .row + label, label + .row { margin-top: 8px; }
   #addr { flex: 1; font-size: 16px; padding: 11px 12px; }
   #go { padding: 11px 18px; font-size: 15px; }
-  #pw { flex: 1; } #port { width: 110px; }
+  #pw { flex: 1; } #port { width: 110px; } #code { width: 150px; }
   label.check { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; cursor: pointer; margin-top: 10px; user-select: none; }
   label.check input { accent-color: var(--primary); width: 15px; height: 15px; margin: 0; }
   .note { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--raised); border: 1px solid var(--line); color: var(--dim); font-size: 13px; }
@@ -222,6 +222,7 @@
       </div>
       <div class="row">
         <input id="pw" type="password" placeholder="Password" aria-label="Password" autocomplete="off">
+        <input id="code" placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" autocomplete="one-time-code" hidden>
         <input id="port" placeholder="Port 22" inputmode="numeric" aria-label="Port" hidden>
       </div>
       <label class="check"><input type="checkbox" id="keep"> Remember the password on this browser</label>

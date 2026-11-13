@@ -299,7 +299,10 @@ $("form").onsubmit = async e => {
     $("go").disabled = false;
   }
   // A password typed without "Remember" replaces the kept one with none.
-  connect({ ...t, name: known?.name, view: known?.view, password, keep: $("keep").checked && !!typed, kept: typed ? null : known?.pw });
+  // The two-step code goes with this try only, never kept.
+  const code = p.kind === "id" ? $("code").value.trim() : "";
+  $("code").value = "";
+  connect({ ...t, name: known?.name, view: known?.view, password, code, keep: $("keep").checked && !!typed, kept: typed ? null : known?.pw });
 };
 
 function renderSaved() {
@@ -627,7 +630,7 @@ class Client {
     const [w, hh] = this.want();
     const size = { w, h: hh, cols: this.term.cols, rows: this.term.rows };
     ws.onopen = () => {
-      if (t.kind === "id") ws.send(JSON.stringify({ id: t.address, password: t.password, ...size }));
+      if (t.kind === "id") ws.send(JSON.stringify({ id: t.address, password: t.password, code: t.code || undefined, ...size }));
       else ws.send(JSON.stringify({ gateway: gatewayAuth(), open: { host: t.address, port: t.port ? +t.port : undefined, password: t.password || undefined }, ...size }));
     };
     ws.onmessage = m => this.message(m);
@@ -678,7 +681,10 @@ class Client {
       refreshForm();
     }
     fail(error || "");
-    (error ? $("pw") : $("addr")).focus();
+    // A computer with two-step sign-in took the password and wants the app's code.
+    const code = /authenticator|wrong code/.test(error || "");
+    $("code").hidden = !code;
+    (code ? $("code") : error ? $("pw") : $("addr")).focus();
   }
   close() {
     this.ended = true;

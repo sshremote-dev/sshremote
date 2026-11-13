@@ -643,6 +643,8 @@ fn friendly(e: &str) -> (String, &'static str) {
         "sshremote is not installed on the host. Copy it to ~/.local/bin/sshremote (Windows: anywhere on PATH)."
     } else if l.contains("host key verification failed") {
         "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
+    } else if l.contains("authenticator") || l.contains("wrong code") {
+        "That computer has two-step sign-in: give the code its authenticator app shows now, with the password."
     } else if l.contains("wrong password") {
         "The password does not match the one set on that computer (Remote access by ID, on the left of its window)."
     } else if l.contains("no agent with that id") || l.contains("relay: offline") {
@@ -1470,7 +1472,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1526,7 +1528,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

@@ -40,11 +40,13 @@ pub struct Config {
     pub lan: bool,
     /// Whether viewers on this network may come straight in (`net::DIRECT_PORT`), not through the relay.
     pub direct: bool,
+    /// Two-step sign-in: the authenticator app's secret (base32); empty: the password is enough.
+    pub totp: String,
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "totp": self.totp })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -64,6 +66,7 @@ impl Config {
             allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
             lan: v.get("lan").and_then(|x| x.as_bool()).unwrap_or(true),
             direct: v.get("direct").and_then(|x| x.as_bool()).unwrap_or(true),
+            totp: s("totp").unwrap_or_default(),
         })
     }
 }
@@ -184,7 +187,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: true }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -534,6 +537,7 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
             // Who is asked and what viewers may do apply to the next call, with no new line.
             if let Some(k) = &now {
                 (cfg.ask, cfg.allow) = (k.ask, k.allow);
+                cfg.totp.clone_from(&k.totp);
             }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -661,7 +665,8 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard) {
         if right { guard.passed() } else { guard.failed() }
         Ok(right)
     };
-    let Ok((r, w)) = crate::net::handshake_agent(s, &cfg.password, &judge) else { return };
+    let totp = (!cfg.totp.is_empty()).then_some(cfg.totp.as_str());
+    let Ok((r, w)) = crate::net::handshake_agent_2fa(s, &cfg.password, totp, &judge) else { return };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     if let Ok(socket) = w.stream() {

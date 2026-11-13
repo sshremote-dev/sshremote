@@ -23,6 +23,9 @@ pub(super) struct SignIn {
     by_id: Option<String>,
     /// The password field has had the keyboard once (later the user puts it where they like).
     focused: bool,
+    /// The computer wants its authenticator app's code too, typed here.
+    wants_code: bool,
+    code: String,
 }
 
 pub(super) enum Answer {
@@ -42,8 +45,19 @@ impl SignIn {
         let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or(why).trim().to_string();
         let remember = crate::vault::backend().is_some();
         #[cfg(feature = "remote")]
-        if let Target::Direct { addr, .. } = target {
-            let why = if why.contains("wrong password") { "That password was not accepted.".to_string() } else { why };
+        if let Target::Direct { addr, password } = target {
+            let address = crate::access::address(&addr.id, &addr.relay);
+            // A computer with two-step sign-in took the password: only the code is missing (or wrong).
+            let wants_code = why.contains("code");
+            let why = if wants_code {
+                "The password was right; this computer wants the code of its authenticator app too.".to_string()
+            } else if why.contains("wrong password") {
+                "That password was not accepted.".to_string()
+            } else {
+                why
+            };
+            let known = password.split(crate::net::CODE_SEP).next().unwrap_or("").to_string();
+            let password = if wants_code && !known.is_empty() { known } else if wants_code { crate::vault::get(&address).unwrap_or_default() } else { String::new() };
             return Some(SignIn {
                 pane,
                 host: format!("ID {}", crate::computers::spaced(&addr.id)),
@@ -51,11 +65,13 @@ impl SignIn {
                 port: String::new(),
                 purpose: purpose.to_string(),
                 why,
-                password: String::new(),
+                password,
                 key: String::new(),
                 remember,
-                by_id: Some(crate::access::address(&addr.id, &addr.relay)),
+                by_id: Some(address),
                 focused: false,
+                wants_code,
+                code: String::new(),
             });
         }
         let Target::Ssh { host, port, args, .. } = target else { return None };
@@ -77,13 +93,15 @@ impl SignIn {
             remember,
             by_id: None,
             focused: false,
+            wants_code: false,
+            code: String::new(),
         })
     }
 
     /// The dialog; an answer once one of its buttons is used.
     pub fn show(&mut self, ctx: &egui::Context, target: &Target) -> Option<Answer> {
         let by_id = self.by_id.is_some();
-        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, if by_id { 240.0 } else { 330.0 }));
+        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, if self.wants_code { 300.0 } else if by_id { 240.0 } else { 330.0 }));
         let mut answer = None;
         let r = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
@@ -115,9 +133,17 @@ impl SignIn {
             ui.add_space(8.0);
             ui.label(if by_id { "The password set on that computer" } else { "Password, or the key's passphrase" });
             let pw = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(fit.x));
+            let code = self.wants_code.then(|| {
+                ui.add_space(4.0);
+                ui.label("The code your authenticator app shows now");
+                ui.add(egui::TextEdit::singleline(&mut self.code).hint_text("six digits").desired_width(140.0))
+            });
             // The keyboard starts here, once; after that it stays where the user puts it.
             if !self.focused {
-                pw.request_focus();
+                match &code {
+                    Some(c) if !self.password.is_empty() => c.request_focus(),
+                    _ => pw.request_focus(),
+                }
                 self.focused = true;
             }
             if !by_id {
@@ -180,6 +206,11 @@ impl SignIn {
         #[cfg(feature = "remote")]
         if let Target::Direct { password, .. } = &mut t {
             *password = self.password.clone();
+            let code = self.code.trim();
+            if !code.is_empty() {
+                password.push(crate::net::CODE_SEP);
+                password.push_str(code);
+            }
         }
         if let Target::Ssh { host, port, args, password, .. } = &mut t {
             let user = self.user.trim();

@@ -43,6 +43,8 @@ mod hostctl;
 mod porttunnel;
 #[cfg(feature = "remote")]
 mod record;
+#[cfg(feature = "remote")]
+mod totp;
 mod here;
 mod hosts;
 mod lan;
@@ -131,7 +133,8 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --install-service | --uninstall-service
                                   Windows: add or remove the service alone (remote-access install
                                   also turns remote access on)
-       sshremote sshremote://ID[@RELAY[:PORT]] --password P  view a computer by its remote access ID
+       sshremote sshremote://ID[@RELAY[:PORT]] --password P [--code C]  view a computer by its remote access ID
+                                       (C: its authenticator app's code, with two-step sign-in)
 
 options:
   --local         no ssh: an agent on this computer (a synthetic desktop unless --capture)
@@ -180,6 +183,7 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
     let mut view = (1900u16, 1000u16);
     let mut dump = None;
     let mut probe = None;
+    let mut code: Option<String> = None;
     let mut here = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -210,6 +214,8 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
             "--remote" => o.remote = val()?,
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
+            // Two-step sign-in: the authenticator app's code, joined to the password.
+            "--code" => code = Some(val()?),
             "--sound" => o.sound = true,
             "--fullscreen" => o.open.push_str(" fullscreen"),
             "--open" => o.open = val()?,
@@ -231,6 +237,13 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
         }
     }
     o.probe = probe.map(|secs| (secs, view, dump));
+    #[cfg(not(feature = "remote"))]
+    let _ = code;
+    #[cfg(feature = "remote")]
+    if let (Some(c), Some(p)) = (code, o.password.as_mut()) {
+        p.push(net::CODE_SEP);
+        p.push_str(c.trim());
+    }
     if o.capture.is_empty() {
         o.capture = if o.local && !here { "synthetic" } else { "auto" }.into();
     }

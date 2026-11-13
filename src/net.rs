@@ -149,6 +149,12 @@ impl Read for SealedReader {
 }
 
 const CONFIRM: &[u8] = b"sshremote/1 ready";
+/// Said instead of CONFIRM by a computer that also wants the code of an authenticator app.
+const CODE_PLEASE: &[u8] = b"sshremote/1 code?";
+/// Joins the two-step code to the password a viewer is given: "password", SEP, "123456".
+pub const CODE_SEP: char = '\u{1f}';
+/// What a viewer is told when the computer wants a code it was not given.
+pub const CODE_WANTED: &str = "the computer asks for the code of its authenticator app, with the password";
 
 /// Decides whether the viewer's proof of the password is checked now: given the check, it runs it
 /// in its own time (its turn, a delay) and says whether the password was right; an error turns
@@ -162,15 +168,24 @@ const VERDICT_LIMIT: Duration = Duration::from_secs(75);
 /// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here. On
 /// a failure the connection is shut at once, so the other side hears it without waiting.
 fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
+    handshake_2fa(stream, password, viewer, judge, None)
+}
+
+fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>) -> io::Result<(SealedReader, SealedWriter)> {
     let closer = stream.try_clone()?;
-    let result = handshake_on(stream, password, viewer, judge);
+    let result = handshake_on(stream, password, viewer, judge, totp);
     if result.is_err() {
         let _ = closer.shutdown(std::net::Shutdown::Both);
     }
     result
 }
 
-fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
+fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>) -> io::Result<(SealedReader, SealedWriter)> {
+    // A viewer may be given the two-step code with the password.
+    let (password, code) = match password.split_once(CODE_SEP) {
+        Some((p, c)) if viewer => (p, Some(c.trim())),
+        _ => (password, None),
+    };
     let (a, b) = (Identity::new(b"sshremote viewer"), Identity::new(b"sshremote agent"));
     let pw = Password::new(password.trim().as_bytes());
     let (state, msg) = if viewer {
@@ -239,14 +254,21 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -
         w.flush()?;
         extend(VERDICT_LIMIT);
         // A computer that did not take the password closes the connection without a word.
-        if let Err(e) = r.read_exact(&mut got) {
-            return Err(match e.kind() {
-                _ if late() => io::Error::new(io::ErrorKind::TimedOut, "the computer did not answer the password in time"),
-                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
-                    io::Error::new(io::ErrorKind::PermissionDenied, "wrong password")
-                }
-                _ => e,
-            });
+        let refused = |e: io::Error, what: &str| match e.kind() {
+            _ if late() => io::Error::new(io::ErrorKind::TimedOut, "the computer did not answer the password in time"),
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => io::Error::new(io::ErrorKind::PermissionDenied, what.to_string()),
+            _ => e,
+        };
+        r.read_exact(&mut got).map_err(|e| refused(e, "wrong password"))?;
+        // The password was right; the computer wants the code too.
+        if got == CODE_PLEASE {
+            let Some(code) = code.filter(|c| !c.is_empty()) else {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, CODE_WANTED));
+            };
+            w.write_all(code.as_bytes())?;
+            w.flush()?;
+            extend(VERDICT_LIMIT);
+            r.read_exact(&mut got).map_err(|e| refused(e, "wrong code (the password was right)"))?;
         }
     } else {
         // The proof is read as it comes; checking it waits on the judge, with no deadline
@@ -257,6 +279,18 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -
         extend(HANDSHAKE_LIMIT);
         if !right {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
+        }
+        // Two-step: the code is checked in turn too, and a wrong one counts as a wrong password.
+        if let Some(secret) = totp {
+            w.write_all(CODE_PLEASE)?;
+            w.flush()?;
+            let ct = r.sealed_frame()?.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+            deadline.store(u64::MAX, Ordering::Release);
+            let right = judge(&mut || r.open(&ct).is_ok_and(|c| crate::totp::check(secret, &String::from_utf8_lossy(&c))))?;
+            extend(HANDSHAKE_LIMIT);
+            if !right {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
+            }
         }
         got.copy_from_slice(CONFIRM);
         w.write_all(CONFIRM)?;
@@ -271,8 +305,14 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -
 
 /// The agent's side of the handshake, for remote access by ID; `judge` checks the viewer's proof
 /// of the password when it allows.
+#[cfg(test)]
 pub fn handshake_agent(stream: TcpStream, password: &str, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
     handshake(stream, password, false, judge)
+}
+
+/// `handshake_agent` that also wants the code of the authenticator app set up with `totp`.
+pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
+    handshake_2fa(stream, password, false, judge, totp)
 }
 
 /// A judge that checks at once.
@@ -495,6 +535,28 @@ mod tests {
         assert!(matches!(connect_direct(&other, "right one", &[at]), Ok(None)));
         // Nobody there: no answer, quickly.
         assert!(matches!(connect_direct(&addr, "right one", &["127.0.0.1:1".into()]), Ok(None)));
+    }
+
+    /// A computer that wants a code: refused without it, or with a wrong one, though the
+    /// password is right; in with both.
+    #[test]
+    fn two_step_wants_the_code_too() {
+        let secret = crate::totp::new_secret();
+        let serve = |secret: String| {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = l.local_addr().unwrap();
+            thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let _ = handshake_agent_2fa(s, "pw for both", Some(&secret), &now);
+            });
+            at
+        };
+        let viewer = |pw: String, at| handshake(TcpStream::connect(at).unwrap(), &pw, true, &now).map(|_| ()).map_err(|e| e.to_string());
+        assert_eq!(viewer("pw for both".into(), serve(secret.clone())), Err(CODE_WANTED.to_string()));
+        assert!(viewer(format!("pw for both{CODE_SEP}000000"), serve(secret.clone())).is_err_and(|e| e.contains("wrong code")) || crate::totp::check(&secret, "000000"));
+        let code = crate::totp::now(&secret);
+        assert!(viewer(format!("pw for both{CODE_SEP}{code}"), serve(secret.clone())).is_ok());
+        assert!(viewer(format!("wrong pw{CODE_SEP}{code}"), serve(secret)).is_err_and(|e| e.contains("wrong password")));
     }
 
     #[test]

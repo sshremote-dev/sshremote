@@ -456,7 +456,10 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
             Some(capture) => crate::transport::Target::Local { capture: capture.clone() },
             None => {
                 let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
-                crate::transport::Target::Direct { addr, password: text("password") }
+                // The two-step code rides with the password (`net::CODE_SEP`).
+                let code = text("code");
+                let password = if code.trim().is_empty() { text("password") } else { format!("{}{}{}", text("password"), crate::net::CODE_SEP, code.trim()) };
+                crate::transport::Target::Direct { addr, password }
             }
         };
         let open = Open { name: format!("ID {}", crate::computers::spaced(&id)), agent, lazy: false, shell: None };
@@ -909,7 +912,7 @@ fn client(
         match start(open.agent.clone(), settings(&ctl, view), w.clone()) {
             Ok((s, rx)) => Agent::Up(s, rx),
             Err(e) => {
-                let refused = e.to_lowercase().contains("wrong password");
+                let refused = e.to_lowercase().contains("wrong password") || e.to_lowercase().contains("wrong code");
                 send_json(&w, serde_json::json!({ "error": plain(&e) }))?;
                 return Ok(if refused { Opened::WrongPassword } else { Opened::No });
             }
@@ -1333,6 +1336,10 @@ fn plain(e: &str) -> String {
     let l = e.to_lowercase();
     if l.contains("offline") || l.contains("no agent with that id") {
         "That computer is not online: its remote access is off, or it has no network.".into()
+    } else if l.contains("authenticator") {
+        "The password was right; that computer wants the code of its authenticator app too.".into()
+    } else if l.contains("wrong code") {
+        "Wrong code from the authenticator app (the password was right).".into()
     } else if l.contains("wrong password") || l.contains("permission") {
         "Wrong password for that computer.".into()
     } else if l.contains("busy") || l.contains("try again") {
