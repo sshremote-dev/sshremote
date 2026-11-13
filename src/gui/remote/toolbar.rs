@@ -190,7 +190,7 @@ impl Remote {
         ui.separator();
 
         let display = icon_menu(ui, ic::MONITOR, |ui| {
-            ui.label(RichText::new("Quality").strong());
+            ui.label(RichText::new("Quality of this connection").strong());
             let auto = self.ctl.auto.is_some();
             if ui.selectable_label(auto, "Auto (adapts to the connection)").clicked() {
                 *action = Some(Box::new(|r, _| r.menu('a')));
@@ -204,7 +204,11 @@ impl Remote {
                     ui.close();
                 }
             }
-            ui.collapsing("Custom", |ui| {
+            // Custom in use is marked as a preset is, with what it is; its controls open below.
+            let custom = !auto && self.ctl.preset == "custom";
+            let title = if custom { format!("Custom: {}", self.ctl.describe()) } else { "Custom".to_string() };
+            let mark = if custom { RichText::new(title).color(ui.visuals().selection.stroke.color).strong() } else { RichText::new(title) };
+            egui::CollapsingHeader::new(mark).id_salt("quality-custom").default_open(custom).show(ui, |ui| {
                 let mut mode = self.ctl.s.mode;
                 ui.label(RichText::new("Colours").weak());
                 ui.horizontal_wrapped(|ui| {
@@ -235,11 +239,18 @@ impl Remote {
             pick(ui, Fit::Stretch, "Stretch to fill");
             ui.checkbox(&mut self.fill_full, "Fill the whole screen in full screen")
                 .on_hover_text("No bars when this screen's shape differs from the host's: the picture stretches a little");
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 for p in [50, 75, 100, 125, 150, 200] {
                     pick(ui, Fit::Fixed(p), &format!("{p}%"));
                 }
             });
+            ui.separator();
+            // Where every new connection starts: Settings, as the quality there is named.
+            let default = crate::hosts::setting("preset").and_then(|v| v.parse::<usize>().ok()).and_then(|i| PRESETS.get(i)).map_or("Auto".to_string(), preset_text);
+            if ui.button(format!("{}  New connections start with: {default}\u{2026}", ic::SLIDERS_HORIZONTAL)).on_hover_text("Settings, Connections").clicked() {
+                crate::gui::ask_settings("connections");
+                ui.close();
+            }
         });
         display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
 
@@ -465,6 +476,7 @@ impl Remote {
         // The screen's options (view only, sound, system keys...): only where the screen is shown.
         if screen {
             let more = icon_menu(ui, ic::GEAR, |ui| {
+                ui.label(RichText::new("This connection").strong());
                 ui.checkbox(&mut self.view_only, "View only")
                     .on_hover_text("Watch without sending keys, clicks or the wheel");
                 ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");

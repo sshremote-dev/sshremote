@@ -672,7 +672,7 @@ class Client {
     if (!this.ready) { this.leave(why || "The connection could not be made."); return; }
     this.lost = true;
     this.ready = false;
-    this.state("Disconnected", "down");
+    this.state("Connection lost", "down");
     this.releaseKeys?.();
     this.retry(why, 0);
   }
@@ -841,7 +841,7 @@ class Client {
   chrome() {
     setButton($("full"), "full");
     setButton($("fold"), "caretup");
-    setButton($("bye"), "logout", "Disconnect");
+    setButton($("bye"), "logout", "Close");
     for (const b of document.querySelectorAll("#bar [data-view]")) {
       b.onclick = () => this.pick(b.dataset.view);
       if (!b.querySelector("svg")) b.prepend(icon({ term: "terminal", screen: "monitor", files: "folder" }[b.dataset.view]));
@@ -1372,8 +1372,8 @@ class Client {
       null,
       ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
     ], at);
-    const Q = this.quality || {};
-    const qualityMenu = at => menu(["Picture quality",
+    // Read when opened: the quality changes after the bar is made (auto, the host's answer).
+    const qualityMenu = at => { const Q = this.quality || {}; menu(["Picture quality",
       ["Auto (adapts to the connection)", () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
       ...(this.qualities || []).map((p, i) => [p.text, () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
       ["Custom: colours, resolution, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
@@ -1384,7 +1384,7 @@ class Client {
       ...[0.5, 0.75, 1, 1.5, 2].map(z => [z * 100 + "%" + (z === 1 ? " (the host's own size)" : ""), () => this.setFit(z), { on: this.viewFit === z }]),
       null,
       ["Repaint the whole screen", () => this.send({ refresh: 1 })],
-    ], at);
+    ], at); };
     const several = this.monitors && this.monitors.list.length > 1;
     // What of the host is shared: all of the screen, or one window or program, with its menus.
     const kind = this.sharing?.kind || 0;
