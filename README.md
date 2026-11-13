@@ -187,6 +187,7 @@ sshremote remote-access            # this computer's ID, password and state
 sshremote remote-access on|off|install|uninstall|password [NEW]|relay HOST
 sshremote remote-access ask on|off               # the person here lets each viewer in
 sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
+sshremote remote-access straight on|off          # viewers may move past the relay
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN
@@ -207,7 +208,16 @@ asks for them at start). The relay is its own small program, [sshremote-relay](h
 7071 is shut.
 
 Both ends dial out to the relay, prove the password to each other with SPAKE2 and seal every byte
-with ChaCha20-Poly1305; the relay sees neither. IDs are held at the relay by a secret token, wrong
+with ChaCha20-Poly1305; the relay sees neither. Once in, the two look for a **straight path
+through their routers** (NAT hole punching, as RustDesk and other remote desktops do): each asks
+the relay over UDP which address and port its router shows, they swap those and their own network
+addresses inside the sealed stream, and probe each other's. When a path answers, the sealed
+stream moves onto it (an ordered, reliable stream over UDP with its own congestion control) with
+nothing lost or repeated, and the relay lets the session go; the toolbar's lightning sign shows
+it. The session starts on the relay at once and stays there when no path is found (a router that
+gives a new port for every destination, on both sides, or a network without UDP); a path that
+stops working ends the session, which reconnects through the relay. Either side can turn it off:
+the computer in its remote access settings, the viewer in Settings, Connections. IDs are held at the relay by a secret token, wrong
 passwords cost more time each, and attempts per address are limited. See
 [docs/architecture.md](docs/architecture.md) for how this, SSH and the extensions fit together.
 

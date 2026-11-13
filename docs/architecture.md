@@ -9,7 +9,7 @@ extensions only add looks, commands and panels.
 | Group | Features |
 |---|---|
 | Going out | SSH host (alias, `user@host[:port]`, IP) as terminal, screen or files; a computer by its ID and password as screen or files; this computer's own terminal, screen and files |
-| Coming in | Remote access by ID: on and off, password, two-step code, relay, start with the computer (Windows service); asking the person here first, and the rights viewers have (changed live in the window shown here); found on this network and reached straight; who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
+| Coming in | Remote access by ID: on and off, password, two-step code, relay, start with the computer (Windows service); asking the person here first, and the rights viewers have (changed live in the window shown here); found on this network and reached straight; moved past the relay onto a straight path through both routers (`udp`, NAT hole punching); who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
 | Computers | One list: favorites, recent, `~/.ssh/config` aliases, computers by ID, this computer; per computer its user, port, key, saved password and tunnels |
 | Tunnels | Local, remote and SOCKS port forwards through an SSH computer, started by hand or with the app |
 | Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection; full screen; reconnecting; chat, voice calls, sound, clipboard with files, recording, sharing one window or program; the computer itself (lock, restart, its input kept out, its screen hidden) |
@@ -32,7 +32,7 @@ Port forwarding is SSH's own and is built in, per computer.
 
 | Layer | Modules | |
 |---|---|---|
-| Engine | `proto`, `net`, `transport`, `session`, `agent`, `capture/*`, `video`, `audio`, `files`, `clip`, `chat`, `pty`, `conpty`, `keys`, `xk`, `keygrab`, `access`, `relay`, `service`, `admin`, `console_user` | kept |
+| Engine | `proto`, `net`, `udp`, `transport`, `session`, `agent`, `capture/*`, `video`, `audio`, `files`, `clip`, `chat`, `pty`, `conpty`, `keys`, `xk`, `keygrab`, `access`, `relay`, `service`, `admin`, `console_user` | kept |
 | Coming in | `grant` (rights), `hostctl` (the computer itself), `porttunnel` (tunnels by ID), `lan` (found nearby, Wake-on-LAN), `totp` (two-step codes), `record` (MP4) | new |
 | Data | `computers` (the one list), `tunnels`, `vault`, `hosts` (settings and `~/.ssh/config`), `backup` | `computers` and `tunnels` new |
 | Servers | `web`, `mcp` | kept |
@@ -77,6 +77,35 @@ user, port and key stay there), `user@host`, or `sshremote://ID@RELAY`. It is ke
 address. The older `recent.txt`, `favorites.txt` and `seen.txt` are read once into it.
 Passwords stay in the system's password store, keyed by the computer's address. The window, the
 web gateway and the terminal picker all read this one list.
+
+## Straight paths by ID (NAT hole punching)
+
+A session by ID starts on the relay. After the password check an agent that may go straight
+(`remote-access straight`, on by default) sends one empty sealed frame, which older viewers pass
+over. A viewer that may too then sends control frames: sealed like the stream's, in the same
+order, with the top bit of the length set, and sent only to a side known to read them.
+
+1. Each side binds a UDP socket and asks the relay, on UDP at the relay's port, where it sees it
+   from (`sshremote-addr 1 NONCE`, answered with the address and port; the relay answers 20 a
+   second per address, never more bytes than asked).
+2. `offer TAG FIRST ADDRESS...` (viewer) and `answer ADDRESS...` (agent): the router's address
+   and the computer's own, and an 8-byte tag for the UDP packets.
+3. Both probe all of the other's addresses (and any address a probe came from). The side named
+   FIRST probes at once, the other a second later or when it first hears a probe, so a router
+   never sees an answer before its own side sent: a Linux router answering a stray keeps it as a
+   flow and moves its side to another port, and some routers drop the mapping. The viewer names
+   the path (a private address if one answered in 100 ms, else the first) and the agent takes it.
+   Ten seconds each; a second try on new ports with the other side first.
+4. Each side then writes `move` on the relay and its frames from there on onto the UDP stream; a
+   reader that reads `move` reads on from the UDP stream. Once both moved the relay's connection
+   is shut.
+
+The UDP stream (`udp`) numbers packets of at most 1180 bytes and acknowledges ranges: losses are
+found by later packets arriving (by time and by count) and by timeouts, a lone tail packet is sent
+again early, the window halves on loss and grows as TCP's, and the receiver's room limits the
+sender. Every packet carries the tag; twenty seconds of nothing ends it, and a viewer whose
+straight path was lost uses the relay for that ID for ten minutes. The web gateway, beside the
+relay, does not look for one.
 
 ## Order of work
 
