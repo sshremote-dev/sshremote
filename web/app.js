@@ -2000,9 +2000,41 @@ addEventListener("message", e => {
 });
 if (/^#screen=\d+$/.test(location.hash) && window.opener) window.opener.postMessage("spread-ready", location.origin);
 
+// The page moved here from another address (sshremote.dev/web to web.sshremote.dev): the
+// computers that browser kept there come along once the person says so; their passwords stay
+// behind, sealed to that address. The link names what came: #import=BASE64URL(JSON).
+let linked = location.hash;
+{
+  const m = /^#import=([A-Za-z0-9_-]{1,20000})$/.exec(location.hash);
+  if (m) {
+    history.replaceState(null, "", location.pathname + location.search);
+    let got = null;
+    try { got = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(m[1].replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0)))); } catch { got = null; }
+    linked = typeof got?.then === "string" ? got.then : "";
+    const text = (v, n) => (typeof v === "string" ? v : "").slice(0, n);
+    const list = (Array.isArray(got?.saved) ? got.saved : [])
+      .filter(e => e && ["id", "ssh", "gw"].includes(e.kind) && typeof e.address === "string" && e.address && e.address.length < 300)
+      .slice(0, 40)
+      .map(e => {
+        const t = { kind: e.kind, address: e.address, port: /^\d{1,5}$/.test(String(e.port ?? "")) ? String(e.port) : "", name: text(e.name, 80), last: Number(e.last) || 0 };
+        return { ...t, key: keyOf(t) };
+      });
+    const fresh = list.filter(e => !saved().some(x => x.key === e.key));
+    if (fresh.length) {
+      const from = text(got.from, 80) || "its old address";
+      ask({ title: "Bring your computers along?", text: `This page moved here from ${from}. This browser kept ${fresh.length === 1 ? "one computer" : fresh.length + " computers"} there: ${fresh.map(title).join(", ")}. Their passwords stay behind: type each once more.`, ok: "Add them" })
+        .then(yes => { if (yes) { store.set("saved", [...saved(), ...fresh].slice(0, 40)); renderSaved(); } });
+    }
+    if ((got?.theme === "light" || got?.theme === "dark") && !store.get("theme", "")) {
+      store.set("theme", got.theme);
+      document.documentElement.dataset.theme = got.theme;
+      themeButton();
+    }
+  }
+}
 // A link can name what to open: #id=123456789 or #ssh=user@host.
 {
-  const m = /^#(id|ssh)=(.+)$/.exec(location.hash);
+  const m = /^#(id|ssh)=(.+)$/.exec(linked);
   if (m) $("addr").value = m[1] === "id" ? spaced(decodeURIComponent(m[2]).replace(/\D/g, "").slice(0, 9)) : decodeURIComponent(m[2]);
 }
 renderSaved();

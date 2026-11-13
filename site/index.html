@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SSH Remote: terminal, remote screen and files over SSH</title>
 <meta name="description" content="A terminal workspace that also shows the host's screen and files, through the SSH login you already have. For PCs without SSH, connect by ID and password.">
-<meta name="theme-color" content="#0e0e10">
+<meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e0e10" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <script src="site.js"></script>
@@ -22,7 +23,8 @@
     <a href="index.html#download">Download</a>
     <a class="gh" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>GitHub</a>
   </nav>
-  <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+  <a class="btn sm" id="webapp" href="/web/" title="Reach a computer by its ID from this browser, with nothing to install"><span data-i="globe"></span>Open in browser</a>
+  <button class="icon-btn" id="theme" type="button" aria-label="Theme"></button>
 </div></header>
 
 <main id="main">
@@ -31,6 +33,7 @@
   <p class="lead">SSH Remote opens a shell, the desktop and the file system of another computer side by side, over the SSH you already use. No account, no open port, nobody in between.</p>
   <div class="btns">
     <a class="btn" href="#download"><span data-i="download"></span>Download</a>
+    <a class="btn alt" href="/web/"><span data-i="globe"></span>Open in the browser</a>
     <a class="btn alt" href="docs.html#start">Read the guide</a>
   </div>
   <ul class="facts">
@@ -126,6 +129,7 @@
       <tr><th>Sign-in</th><td>Your keys, agent and <code>~/.ssh/config</code>, unchanged</td><td>A 9-digit ID and a password you set or generate</td></tr>
       <tr><th>In between</th><td>Nothing. It all runs inside the SSH session</td><td>The relay, which pairs both ends and sees only sealed bytes</td></tr>
       <tr><th>Terminal</th><td>Yes</td><td>Screen and files</td></tr>
+      <tr><th>From a browser</th><td>Through a gateway you run (<code>sshremote web</code>)</td><td>Yes, <a href="/web/">in the browser</a>, with nothing to install</td></tr>
       <tr><th>Start</th><td><pre class="cmd"><code>sshremote --gui user@host</code></pre></td><td><pre class="cmd"><code>sshremote remote-access on</code></pre></td></tr>
     </tbody>
   </table>
@@ -142,7 +146,7 @@
     <a class="file" href="download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 · .exe</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
     <a class="file" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · GNOME on Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
   </div>
-  <p class="dim small" style="margin-top:20px">From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
+  <p class="dim small" style="margin-top:20px">Nothing to install where you are? Reach a computer by its ID <a href="/web/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
 </div></section>
 
 <section id="start"><div class="wrap">
@@ -161,7 +165,7 @@ mv sshremote-linux-x86_64 ~/.local/bin/sshremote</code></pre></div>
 <section class="alt closing"><div class="wrap">
   <h2>Your other computer, one window away.</h2>
   <p class="dim">Free and open source. No sign-up.</p>
-  <div class="btns"><a class="btn" href="#download"><span data-i="download"></span>Download</a><a class="btn alt" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>Source</a></div>
+  <div class="btns"><a class="btn" href="#download"><span data-i="download"></span>Download</a><a class="btn alt" href="/web/"><span data-i="globe"></span>Open in the browser</a><a class="btn alt" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>Source</a></div>
 </div></section>
 </main>
 

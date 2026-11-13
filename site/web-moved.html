@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SSH Remote in the browser</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script>
+// The page in the browser moved to its own address. What this browser kept at the old one (the
+// computers, not their passwords, which stay sealed to this address) goes along in the link,
+// once; the page there asks before taking it.
+(function () {
+  var to = 'https://web.sshremote.dev/';
+  var hash = location.hash;
+  try {
+    if (!localStorage.getItem('sshremote.moved')) {
+      var list = JSON.parse(localStorage.getItem('sshremote.saved') || '[]');
+      var keep = (Array.isArray(list) ? list : []).filter(function (e) { return e && (e.kind === 'id' || e.kind === 'ssh' || e.kind === 'gw'); })
+        .map(function (e) { return { kind: e.kind, address: e.address, port: e.port || '', name: e.name || '', last: e.last || 0 }; });
+      var theme = JSON.parse(localStorage.getItem('sshremote.theme') || '""');
+      localStorage.setItem('sshremote.moved', '1');
+      if (keep.length || theme) {
+        var bytes = new TextEncoder().encode(JSON.stringify({ from: 'sshremote.dev/web', saved: keep, theme: theme, then: hash }));
+        var bin = '';
+        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        hash = '#import=' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      }
+    }
+  } catch (e) { /* storage off: just go */ }
+  location.replace(to + location.search + hash);
+})();
+</script>
+</head>
+<body style="font: 16px system-ui, sans-serif; margin: 40px">
+<p>SSH Remote in the browser is now at <a href="https://web.sshremote.dev/">web.sshremote.dev</a>.</p>
+</body>
+</html>

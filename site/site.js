@@ -24,6 +24,7 @@
     "bolt": "<path d=\"M215.79,118.17a8,8,0,0,0-5-5.66L153.18,90.9l14.66-73.33a8,8,0,0,0-13.69-7l-112,120a8,8,0,0,0,3,13l57.63,21.61L88.16,238.43a8,8,0,0,0,13.69,7l112-120A8,8,0,0,0,215.79,118.17ZM109.37,214l10.47-52.38a8,8,0,0,0-5-9.06L62,132.71l84.62-90.66L136.16,94.43a8,8,0,0,0,5,9.06l52.8,19.8Z\"/>",
     "tunnel": "<path d=\"M213.66,181.66l-32,32a8,8,0,0,1-11.32-11.32L188.69,184H48a8,8,0,0,1,0-16H188.69l-18.35-18.34a8,8,0,0,1,11.32-11.32l32,32A8,8,0,0,1,213.66,181.66Zm-139.32-64a8,8,0,0,0,11.32-11.32L67.31,88H208a8,8,0,0,0,0-16H67.31L85.66,53.66A8,8,0,0,0,74.34,42.34l-32,32a8,8,0,0,0,0,11.32Z\"/>",
     "text": "<path d=\"M208,56V88a8,8,0,0,1-16,0V64H136V192h24a8,8,0,0,1,0,16H96a8,8,0,0,1,0-16h24V64H64V88a8,8,0,0,1-16,0V56a8,8,0,0,1,8-8H200A8,8,0,0,1,208,56Z\"/>",
+    "auto": "<path d=\"M128,24a104,104,0,1,0,104,104A104.12,104.12,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Z\"/><path d=\"M128,52a76,76,0,0,1,0,152Z\"/>",
     "sun": "<path d=\"M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z\"/>",
     "moon": "<path d=\"M233.54,142.23a8,8,0,0,0-8-2,88.08,88.08,0,0,1-109.8-109.8,8,8,0,0,0-10-10,104.84,104.84,0,0,0-52.91,37A104,104,0,0,0,136,224a103.09,103.09,0,0,0,62.52-20.88,104.84,104.84,0,0,0,37-52.91A8,8,0,0,0,233.54,142.23ZM188.9,190.34A88,88,0,0,1,65.66,67.11a89,89,0,0,1,31.4-26A106,106,0,0,0,96,56,104.11,104.11,0,0,0,200,160a106,106,0,0,0,14.92-1.06A89,89,0,0,1,188.9,190.34Z\"/>",
     "menu": "<path d=\"M224,128a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,128ZM40,72H216a8,8,0,0,0,0-16H40a8,8,0,0,0,0,16ZM216,184H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z\"/>",
@@ -44,11 +45,19 @@
   const paint = (root) => root.querySelectorAll('[data-i]').forEach((e) => { e.innerHTML = icon(e.dataset.i); e.removeAttribute('data-i'); });
   window.sshPaint = paint;
 
-  // Theme: the system's unless chosen; the choice is kept on this browser only.
+  // Theme: the system's unless light or dark is chosen; the choice is kept on this browser only.
   const root = document.documentElement;
-  const saved = localStorage.getItem('theme');
-  if (saved) root.dataset.theme = saved;
-  const dark = () => root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  const read = () => { try { return localStorage.getItem('theme') || ''; } catch (e) { return ''; } };
+  const keep = (v) => { try { if (v) localStorage.setItem('theme', v); else localStorage.removeItem('theme'); } catch (e) { /* private mode */ } };
+  const apply = (v) => {
+    if (v === 'light' || v === 'dark') root.dataset.theme = v; else delete root.dataset.theme;
+    // The browser's own bar follows too.
+    document.querySelectorAll('meta[name=theme-color]').forEach((m) => {
+      const isDark = m.getAttribute('content') === '#0e0e10';
+      m.media = v ? (isDark === (v === 'dark') ? 'all' : 'not all') : (isDark ? '(prefers-color-scheme: dark)' : '(prefers-color-scheme: light)');
+    });
+  };
+  apply(read());
 
   // Copy buttons: beside every pre.cmd and anything with data-copy.
   async function copy(btn, text) {
@@ -71,10 +80,20 @@
     paint(document);
     const t = document.getElementById('theme');
     if (t) {
-      const show = () => { t.innerHTML = icon(dark() ? 'sun' : 'moon'); t.setAttribute('aria-label', dark() ? 'Use the light theme' : 'Use the dark theme'); };
+      // System, then light, then dark, then the system again.
+      const next = { '': 'light', light: 'dark', dark: '' };
+      const words = { '': 'Theme: as the system', light: 'Theme: light', dark: 'Theme: dark' };
+      const show = () => {
+        const v = read();
+        t.innerHTML = icon(v === 'light' ? 'sun' : v === 'dark' ? 'moon' : 'auto');
+        t.setAttribute('aria-label', words[v] + ' (click for ' + words[next[v]].slice(7) + ')');
+        t.title = words[v];
+      };
+      apply(read());
       show();
-      t.addEventListener('click', () => { const v = dark() ? 'light' : 'dark'; root.dataset.theme = v; localStorage.setItem('theme', v); show(); });
-      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', show);
+      t.addEventListener('click', () => { const v = next[read()]; keep(v); apply(v); show(); });
+      // Chosen in another tab: this one follows.
+      addEventListener('storage', (e) => { if (e.key === 'theme') { apply(read()); show(); } });
     }
     const m = document.getElementById('menu'), nav = document.getElementById('nav');
     if (m && nav) m.addEventListener('click', () => { const o = nav.classList.toggle('open'); m.setAttribute('aria-expanded', o); });
