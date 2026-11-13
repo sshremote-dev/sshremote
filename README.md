@@ -89,7 +89,11 @@ What is opened goes into the workspace:
     full-screen programs are stitched into one document as they scroll.
 - **Files**: two panes, drag and drop, never overwriting.
 - **Tools**: SSH keys, `~/.ssh/config` editor, saved passwords (the system's password store), and
-  backups of hosts and settings, with all of `~/.ssh` encrypted under a passphrase.
+  backups of hosts and settings, with all of `~/.ssh` encrypted under a passphrase (made by hand
+  or each day; restored or deleted from the list).
+- **Settings** hold every setting once. A pane's quick menu shows the ones that matter there with
+  the same controls and links to its page; a screen's menus say "this connection" where they
+  change that connection only, and what new ones start with.
 - On Windows the window asks for administrator rights at start and works without them. Closed
   while remote access by ID or tunnels are up here, it goes to the notification area: a click
   brings it back, and its menu turns remote access on or off, copies the ID, starts, stops,
@@ -187,7 +191,8 @@ sshremote remote-access            # this computer's ID, password and state
 sshremote remote-access on|off|install|uninstall|password [NEW]|relay HOST
 sshremote remote-access ask on|off               # the person here lets each viewer in
 sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
-sshremote remote-access straight on|off          # viewers may move past the relay
+sshremote remote-access straight|lan|direct on|off  # past the relay; found nearby; straight in nearby
+sshremote remote-access service start|stop       # the service, without removing it
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN
@@ -201,6 +206,13 @@ connection can also be ended. **Two-step sign-in** adds the code of an authentic
 password. Computers on the same network can find this one (its ID, name and network card, never
 the password) and, when allowed, come **straight in** on TCP 7073 instead of through the relay,
 with the same password check.
+
+With the service installed, an icon starts with each sign-in, in the notification area on
+Windows and in the top bar on Linux (GNOME shows it with its AppIndicator extension, which Ubuntu
+has on): a click opens the window, and its menu turns remote access on and off, copies the ID,
+sets who comes in, shows the window of whoever is connected and starts, stops or removes the
+service. That window, on the computer being viewed, stays in the taskbar while someone is
+connected, so ending the connection and changing what they may do are always at hand.
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
