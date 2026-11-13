@@ -42,7 +42,7 @@ mod extui;
 mod dock;
 mod toast;
 #[cfg(feature = "drive")]
-mod drive;
+pub(crate) mod drive;
 
 use remote::Remote;
 #[cfg(not(feature = "remote"))]
@@ -240,15 +240,28 @@ struct Form {
     mode: PaneMode,
 }
 
-type Pending = mpsc::Receiver<Result<(Session, mpsc::Receiver<Ev>), String>>;
+/// A connection being made in the background, and what its agent said before it answered.
+struct Pending {
+    rx: mpsc::Receiver<Result<(Session, mpsc::Receiver<Ev>), String>>,
+    note: std::sync::Arc<std::sync::Mutex<String>>,
+}
 
 /// Opens `target` on a thread of its own; the answer wakes the window.
 fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
+    let note = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let said = note.clone();
     std::thread::spawn(move || {
         #[cfg(feature = "remote")]
-        let r = Session::open(&target, true).map(|(s, _tx, rx)| (s, rx));
+        let r = {
+            let wake = ctx.clone();
+            let tell = move |t: &str| {
+                *said.lock().unwrap_or_else(|e| e.into_inner()) = t.to_string();
+                wake.request_repaint();
+            };
+            Session::open_noting(&target, true, &tell).map(|(s, _tx, rx)| (s, rx))
+        };
         #[cfg(not(feature = "remote"))]
         let r = {
             let _ = target;
@@ -257,7 +270,7 @@ fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
         let _ = tx.send(r);
         ctx.request_repaint();
     });
-    rx
+    Pending { rx, note }
 }
 
 enum Screen {
@@ -1449,7 +1462,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1505,7 +1518,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

@@ -293,6 +293,29 @@ impl App {
                     );
                 });
                 ui.add_space(kit::GAP);
+                kit::heading(ui, "Who comes in, and what they may do");
+                kit::card(ui, |ui| {
+                    if ui.checkbox(&mut cfg.ask, "Ask the person at this computer before letting anyone in").changed() {
+                        changed = true;
+                    }
+                    ui.add(
+                        egui::Label::new(RichText::new("With the right password a viewer waits for a click here; nobody answering within a minute turns them away. Off: the password is enough, for a computer nobody sits at.").weak().size(12.0))
+                            .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Viewers may").strong());
+                    for (bit, label, _) in crate::grant::RIGHTS {
+                        let mut on = cfg.allow & bit != 0;
+                        if ui.checkbox(&mut on, label).changed() {
+                            cfg.allow = if on { cfg.allow | bit } else { cfg.allow & !bit };
+                            changed = true;
+                        }
+                    }
+                    ui.add(
+                        egui::Label::new(RichText::new("They always see the screen. The person at the computer can change these for a session in its window.").weak().size(12.0)).wrap(),
+                    );
+                });
+                ui.add_space(kit::GAP);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(theme::primary("Done")).clicked()).inner
             });
             if changed {

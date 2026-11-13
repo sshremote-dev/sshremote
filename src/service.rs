@@ -248,8 +248,12 @@ fn serve() {
         let _ = BufReader::new(&*pipe).read_line(&mut line);
         let answer = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["sas"] => send_sas(),
-            ["spawn", base, capture] => spawn_helper(base, capture, false),
-            ["spawn", base, capture, "id"] => spawn_helper(base, capture, true),
+            ["spawn", base, capture] => spawn_helper(base, capture, None),
+            ["spawn", base, capture, "id"] => spawn_helper(base, capture, Some(crate::grant::ALL)),
+            ["spawn", base, capture, "id", grant] => match grant.parse() {
+                Ok(g) => spawn_helper(base, capture, Some(g)),
+                Err(_) => Err("bad request".into()),
+            },
             _ => Err("unknown request".into()),
         };
         let _ = writeln!(&*pipe, "{}", answer.err().unwrap_or_else(|| "ok".into()));
@@ -273,13 +277,13 @@ fn send_sas() -> Result<(), String> {
 }
 
 /// Starts `sshremote --agent --pipe BASE` as SYSTEM in the active console session.
-fn spawn_helper(base: &str, capture: &str, by_id: bool) -> Result<(), String> {
+fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>) -> Result<(), String> {
     let name = base.strip_prefix(r"\\.\pipe\sshremote-").unwrap_or("");
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("bad request".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let by_id = if by_id { " --by-id" } else { "" };
+    let by_id = by_id.map(|g| format!(" --by-id --grant {g}")).unwrap_or_default();
     let mut cmd = wide(&format!("\"{}\" --agent --capture {capture} --pipe {base}{by_id}", exe.display()));
     let mut desktop = wide(r"winsta0\default");
     unsafe {

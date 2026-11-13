@@ -541,7 +541,7 @@ impl Workspace {
             let target = self.panes[i].target.clone();
             let State::Down(d) = &mut self.panes[i].state else { continue };
             let mut live = None;
-            match d.rx.as_ref().map(|rx| rx.try_recv()) {
+            match d.rx.as_ref().map(|p| p.rx.try_recv()) {
                 Some(Ok(Ok(s))) => live = Some(s),
                 Some(Ok(Err(e))) => d.failed(e),
                 Some(Err(mpsc::TryRecvError::Disconnected)) => d.failed("the connection attempt ended".into()),
@@ -1418,6 +1418,12 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<Dow
         let secs = d.since.elapsed().as_secs();
         let sub = if d.attempt > 0 { format!("Attempt {}  ·  {secs} s", d.attempt + 1) } else { format!("{secs} s") };
         c.label(RichText::new(sub).small().weak());
+        // What the computer said while it was reached: that someone there is asked, say.
+        let note = d.rx.as_ref().map(|p| p.note.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
+        if !note.is_empty() {
+            c.add_space(4.0);
+            c.label(RichText::new(note).color(super::brand()));
+        }
         c.add_space(8.0);
         if c.button("Cancel").clicked() {
             act = Some(DownAct::Cancel);

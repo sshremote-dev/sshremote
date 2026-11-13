@@ -32,11 +32,20 @@ pub struct Config {
     pub password: String,
     pub relay: String,
     pub enabled: bool,
+    /// Whether the person at the screen is asked before a viewer comes in.
+    pub ask: bool,
+    /// What a viewer may do (`grant`), until the person at the screen changes it.
+    pub allow: u8,
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow })
+    }
+
+    /// The rights and whether to ask, as the agent takes them (`--grant`).
+    pub fn grant(&self) -> u8 {
+        (self.allow & crate::grant::ALL) | if self.ask { crate::grant::ASK } else { 0 }
     }
 
     fn from_json(v: &serde_json::Value) -> Option<Config> {
@@ -47,6 +56,8 @@ impl Config {
             password: s("password")?,
             relay: s("relay").filter(|r| !r.trim().is_empty()).unwrap_or_else(default_relay),
             enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
+            ask: v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false),
+            allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
         })
     }
 }
@@ -167,7 +178,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -507,6 +518,10 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let mut pending = Vec::new();
         'line: loop {
             let now = keep();
+            // Who is asked and what viewers may do apply to the next call, with no new line.
+            if let Some(k) = &now {
+                (cfg.ask, cfg.allow) = (k.ask, k.allow);
+            }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
                 // Viewers let in by the settings that changed go too.
@@ -607,20 +622,20 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
         SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
     }
     VIEWERS.fetch_add(1, Ordering::Relaxed);
-    let _ = serve_viewer(r, w);
+    let _ = serve_viewer(r, w, cfg.grant());
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| *k != n);
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != n);
 }
 
 /// The agent as a process of its own, its input and output the sealed stream.
-fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter) -> Result<(), String> {
+fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8) -> Result<(), String> {
     // The session's own pings come every second; two minutes of nothing means it is gone.
     let socket = w.stream().map_err(|e| e.to_string())?;
     let _ = socket.set_read_timeout(Some(Duration::from_secs(120)));
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
-    cmd.args(["--agent", "--capture", "auto", "--by-id"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["--agent", "--capture", "auto", "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -866,6 +881,8 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         println!("password: {}", c.password);
         println!("relay:    {}", c.relay);
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
+        println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
+        println!("viewers:  may use {}", crate::grant::words(c.allow));
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
         println!("connect with: sshremote --gui {}", address(&c.id, &c.relay));
     };
@@ -899,6 +916,35 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             c.id = new_id();
             save(&c)?;
             println!("ID: {}", crate::computers::spaced(&c.id));
+            Ok(())
+        }
+        Some("ask") => {
+            c.ask = match args.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("usage: sshremote remote-access ask on|off".into()),
+            };
+            save(&c)?;
+            show(&c);
+            Ok(())
+        }
+        // The rights by their short names, or "all" or "none".
+        Some("allow") => {
+            let names: Vec<&str> = crate::grant::RIGHTS.iter().map(|(.., w)| w.split_whitespace().next().unwrap_or("")).collect();
+            let mut bits = 0;
+            for a in args[1..].iter().flat_map(|a| a.split(',')).map(str::trim).filter(|a| !a.is_empty()) {
+                bits |= match a {
+                    "all" => crate::grant::ALL,
+                    "none" => 0,
+                    _ => match names.iter().position(|n| *n == a) {
+                        Some(i) => crate::grant::RIGHTS[i].0,
+                        None => return Err(format!("usage: sshremote remote-access allow [all | none | {}]...", names.join(" | "))),
+                    },
+                };
+            }
+            c.allow = bits;
+            save(&c)?;
+            show(&c);
             Ok(())
         }
         Some("relay") => {
@@ -942,7 +988,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | install | uninstall]".into()),
+        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | install | uninstall]".into()),
     }
 }
 
@@ -995,9 +1041,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         TEST_DIR.with(|t| *t.borrow_mut() = Some(d.clone()));
         let mut c = load();
+        assert!(!c.ask && c.allow == crate::grant::ALL, "the password is enough, for everything, until set otherwise");
         c.enabled = true;
+        (c.ask, c.allow) = (true, crate::grant::CONTROL | crate::grant::FILES);
         save(&c).unwrap();
         assert_eq!(load(), c);
+        assert_eq!(c.grant(), crate::grant::ASK | crate::grant::CONTROL | crate::grant::FILES);
         c.password = "abc".into();
         assert!(save(&c).is_err(), "too short");
         TEST_DIR.with(|t| *t.borrow_mut() = None);

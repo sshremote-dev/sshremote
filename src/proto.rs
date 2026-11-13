@@ -383,6 +383,8 @@ pub enum ToClient {
         ok: bool,
         text: String,
     },
+    /// What the person at the screen lets this viewer, who came by the computer's ID, do (`grant`).
+    Allowed(u8),
 }
 
 /// The largest picture a viewer takes: 16384 a side (four 4K screens in a row) and 64 megapixels.
@@ -904,6 +906,10 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 124
             }
+            ToClient::Allowed(bits) => {
+                b.push(*bits);
+                127
+            }
             ToClient::Monitors { list, current } => {
                 b.push(*current);
                 b.extend_from_slice(&(list.len() as u32).to_le_bytes());
@@ -1060,6 +1066,7 @@ impl ToClient {
                 ToClient::UiTree { title, windows, elems, more, note }
             }
             124 => ToClient::UiDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            127 => ToClient::Allowed(c.u8()?),
             120 => ToClient::TermExit { id: c.u32()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             118 => ToClient::FetchStart {
                 id: c.u32()?,
@@ -1181,6 +1188,7 @@ mod tests {
                 note: String::new(),
             },
             ToClient::UiDone { ok: true, text: "clicked".into() },
+            ToClient::Allowed(5),
             ToClient::Monitors {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,

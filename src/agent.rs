@@ -69,7 +69,6 @@ fn files_as_user() -> Result<Option<crate::console_user::AsUser>, &'static str> 
 }
 
 /// What a file request refused for `why` is answered with.
-#[cfg(windows)]
 fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
     let why = why.to_string();
     match m {
@@ -89,13 +88,21 @@ fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
 
 /// The viewer came by this computer's remote access ID (rather than over ssh as its owner).
 static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What such a viewer may do, and whether the person at the screen is asked first (`grant`).
+static GRANT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(crate::grant::ALL);
 
-pub fn mark_by_id() {
+pub fn mark_by_id(grant: u8) {
     BY_ID.store(true, std::sync::atomic::Ordering::Relaxed);
+    GRANT.store(grant, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn by_id() -> bool {
     BY_ID.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The rights and whether to ask, as given to this agent.
+pub fn grant() -> u8 {
+    GRANT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
@@ -168,10 +175,31 @@ pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>
     result
 }
 
+/// How long the person at the screen has to accept a viewer who came by this computer's ID.
+const ASK_FOR: Duration = Duration::from_secs(60);
+
 fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(), String> {
+    let mut chat = crate::chat::Window::default();
+    let mut allowed = crate::grant::ALL;
+    if by_id() {
+        allowed = grant() & crate::grant::ALL;
+        if grant() & crate::grant::ASK != 0 {
+            // Asked before the screen is opened: nothing of it is seen until then.
+            send(enc, &ToClient::Notice(crate::chat::WAITING.into())).and_then(|()| enc.flush()).map_err(|e| e.to_string())?;
+            allowed = match chat.ask(allowed, ASK_FOR) {
+                Ok(Some(a)) => a,
+                Ok(None) => return Err("The person at that computer did not let you in.".into()),
+                Err(e) => return Err(format!("Nobody could let you in at that computer: {e}")),
+            };
+        } else {
+            // Someone who came by this computer's ID is made known to the person at the screen,
+            // who can end it (nobody signed in: nobody to tell).
+            let _ = chat.notice(allowed);
+        }
+    }
     let mut cap = capture::open(backend)?;
     let mut held = Held::default();
-    let result = serve_with(enc, input, &mut cap, &mut held);
+    let result = serve_with(enc, input, &mut cap, &mut held, chat, allowed);
     // What the viewer still held down at the host is let go, however the session ended.
     held.release(cap.as_mut());
     result
@@ -212,7 +240,14 @@ impl Held {
     }
 }
 
-fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn capture::Capture>, held: &mut Held) -> Result<(), String> {
+fn serve_with(
+    enc: &mut Wire,
+    input: Box<dyn Read + Send>,
+    cap: &mut Box<dyn capture::Capture>,
+    held: &mut Held,
+    mut chat: crate::chat::Window,
+    mut allowed: u8,
+) -> Result<(), String> {
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
@@ -287,12 +322,13 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
     let mut queued: Vec<ToAgent> = Vec::new();
     let mut outbox = crate::files::Outbox::default();
     let mut sound: Option<crate::audio::Capture> = None;
-    let mut chat = crate::chat::Window::default();
-    // Someone who came by this computer's ID is made known to the person at the screen, who can
-    // end it (nobody signed in: nobody to tell).
-    if by_id() {
-        let _ = chat.notice();
+    // A viewer kept from some things is told what it may do.
+    if allowed != crate::grant::ALL {
+        send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
+        send(enc, &ToClient::Notice(format!("The person at that computer lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
     }
+    // Rights a request was turned away for since they last changed: said once each.
+    let mut told_off = 0u8;
     let mut pending = String::new();
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
@@ -330,6 +366,26 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
             let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym));
             if !typed_text && matches!(m, ToAgent::Key { .. } | ToAgent::KeyState { .. } | ToAgent::Button { .. }) {
                 paste(&mut pending, &mut clip, cap.as_mut());
+            }
+            // What the person at the screen does not allow is turned away, and said once.
+            if let Some(need) = crate::grant::needed(&m)
+                && allowed & need == 0
+            {
+                let why = format!("The person at that computer does not let you use {}.", crate::grant::words(need));
+                // A file's end follows its refused start: one answer is enough.
+                if !matches!(m, ToAgent::FileEnd { .. }) {
+                    for r in refused(&m, &why) {
+                        send(enc, &r).map_err(io_err)?;
+                    }
+                }
+                if let ToAgent::TermOpen { id, .. } = m {
+                    send(enc, &ToClient::TermExit { id, text: why.clone() }).map_err(io_err)?;
+                }
+                if told_off & need == 0 {
+                    told_off |= need;
+                    send(enc, &ToClient::Notice(why)).map_err(io_err)?;
+                }
+                continue;
             }
             // Files are the signed-in person's business: an agent run as SYSTEM acts as them, and
             // with nobody signed in there are none to hand out.
@@ -580,8 +636,30 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
         paste(&mut pending, &mut clip, cap.as_mut());
         for text in chat.replies() {
             // The person at the screen ended it.
-            if text == crate::chat::END {
+            if text == crate::chat::END || text == crate::chat::DENY {
                 return Err("The person at that computer's screen ended the connection.".into());
+            }
+            // The person at the screen changed what the viewer may do: what was taken away stops.
+            if let Some(now) = text.strip_prefix(crate::chat::ALLOW).and_then(|b| b.parse::<u8>().ok()) {
+                let now = now & crate::grant::ALL;
+                let taken = allowed & !now;
+                allowed = now;
+                told_off = 0;
+                if taken & crate::grant::CONTROL != 0 {
+                    held.release(cap.as_mut());
+                }
+                if taken & crate::grant::SOUND != 0 {
+                    sound = None;
+                }
+                if taken & crate::grant::TERMINAL != 0 {
+                    terms = crate::pty::Terms::default();
+                }
+                if taken & crate::grant::FILES != 0 {
+                    (inbox, outbox) = (Default::default(), Default::default());
+                }
+                send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
+                send(enc, &ToClient::Notice(format!("The person at that computer now lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
+                continue;
             }
             send(enc, &ToClient::Chat(text)).map_err(io_err)?;
         }
@@ -613,7 +691,9 @@ fn serve_with(enc: &mut Wire, input: Box<dyn Read + Send>, cap: &mut Box<dyn cap
         for m in outbox.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
         }
-        if let Some(text) = clip.poll() {
+        if let Some(text) = clip.poll()
+            && allowed & crate::grant::CLIPBOARD != 0
+        {
             send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
         }
         // The choice made in the desktop's sharing dialog, even while the picture is paused.

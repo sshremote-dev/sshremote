@@ -35,6 +35,8 @@ mod filewin;
 #[cfg(feature = "gui")]
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod gui;
+#[cfg(feature = "remote")]
+mod grant;
 mod here;
 mod hosts;
 #[cfg(windows)]
@@ -434,7 +436,10 @@ fn run(args: &[String]) -> Result<(), String> {
         #[cfg(feature = "remote")]
         "remote-access" => access::cli(&args[1..]),
         #[cfg(all(feature = "gui", feature = "remote"))]
-        "--chat-window" => chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id")),
+        "--chat-window" => {
+            let grant = args.iter().position(|a| a == "--grant").and_then(|i| args.get(i + 1)).and_then(|g| g.parse().ok());
+            chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant)
+        }
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
         #[cfg(feature = "gui")]
         "--stats" => gui::look::print_stats(),
@@ -462,7 +467,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let pipe = get("--pipe");
             // Started for a viewer who came by this computer's ID: the person at the screen is told.
             if args.iter().any(|a| a == "--by-id") {
-                agent::mark_by_id();
+                agent::mark_by_id(get("--grant").and_then(|g| g.parse().ok()).unwrap_or(grant::ALL));
             }
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
             // A relay helper has no visible stderr; keep its failure where it can be found: beside

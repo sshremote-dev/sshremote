@@ -106,9 +106,15 @@ impl Session {
     /// takes `PATH=...` as its own command and says nothing) is tried with Windows' commands, and
     /// the one that worked is kept for the next time.
     pub fn open(target: &Target, hidden: bool) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
-        let Target::Ssh { host, remote, .. } = target else { return Session::open_once(target, hidden) };
+        Session::open_noting(target, hidden, &|_| {})
+    }
+
+    /// `open`, telling `note` what the agent says before its hello (that it waits for the person
+    /// at the screen to let the viewer in, say).
+    pub fn open_noting(target: &Target, hidden: bool, note: &dyn Fn(&str)) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
+        let Target::Ssh { host, remote, .. } = target else { return Session::open_once(target, hidden, note) };
         if remote != crate::options::REMOTE {
-            return Session::open_once(target, hidden);
+            return Session::open_once(target, hidden, note);
         }
         let with = |cmd: &str| {
             let mut t = target.clone();
@@ -119,11 +125,11 @@ impl Session {
         };
         let kept = WORKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().get(host).cloned();
         if let Some(cmd) = kept
-            && let Ok(s) = Session::open_once(&with(&cmd), hidden)
+            && let Ok(s) = Session::open_once(&with(&cmd), hidden, note)
         {
             return Ok(s);
         }
-        let first = match Session::open_once(target, hidden) {
+        let first = match Session::open_once(target, hidden, note) {
             Ok(s) => return Ok(s),
             Err(e) => e,
         };
@@ -132,7 +138,7 @@ impl Session {
         }
         let mut last = first;
         for cmd in WINDOWS_AGENT {
-            match Session::open_once(&with(cmd), hidden) {
+            match Session::open_once(&with(cmd), hidden, note) {
                 Ok(s) => {
                     WORKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert(host.clone(), cmd.to_string());
                     return Ok(s);
@@ -143,7 +149,7 @@ impl Session {
         Err(format!("{last}\nsshremote was not found on that Windows computer: install SSH Remote there (This computer, Start with the computer), or put sshremote.exe on its PATH."))
     }
 
-    fn open_once(target: &Target, hidden: bool) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
+    fn open_once(target: &Target, hidden: bool, note: &dyn Fn(&str)) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
         let mut link = transport::open(target, hidden)?;
         let reader = std::mem::replace(&mut link.reader, Box::new(io::empty()));
         let writer = std::mem::replace(&mut link.writer, Box::new(io::sink()));
@@ -210,7 +216,19 @@ impl Session {
             backend: String::new(),
             waker,
         };
-        match rx.recv_timeout(Duration::from_secs(60)) {
+        // What comes before the hello is said (the person at the screen is asked, which may take
+        // them a minute) and waited past.
+        let mut until = Instant::now() + Duration::from_secs(60);
+        let first = loop {
+            match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(Ev::Net(ToClient::Notice(t))) => {
+                    note(&t);
+                    until = until.max(Instant::now() + Duration::from_secs(75));
+                }
+                other => break other,
+            }
+        };
+        match first {
             Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
                 sess.desk = (w, h);
                 sess.backend = backend;

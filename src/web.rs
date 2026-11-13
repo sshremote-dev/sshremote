@@ -716,10 +716,16 @@ fn settings(ctl: &crate::session::Control, (vw, vh): (u16, u16)) -> crate::proto
     crate::proto::Settings { view_w: vw, view_h: vh, ..ctl.s }
 }
 
-/// Reaches the agent, with no picture until the screen shows.
-fn reach(target: crate::transport::Target, s: crate::proto::Settings) -> Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String> {
+/// Reaches the agent, with no picture until the screen shows; what it says before it answers
+/// (that the person at the screen is asked) is the browser's status meanwhile.
+fn reach(
+    target: crate::transport::Target,
+    s: crate::proto::Settings,
+    w: Arc<Mutex<TcpStream>>,
+) -> Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String> {
     use crate::proto::ToAgent;
-    let (mut sess, _tx, rx) = crate::session::Session::open(&target, true)?;
+    let tell = |t: &str| drop(send_json(&w, serde_json::json!({ "status": t })));
+    let (mut sess, _tx, rx) = crate::session::Session::open_noting(&target, true, &tell)?;
     sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
     sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
     Ok((sess, rx))
@@ -895,7 +901,7 @@ fn client(
     let mut agent = if open.lazy {
         Agent::Idle
     } else {
-        match start(open.agent.clone(), settings(&ctl, view)) {
+        match start(open.agent.clone(), settings(&ctl, view), w.clone()) {
             Ok((s, rx)) => Agent::Up(s, rx),
             Err(e) => {
                 let refused = e.to_lowercase().contains("wrong password");
@@ -1210,7 +1216,8 @@ fn client(
                         let _ = send_json(&w, serde_json::json!({ "status": "Connecting for the screen and files\u{2026}" }));
                         let (tx, rx) = mpsc::channel();
                         let (target, at) = (open.agent.clone(), settings(&ctl, view));
-                        std::thread::spawn(move || drop(tx.send(start(target, at))));
+                        let w = w.clone();
+                        std::thread::spawn(move || drop(tx.send(start(target, at, w))));
                         agent = Agent::Connecting(rx);
                     }
                     if on == shown {
@@ -1258,7 +1265,8 @@ fn client(
                 Agent::Idle => {
                     let (tx, rx) = mpsc::channel();
                     let (target, at) = (open.agent.clone(), settings(&ctl, view));
-                    std::thread::spawn(move || drop(tx.send(start(target, at))));
+                    let w = w.clone();
+                        std::thread::spawn(move || drop(tx.send(start(target, at, w))));
                     agent = Agent::Connecting(rx);
                     waiting.push(m);
                 }

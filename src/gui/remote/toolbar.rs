@@ -276,6 +276,11 @@ impl Remote {
             screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));
         }
 
+        // The person at a computer reached by its ID keeps some things from this viewer.
+        if self.allowed != crate::grant::ALL {
+            let tip = format!("The person at that computer lets you use: {}", crate::grant::words(self.allowed));
+            ui.label(egui::RichText::new(ic::SHIELD).size(17.0).color(crate::gui::warn())).on_hover_text(tip);
+        }
         if icon(ui, ic::APP_WINDOW, "Share: the entire screen, one window or one application", self.sharing.0 != 0)
             .clicked()
         {

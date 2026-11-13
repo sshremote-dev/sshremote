@@ -6,7 +6,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-#[cfg(feature = "gui")]
 use std::time::Duration;
 
 #[cfg(feature = "gui")]
@@ -36,6 +35,13 @@ pub fn unescape(s: &str) -> String {
 /// What the chat window writes when the person at the screen ends the connection (a typed
 /// message cannot hold a NUL).
 pub const END: &str = "\u{0}end";
+/// What it writes, with the rights as a number, when the person lets the viewer in or changes
+/// what it may do (`grant`).
+pub const ALLOW: &str = "\u{0}allow ";
+/// What it writes when the person turns the viewer away.
+pub const DENY: &str = "\u{0}deny";
+/// What a viewer is told while the person at the screen is asked.
+pub const WAITING: &str = "Waiting for the person at that computer to let you in\u{2026}";
 
 /// The chat window's program: one started here, or one started as the person signed in at the
 /// screen (an agent run as SYSTEM).
@@ -72,8 +78,9 @@ impl Proc {
 pub struct Window {
     child: Option<(Proc, Box<dyn Write + Send>)>,
     replies: Option<Receiver<String>>,
-    /// It says that someone is connected by this computer's ID, with a button to end that.
-    by_id: bool,
+    /// It says that someone is connected by this computer's ID, with a button to end that and
+    /// what they may do (`grant`), and asks first when `grant::ASK` is in it.
+    by_id: Option<u8>,
 }
 
 impl Window {
@@ -82,10 +89,40 @@ impl Window {
     }
 
     /// Tells the person at the screen that someone connected by this computer's ID: the window
-    /// opens at once, with a button to end the connection.
-    pub fn notice(&mut self) -> Result<(), String> {
-        self.by_id = true;
+    /// opens at once, with a button to end the connection and what they may do (`grant`).
+    pub fn notice(&mut self, allowed: u8) -> Result<(), String> {
+        self.by_id = Some(allowed & crate::grant::ALL);
         self.open()
+    }
+
+    /// Asks the person at the screen to let in someone who came by this computer's ID, offering
+    /// `allowed`: what they let the viewer do, or None when they turned it away, closed the
+    /// window or did not answer within `limit`.
+    pub fn ask(&mut self, allowed: u8, limit: Duration) -> Result<Option<u8>, String> {
+        self.by_id = Some((allowed & crate::grant::ALL) | crate::grant::ASK);
+        self.open()?;
+        let until = std::time::Instant::now() + limit;
+        let rx = self.replies.as_ref().ok_or("no window")?;
+        let answer = loop {
+            match rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+                Ok(m) => {
+                    if let Some(a) = m.strip_prefix(ALLOW).and_then(|b| b.parse::<u8>().ok()) {
+                        break Some(a & crate::grant::ALL);
+                    }
+                    if m == DENY || m == END {
+                        break None;
+                    }
+                }
+                Err(_) => break None,
+            }
+        };
+        if answer.is_none()
+            && let Some((mut c, _)) = self.child.take()
+        {
+            c.end();
+        }
+        self.by_id = answer;
+        Ok(answer)
     }
 
     /// Shows a message from the viewer, opening the window if the user closed it.
@@ -99,12 +136,13 @@ impl Window {
 
     fn open(&mut self) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let name = if self.by_id { "Someone connected by this computer's ID".to_string() } else { viewer_name() };
+        let name = if self.by_id.is_some() { "Someone connected by this computer's ID".to_string() } else { viewer_name() };
+        let by_id = self.by_id.map(|g| format!(" --by-id --grant {g}")).unwrap_or_default();
         // An agent run as SYSTEM shows it as the person signed in at the screen, never as SYSTEM.
         #[cfg(windows)]
         match crate::console_user::acting() {
             crate::console_user::Acting::User(u) => {
-                let line = format!("\"{}\" --chat-window \"{}\"{}", exe.display(), name, if self.by_id { " --by-id" } else { "" });
+                let line = format!("\"{}\" --chat-window \"{}\"{by_id}", exe.display(), name);
                 let (proc, stdin, stdout) = crate::console_user::spawn_piped(&u, &line)?;
                 self.listen(Box::new(stdout));
                 self.child = Some((Proc::AsUser(proc), Box::new(stdin)));
@@ -115,9 +153,7 @@ impl Window {
         }
         let mut cmd = Command::new(exe);
         cmd.arg("--chat-window").arg(&name).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        if self.by_id {
-            cmd.arg("--by-id");
-        }
+        cmd.args(by_id.split_whitespace());
         #[cfg(target_os = "linux")]
         {
             // An agent started over ssh has no display variables; the desktop session uses the defaults.
@@ -149,8 +185,8 @@ impl Window {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                // The end of the connection comes as is; a message is unescaped.
-                let m = if line == END { line } else { unescape(&line) };
+                // What the window says for itself (it starts with a NUL) comes as is; a message is unescaped.
+                let m = if line.starts_with('\u{0}') { line } else { unescape(&line) };
                 if tx.send(m).is_err() {
                     break;
                 }
@@ -183,7 +219,7 @@ fn viewer_name() -> String {
 
 /// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
 #[cfg(feature = "gui")]
-pub fn run_window(name: String, by_id: bool) -> Result<(), String> {
+pub fn run_window(name: String, by_id: bool, grant: Option<u8>) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -194,8 +230,12 @@ pub fn run_window(name: String, by_id: bool) -> Result<(), String> {
         // The agent went away with the session.
         let _ = tx.send(String::from("\u{0}"));
     });
-    let mut native = crate::gui::native_options("SSH Remote chat", [380.0, 460.0]);
+    let grant = grant.unwrap_or(crate::grant::ALL);
+    let asking = by_id && grant & crate::grant::ASK != 0;
+    let mut native = crate::gui::native_options(if asking { "SSH Remote: someone wants to connect" } else { "SSH Remote chat" }, [400.0, if asking { 600.0 } else { 460.0 }]);
     native.viewport = native.viewport.with_always_on_top();
+    #[cfg(feature = "drive")]
+    crate::gui::drive::start();
     eframe::run_native(
         "sshremote chat",
         native,
@@ -211,7 +251,17 @@ pub fn run_window(name: String, by_id: bool) -> Result<(), String> {
                     ctx.request_repaint();
                 }
             });
-            Ok(Box::new(ChatApp { incoming: wake_rx, lines: Vec::new(), input: String::new(), ended: None, name, by_id }))
+            Ok(Box::new(ChatApp {
+                incoming: wake_rx,
+                lines: Vec::new(),
+                input: String::new(),
+                ended: None,
+                name,
+                by_id,
+                allowed: grant & crate::grant::ALL,
+                asking: asking.then(std::time::Instant::now),
+                rights_open: false,
+            }))
         }),
     )
     .map_err(|e| e.to_string())
@@ -229,12 +279,98 @@ struct ChatApp {
     name: String,
     /// Someone came by this computer's ID: the window says so and can end it.
     by_id: bool,
+    /// What they may do (`grant`), changed here for this session.
+    allowed: u8,
+    /// Since when the window asks whether to let them in at all.
+    asking: Option<std::time::Instant>,
+    /// The list of what they may do is unfolded.
+    rights_open: bool,
+}
+
+/// Says something of the window's own to the agent.
+#[cfg(feature = "gui")]
+fn tell(line: &str) {
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+}
+
+/// The rights as switches; true when one changed.
+#[cfg(feature = "gui")]
+fn rights(ui: &mut egui::Ui, allowed: &mut u8) -> bool {
+    let mut changed = false;
+    for (bit, label, _) in crate::grant::RIGHTS {
+        let mut on = *allowed & bit != 0;
+        if ui.checkbox(&mut on, label).changed() {
+            *allowed = if on { *allowed | bit } else { *allowed & !bit };
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(feature = "gui")]
+impl ChatApp {
+    /// Whether to let someone in who came by this computer's ID, and what they may do.
+    fn ask(&mut self, ui: &mut egui::Ui, since: std::time::Instant) {
+        let ctx = ui.ctx().clone();
+        let left = 60u64.saturating_sub(since.elapsed().as_secs());
+        let mut answer = None;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::same(20))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(crate::gui::ic::USER).size(30.0).color(crate::gui::brand()));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Someone wants to connect").strong().size(16.0));
+                    ui.label(RichText::new("They have this computer's ID and its password.").weak());
+                });
+            });
+            ui.add_space(14.0);
+            ui.label(RichText::new("If you let them in, they may:").strong());
+            ui.add_space(4.0);
+            rights(ui, &mut self.allowed);
+            ui.label(RichText::new("They always see the screen. You can change these and end the connection at any time.").small().weak());
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if ui.add(crate::gui::kit::secondary("Turn away")).clicked() {
+                    answer = Some(false);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(crate::gui::theme::primary("Let them in").min_size(egui::Vec2::new(0.0, crate::gui::kit::CONTROL_H))).clicked() {
+                        answer = Some(true);
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("Turned away by itself in {left} s")).small().weak());
+        });
+        if left == 0 {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                tell(&format!("{ALLOW}{}", self.allowed));
+                self.asking = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("SSH Remote chat".into()));
+            }
+            Some(false) => {
+                tell(DENY);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            None => ctx.request_repaint_after(Duration::from_millis(500)),
+        }
+    }
 }
 
 #[cfg(feature = "gui")]
 impl eframe::App for ChatApp {
+    #[cfg(feature = "drive")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        crate::gui::drive::hook(ctx, raw);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(feature = "drive")]
+        crate::gui::drive::end_of_frame(&ctx);
         for m in self.incoming.try_iter() {
             if m == "\u{0}" {
                 self.ended = Some(std::time::Instant::now());
@@ -244,12 +380,24 @@ impl eframe::App for ChatApp {
             }
         }
         crate::gui::chrome::behaviour(&ctx);
+        let title = if self.asking.is_some() { "SSH Remote" } else { "SSH Remote chat" };
         if crate::gui::chrome::title_bar(ui, |ui| {
-            ui.label(RichText::new("SSH Remote chat").size(13.0));
+            ui.label(RichText::new(title).size(13.0));
         })
         .close
         {
+            // Closing the question turns the viewer away.
+            if self.asking.is_some() {
+                tell(DENY);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if let Some(since) = self.asking {
+            if self.ended.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            self.ask(ui, since);
+            return;
         }
         let card = ui.visuals().window_fill;
         let header = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(16, 10));
@@ -272,15 +420,27 @@ impl eframe::App for ChatApp {
                     ui.label(RichText::new(state).small().weak());
                 });
             });
-            // The person at the screen can end it at any time.
+            // The person at the screen can end it, and change what they may do, at any time.
             if self.by_id && self.ended.is_none() {
                 ui.add_space(6.0);
-                let end = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE).strong()).fill(crate::gui::bad());
-                if ui.add(end).on_hover_text("End this connection now").clicked() {
-                    println!("{END}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    self.ended = Some(std::time::Instant::now());
+                ui.horizontal(|ui| {
+                    let end = egui::Button::new(RichText::new("Disconnect").color(Color32::WHITE).strong()).fill(crate::gui::bad());
+                    if ui.add(end).on_hover_text("End this connection now").clicked() {
+                        tell(END);
+                        self.ended = Some(std::time::Instant::now());
+                    }
+                    let fold = if self.rights_open { crate::gui::ic::CARET_UP } else { crate::gui::ic::CARET_DOWN };
+                    if ui.add(crate::gui::kit::ghost(format!("What they may do  {fold}"))).clicked() {
+                        self.rights_open = !self.rights_open;
+                    }
+                });
+                if self.rights_open {
+                    ui.add_space(4.0);
+                    if rights(ui, &mut self.allowed) {
+                        tell(&format!("{ALLOW}{}", self.allowed));
+                    }
+                } else if self.allowed != crate::grant::ALL {
+                    ui.label(RichText::new(format!("They may use: {}", crate::grant::words(self.allowed))).small().weak());
                 }
             }
         });
