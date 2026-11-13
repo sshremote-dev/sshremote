@@ -1055,6 +1055,11 @@ pub fn run(opt: Options) -> Result<(), String> {
             v.paint_bytes as f64 / 1024.0,
             v.paint_ms
         );
+        match v.sess.straight() {
+            Some(Some(a)) => eprintln!("probe: straight to {a}, past the relay"),
+            Some(None) => eprintln!("probe: through the relay"),
+            None => {}
+        }
         if let Some(path) = opt.probe.as_ref().and_then(|p| p.2.as_ref()) {
             std::fs::write(path, v.fb.ppm()).map_err(|e| e.to_string())?;
         }

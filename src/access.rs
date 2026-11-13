@@ -40,13 +40,16 @@ pub struct Config {
     pub lan: bool,
     /// Whether viewers on this network may come straight in (`net::DIRECT_PORT`), not through the relay.
     pub direct: bool,
+    /// Whether a viewer that came through the relay may move to a straight path through the
+    /// routers, once in (`udp`): the two then learn each other's addresses.
+    pub punch: bool,
     /// Two-step sign-in: the authenticator app's secret (base32); empty: the password is enough.
     pub totp: String,
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "totp": self.totp })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -67,6 +70,8 @@ impl Config {
             lan: v.get("lan").and_then(|x| x.as_bool()).unwrap_or(true),
             // Off unless chosen, as a port open to the network is.
             direct: v.get("direct").and_then(|x| x.as_bool()).unwrap_or(false),
+            // On, as with other remote desktops: it moves only sealed traffic, after the password.
+            punch: v.get("punch").and_then(|x| x.as_bool()).unwrap_or(true),
             totp: s("totp").unwrap_or_default(),
         })
     }
@@ -188,7 +193,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: false, totp: String::new() }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: false, punch: true, totp: String::new() }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -279,7 +284,7 @@ pub fn state() -> State {
 
 /// The viewers being served: a number, the settings they came in by, and their connection, so a
 /// change of those settings (off, a new password, ID or relay) ends them too.
-static SESSIONS: Mutex<Vec<(u64, String, TcpStream)>> = Mutex::new(Vec::new());
+static SESSIONS: Mutex<Vec<(u64, String, crate::net::Ender)>> = Mutex::new(Vec::new());
 
 /// When each viewer came in, by its number, in seconds since 1970.
 static SINCE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
@@ -299,7 +304,7 @@ pub fn viewers() -> Vec<(u64, u64)> {
 pub fn disconnect(viewer: u64) {
     for (n, _, s) in SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if *n == viewer {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+            s.end();
         }
     }
 }
@@ -315,7 +320,7 @@ fn end_sessions_but(now: Option<&Config>) {
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, k, s)| {
         let stays = keep.as_ref() == Some(k);
         if !stays {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+            s.end();
         }
         stays
     });
@@ -535,9 +540,10 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let mut pending = Vec::new();
         'line: loop {
             let now = keep();
-            // Who is asked and what viewers may do apply to the next call, with no new line.
+            // Who is asked, what viewers may do and whether they may go straight apply to the next
+            // call, with no new line.
             if let Some(k) = &now {
-                (cfg.ask, cfg.allow) = (k.ask, k.allow);
+                (cfg.ask, cfg.allow, cfg.punch) = (k.ask, k.allow, k.punch);
                 cfg.totp.clone_from(&k.totp);
             }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
@@ -625,7 +631,7 @@ fn listen_direct(guard: Arc<Guard>) {
                 let guard = guard.clone();
                 thread::spawn(move || {
                     if crate::net::accept_direct(&mut s, &cfg.id) {
-                        serve_call(s, &cfg, &guard);
+                        serve_call(s, &cfg, &guard, false);
                     }
                     guard.calls.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -643,11 +649,12 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
     }
-    serve_call(s, cfg, guard);
+    serve_call(s, cfg, guard, true);
 }
 
 /// A viewer's connection, by the relay or straight: the password checked in turn, then the agent.
-fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard) {
+/// Through the relay, it may move to a straight path through the routers.
+fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
     // The exchange runs at the viewer's pace with nobody waiting on it; only checking its proof
     // of the password takes the turn, after the delay wrong ones have earned.
     let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
@@ -667,13 +674,12 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard) {
         Ok(right)
     };
     let totp = (!cfg.totp.is_empty()).then_some(cfg.totp.as_str());
-    let Ok((r, w)) = crate::net::handshake_agent_2fa(s, &cfg.password, totp, &judge) else { return };
+    let punch = (relayed && cfg.punch).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
+    let Ok((r, w)) = crate::net::handshake_agent_2fa(s, &cfg.password, totp, &judge, punch) else { return };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    if let Ok(socket) = w.stream() {
-        SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), socket));
-        SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
-    }
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), w.ender()));
+    SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, cfg.grant());
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
@@ -684,8 +690,8 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard) {
 /// The agent as a process of its own, its input and output the sealed stream.
 fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8) -> Result<(), String> {
     // The session's own pings come every second; two minutes of nothing means it is gone.
-    let socket = w.stream().map_err(|e| e.to_string())?;
-    let _ = socket.set_read_timeout(Some(Duration::from_secs(120)));
+    let ender = w.ender();
+    ender.set_idle_limit(Duration::from_secs(120));
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.args(["--agent", "--capture", "auto", "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -711,7 +717,7 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
             }
         }
         // The agent is gone: so is the session, and the viewer's side ends with it.
-        let _ = socket.shutdown(std::net::Shutdown::Both);
+        ender.end();
     });
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -936,6 +942,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
         println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
         println!("viewers:  may use {}", crate::grant::words(c.allow));
+        println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
         println!("connect with: sshremote --gui {}", address(&c.id, &c.relay));
     };
@@ -969,6 +976,16 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             c.id = new_id();
             save(&c)?;
             println!("ID: {}", crate::computers::spaced(&c.id));
+            Ok(())
+        }
+        Some("straight") => {
+            c.punch = match args.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("usage: sshremote remote-access straight on|off".into()),
+            };
+            save(&c)?;
+            show(&c);
             Ok(())
         }
         Some("ask") => {
@@ -1041,7 +1058,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | install | uninstall]".into()),
+        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight on|off | install | uninstall]".into()),
     }
 }
 

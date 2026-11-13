@@ -277,6 +277,14 @@ impl App {
                     crate::hosts::set_setting("agent_command", self.form.remote.trim());
                 }
             });
+            // Computers by ID: past the relay when a path through both routers is found.
+            #[cfg(feature = "remote")]
+            kit::row(ui, "By ID", |ui| {
+                let mut on = crate::net::straight_paths();
+                if ui.checkbox(&mut on, "Go straight to the computer when a path through the routers is found").on_hover_text("The relay carries the session until then, and when there is none. The computer learns this one's address.").changed() {
+                    crate::hosts::set_setting("straight_paths", if on { "yes" } else { "no" });
+                }
+            });
             kit::row(ui, "Passwords", |ui| {
                 let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember the passwords typed, in the system's password store"));
                 if r.changed() {

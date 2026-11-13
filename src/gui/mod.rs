@@ -631,7 +631,9 @@ fn preset_text(p: &crate::proto::Preset) -> String {
 fn friendly(e: &str) -> (String, &'static str) {
     let first = e.lines().find(|l| !l.trim().is_empty()).unwrap_or(e).trim().to_string();
     let l = e.to_lowercase();
-    let hint = if l.contains("permission denied") {
+    let hint = if l.contains("straight path") {
+        "The straight connection through the routers stopped working (a network that cuts UDP, say); it connects through the relay instead."
+    } else if l.contains("permission denied") {
         "The host refused the login. Enter the password, or install your key on the host with ssh-copy-id."
     } else if l.contains("could not resolve") || l.contains("name or service not known") || l.contains("no such host") {
         "The host name is unknown. Check the spelling, or use the IP address."
@@ -1472,7 +1474,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1528,7 +1530,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, totp: String::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: "sshremote.dev".into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

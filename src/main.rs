@@ -91,6 +91,8 @@ mod termwin;
 mod tools;
 #[cfg(feature = "remote")]
 mod transport;
+#[cfg(feature = "remote")]
+mod udp;
 mod tunnels;
 #[cfg(feature = "remote")]
 mod ui;

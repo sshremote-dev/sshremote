@@ -379,6 +379,18 @@ impl App {
                             egui::Label::new(RichText::new(format!("On port {}, with the same password, without the relay: quicker, and nothing leaves the network.", crate::net::DIRECT_PORT)).weak().size(12.0))
                                 .wrap(),
                         );
+                        ui.add_space(8.0);
+                        if ui.checkbox(&mut cfg.punch, "Let viewers by ID go straight through the routers").changed() {
+                            changed = true;
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Once the password is right, the two computers look for a path between them that skips the relay, and move to it if there is one: quicker, and the relay no longer carries the session. Each then knows the other's address.")
+                                    .weak()
+                                    .size(12.0),
+                            )
+                            .wrap(),
+                        );
                     });
                 });
                 ui.add_space(kit::GAP);

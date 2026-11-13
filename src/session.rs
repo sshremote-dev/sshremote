@@ -294,6 +294,11 @@ impl Session {
     }
 
     /// The agent's stderr so far.
+    /// For a session by ID: where its straight path goes, or None while it runs through the relay.
+    pub fn straight(&self) -> Option<Option<std::net::SocketAddr>> {
+        self.link.straight()
+    }
+
     pub fn log(&self) -> String {
         String::from_utf8_lossy(&self.errlog.lock().unwrap()).trim().to_string()
     }

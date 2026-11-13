@@ -4,9 +4,9 @@
 //! exchange. The relay's lines are described in `access`.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -38,6 +38,14 @@ impl Address {
     }
 }
 
+/// A frame whose length has this bit is the two sides' own (finding a straight path, moving to
+/// it), not the stream's: sent only to a side that said it knows them (an empty frame, which
+/// older versions pass over).
+const CONTROL: u32 = 1 << 31;
+const MOST_CONTROL: usize = 4096;
+/// How long a reader told the other side moved waits for this side's end of the path.
+const MOVE_WAIT: Duration = Duration::from_secs(15);
+
 /// One direction of the sealed stream: frames of `len u32 | ciphertext`, counter nonces.
 struct Sealer {
     cipher: ChaCha20Poly1305,
@@ -57,9 +65,224 @@ impl Sealer {
     }
 }
 
-pub struct SealedWriter {
-    inner: TcpStream,
+/// What sealed frames travel on: the connection they started on (the relay's, or one straight
+/// on this network), and from a "move" on, a straight path found through the routers.
+enum Wire {
+    Tcp(TcpStream),
+    Udp(crate::udp::Stream),
+}
+
+impl Read for Wire {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Wire::Tcp(s) => s.read(b),
+            Wire::Udp(s) => s.read(b),
+        }
+    }
+}
+
+impl Write for Wire {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        match self {
+            Wire::Tcp(s) => s.write(b),
+            Wire::Udp(s) => s.write(b),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// This side looks for a straight path: as the viewer or the agent, asking `relay` (`host` or
+/// `host:port`, UDP on the relay's port) where its router shows it.
+#[derive(Clone, Debug)]
+pub struct Punch {
+    pub viewer: bool,
+    pub relay: String,
+    /// The viewer's: the ID it called, remembered if its straight path is lost.
+    pub id: String,
+}
+
+/// IDs whose straight path was lost, and when: the relay only for a while (a network that cuts
+/// UDP after a time would otherwise end every session that moved).
+static LOST: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
+const LOST_FOR: Duration = Duration::from_secs(600);
+
+fn lost_lately(id: &str) -> bool {
+    let mut l = guard(&LOST);
+    l.retain(|(_, t)| t.elapsed() < LOST_FOR);
+    l.iter().any(|(i, _)| i == id)
+}
+
+struct Out {
     seal: Sealer,
+    wire: Wire,
+}
+
+impl Out {
+    fn frame(&mut self, plain: &[u8], control: bool) -> io::Result<()> {
+        let nonce = self.seal.nonce();
+        let ct = self.seal.cipher.encrypt(&nonce, plain).map_err(|_| io::Error::other("seal"))?;
+        let mut f = Vec::with_capacity(4 + ct.len());
+        f.extend_from_slice(&(ct.len() as u32 | if control { CONTROL } else { 0 }).to_le_bytes());
+        f.extend_from_slice(&ct);
+        self.wire.write_all(&f)
+    }
+}
+
+const MOVED_OUT: u8 = 1;
+const MOVED_IN: u8 = 2;
+
+/// What the two halves of a sealed stream share: the sending side (control frames go out
+/// between the stream's), the first connection, and the straight path once there is one.
+struct Line {
+    out: Mutex<Out>,
+    tcp: TcpStream,
+    udp: Mutex<Option<crate::udp::Stream>>,
+    udp_ready: Condvar,
+    straight: Mutex<Option<SocketAddr>>,
+    moved: AtomicU8,
+    punch: Option<Punch>,
+    /// The viewer's wait for the agent's addresses.
+    answer: Mutex<Option<mpsc::Sender<Vec<SocketAddr>>>>,
+    /// Attempts at a straight path so far.
+    tried: AtomicU8,
+    ended: AtomicBool,
+}
+
+fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn addresses(list: &[SocketAddr]) -> String {
+    list.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ")
+}
+
+impl Line {
+    fn frame(&self, plain: &[u8], control: bool) -> io::Result<()> {
+        guard(&self.out).frame(plain, control)
+    }
+
+    fn moved(&self, bit: u8) {
+        // Both ways on the straight path: the relay's connection is no longer needed.
+        if self.moved.fetch_or(bit, Ordering::AcqRel) | bit == MOVED_OUT | MOVED_IN {
+            let _ = self.tcp.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// Sends from here on over `path`: a "move" on the old wire marks where.
+    fn go_straight(&self, path: crate::udp::Stream, to: SocketAddr) {
+        if self.ended.load(Ordering::Acquire) {
+            path.end();
+            return;
+        }
+        *guard(&self.udp) = Some(path.clone());
+        self.udp_ready.notify_all();
+        *guard(&self.straight) = Some(to);
+        {
+            let mut out = guard(&self.out);
+            if out.frame(b"move", true).is_err() {
+                return;
+            }
+            out.wire = Wire::Udp(path);
+        }
+        self.moved(MOVED_OUT);
+    }
+
+    fn wait_udp(&self) -> Option<crate::udp::Stream> {
+        let deadline = std::time::Instant::now() + MOVE_WAIT;
+        let mut u = guard(&self.udp);
+        loop {
+            if let Some(s) = u.as_ref() {
+                return Some(s.clone());
+            }
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            u = self.udp_ready.wait_timeout(u, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+
+    /// The agent said it can look for a straight path: the viewer starts, if it looks for one.
+    /// Twice at most: the agent probes second the first time, first the second time, each on new
+    /// ports (a router that turned the first probes away may keep that way shut).
+    fn agent_can(self: &Arc<Self>) {
+        let Some(p) = self.punch.clone().filter(|p| p.viewer) else { return };
+        if self.tried.fetch_add(1, Ordering::AcqRel) > 0 {
+            return;
+        }
+        let line = self.clone();
+        std::thread::spawn(move || {
+            for first in ["viewer", "agent"] {
+                if line.ended.load(Ordering::Acquire) {
+                    return;
+                }
+                let (tx, rx) = mpsc::channel();
+                *guard(&line.answer) = Some(tx);
+                let Ok(mut path) = crate::udp::Path::bind(true) else { return };
+                let mine = path.candidates(&p.relay);
+                let tag: [u8; 8] = crate::sys::random(8).try_into().unwrap_or([0; 8]);
+                if line.frame(format!("offer {} {first} {}", crate::sys::hex(&tag), addresses(&mine)).as_bytes(), true).is_err() {
+                    return;
+                }
+                let Ok(peers) = rx.recv_timeout(MOVE_WAIT) else { return };
+                path.punch(tag, &peers, first != "viewer");
+                if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
+                    line.go_straight(path.stream(), to);
+                    return;
+                }
+            }
+        });
+    }
+
+    /// The viewer offered its addresses: the agent answers with its own and tries them.
+    fn offered(self: &Arc<Self>, tag: [u8; 8], first: &str, peers: Vec<SocketAddr>) {
+        let Some(p) = self.punch.clone().filter(|p| !p.viewer) else { return };
+        if self.tried.fetch_add(1, Ordering::AcqRel) >= 2 || self.moved.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let line = self.clone();
+        let second = first != "agent";
+        std::thread::spawn(move || {
+            let Ok(mut path) = crate::udp::Path::bind(false) else { return };
+            let mine = path.candidates(&p.relay);
+            if line.frame(format!("answer {}", addresses(&mine)).as_bytes(), true).is_err() {
+                return;
+            }
+            path.punch(tag, &peers, second);
+            if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
+                line.go_straight(path.stream(), to);
+            }
+        });
+    }
+}
+
+/// Ends a sealed stream from anywhere (the reader and writer being busy elsewhere), whichever
+/// way it runs; and says which way that is.
+#[derive(Clone)]
+pub struct Ender(Arc<Line>);
+
+impl Ender {
+    pub fn end(&self) {
+        self.0.ended.store(true, Ordering::Release);
+        let _ = self.0.tcp.shutdown(std::net::Shutdown::Both);
+        if let Some(u) = guard(&self.0.udp).as_ref() {
+            u.end();
+        }
+    }
+
+    /// How long the first connection may be silent before a read on it fails.
+    pub fn set_idle_limit(&self, d: Duration) {
+        let _ = self.0.tcp.set_read_timeout(Some(d));
+    }
+
+    /// Where the straight path goes, once the stream runs on one.
+    pub fn straight(&self) -> Option<SocketAddr> {
+        *guard(&self.0.straight)
+    }
+}
+
+pub struct SealedWriter {
+    line: Arc<Line>,
     buf: Vec<u8>,
 }
 
@@ -68,18 +291,14 @@ impl SealedWriter {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let nonce = self.seal.nonce();
-        let ct = self.seal.cipher.encrypt(&nonce, self.buf.as_slice()).map_err(|_| io::Error::other("seal"))?;
+        let r = self.line.frame(&self.buf, false);
         self.buf.clear();
-        self.inner.write_all(&(ct.len() as u32).to_le_bytes())?;
-        self.inner.write_all(&ct)
+        r
     }
-}
 
-impl SealedWriter {
-    /// The connection underneath, to set its timeouts or end it.
-    pub fn stream(&self) -> io::Result<TcpStream> {
-        self.inner.try_clone()
+    /// Ends the stream from elsewhere, and tells which way it runs.
+    pub fn ender(&self) -> Ender {
+        Ender(self.line.clone())
     }
 }
 
@@ -96,13 +315,13 @@ impl Write for SealedWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.emit()?;
-        self.inner.flush()
+        self.emit()
     }
 }
 
 pub struct SealedReader {
-    inner: TcpStream,
+    line: Arc<Line>,
+    wire: Wire,
     seal: Sealer,
     plain: Vec<u8>,
     at: usize,
@@ -111,20 +330,32 @@ pub struct SealedReader {
 }
 
 impl SealedReader {
-    /// The next frame as it came, still sealed; None at the end of the stream.
-    fn sealed_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
+    /// The next frame as it came, still sealed, and whether it is a control frame; None at the
+    /// end of the stream.
+    fn sealed_frame(&mut self) -> io::Result<Option<(bool, Vec<u8>)>> {
         let mut len = [0u8; 4];
-        match self.inner.read_exact(&mut len) {
+        match self.wire.read_exact(&mut len) {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             r => r?,
         }
-        let len = u32::from_le_bytes(len) as usize;
-        if len > self.limit + 16 {
+        let raw = u32::from_le_bytes(len);
+        let control = raw & CONTROL != 0;
+        let len = (raw & !CONTROL) as usize;
+        if len > self.limit + 16 || (control && len > MOST_CONTROL + 16) {
             return Err(io::Error::other("oversized frame"));
         }
         let mut ct = vec![0u8; len];
-        self.inner.read_exact(&mut ct)?;
-        Ok(Some(ct))
+        self.wire.read_exact(&mut ct)?;
+        Ok(Some((control, ct)))
+    }
+
+    /// The next frame of the stream itself, still sealed (the password check reads it so).
+    fn stream_frame(&mut self) -> io::Result<Vec<u8>> {
+        match self.sealed_frame()? {
+            Some((false, ct)) => Ok(ct),
+            Some((true, _)) => Err(io::Error::other("bad key exchange")),
+            None => Err(io::ErrorKind::UnexpectedEof.into()),
+        }
     }
 
     /// Opens a frame `sealed_frame` read, the next in order.
@@ -132,13 +363,62 @@ impl SealedReader {
         let nonce = self.seal.nonce();
         self.seal.cipher.decrypt(&nonce, ct).map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "wrong password or tampered stream"))
     }
+
+    /// The other side's word about the straight path.
+    fn control(&mut self, msg: &[u8]) -> io::Result<()> {
+        let text = String::from_utf8_lossy(msg);
+        let mut words = text.split_whitespace();
+        let peers = |w: std::str::SplitWhitespace| w.filter_map(|a| a.parse::<SocketAddr>().ok()).take(16).collect::<Vec<_>>();
+        match words.next() {
+            // From here on its frames come on the straight path.
+            Some("move") => {
+                let path = self.line.wait_udp().ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "the straight path to the other computer did not come up"))?;
+                self.wire = Wire::Udp(path);
+                self.line.moved(MOVED_IN);
+            }
+            // offer TAG FIRST ADDRESS...: FIRST names the side that probes first.
+            Some("offer") => {
+                let tag = words.next().filter(|t| t.len() == 16 && t.bytes().all(|b| b.is_ascii_hexdigit())).and_then(|t| (0..8).map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Option<Vec<u8>>>());
+                let first = words.next().unwrap_or("viewer").to_string();
+                if let Some(tag) = tag.and_then(|t| <[u8; 8]>::try_from(t).ok()) {
+                    self.line.offered(tag, &first, peers(words));
+                }
+            }
+            Some("answer") => {
+                if let Some(tx) = guard(&self.line.answer).take() {
+                    let _ = tx.send(peers(words));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 impl Read for SealedReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         while self.at == self.plain.len() {
-            let Some(ct) = self.sealed_frame()? else { return Ok(0) };
-            self.plain = self.open(&ct)?;
+            let frame = match self.sealed_frame() {
+                Err(e) if matches!(self.wire, Wire::Udp(_)) && e.kind() == io::ErrorKind::TimedOut => {
+                    if let Some(p) = self.line.punch.as_ref().filter(|p| p.viewer) {
+                        guard(&LOST).push((p.id.clone(), std::time::Instant::now()));
+                    }
+                    return Err(e);
+                }
+                r => r?,
+            };
+            let Some((control, ct)) = frame else { return Ok(0) };
+            let plain = self.open(&ct)?;
+            if control {
+                self.control(&plain)?;
+                continue;
+            }
+            // Empty: the agent can look for a straight path (an older viewer passes over it).
+            if plain.is_empty() {
+                self.line.agent_can();
+                continue;
+            }
+            self.plain = plain;
             self.at = 0;
         }
         let n = out.len().min(self.plain.len() - self.at);
@@ -168,19 +448,20 @@ const VERDICT_LIMIT: Duration = Duration::from_secs(75);
 /// SPAKE2 on `stream`, then a sealed confirmation each way, so a wrong password fails here. On
 /// a failure the connection is shut at once, so the other side hears it without waiting.
 fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
-    handshake_2fa(stream, password, viewer, judge, None)
+    handshake_2fa(stream, password, viewer, judge, None, None)
 }
 
-fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>) -> io::Result<(SealedReader, SealedWriter)> {
+/// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
+fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
     let closer = stream.try_clone()?;
-    let result = handshake_on(stream, password, viewer, judge, totp);
+    let result = handshake_on(stream, password, viewer, judge, totp, punch);
     if result.is_err() {
         let _ = closer.shutdown(std::net::Shutdown::Both);
     }
     result
 }
 
-fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>) -> io::Result<(SealedReader, SealedWriter)> {
+fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
     // A viewer may be given the two-step code with the password.
     let (password, code) = match password.split_once(CODE_SEP) {
         Some((p, c)) if viewer => (p, Some(c.trim())),
@@ -244,8 +525,20 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
     hk.expand(b"viewer to agent", &mut v2a).map_err(|_| io::Error::other("hkdf"))?;
     hk.expand(b"agent to viewer", &mut a2v).map_err(|_| io::Error::other("hkdf"))?;
     let (send, recv) = if viewer { (v2a, a2v) } else { (a2v, v2a) };
-    let mut w = SealedWriter { inner: s.try_clone()?, seal: Sealer::new(&send), buf: Vec::new() };
-    let mut r = SealedReader { inner: s, seal: Sealer::new(&recv), plain: Vec::new(), at: 0, limit: CONFIRM.len() };
+    let line = Arc::new(Line {
+        out: Mutex::new(Out { seal: Sealer::new(&send), wire: Wire::Tcp(s.try_clone()?) }),
+        tcp: s.try_clone()?,
+        udp: Mutex::new(None),
+        udp_ready: Condvar::new(),
+        straight: Mutex::new(None),
+        moved: AtomicU8::new(0),
+        punch,
+        answer: Mutex::new(None),
+        tried: AtomicU8::new(0),
+        ended: AtomicBool::new(false),
+    });
+    let mut w = SealedWriter { line: line.clone(), buf: Vec::new() };
+    let mut r = SealedReader { line, wire: Wire::Tcp(s), seal: Sealer::new(&recv), plain: Vec::new(), at: 0, limit: CONFIRM.len() };
     // The viewer proves the password first: the agent answers only a right one, so a guess
     // cannot be checked against the agent's answer and dropped before it counts as wrong.
     let mut got = [0u8; CONFIRM.len()];
@@ -273,7 +566,7 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
     } else {
         // The proof is read as it comes; checking it waits on the judge, with no deadline
         // meanwhile (the network's part is over).
-        let ct = r.sealed_frame()?.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        let ct = r.stream_frame()?;
         deadline.store(u64::MAX, Ordering::Release);
         let right = judge(&mut || r.open(&ct).is_ok_and(|p| p == CONFIRM))?;
         extend(HANDSHAKE_LIMIT);
@@ -284,7 +577,7 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
         if let Some(secret) = totp {
             w.write_all(CODE_PLEASE)?;
             w.flush()?;
-            let ct = r.sealed_frame()?.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+            let ct = r.stream_frame()?;
             deadline.store(u64::MAX, Ordering::Release);
             let right = judge(&mut || r.open(&ct).is_ok_and(|c| crate::totp::check(secret, &String::from_utf8_lossy(&c))))?;
             extend(HANDSHAKE_LIMIT);
@@ -295,6 +588,10 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
         got.copy_from_slice(CONFIRM);
         w.write_all(CONFIRM)?;
         w.flush()?;
+        // An empty frame: this side can look for a straight path, if the viewer can.
+        if w.line.punch.is_some() {
+            w.line.frame(&[], false)?;
+        }
     }
     if got != CONFIRM {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
@@ -311,8 +608,9 @@ pub fn handshake_agent(stream: TcpStream, password: &str, judge: Judge) -> io::R
 }
 
 /// `handshake_agent` that also wants the code of the authenticator app set up with `totp`.
-pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>, judge: Judge) -> io::Result<(SealedReader, SealedWriter)> {
-    handshake_2fa(stream, password, false, judge, totp)
+/// `punch`: it also looks for a straight path with a viewer that does.
+pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>, judge: Judge, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
+    handshake_2fa(stream, password, false, judge, totp, punch)
 }
 
 /// A judge that checks at once.
@@ -341,9 +639,7 @@ fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Result<O
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e.to_string()),
             Err(_) => continue,
         };
-        if let Ok(t) = pair.1.stream() {
-            let _ = t.set_read_timeout(Some(Duration::from_secs(120)));
-        }
+        pair.1.ender().set_idle_limit(Duration::from_secs(120));
         return Ok(Some(pair));
     }
     Ok(None)
@@ -380,13 +676,47 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     }
     // The agent may make a wrong guess wait its turn and a delay, but not forever.
     let _ = s.set_read_timeout(Some(VERDICT_LIMIT + Duration::from_secs(15)));
-    let pair = handshake(s, password, true, &now).map_err(|e| e.to_string())?;
+    // Once in, a straight path is looked for, unless the person chose the relay always, or the
+    // relay is on this computer (the web page's gateway beside it gains nothing from one).
+    let local = s.peer_addr().is_ok_and(|a| a.ip().is_loopback());
+    let punch = (straight_paths() && !local && !lost_lately(&addr.id)).then(|| Punch { viewer: true, relay: addr.relay.clone(), id: addr.id.clone() });
+    let pair = handshake_2fa(s, password, true, &now, None, punch).map_err(|e| e.to_string())?;
     // The agent answers a ping every second: two minutes of nothing is a dead path (a network
     // change, a NAT mapping dropped), and the viewer reconnects instead of freezing.
-    if let Ok(t) = pair.1.stream() {
-        let _ = t.set_read_timeout(Some(Duration::from_secs(120)));
-    }
+    pair.1.ender().set_idle_limit(Duration::from_secs(120));
     Ok(pair)
+}
+
+/// Whether this viewer looks for straight paths through the routers (on unless turned off).
+pub fn straight_paths() -> bool {
+    crate::hosts::setting("straight_paths").is_none_or(|v| v != "no")
+}
+
+/// Tests: a viewer's and an agent's sealed stream over one connection on this computer; with
+/// `punch`, both look for a straight path, asking a relay here where they are seen from.
+#[cfg(test)]
+pub fn sealed_pair(punch: bool) -> ((SealedReader, SealedWriter), (SealedReader, SealedWriter)) {
+    let relay = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let at = relay.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut b = [0u8; 256];
+        while let Ok((n, from)) = relay.recv_from(&mut b) {
+            if let Some(a) = crate::udp::reflect_answer(&b[..n], from) {
+                let _ = relay.send_to(&a, from);
+            }
+        }
+    });
+    let p = |viewer| punch.then(|| Punch { viewer, relay: at.clone(), id: String::new() });
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let agent_punch = p(false);
+    let agent = std::thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        handshake_agent_2fa(s, "pair password", None, &now, agent_punch).unwrap()
+    });
+    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let viewer = handshake_2fa(s, "pair password", true, &now, None, p(true)).unwrap();
+    (viewer, agent.join().unwrap())
 }
 
 #[cfg(test)]
@@ -394,6 +724,91 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    /// Writes a numbered pattern, a piece at a time, until told to stop; then says how much.
+    fn writer(mut w: SealedWriter, stop: Arc<AtomicBool>, salt: u8) -> thread::JoinHandle<usize> {
+        thread::spawn(move || {
+            let mut sent = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                let piece: Vec<u8> = (sent..sent + 3001).map(|i| (i % 253) as u8 ^ salt).collect();
+                if w.write_all(&piece).and_then(|_| w.flush()).is_err() {
+                    break;
+                }
+                sent += piece.len();
+                thread::sleep(Duration::from_millis(2));
+            }
+            sent
+        })
+    }
+
+    /// Reads until the end, checking the pattern; says how much came.
+    fn reader(mut r: SealedReader, salt: u8) -> thread::JoinHandle<io::Result<usize>> {
+        thread::spawn(move || {
+            let mut got = 0usize;
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let n = r.read(&mut buf)?;
+                if n == 0 {
+                    return Ok(got);
+                }
+                for (i, b) in buf[..n].iter().enumerate() {
+                    assert_eq!(*b, ((got + i) % 253) as u8 ^ salt, "byte {} out of order", got + i);
+                }
+                got += n;
+            }
+        })
+    }
+
+    /// Two sides that both look for a straight path move to it while the stream runs both
+    /// ways: nothing lost or out of order across the move, the first connection let go, and
+    /// the end still heard.
+    #[test]
+    fn a_relayed_stream_moves_to_a_straight_path() {
+        let ((vr, vw), (ar, aw)) = sealed_pair(true);
+        let (ve, ae) = (vw.ender(), aw.ender());
+        let tcp = vw.line.tcp.try_clone().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (w1, w2) = (writer(vw, stop.clone(), 1), writer(aw, stop.clone(), 2));
+        let (r1, r2) = (reader(ar, 1), reader(vr, 2));
+        let started = std::time::Instant::now();
+        while (ve.straight().is_none() || ae.straight().is_none()) && started.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ve.straight().is_some() && ae.straight().is_some(), "both on the straight path");
+        thread::sleep(Duration::from_millis(500));
+        // The first connection is shut once both moved.
+        let mut b = [0u8; 1];
+        let _ = tcp.set_read_timeout(Some(Duration::from_secs(2)));
+        assert!(matches!((&tcp).read(&mut b), Ok(0) | Err(_)), "the first connection let go");
+        stop.store(true, Ordering::Release);
+        let (sent1, sent2) = (w1.join().unwrap(), w2.join().unwrap());
+        thread::sleep(Duration::from_millis(300));
+        ve.end();
+        assert_eq!(r1.join().unwrap().unwrap(), sent1);
+        assert_eq!(r2.join().unwrap().unwrap(), sent2);
+    }
+
+    /// A side that does not look for one (an older version, or turned off) keeps the stream
+    /// where it is, and nothing extra reaches it.
+    #[test]
+    fn without_both_sides_looking_the_stream_stays() {
+        let ((vr, vw), (ar, aw)) = sealed_pair(false);
+        let (ve, ae) = (vw.ender(), aw.ender());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (w1, w2) = (writer(vw, stop.clone(), 3), writer(aw, stop.clone(), 4));
+        let (r1, r2) = (reader(ar, 3), reader(vr, 4));
+        thread::sleep(Duration::from_secs(2));
+        assert!(ve.straight().is_none() && ae.straight().is_none());
+        stop.store(true, Ordering::Release);
+        let (sent1, sent2) = (w1.join().unwrap(), w2.join().unwrap());
+        thread::sleep(Duration::from_millis(200));
+        // Each side's end reaches the other (on Windows a socket shut here does not wake a read
+        // waiting on it here).
+        ae.end();
+        assert_eq!(r2.join().unwrap().unwrap(), sent2);
+        ve.end();
+        assert_eq!(r1.join().unwrap().unwrap(), sent1);
+    }
 
     /// A write larger than a frame goes out in several, and arrives whole.
     #[test]
@@ -547,7 +962,7 @@ mod tests {
             let at = l.local_addr().unwrap();
             thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
-                let _ = handshake_agent_2fa(s, "pw for both", Some(&secret), &now);
+                let _ = handshake_agent_2fa(s, "pw for both", Some(&secret), &now, None);
             });
             at
         };

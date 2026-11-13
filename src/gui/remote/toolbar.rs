@@ -276,6 +276,18 @@ impl Remote {
             screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));
         }
 
+        // By ID: through the relay, or straight once a path through the routers was found.
+        if let Some(path) = self.sess.straight() {
+            let (glyph, color, tip) = match path {
+                Some(a) => (ic::LIGHTNING, crate::gui::good(), format!("Straight to the computer ({a}), past the relay; sealed end to end")),
+                None => (
+                    ic::GLOBE,
+                    ui.visuals().weak_text_color(),
+                    "Through the relay, sealed end to end (it sees no picture or key press); a straight path is taken when one is found".to_string(),
+                ),
+            };
+            ui.label(egui::RichText::new(glyph).size(16.0).color(color)).on_hover_text(tip);
+        }
         // The person at a computer reached by its ID keeps some things from this viewer.
         if self.allowed != crate::grant::ALL {
             let tip = format!("The person at that computer lets you use: {}", crate::grant::words(self.allowed));

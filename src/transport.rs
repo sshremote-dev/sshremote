@@ -13,9 +13,9 @@ pub struct Link {
     /// Diagnostics such as ssh errors; drained into the session log.
     pub errors: Box<dyn Read + Send>,
     child: Option<Child>,
-    /// A direct link's socket: shut on close, so the other end stops at once (the reader thread
-    /// holds a copy, which would keep it open).
-    socket: Option<std::net::TcpStream>,
+    /// A link by ID: ended on close, so the other end stops at once (the reader thread holds a
+    /// copy, which would keep it open), and asked which way it runs.
+    ender: Option<crate::net::Ender>,
 }
 
 impl Link {
@@ -24,9 +24,14 @@ impl Link {
             let _ = c.kill();
             let _ = c.wait();
         }
-        if let Some(s) = self.socket.take() {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        if let Some(e) = self.ender.take() {
+            e.end();
         }
+    }
+
+    /// For a link by ID: where its straight path goes, or None while it runs through the relay.
+    pub fn straight(&self) -> Option<Option<std::net::SocketAddr>> {
+        self.ender.as_ref().map(|e| e.straight())
     }
 
     /// Waits for the other side to finish, as after it closed the stream.
@@ -55,8 +60,8 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             .map(|c| c.direct.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect())
             .unwrap_or_default();
         let (r, w) = crate::net::connect_via(addr, password, &direct)?;
-        let socket = w.stream().ok();
-        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, socket });
+        let ender = Some(w.ender());
+        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, ender });
     }
     let mut cmd = match target {
         Target::Direct { .. } => unreachable!(),
@@ -108,35 +113,25 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         writer: Box::new(child.stdin.take().unwrap()),
         errors: Box::new(child.stderr.take().unwrap()),
         child: Some(child),
-        socket: None,
+        ender: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Read;
-    use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
 
-    /// Closing a direct link tells the other end at once, though a reader still holds the socket.
+    /// Closing a link by ID tells the other end at once, though a reader still holds the stream.
     #[test]
-    fn closing_a_direct_link_ends_it_for_the_other_side() {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let s = TcpStream::connect(l.local_addr().unwrap()).unwrap();
-        let (mut far, _) = l.accept().unwrap();
-        let reader = s.try_clone().unwrap();
-        let mut link = super::Link {
-            reader: Box::new(reader),
-            writer: Box::new(s.try_clone().unwrap()),
-            errors: Box::new(std::io::empty()),
-            child: None,
-            socket: Some(s),
-        };
-        link.close();
-        far.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    fn closing_a_link_by_id_ends_it_for_the_other_side() {
+        let ((r, w), (mut far, _keep)) = crate::net::sealed_pair(false);
+        let ender = Some(w.ender());
+        let mut link = super::Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, ender };
         let started = Instant::now();
+        link.close();
         let mut b = [0u8; 1];
-        assert_eq!(far.read(&mut b).unwrap(), 0, "the other side sees the end");
+        assert!(matches!(far.read(&mut b), Ok(0) | Err(_)), "the other side sees the end");
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
