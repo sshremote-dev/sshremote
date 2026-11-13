@@ -66,8 +66,11 @@ What is opened goes into the workspace:
   offers Reconnect or Close.
 - Every window draws its own title bar and keeps the system's behaviour: drag and snap,
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
-- **Screen sharing**: quality, fit, monitors, sharing one window or application, special keys,
-  chat, screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
+- **Screen sharing**: quality (auto, five presets from black and white at half size and 5 fps to
+  full colour at 60, or colours, resolution and frame rate of one's own), fit, zoom, monitors (or
+  all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
+  monitors"), sharing one window or application with its menus and dialogs, special keys, chat,
+  screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
   Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
   Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
@@ -81,7 +84,21 @@ What is opened goes into the workspace:
 - **Files**: two panes, drag and drop, never overwriting.
 - **Tools**: SSH keys, `~/.ssh/config` editor, saved passwords (the system's password store), and
   backups of hosts and settings, with all of `~/.ssh` encrypted under a passphrase.
-- On Windows the window asks for administrator rights at start and works without them.
+- On Windows the window asks for administrator rights at start and works without them. Closed
+  while remote access by ID or tunnels are up here, it goes to the notification area: a click
+  brings it back, and its menu turns remote access on or off, copies the ID, starts, stops,
+  installs or removes the service, and quits.
+
+## In a browser
+
+`sshremote web` serves the same to a browser, a phone's too: terminals, screens and files of this
+computer and its `~/.ssh/config` hosts, and computers by ID. The screen sends only what changed
+(moves for scrolling, lossless WebP for text, JPEG for photographs) at the app's qualities, auto
+and black and white included; it has zoom, touch (tap, long press for the right button, two
+fingers to scroll and pinch), the keyboard of input methods and phones, keys the browser keeps,
+clipboard, chat, sound (WebCodecs), sharing one window or program, pause, lossless screenshots,
+files dropped on the screen, the terminal below the screen, every screen of a host in a window of
+its own, and reconnecting by itself.
 
 ## Building
 
