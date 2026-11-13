@@ -9,10 +9,10 @@ extensions only add looks, commands and panels.
 | Group | Features |
 |---|---|
 | Going out | SSH host (alias, `user@host[:port]`, IP) as terminal, screen or files; a computer by its ID and password as screen or files; this computer's own terminal, screen and files |
-| Coming in | Remote access by ID: on and off, password, relay, start with the computer (Windows service); who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
+| Coming in | Remote access by ID: on and off, password, two-step code, relay, start with the computer (Windows service); asking the person here first, and the rights viewers have (changed live in the window shown here); found on this network and reached straight; who is connected now, and ending it; the addresses others reach this computer at (ID, IP, host name) |
 | Computers | One list: favorites, recent, `~/.ssh/config` aliases, computers by ID, this computer; per computer its user, port, key, saved password and tunnels |
 | Tunnels | Local, remote and SOCKS port forwards through an SSH computer, started by hand or with the app |
-| Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection; full screen; reconnecting; chat, sound, clipboard, sharing one window or program |
+| Workspace | Tabs and split panes, each pane a terminal, screen or files on one connection; full screen; reconnecting; chat, voice calls, sound, clipboard with files, recording, sharing one window or program; the computer itself (lock, restart, its input kept out, its screen hidden) |
 | Settings | Appearance, SSH keys, saved passwords, backup, extensions, parts of the app on or off, about |
 | Servers and command line | Web gateway (`sshremote web`), MCP server (`sshremote mcp`), terminal viewer (`sshremote HOST`), `remote-access`, `ext`, `module` |
 
@@ -33,6 +33,7 @@ Port forwarding is SSH's own and is built in, per computer.
 | Layer | Modules | |
 |---|---|---|
 | Engine | `proto`, `net`, `transport`, `session`, `agent`, `capture/*`, `video`, `audio`, `files`, `clip`, `chat`, `pty`, `conpty`, `keys`, `xk`, `keygrab`, `access`, `relay`, `service`, `admin`, `console_user` | kept |
+| Coming in | `grant` (rights), `hostctl` (the computer itself), `porttunnel` (tunnels by ID), `lan` (found nearby, Wake-on-LAN), `totp` (two-step codes), `record` (MP4) | new |
 | Data | `computers` (the one list), `tunnels`, `vault`, `hosts` (settings and `~/.ssh/config`), `backup` | `computers` and `tunnels` new |
 | Servers | `web`, `mcp` | kept |
 | Window | `gui/mod.rs` (app, windows), `gui/home/*` (this computer, connect, computer sheet, quick open), `gui/settings/*`, `gui/workspace/*`, `gui/remote/*`, `termwin/*`, `filewin` | home and settings new |

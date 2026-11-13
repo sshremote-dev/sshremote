@@ -53,9 +53,10 @@
       <h3>One field for every computer, and tabs that switch between shell, screen and files</h3>
       <p>Type <code>user@host</code>, an alias, an IP or a remote access ID and open its terminal, its screen or its files. Each computer keeps its name, key, saved password and SSH tunnels; aliases stay in <code>~/.ssh/config</code>. In the workspace each tab is a computer, split beside or below, and lost connections come back by themselves.</p>
       <ul class="points">
-        <li><b>Screen</b><span>Keyboard and mouse, monitors, one window, clipboard, sound, chat</span></li>
+        <li><b>Screen</b><span>Keyboard and mouse, monitors, one window, clipboard with files, sound, chat, voice calls, recording</span></li>
         <li><b>Files</b><span>Two panes, drag and drop, never overwriting</span></li>
-        <li><b>Tunnels</b><span>Here to there, there to here and SOCKS, opened when needed or with the app</span></li>
+        <li><b>Tunnels</b><span>Here to there, there to here and SOCKS, also through a computer by its ID</span></li>
+        <li><b>Traffic</b><span>Lossless text in a third less than RustDesk's AV1; black and white for the thinnest links</span></li>
       </ul>
     </div>
     <div class="window">
@@ -70,8 +71,10 @@
       <h3>For the PC on Wi-Fi with no address and no SSH</h3>
       <p>Turn it on and the PC gets a lasting 9-digit ID. Type that ID and its password on the other side; both ends dial out to the relay, which only copies bytes it cannot read.</p>
       <ul class="points">
-        <li><b>Crypto</b><span>SPAKE2 password proof, ChaCha20-Poly1305 on every byte</span></li>
+        <li><b>Crypto</b><span>SPAKE2 password proof, ChaCha20-Poly1305 on every byte, two-step codes</span></li>
+        <li><b>Consent</b><span>Ask the person there first; rights for keyboard, clipboard, files, sound, tunnels</span></li>
         <li><b>Service</b><span>One button to start with the computer, sign-in screen included</span></li>
+        <li><b>Nearby</b><span>Found on the same network, reached straight, woken by Wake-on-LAN</span></li>
         <li><b>Abuse</b><span>Wrong passwords wait longer each time; attempts are limited</span></li>
       </ul>
     </div>

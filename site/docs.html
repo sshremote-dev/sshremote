@@ -63,6 +63,8 @@ sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true co
   <p>For a PC without SSH or a fixed address, for example a laptop on Wi-Fi, the way RustDesk works. The PC keeps a lasting 9-digit ID, the same across restarts, and a password its owner sets or generates. A viewer connects with both through the relay.</p>
   <h3>On the PC to reach</h3>
   <p>Turn on <b>Remote access by ID</b> on the left of the home window. It shows the ID and the password (copy, show and a new one), a line telling the state and who is connected, each with Disconnect. <b>Remote access settings</b> hold <b>Start with the computer</b>, which installs the Windows service or a systemd user unit (on Windows the service also covers the sign-in and lock screens), your own password, the relay server and a new ID.</p>
+  <p>The same sheet sets who comes in and what they may do: <b>ask the person at this computer first</b> (a viewer with the right password waits for a click; nobody answering within a minute turns them away), the <b>rights</b> viewers have (keyboard and mouse, clipboard, files, sound and calls, terminals, restart and lock, tunnels; changed for one session in the window shown on this computer, which also ends it), <b>two-step sign-in</b> with an authenticator app's code, being <b>found on this network</b>, and letting viewers on it <b>come straight in</b> (TCP 7073) rather than through the relay.</p>
+  <p>On the viewer, the screen's toolbar also locks or restarts the computer, keeps its own keyboard and mouse out and hides its screen from whoever sits there (Windows; Ctrl+P there takes them back), locks it on leaving, calls the person there, and records the screen to an MP4 file.</p>
   <p>From any browser, without installing anything: open <a href="/web/">sshremote.dev/web</a>, type the ID and its password, and the screen opens in the page with keyboard and mouse.</p>
   <h3>On the viewer</h3>
   <p>Type the ID (digits only) in the address field, then the password, and choose Screen sharing or Files.</p>
@@ -72,7 +74,11 @@ sshremote remote-access password     # a new one; password NEW sets yours
 sshremote remote-access id           # a new ID
 sshremote remote-access install      # start with the computer; uninstall
 sshremote remote-access relay HOST   # use another relay
-sshremote sshremote://ID@sshremote.dev --password P</code></pre>
+sshremote remote-access ask on       # the person here lets each viewer in
+sshremote remote-access allow keyboard files sound   # what viewers may use
+sshremote sshremote://ID@sshremote.dev --password P [--code C]
+sshremote find                       # computers nearby with remote access on
+sshremote wake 3c:52:82:1a:2b:3c     # Wake-on-LAN</code></pre>
   <h3>Your own relay</h3>
   <p>The relay is a small program of its own, <a href="https://github.com/thinkbigx/sshremote-relay">sshremote-relay</a>, listening on TCP 7071. To run your own and keep its IDs in a file:</p>
   <pre class="cmd"><code>sshremote-relay --listen 0.0.0.0:7071 --store /var/lib/sshremote/ids.json</code></pre>

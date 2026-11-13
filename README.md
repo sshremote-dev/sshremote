@@ -48,8 +48,11 @@ Tests that reach other computers name them by ssh alias:
   what it reads there and opens a terminal, the screen or the files on it; an ID asks for its
   password in place. Under it the computers: this computer first, then favorites and the last
   opened, with the aliases of `~/.ssh/config`. A computer's sheet (Add, or Edit in its menu) keeps
-  its name, its address or its `~/.ssh/config` block (host, user, port, key), its saved password
-  and its **tunnels** (`-L`, `-R` or SOCKS through it, opened on demand or with the app).
+  its name, its address or its `~/.ssh/config` block (host, user, port, key), its saved password,
+  its network card for **Wake-on-LAN** and its **tunnels** (`-L`, `-R` or SOCKS through an SSH
+  computer; a port here to anything a computer by ID reaches), opened on demand or with the app.
+  **On this network** lists the computers nearby with remote access on, to add without typing
+  their ID.
 - The gear opens **Settings**: Appearance, Connections, SSH keys, Passwords, Backup, Extensions,
   Parts and About.
 
@@ -70,7 +73,10 @@ What is opened goes into the workspace:
   full colour at 60, or colours, resolution and frame rate of one's own), fit, zoom, monitors (or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
   monitors"), sharing one window or application with its menus and dialogs, special keys, chat,
-  screenshot, pause, view only, clipboard, sound. F11 and the other keys go to the host;
+  a voice call (the person there answers in their window), screenshot, recording to MP4, pause,
+  view only, clipboard with files (copied in a file manager here, pasted there, and back), sound,
+  and the computer itself: lock it, restart it, keep its own keyboard and mouse out, hide its
+  screen from whoever sits there (Windows) and lock it on leaving. F11 and the other keys go to the host;
   Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
   Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
@@ -96,9 +102,32 @@ computer and its `~/.ssh/config` hosts, and computers by ID. The screen sends on
 (moves for scrolling, lossless WebP for text, JPEG for photographs) at the app's qualities, auto
 and black and white included; it has zoom, touch (tap, long press for the right button, two
 fingers to scroll and pinch), the keyboard of input methods and phones, keys the browser keeps,
-clipboard, chat, sound (WebCodecs), sharing one window or program, pause, lossless screenshots,
-files dropped on the screen, the terminal below the screen, every screen of a host in a window of
-its own, and reconnecting by itself.
+clipboard (and files pasted there), chat, sound and voice calls (WebCodecs), sharing one window or
+program, the computer menu (lock, restart, its keyboard kept out, its screen hidden), pause,
+lossless screenshots, recording, files dropped on the screen, the terminal below the screen, every
+screen of a host in a window of its own, two-step codes, and reconnecting by itself.
+
+### Traffic
+
+Measured in one private GNOME session with the same scripted activity (a document still, typed
+into, scrolled, paged and a moving photograph, 30 s each), against RustDesk 1.4.9 (AV1, its
+default quality) on a direct connection:
+
+| | sshremote auto (lossless text, 60 fps) | sshremote 256 colours | RustDesk |
+|---|---|---|---|
+| window opens | 30 KB | 27 KB | 51 KB |
+| still | 0.1 KB | 0.1 KB | 0.2 KB |
+| typing | 45 KB | 53 KB | 62 KB |
+| scrolling | 541 KB | 501 KB | 1052 KB |
+| page after page | 221 KB | 187 KB | 440 KB |
+| film | 1722 KB | 940 KB | 2492 KB |
+| back to text | 38 KB | 8 KB | 46 KB |
+| **all** | **2596 KB** | **1717 KB** | **4145 KB** |
+
+The black-and-white preset at half size sends 520 KB for all of it. What makes the difference:
+text and drawings go through a palette kept for the session (their bytes repeat from frame to
+frame, which the stream's compression finds), scrolls are moves past the scroll bar, only areas
+that look like photographs become H.264, and two paints a moment apart go as one.
 
 ## Building
 
@@ -156,8 +185,21 @@ other side, type the ID in the address field, give the password and open the scr
 ```sh
 sshremote remote-access            # this computer's ID, password and state
 sshremote remote-access on|off|install|uninstall|password [NEW]|relay HOST
-sshremote sshremote://ID@sshremote.dev --password P
+sshremote remote-access ask on|off               # the person here lets each viewer in
+sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
+sshremote sshremote://ID@sshremote.dev --password P [--code C]
+sshremote find                     # computers nearby with remote access on
+sshremote wake MAC|ADDRESS         # Wake-on-LAN
 ```
+
+Who comes in and what they may do is the person at the computer's choice: **ask first** (a viewer
+with the right password waits for a click there, turned away after a minute), and rights for the
+keyboard and mouse, the clipboard, files, sound and calls, terminals, restart and lock, and
+tunnels, set in the settings and changed for one session in the window shown there, where the
+connection can also be ended. **Two-step sign-in** adds the code of an authenticator app to the
+password. Computers on the same network can find this one (its ID, name and network card, never
+the password) and, when allowed, come **straight in** on TCP 7073 instead of through the relay,
+with the same password check.
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
