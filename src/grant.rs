@@ -16,18 +16,21 @@ pub const SOUND: u8 = 8;
 pub const TERMINAL: u8 = 16;
 /// Restarting and locking the computer, keeping its own keyboard and mouse out, and hiding its screen.
 pub const POWER: u8 = 32;
-pub const ALL: u8 = CONTROL | CLIPBOARD | FILES | SOUND | TERMINAL | POWER;
+/// Ports forwarded through the computer to what it reaches.
+pub const PORTS: u8 = 64;
+pub const ALL: u8 = CONTROL | CLIPBOARD | FILES | SOUND | TERMINAL | POWER | PORTS;
 /// Not a right: the person at the screen is asked before anyone comes in.
 pub const ASK: u8 = 128;
 
 /// Each right with its name in a list and in a sentence.
-pub const RIGHTS: [(u8, &str, &str); 6] = [
+pub const RIGHTS: [(u8, &str, &str); 7] = [
     (CONTROL, "Use the keyboard and mouse", "keyboard and mouse"),
     (CLIPBOARD, "Copy and paste", "clipboard"),
     (FILES, "Send and fetch files", "files"),
     (SOUND, "Hear this computer's sound", "sound"),
     (TERMINAL, "Open terminals", "terminals"),
     (POWER, "Restart or lock this computer, block its keyboard and hide its screen", "restart and lock"),
+    (PORTS, "Reach ports through this computer (tunnels)", "ports"),
 ];
 
 /// The rights in `bits`, as words: "keyboard and mouse, files".
@@ -62,6 +65,7 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         ToAgent::Audio(true) => SOUND,
         ToAgent::TermOpen { .. } | ToAgent::TermInput { .. } | ToAgent::TermResize { .. } => TERMINAL,
         ToAgent::Host { act, .. } if *act != crate::hostctl::QUERY => POWER,
+        ToAgent::PortOpen { .. } | ToAgent::PortData { .. } => PORTS,
         _ => return None,
     })
 }

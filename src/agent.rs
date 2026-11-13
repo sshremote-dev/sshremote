@@ -331,6 +331,8 @@ fn serve_with(
     let mut told_off = 0u8;
     // The computer itself: its own keyboard and mouse, its screen, locking as the viewer leaves.
     let mut host = crate::hostctl::HostCtl::default();
+    // Connections for the viewer's forwarded ports.
+    let mut ports = crate::porttunnel::Ports::default();
     let mut pending = String::new();
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
@@ -431,6 +433,9 @@ fn serve_with(
                     in_flight = in_flight.saturating_sub(1);
                     flight_sizes.pop_front();
                 }
+                ToAgent::PortOpen { id, host, port } => ports.open(id, host, port),
+                ToAgent::PortData { id, data } => ports.data(id, data),
+                ToAgent::PortClose { id } => ports.close(id),
                 // Files copied at the viewer and sent over: on the clipboard here, then pasted.
                 ToAgent::PasteFiles { batch, names } => {
                     let dir = crate::files::clipboard_dir(&batch);
@@ -695,6 +700,9 @@ fn serve_with(
                 if taken & crate::grant::POWER != 0 {
                     host = crate::hostctl::HostCtl::default();
                 }
+                if taken & crate::grant::PORTS != 0 {
+                    ports = crate::porttunnel::Ports::default();
+                }
                 send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
                 send(enc, &ToClient::Notice(format!("The person at that computer now lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
                 continue;
@@ -727,6 +735,9 @@ fn serve_with(
             None
         };
         for m in outbox.pump(256 << 10) {
+            send(enc, &m).map_err(io_err)?;
+        }
+        for m in ports.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
         }
         match clip.poll() {

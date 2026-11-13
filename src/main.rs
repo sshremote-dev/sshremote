@@ -39,6 +39,8 @@ mod gui;
 mod grant;
 #[cfg(feature = "remote")]
 mod hostctl;
+#[cfg(feature = "remote")]
+mod porttunnel;
 mod here;
 mod hosts;
 #[cfg(windows)]

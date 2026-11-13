@@ -1,4 +1,5 @@
-//! Port forwards through an SSH computer: what one is, and the ssh that keeps it open.
+//! Port forwards through an SSH computer (the ssh that keeps one open) or through a computer
+//! reached by its ID (a session with its agent, `porttunnel`).
 
 use std::sync::Mutex;
 
@@ -121,6 +122,9 @@ struct Run {
     address: String,
     tunnel: Tunnel,
     child: Option<std::process::Child>,
+    /// Through a computer reached by its ID instead.
+    #[cfg(feature = "remote")]
+    by_id: Option<crate::porttunnel::Forward>,
     said: std::sync::Arc<Mutex<String>>,
     since: std::time::Instant,
     /// How ssh ended, once it has.
@@ -151,9 +155,12 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
         return Err(p.into());
     }
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    runs.retain(|r| !(r.address == address && same(&r.tunnel, t) && r.child.is_none()));
+    runs.retain(|r| !(r.address == address && same(&r.tunnel, t) && r.child.is_none() && !r.through_id()));
     if runs.iter().any(|r| r.address == address && same(&r.tunnel, t)) {
         return Ok(());
+    }
+    if address.starts_with("sshremote://") {
+        return start_by_id(&mut runs, address, t);
     }
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"]);
@@ -196,8 +203,51 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
             *said.lock().unwrap_or_else(|e| e.into_inner()) = text;
         });
     }
-    runs.push(Run { address: address.into(), tunnel: t.clone(), child: Some(child), said, since: std::time::Instant::now(), ended: None });
+    runs.push(Run {
+        address: address.into(),
+        tunnel: t.clone(),
+        child: Some(child),
+        #[cfg(feature = "remote")]
+        by_id: None,
+        said,
+        since: std::time::Instant::now(),
+        ended: None,
+    });
     Ok(())
+}
+
+impl Run {
+    fn through_id(&self) -> bool {
+        #[cfg(feature = "remote")]
+        return self.by_id.is_some();
+        #[cfg(not(feature = "remote"))]
+        false
+    }
+}
+
+/// A port here leading somewhere a computer reached by its ID reaches, with its saved password.
+#[cfg(feature = "remote")]
+fn start_by_id(runs: &mut Vec<Run>, address: &str, t: &Tunnel) -> Result<(), String> {
+    if t.kind != Kind::Local {
+        return Err("Through a computer reached by its ID, a tunnel goes from here to there only.".into());
+    }
+    let password = crate::vault::get(address).ok_or("Save its password first: a tunnel has nobody to ask for it.")?;
+    let fwd = crate::porttunnel::open(address, password, t.port, &t.dest)?;
+    runs.push(Run {
+        address: address.into(),
+        tunnel: t.clone(),
+        child: None,
+        by_id: Some(fwd),
+        said: Default::default(),
+        since: std::time::Instant::now(),
+        ended: None,
+    });
+    Ok(())
+}
+
+#[cfg(not(feature = "remote"))]
+fn start_by_id(_: &mut Vec<Run>, _: &str, _: &Tunnel) -> Result<(), String> {
+    Err(crate::not_built("tunnels through a computer reached by its ID"))
 }
 
 /// Closes `t` of the computer at `address`, and forgets why it failed if it did.
@@ -216,6 +266,14 @@ pub fn stop(address: &str, t: &Tunnel) {
 pub fn state(address: &str, t: &Tunnel) -> State {
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(r) = runs.iter_mut().find(|r| r.address == address && same(&r.tunnel, t)) else { return State::Off };
+    #[cfg(feature = "remote")]
+    if let Some(f) = &r.by_id {
+        return match f.status() {
+            crate::porttunnel::Status::Starting => State::Starting,
+            crate::porttunnel::Status::On => State::On,
+            crate::porttunnel::Status::Failed(why) => State::Failed(why),
+        };
+    }
     if let Some(c) = r.child.as_mut()
         && let Ok(Some(status)) = c.try_wait()
     {
@@ -260,7 +318,7 @@ pub fn open_count(address: &str, tunnels: &[Tunnel]) -> usize {
 
 /// Whether any tunnel is open or opening.
 pub fn any_open() -> bool {
-    RUNS.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().any(|r| r.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
+    RUNS.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().any(|r| r.through_id() || r.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
 }
 
 /// Opens every tunnel set to start with the app; returns why those that could not, could not.

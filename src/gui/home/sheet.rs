@@ -155,7 +155,10 @@ impl Sheet {
         } else {
             Some(self.port.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or("The port is a number from 1 to 65535.")?)
         };
-        let tunnels = if self.by_id { Vec::new() } else { self.tunnels.iter().map(TunnelForm::tunnel).collect::<Result<Vec<_>, _>>()? };
+        let tunnels = self.tunnels.iter().map(TunnelForm::tunnel).collect::<Result<Vec<_>, _>>()?;
+        if self.by_id && tunnels.iter().any(|t| t.kind != Kind::Local) {
+            return Err("Through a computer reached by its ID, a tunnel goes from here to there only.".into());
+        }
         // Another computer's address, or another block of ~/.ssh/config, is never taken over.
         let in_file = self.in_config && !self.by_id;
         if address != self.was && (crate::computers::get(&address).is_some() || (in_file && crate::tools::config_entry(&address).is_some())) {
@@ -328,10 +331,8 @@ impl App {
                         });
                     });
                 });
-                if !s.by_id {
-                    ui.add_space(kit::GAP);
-                    self.tunnel_rows(ui, &mut s);
-                }
+                ui.add_space(kit::GAP);
+                self.tunnel_rows(ui, &mut s);
             });
             if let Some(p) = s.problem.clone() {
                 ui.add_space(10.0);
@@ -401,10 +402,16 @@ impl App {
         });
         let address = s.address_now();
         let port = s.port.trim().parse().ok();
+        let by_id = s.by_id;
         let mut gone = None;
         kit::card(ui, |ui| {
             if s.tunnels.is_empty() {
-                ui.add(egui::Label::new(RichText::new("Ports forwarded through this computer while SSH Remote runs, signing in with your SSH keys: a port here that leads somewhere it reaches, one there that leads here, or a SOCKS proxy.").weak().size(12.5)).wrap());
+                let about = if s.by_id {
+                    "Ports forwarded through this computer while SSH Remote runs, with its saved password: a port here that leads somewhere it reaches."
+                } else {
+                    "Ports forwarded through this computer while SSH Remote runs, signing in with your SSH keys: a port here that leads somewhere it reaches, one there that leads here, or a SOCKS proxy."
+                };
+                ui.add(egui::Label::new(RichText::new(about).weak().size(12.5)).wrap());
                 return;
             }
             for (i, t) in s.tunnels.iter_mut().enumerate() {
@@ -415,7 +422,8 @@ impl App {
                     ui.horizontal(|ui| {
                         combo("kind", t.kind.name()).width(130.0).show_ui(ui, |ui| {
                             crate::gui::menu_look(ui);
-                            for k in Kind::ALL {
+                            // Through a computer by its ID only a port here leads there.
+                            for k in Kind::ALL.into_iter().filter(|k| !by_id || *k == Kind::Local) {
                                 ui.selectable_value(&mut t.kind, k, k.name());
                             }
                         });
