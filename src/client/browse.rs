@@ -5,6 +5,7 @@ use super::*;
 impl Viewer {
     /// The remote folder: a header, the entries with the selection, keys at the foot.
     pub(super) fn draw_files(&mut self) -> io::Result<()> {
+        self.unpicture()?;
         let height = self.rows.saturating_sub(1);
         let list_h = height.saturating_sub(4).max(1);
         let shown: Vec<(String, bool, u64, u64)> =

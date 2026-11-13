@@ -6,7 +6,9 @@ the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the s
 in one zstd stream (H.264 only for areas that keep moving).
 
 Hosts: Windows (GDI capture, SendInput) and GNOME on Wayland (Mutter RemoteDesktop, PipeWire).
-Viewers: a native window, or a sixel terminal (Windows Terminal, WezTerm, foot, VTE).
+Viewers: a native window, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE)
+or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found by asking the
+terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead).
 
 ## Build
 

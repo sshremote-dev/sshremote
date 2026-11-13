@@ -1,5 +1,5 @@
 //! Terminal viewer: keeps an exact copy of the remote framebuffer and repaints
-//! only damaged cells with sixel.
+//! only damaged cells with sixel, or kitty images where the terminal shows them.
 
 use std::io::{self, Write};
 use std::sync::mpsc;
@@ -180,6 +180,8 @@ struct Viewer {
     lut: Lut,
     pal: Vec<[u8; 3]>,
     sixel: Sixel,
+    /// Kitty images in place of sixel (kitty, Ghostty, WezTerm): true colour.
+    kitty: Option<crate::kitty::Kitty>,
     idx: Vec<u8>,
     px: Vec<[u8; 3]>,
     qpal: Vec<[u8; 3]>,
@@ -283,6 +285,7 @@ impl Viewer {
         if self.probe.is_some() {
             return Ok(());
         }
+        self.unpicture()?;
         if self.shell_modes.alt {
             write!(self.out, "\x1b[?1049h\x1b[0m\x1b[2J\x1b[H")?;
         } else {
@@ -321,6 +324,7 @@ impl Viewer {
         }
         match self.view {
             View::Screen => {
+                self.unpicture()?;
                 write!(self.out, "\x1b[0m\x1b[2J")?;
                 if self.fb.w == 0 {
                     self.sess.send(ToAgent::Refresh)?;
@@ -854,6 +858,7 @@ impl Viewer {
         lut: Lut::new(&[[0, 0, 0]]),
         pal: Vec::new(),
         sixel: Sixel::new(),
+        kitty: None,
         idx: Vec::new(),
         px: Vec::new(),
         qpal: Vec::new(),
@@ -914,6 +919,7 @@ pub fn run(opt: Options) -> Result<(), String> {
         if opt.cell.is_none() {
             v.cell_queried = query_cell();
         }
+        v.kitty = kitty_images(v.tmux.is_some()).then(crate::kitty::Kitty::new);
         let _ = execute!(
             v.out,
             terminal::EnterAlternateScreen,
@@ -1180,6 +1186,49 @@ fn query_cell() -> Option<(usize, usize)> {
 #[cfg(not(unix))]
 fn query_cell() -> Option<(usize, usize)> {
     None
+}
+
+/// Whether to draw with kitty images: `SSHREMOTE_GRAPHICS=kitty` or `sixel` says so; otherwise
+/// the terminal is asked (not through tmux, which answers for itself).
+fn kitty_images(tmux: bool) -> bool {
+    match std::env::var("SSHREMOTE_GRAPHICS").as_deref() {
+        Ok("kitty") => true,
+        Ok("sixel") => false,
+        _ => !tmux && query_kitty(),
+    }
+}
+
+#[cfg(unix)]
+fn query_kitty() -> bool {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let Ok(mut tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else { return false };
+    if tty.write_all(crate::kitty::QUERY).and_then(|_| tty.flush()).is_err() {
+        return false;
+    }
+    // Until the attributes' answer (ESC [ ? ... c), which comes after any answer to the first.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut buf = Vec::new();
+    let done = |b: &[u8]| b.windows(3).position(|w| w == b"\x1b[?").is_some_and(|at| b[at..].contains(&b'c'));
+    while !done(&buf) {
+        let left = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let mut pfd = libc::pollfd { fd: tty.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        if left == 0 || unsafe { libc::poll(&mut pfd, 1, left) } <= 0 {
+            break;
+        }
+        let mut b = [0u8; 256];
+        match tty.read(&mut b) {
+            Ok(n @ 1..) => buf.extend_from_slice(&b[..n]),
+            _ => break,
+        }
+    }
+    crate::kitty::answered(&buf)
+}
+
+/// Windows Terminal and the console show sixel, not kitty images.
+#[cfg(not(unix))]
+fn query_kitty() -> bool {
+    false
 }
 
 #[cfg(test)]

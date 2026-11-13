@@ -70,6 +70,11 @@ impl Viewer {
         let mut out = Vec::with_capacity(1 << 16);
         out.extend_from_slice(b"\x1b[?2026h");
         if self.fb.apply(&f)? {
+            if let Some(k) = &mut self.kitty {
+                let mut clear = Vec::new();
+                k.clear(&mut clear);
+                self.wrap(&mut out, &clear);
+            }
             out.extend_from_slice(b"\x1b[0m\x1b[2J");
             self.dirty.iter_mut().for_each(|d| *d = true);
         }
@@ -153,7 +158,9 @@ impl Viewer {
                 let mut img = Vec::new();
                 let (top, left) = self.tmux.unwrap_or((0, 0));
                 let _ = write!(img, "\x1b[{};{}H", top + r + 1, left + c + 1);
-                if adaptive {
+                if let Some(k) = &mut self.kitty {
+                    k.place(&mut img, self.px.as_flattened(), w, h, (cols, img_rows), (c, c1, r, r1));
+                } else if adaptive {
                     quant::quantize(&self.px, &mut self.qpal, &mut self.idx);
                     self.sixel.encode(&mut img, w, h, &self.idx, &self.qpal);
                 } else {
@@ -220,7 +227,29 @@ impl Viewer {
 
     pub(super) fn full_redraw(&mut self) -> io::Result<()> {
         self.fb = Framebuffer::default();
+        self.unpicture()?;
         write!(self.out, "\x1b[0m\x1b[2J")?;
         self.out.flush()
+    }
+
+    /// Deletes the kitty images before text is drawn where they are: they would show over it.
+    /// (Text replaces sixel pixels by itself.)
+    pub(super) fn unpicture(&mut self) -> io::Result<()> {
+        let Some(k) = self.kitty.as_mut().filter(|k| k.any()) else { return Ok(()) };
+        let mut clear = Vec::new();
+        k.clear(&mut clear);
+        let mut out = Vec::new();
+        self.wrap(&mut out, &clear);
+        self.dirty.iter_mut().for_each(|d| *d = true);
+        self.out.write_all(&out)
+    }
+
+    /// `seq` for the terminal, through tmux when inside it.
+    fn wrap(&self, out: &mut Vec<u8>, seq: &[u8]) {
+        if self.tmux.is_some() {
+            tmux_wrap(out, seq);
+        } else {
+            out.extend_from_slice(seq);
+        }
     }
 }

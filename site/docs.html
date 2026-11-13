@@ -57,7 +57,7 @@
   <pre class="cmd"><code>sshremote --gui user@host                 # the workspace
 sshremote --gui user@host --open files    # straight to the files
 sshremote terminal user@host --split db   # terminal panes, split
-sshremote user@host                       # the screen in this terminal (sixel)
+sshremote user@host                       # the screen in this terminal (sixel or kitty images)
 sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true colour 60 fps</code></pre>
   <p>A lost connection is tried again in the same mode, keeping the shells; after 30 seconds the pane offers Reconnect or Close.</p>
   <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or with Start with the computer in the remote access settings): <code>sshremote --install-service</code>.</div>
@@ -126,7 +126,7 @@ sshremote ext dev my-extension</code></pre>
     <details><summary>Can someone take over my ID or guess the password?</summary><p>An ID is held at the relay by a secret token only your computer has. Each wrong password is answered more slowly than the last, and the relay limits the attempts from each address.</p></details>
     <details><summary>Are passwords stored?</summary><p>Not unless you choose to. Passwords you choose to save go to the system's password store, and backups of <code>~/.ssh</code> are encrypted under a passphrase.</p></details>
     <details><summary>How are extensions checked?</summary><p>The registry's index is signed, each package is checked by its SHA-256, and native extensions are packed per platform. At run time every request is held to the manifest's permissions.</p></details>
-    <details><summary>Which systems work?</summary><p>Hosts: Windows and GNOME on Wayland. Viewers: the native window on Windows and Linux, or a sixel terminal such as Windows Terminal, WezTerm, foot or VTE.</p></details>
+    <details><summary>Which systems work?</summary><p>Hosts: Windows and GNOME on Wayland. Viewers: the native window on Windows and Linux, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE) or kitty images in true colour (kitty, Ghostty, WezTerm).</p></details>
   </div>
 </article>
 </div>

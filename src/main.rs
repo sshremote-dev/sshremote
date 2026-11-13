@@ -82,6 +82,7 @@ mod shared;
 mod shot;
 #[cfg(feature = "remote")]
 mod sixel;
+mod kitty;
 mod script;
 mod sys;
 #[cfg(feature = "gui")]

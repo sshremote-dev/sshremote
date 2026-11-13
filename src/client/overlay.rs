@@ -5,6 +5,7 @@ use super::*;
 impl Viewer {
     /// Draws rows of text from the top, each cut or padded to the width; `style` per row.
     pub(super) fn draw_rows(&mut self, rows: &[(String, &str)]) -> io::Result<()> {
+        self.unpicture()?;
         let mut out = String::from("\x1b[?2026h\x1b[0m");
         let height = self.rows.saturating_sub(1);
         for i in 0..height {
@@ -329,6 +330,7 @@ impl Viewer {
                 }
             }
         }
+        self.unpicture()?;
         let width = self.cols.min(100);
         let mut out = String::new();
         for (i, l) in lines.iter().take(self.rows.saturating_sub(2)).enumerate() {
