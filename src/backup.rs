@@ -290,6 +290,16 @@ pub fn list() -> Vec<PathBuf> {
     all
 }
 
+/// Deletes a backup: one in the backup folder or among the automatic ones, nothing else.
+pub fn delete(path: &Path) -> Result<(), String> {
+    let dir = path.parent().and_then(|d| std::fs::canonicalize(d).ok());
+    let ours = [Some(folder()), auto_folder()].into_iter().flatten().filter_map(|d| std::fs::canonicalize(d).ok()).any(|d| Some(d) == dir);
+    if !ours || path.extension().is_none_or(|x| x != "json") {
+        return Err("only backups in the backup folders are deleted here".into());
+    }
+    std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// What a backup holds, for the restore list: its date and whether passwords are inside.
 pub fn describe(path: &Path) -> Option<(String, bool)> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
@@ -524,6 +534,15 @@ mod tests {
         assert!(put_ssh_file(&dir, "authorized_keys", b"ssh-ed25519 DDDD\n").unwrap());
         assert!(dir.join("authorized_keys.bak").exists() && dir.join("authorized_keys.bak2").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_backups_in_the_folders_are_deleted() {
+        let elsewhere = std::env::temp_dir().join(format!("sshremote-not-a-backup-{}.json", std::process::id()));
+        std::fs::write(&elsewhere, "{}").unwrap();
+        assert!(delete(&elsewhere).is_err());
+        assert!(elsewhere.exists());
+        let _ = std::fs::remove_file(&elsewhere);
     }
 
     #[test]

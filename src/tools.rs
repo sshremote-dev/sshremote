@@ -582,8 +582,16 @@ pub struct BackupTool {
     chosen: Option<PathBuf>,
     list: Vec<(PathBuf, String, bool)>,
     status: Option<(bool, String)>,
-    /// The dialog open: backing up (false) or restoring the chosen backup (true).
-    dialog: Option<bool>,
+    /// The form open in place of the list.
+    dialog: Option<BackupForm>,
+}
+
+/// What the backup page asks about.
+#[derive(Clone, Copy, PartialEq)]
+enum BackupForm {
+    Save,
+    Restore,
+    Delete,
 }
 
 impl BackupTool {
@@ -624,14 +632,21 @@ impl BackupTool {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add(primary(format!("{}  Back up now", ic::DOWNLOAD))).clicked() {
-                self.dialog = Some(false);
+                self.dialog = Some(BackupForm::Save);
                 self.status = None;
             }
             if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD)).min_size(egui::vec2(0.0, 32.0)))
                 .on_disabled_hover_text("Choose a backup below first")
                 .clicked()
             {
-                self.dialog = Some(true);
+                self.dialog = Some(BackupForm::Restore);
+                self.status = None;
+            }
+            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Delete", ic::TRASH)).min_size(egui::vec2(0.0, 32.0)))
+                .on_disabled_hover_text("Choose a backup below first")
+                .clicked()
+            {
+                self.dialog = Some(BackupForm::Delete);
                 self.status = None;
             }
             if ui.button(format!("{}  Folder", ic::FOLDER)).clicked() {
@@ -675,7 +690,7 @@ impl BackupTool {
     fn forms(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         let status = self.status.clone();
         match self.dialog {
-            Some(false) => {
+            Some(BackupForm::Save) => {
                 let min = crate::backup::MIN_PASSPHRASE;
                 let answer = form_page(ui, "Back up now", "Back up", true, &status, |ui| {
                     ui.label(RichText::new(format!(
@@ -703,7 +718,35 @@ impl BackupTool {
                     None => {}
                 }
             }
-            Some(true) => {
+            Some(BackupForm::Delete) => {
+                let what = self.chosen.as_ref().and_then(|p| self.list.iter().find(|(q, ..)| q == p)).map(|(p, when, _)| (p.clone(), when.clone()));
+                let answer = form_page(ui, "Delete this backup?", "Delete", what.is_some(), &status, |ui| {
+                    if let Some((p, when)) = &what {
+                        ui.label(RichText::new(format!("The backup of {when}")).strong());
+                        ui.label(RichText::new(p.display().to_string()).weak().small());
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("It is gone for good: it cannot be restored afterwards.").weak());
+                    }
+                });
+                match answer {
+                    Some(true) => {
+                        if let Some((p, _)) = &what {
+                            self.status = Some(match crate::backup::delete(p) {
+                                Ok(()) => (true, "Deleted.".to_string()),
+                                Err(e) => (false, e),
+                            });
+                        }
+                        if self.status.as_ref().is_some_and(|s| s.0) {
+                            self.chosen = None;
+                            self.refresh();
+                            self.dialog = None;
+                        }
+                    }
+                    Some(false) => self.back(),
+                    None => {}
+                }
+            }
+            Some(BackupForm::Restore) => {
                 let answer = form_page(ui, "Restore this backup", "Restore", self.chosen.is_some(), &status, |ui| {
                     ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
                     ui.checkbox(&mut self.ssh_files, "Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)");
