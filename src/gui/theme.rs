@@ -147,6 +147,10 @@ pub fn style(ctx: &egui::Context) {
         .into();
         s.spacing.item_spacing = Vec2::new(10.0, 10.0);
         s.spacing.button_padding = Vec2::new(12.0, 6.0);
+        // A popup is measured once, at most this tall, and keeps that size: a menu longer than
+        // egui's 400 points would keep its last rows behind a scroll it never outgrows. The
+        // screen still limits it (and a menu scrolls inside the window when longer).
+        s.spacing.default_area_size = Vec2::new(600.0, 4000.0);
         s.spacing.interact_size.y = 30.0;
         s.spacing.window_margin = egui::Margin::same(16);
         s.spacing.menu_margin = egui::Margin::same(8);

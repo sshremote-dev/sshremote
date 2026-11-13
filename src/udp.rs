@@ -1033,6 +1033,7 @@ fn source_toward(t: SocketAddr) -> Option<IpAddr> {
 /// The usable addresses of this computer's network cards that are up (not those of containers
 /// and virtual machines it hosts).
 fn interface_addrs() -> Vec<IpAddr> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut out = Vec::new();
     #[cfg(unix)]
     unsafe {

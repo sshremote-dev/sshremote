@@ -94,8 +94,7 @@ impl Settings {
         Settings { page: Page::Appearance }
     }
 
-    /// Opened on the page named, for pictures.
-    #[cfg(test)]
+    /// Opened on the page named: from a pane's quick menu (its "all settings" link), and for pictures.
     pub(super) fn at(name: &str) -> Settings {
         let page = match name {
             "connections" => Page::Connections,
@@ -244,10 +243,10 @@ impl App {
     /// How the screen and files reach a computer: the picture's quality, the agent started there,
     /// how its screen is read, and passwords.
     fn connections_page(&mut self, ui: &mut egui::Ui) {
-        kit::title(ui, "Connections", "How screens and files reach a computer over SSH. A terminal is plain ssh and needs none of this.");
+        kit::title(ui, "Connections", "How screens and files reach a computer. A screen's own menu changes these for that connection only; here is where every new one starts. A terminal is plain ssh and needs none of this.");
         kit::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            kit::row(ui, "Screen quality", |ui| {
+            kit::row(ui, "New screens", |ui| {
                 let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
                 let before = self.form.preset;
                 combo("quality", current).width(300.0).show_ui(ui, |ui| {

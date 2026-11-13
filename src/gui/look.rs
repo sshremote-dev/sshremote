@@ -1031,6 +1031,7 @@ struct Editor {
 }
 
 /// Opens the Appearance settings in this window.
+#[cfg(test)]
 pub(crate) fn open(ctx: &egui::Context) {
     if let Ok(mut g) = EDITOR.lock() {
         *g = Some((ctx.viewport_id(), Editor::default()));
@@ -1207,6 +1208,8 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     } else {
         crate::termwin::scheme_picker(ui);
     }
+    crate::termwin::cursor_picker(ui);
+    crate::termwin::copy_select_picker(ui);
 
     heading(ui, "Background layers");
     ui.label(RichText::new("Behind the terminal panes, the top of the list in front. Add built-in ones or your own pictures and animations (PNG, JPEG, WebP, GIF, Lottie); drop a file on this window to add it.").weak().size(12.0));

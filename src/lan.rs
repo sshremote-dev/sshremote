@@ -141,6 +141,7 @@ pub fn wake(mac: &str) -> Result<(), String> {
 
 /// Where a broadcast reaches this network: each interface's own, and the general one.
 fn broadcasts() -> Vec<Ipv4Addr> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut out = vec![Ipv4Addr::BROADCAST];
     #[cfg(unix)]
     unsafe {

@@ -191,6 +191,10 @@ fn scheme() -> &'static Scheme {
 /// The cursor's shape: a thin bar as in VS Code and Windows Terminal, a block, or an underline.
 static CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
+/// Selected text goes to the clipboard as it is selected, in every terminal.
+static COPY_SELECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the automatic colour scheme is called wherever it is chosen.
+const AUTO_NAME: &str = "Automatic (follows the app theme)";
 
 /// The text and Markdown views are made again from the scrollback at most this often (seconds)
 /// while output streams in.
@@ -240,19 +244,61 @@ pub(crate) fn size_picker(ui: &mut egui::Ui) {
     }
 }
 
-/// The terminal's colour scheme, for Appearance.
-pub(crate) fn scheme_picker(ui: &mut egui::Ui) {
+/// The colour schemes as a list to choose from, the one in use marked: the same in Settings and
+/// in a terminal's menu.
+fn scheme_list(ui: &mut egui::Ui) -> bool {
     let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Scheme");
-        let names = std::iter::once((AUTO, "Automatic")).chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
-        for (k, name) in names {
-            if ui.selectable_label(k == current, name).clicked() {
-                SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
-                crate::hosts::set_setting("term_colors", &if k == AUTO { "auto".to_string() } else { k.to_string() });
+    let names = std::iter::once((AUTO, AUTO_NAME)).chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
+    let mut chosen = false;
+    for (k, name) in names {
+        if ui.selectable_label(k == current, name).clicked() {
+            SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
+            crate::hosts::set_setting("term_colors", &if k == AUTO { "auto".to_string() } else { k.to_string() });
+            chosen = true;
+        }
+    }
+    chosen
+}
+
+fn scheme_name() -> &'static str {
+    match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
+        AUTO => AUTO_NAME,
+        k => SCHEMES.get(k).map_or(AUTO_NAME, |s| s.0),
+    }
+}
+
+/// The terminal's colour scheme, for Appearance: a list that opens from its name.
+pub(crate) fn scheme_picker(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Colour scheme");
+        egui::ComboBox::from_id_salt("term-scheme").selected_text(scheme_name()).width(260.0).show_ui(ui, |ui| {
+            crate::gui::menu_look(ui);
+            scheme_list(ui);
+        });
+    });
+}
+
+/// The cursor's shape, the same in Settings and in a terminal's menu.
+pub(crate) fn cursor_picker(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Cursor");
+        let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+        for (k, name) in CURSORS.iter().enumerate() {
+            if ui.selectable_label(k == current, *name).clicked() {
+                CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
+                crate::hosts::set_setting("term_cursor", &k.to_string());
             }
         }
     });
+}
+
+/// Copy on select, the same in Settings and in a terminal's menu.
+pub(crate) fn copy_select_picker(ui: &mut egui::Ui) {
+    let mut on = COPY_SELECT.load(std::sync::atomic::Ordering::Relaxed);
+    if ui.checkbox(&mut on, "Copy on select").changed() {
+        COPY_SELECT.store(on, std::sync::atomic::Ordering::Relaxed);
+        crate::hosts::set_setting("term_copy_select", if on { "1" } else { "0" });
+    }
 }
 
 /// Appearance back to its defaults: the automatic scheme and the usual text size.
@@ -519,7 +565,6 @@ pub struct TermWindow {
     /// The tab being dragged in the strip.
     dragging: Option<u32>,
     title: String,
-    copy_on_select: bool,
     renaming: Option<(u32, String)>,
     /// Tabs and panes to open on the next frame (the window's context is needed to wake it for output).
     pending: Vec<Pending>,
@@ -558,6 +603,7 @@ impl TermWindow {
         let c =
             crate::hosts::setting("term_cursor").and_then(|v| v.parse().ok()).unwrap_or(0usize).min(CURSORS.len() - 1);
         CURSOR.store(c, std::sync::atomic::Ordering::Relaxed);
+        COPY_SELECT.store(crate::hosts::setting("term_copy_select").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
         let setting = |k: &str| crate::hosts::setting(k);
         // "auto" or a scheme's number; the older key always held a number, chosen or not.
         let chosen = setting("term_colors").and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < SCHEMES.len());
@@ -576,7 +622,6 @@ impl TermWindow {
             viewport: egui::ViewportId::from_hash_of(viewport),
             dragging: None,
             title: title.into(),
-            copy_on_select: setting("term_copy_select").is_some_and(|v| v == "1"),
             renaming: None,
             pending: Vec::new(),
             framed: false,
@@ -928,14 +973,6 @@ impl TermWindow {
     }
 
     /// Saves the terminal preferences.
-    fn save_settings(&self) {
-        crate::hosts::set_setting("term_font", &format!("{}", self.font_size));
-        let scheme = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
-        crate::hosts::set_setting("term_colors", &if scheme == AUTO { "auto".to_string() } else { scheme.to_string() });
-        crate::hosts::set_setting("term_copy_select", if self.copy_on_select { "1" } else { "0" });
-        crate::hosts::set_setting("term_cursor", &CURSOR.load(std::sync::atomic::Ordering::Relaxed).to_string());
-    }
-
     /// The tabs, the new-tab button and menu, and the window's own buttons (views, settings).
     fn strip(&mut self, ui: &mut egui::Ui, out: &mut Vec<Cmd>) {
         // Colours of the bar the strip sits in: the title bar follows the app's light or dark theme.
@@ -1130,81 +1167,65 @@ impl TermWindow {
         }
     }
 
-    /// Text size, colours, copy on select, the cursor, and the shortcuts.
+    /// The terminals' look in short, as Settings has it (the same controls, the same settings),
+    /// the link to all of it, and the shortcuts.
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         let weak = ui.visuals().text_color().gamma_multiply(0.75);
         let bare = self.bare;
-        let font = &mut self.font_size;
-        let mut copy_on_select = self.copy_on_select;
-        let mut changed = false;
         let gear = egui::Button::new(RichText::new(ic::GEAR).size(14.0).color(weak))
             .frame_when_inactive(false)
             .min_size(Vec2::splat(28.0));
         egui::containers::menu::MenuButton::from_button(gear)
             .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
             .ui(ui, |ui| crate::gui::menu(ui, |ui| {
-                ui.set_min_width(240.0);
-                ui.label(RichText::new("Appearance").strong());
-                changed |= ui.add(egui::Slider::new(font, 8.0..=32.0).step_by(1.0).text("Text size")).changed();
-                let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
-                let names = std::iter::once((AUTO, "Automatic (follows the app theme)"))
-                    .chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
-                for (k, name) in names {
-                    if ui.selectable_label(k == current, name).clicked() {
-                        SCHEME.store(k, std::sync::atomic::Ordering::Relaxed);
-                        changed = true;
-                    }
-                }
-                ui.separator();
-                changed |= ui.checkbox(&mut copy_on_select, "Copy on select").changed();
-                ui.horizontal(|ui| {
-                    ui.label("Cursor");
-                    let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
-                    for (k, name) in CURSORS.iter().enumerate() {
-                        if ui.selectable_label(k == current, *name).clicked() {
-                            CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
-                            changed = true;
-                        }
+                ui.set_min_width(260.0);
+                ui.label(RichText::new("All terminals").strong());
+                size_picker(ui);
+                ui.menu_button(format!("Colour scheme: {}", scheme_name()), |ui| {
+                    crate::gui::menu_look(ui);
+                    if scheme_list(ui) {
+                        ui.close();
                     }
                 });
-                if ui.button(format!("{}  More: fonts, picture, overlay\u{2026}", ic::EYE)).clicked() {
-                    crate::gui::look::open(ui.ctx());
+                cursor_picker(ui);
+                copy_select_picker(ui);
+                if ui.button(format!("{}  All appearance settings\u{2026}", ic::SLIDERS_HORIZONTAL)).on_hover_text("Fonts, colours, background pictures and the load overlay, in Settings").clicked() {
+                    crate::gui::ask_settings("appearance");
                     ui.close();
                 }
                 ui.separator();
-                ui.label(RichText::new("Shortcuts").strong());
-                // A pane of the workspace has one shell: tabs and splits are the workspace's.
-                let tabs: &[(&str, &str)] = if bare {
-                    &[]
-                } else {
-                    &[
-                        ("Ctrl+Shift+T", "New tab"),
-                        ("Ctrl+Shift+W", "Close pane or tab"),
-                        ("Ctrl+Tab", "Next tab"),
-                        ("Alt+Shift+= / -", "Split right / down"),
-                        ("Alt+Shift+D", "Split along the longer side"),
-                        ("Alt+arrows", "Move between panes"),
-                        ("Double-click a tab", "Rename it"),
-                    ]
-                };
-                let common = [
-                    ("Ctrl+Shift+F", "Find"),
-                    ("Ctrl+Shift+C / V", "Copy / paste"),
-                    ("Ctrl+Insert / Shift+Insert", "Copy / paste"),
-                    ("Ctrl+= / Ctrl+-", "Text size"),
-                    ("Ctrl+click", "Open a link"),
-                ];
-                for (k, v) in tabs.iter().chain(common.iter()) {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(*k).monospace().size(12.0));
-                        ui.label(RichText::new(*v).weak().size(12.0));
+                ui.menu_button(format!("{}  Keyboard shortcuts", ic::KEYBOARD), |ui| {
+                    crate::gui::menu_look(ui);
+                    // A pane of the workspace has one shell: tabs and splits are the workspace's.
+                    let tabs: &[(&str, &str)] = if bare {
+                        &[]
+                    } else {
+                        &[
+                            ("Ctrl+Shift+T", "New tab"),
+                            ("Ctrl+Shift+W", "Close pane or tab"),
+                            ("Ctrl+Tab", "Next tab"),
+                            ("Alt+Shift+= / -", "Split right / down"),
+                            ("Alt+Shift+D", "Split along the longer side"),
+                            ("Alt+arrows", "Move between panes"),
+                            ("Double-click a tab", "Rename it"),
+                        ]
+                    };
+                    let common = [
+                        ("Ctrl+Shift+F", "Find"),
+                        ("Ctrl+Shift+C / V", "Copy / paste"),
+                        ("Ctrl+Insert / Shift+Insert", "Copy / paste"),
+                        ("Ctrl+= / Ctrl+-", "Text size"),
+                        ("Ctrl+click", "Open a link"),
+                    ];
+                    egui::Grid::new("term-shortcuts").num_columns(2).spacing(Vec2::new(14.0, 4.0)).show(ui, |ui| {
+                        for (k, v) in tabs.iter().chain(common.iter()) {
+                            ui.label(RichText::new(*k).monospace().size(12.0));
+                            ui.label(RichText::new(*v).weak().size(12.0));
+                            ui.end_row();
+                        }
                     });
-                }
+                });
             }));
-        self.copy_on_select = copy_on_select;
-        if changed {
-            self.save_settings();
-        }
     }
 
     /// How the active shell is shown: terminal, text or Markdown, three icon buttons (the current
@@ -1357,7 +1378,7 @@ impl TermWindow {
             self.font_size = f32::from_bits(TERM_SIZE.load(std::sync::atomic::Ordering::Relaxed)).clamp(8.0, 32.0);
         }
         let frame = egui::Frame::new().fill(crate::gui::look::fill(scheme_bg())).inner_margin(6.0);
-        let copy_on_select = self.copy_on_select;
+        let copy_on_select = COPY_SELECT.load(std::sync::atomic::Ordering::Relaxed);
         // A dialog or an open menu takes the keys; the terminal gets them back when it closes.
         // A pane's shell that ended well closes its pane, as Windows Terminal does by default; one
         // that failed stays, its message there to read.
