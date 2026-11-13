@@ -269,7 +269,11 @@ impl App {
             Item::Here { mode } => Some(Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode: *mode }),
             Item::Shell { profile } => {
                 let profiles = crate::termwin::local_profiles();
-                let p = profiles.iter().find(|p| p.name == *profile).or_else(|| profiles.first())?.clone();
+                // A shell this computer has no more (or an extension's command): said, not swapped for another.
+                let Some(p) = profiles.iter().find(|p| p.name == *profile).cloned() else {
+                    self.error = Some(format!("This computer has no shell named {profile}: that pane was left out"));
+                    return None;
+                };
                 Some(Launch::Shell { label: p.name.clone(), profile: p, target: Target::Local { capture: "auto".into() }, ssh_cmd: None })
             }
             Item::Web { url, label } => Some(Launch::Agent {

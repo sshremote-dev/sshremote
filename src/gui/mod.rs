@@ -371,6 +371,8 @@ pub struct App {
     queued_tabs: Vec<workspace::Opening>,
     /// The last session was looked at for reopening at start.
     reopened: bool,
+    /// The last session was kept as the main window closed: quitting after it keeps it as it is.
+    session_kept: bool,
     /// The open window growing into the working window: the size asked for and the frames waited.
     /// What is queued opens once it has its size, so a terminal starts at the size it keeps.
     growing: Option<(Vec2, u32)>,
@@ -774,6 +776,7 @@ impl App {
             queued: Vec::new(),
             queued_tabs: Vec::new(),
             reopened: false,
+            session_kept: false,
             growing: None,
         }
     }
@@ -931,6 +934,7 @@ impl eframe::App for App {
                     w.add(launch, place, start);
                 }
             }
+            self.session_kept = false;
             for tab in std::mem::take(&mut self.queued_tabs) {
                 if !matches!(self.screen, Screen::Work(_)) {
                     self.screen = Screen::Work(Box::new(workspace::Workspace::new(self.options())));
@@ -952,12 +956,9 @@ impl eframe::App for App {
             let out = w.ui(ui, main_keys);
             back = out.empty;
             closing = w.closing_window;
-            if closing {
-                // Its tabs, kept as the last session to open again.
-                let tabs = w.snapshot();
-                if !tabs.is_empty() {
-                    let _ = project::save(project::LAST, tabs);
-                }
+            if let Some(tabs) = w.last_tabs.take() {
+                self.keep_session(tabs);
+                self.session_kept = true;
             }
             if let Some(name) = w.open_project.take()
                 && let Some(p) = project::get(&name)
@@ -1093,6 +1094,7 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.quit_asked = true;
             } else {
+                self.quit_session();
                 self.quitting = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -1121,10 +1123,34 @@ impl App {
         if let Some(yes) = workspace::ask(ctx, "Close SSH Remote?", &body.join(" "), "Close") {
             self.quit_asked = false;
             if yes {
+                self.quit_session();
                 self.quitting = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         }
+    }
+
+    /// Keeps `main` (the main window's tabs) and every other window's as the last session; an
+    /// app that ends with its last pane (`sshremote terminal`) or no tabs at all keeps the one before.
+    fn keep_session(&self, mut tabs: Vec<project::Tree>) {
+        if self.quit_when_empty {
+            return;
+        }
+        for (_, w, _) in &self.windows {
+            tabs.extend(w.snapshot());
+        }
+        if !tabs.is_empty() {
+            let _ = project::save(project::LAST, tabs);
+        }
+    }
+
+    /// The app quits: its tabs are the last session, unless they were kept as the main window closed.
+    fn quit_session(&mut self) {
+        if std::mem::take(&mut self.session_kept) {
+            return;
+        }
+        let main = if let Screen::Work(w) = &self.screen { w.snapshot() } else { Vec::new() };
+        self.keep_session(main);
     }
 
     /// A window of its own for a tab dragged out, its tab under the screen point `at`.
@@ -1264,6 +1290,7 @@ impl App {
     /// `keys` are the system keys caught for the one that asked; returns the one asking now.
     fn other_windows(&mut self, ctx: &egui::Context, keys: Vec<(u32, bool)>, reached: &mut Vec<String>) -> Option<egui::ViewportId> {
         let mut windows = std::mem::take(&mut self.windows);
+        let mut asked = Vec::new();
         let mut keys = Some(keys);
         let owner = self.grab_window;
         let mut grab = None;
@@ -1286,6 +1313,9 @@ impl App {
                 let mine = if owner == Some(*id) { keys.take().unwrap_or_default() } else { Vec::new() };
                 let out = w.ui(ui, mine);
                 reached.append(&mut w.reached);
+                if let Some(name) = w.open_project.take() {
+                    asked.push(name);
+                }
                 if out.empty {
                     keep = false;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1300,6 +1330,12 @@ impl App {
             keep
         });
         self.windows.append(&mut windows);
+        // A project asked for in another window opens in the main one.
+        for name in asked {
+            if let Some(p) = project::get(&name) {
+                self.open_project(&p);
+            }
+        }
         grab
     }
 }

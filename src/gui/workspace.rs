@@ -125,8 +125,13 @@ fn item_of(p: &Pane) -> Option<super::project::Item> {
         Target::Local { .. } if mode == PaneMode::Terminal => Some(Item::Shell { profile: p.label.clone() }),
         Target::Local { .. } => Some(Item::Here { mode }),
         Target::Ssh { host, port, .. } => Some(Item::Host { address: host.clone(), port: port.map(|p| p.to_string()).unwrap_or_default(), mode }),
+        // A computer by its ID opens on its screen (its terminal is one of the screen's modes).
         #[cfg(feature = "remote")]
-        Target::Direct { addr, .. } => Some(Item::Host { address: crate::access::address(&addr.id, &addr.relay), port: String::new(), mode }),
+        Target::Direct { addr, .. } => Some(Item::Host {
+            address: crate::access::address(&addr.id, &addr.relay),
+            port: String::new(),
+            mode: if mode == PaneMode::Terminal { PaneMode::Screen } else { mode },
+        }),
     }
 }
 
@@ -297,6 +302,8 @@ pub(super) struct Workspace {
     pub(super) closing_window: bool,
     /// A project asked to be opened from the Projects menu, for the app to open here.
     pub(super) open_project: Option<String>,
+    /// The tabs as they were when the window was told to close, before they closed: the last session.
+    pub(super) last_tabs: Option<Vec<super::project::Tree>>,
     /// The name being typed to keep these tabs as a project.
     naming: Option<String>,
     /// The current tab and room it was last brought into view for.
@@ -351,6 +358,7 @@ impl Workspace {
             panes_area: Rect::NOTHING,
             closing_window: false,
             open_project: None,
+            last_tabs: None,
             naming: None,
             scrolled_for: None,
         }
@@ -427,9 +435,9 @@ impl Workspace {
 
     /// The Projects menu beside +: these tabs kept under a name, and the projects to open.
     pub(super) fn projects_menu(&mut self, ui: &mut egui::Ui) {
-        let all = super::project::list();
         let r = super::icon_menu(ui, ic::ARCHIVE, |ui| {
             super::menu_look(ui);
+            let all = super::project::list();
             ui.set_min_width(260.0);
             if ui.button(format!("{}  Keep these tabs as a project\u{2026}", ic::PLUS)).on_hover_text("Each pane's computer and what it shows, and how the panes divide each tab; never a password").clicked() {
                 self.naming = Some(String::new());
@@ -1374,6 +1382,7 @@ impl Workspace {
             if let Some(yes) = ask(ctx, "Close this window?", &body, "Close window") {
                 self.confirm = None;
                 if yes {
+                    self.last_tabs = Some(self.snapshot());
                     self.close_all();
                     self.closing_window = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);

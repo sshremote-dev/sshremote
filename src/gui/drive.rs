@@ -209,6 +209,8 @@ impl Driver {
                     ctx.content_rect()
                 ));
             }
+            // As the title bar's close button or Alt+F4: the window asks first.
+            "close" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             "fullscreen" => ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(rest.first() == Some(&"on"))),
             "size" => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(num(0)?, num(1)?))),
             "exit" => {

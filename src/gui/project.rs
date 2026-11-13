@@ -54,7 +54,9 @@ impl Tree {
 
     fn to_json(&self) -> Value {
         match self {
-            Tree::Split { below, ratio, a, b } => json!({ "split": if *below { "below" } else { "beside" }, "ratio": ratio, "a": a.to_json(), "b": b.to_json() }),
+            Tree::Split { below, ratio, a, b } => {
+                json!({ "split": if *below { "below" } else { "beside" }, "ratio": (*ratio as f64 * 1000.0).round() / 1000.0, "a": a.to_json(), "b": b.to_json() })
+            }
             Tree::Leaf(Item::Host { address, port, mode }) => json!({ "host": address, "port": port, "mode": mode.key() }),
             Tree::Leaf(Item::Here { mode }) => json!({ "here": mode.key() }),
             Tree::Leaf(Item::Shell { profile }) => json!({ "shell": profile }),
@@ -101,24 +103,51 @@ fn read_from(text: &str) -> Vec<Project> {
         .unwrap_or_default()
 }
 
-/// The projects kept, the last session first, then the newest.
+/// The projects kept, the last session first, then the newest; read again only when the file changed.
 pub(crate) fn list() -> Vec<Project> {
-    let mut all = file().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| read_from(&t)).unwrap_or_default();
+    static SEEN: std::sync::Mutex<Option<(Option<std::time::SystemTime>, u64, Vec<Project>)>> = std::sync::Mutex::new(None);
+    let Some(f) = file() else { return Vec::new() };
+    let stamp = std::fs::metadata(&f).ok().map(|m| (m.modified().ok(), m.len()));
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let (Some((at, len)), Some((was_at, was_len, all))) = (stamp, seen.as_ref())
+        && (at, len) == (*was_at, *was_len)
+    {
+        return all.clone();
+    }
+    let mut all = read().unwrap_or_default();
     all.sort_by_key(|p| (p.name != LAST, std::cmp::Reverse(p.saved)));
+    *seen = stamp.map(|(at, len)| (at, len, all.clone()));
     all
+}
+
+fn read() -> Result<Vec<Project>, String> {
+    Ok(read_from(&Value::Array(raw()?).to_string()))
+}
+
+/// The file's entries as written, so what this build cannot read is kept as it is; an error when
+/// the file is there but is not a list, so it is not written over.
+fn raw() -> Result<Vec<Value>, String> {
+    let Some(f) = file() else { return Ok(Vec::new()) };
+    match std::fs::read_to_string(&f) {
+        Ok(t) => match serde_json::from_str::<Value>(&t) {
+            Ok(Value::Array(a)) => Ok(a),
+            _ => Err(format!("{} could not be read: correct it or move it away first", f.display())),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", f.display())),
+    }
 }
 
 pub(crate) fn get(name: &str) -> Option<Project> {
     list().into_iter().find(|p| p.name == name)
 }
 
-fn write(all: &[Project]) -> Result<(), String> {
+fn write(v: &[Value]) -> Result<(), String> {
     let f = file().ok_or("no settings folder")?;
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
-    let v: Vec<Value> = all.iter().map(|p| json!({ "name": p.name, "saved": p.saved, "tabs": p.tabs.iter().map(Tree::to_json).collect::<Vec<_>>() })).collect();
-    let tmp = f.with_extension("json.new");
+    let tmp = f.with_extension(format!("json.{}.new", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &f).map_err(|e| e.to_string())
 }
@@ -132,15 +161,15 @@ pub(crate) fn save(name: &str, tabs: Vec<Tree>) -> Result<(), String> {
     if tabs.is_empty() {
         return Err("There are no tabs to keep".into());
     }
-    let mut all = list();
-    all.retain(|p| p.name != name);
-    all.push(Project { name: name.to_string(), saved: crate::sys::now_secs(), tabs });
+    let mut all = raw()?;
+    all.retain(|p| p.get("name").and_then(Value::as_str).map(str::trim) != Some(name));
+    all.push(json!({ "name": name, "saved": crate::sys::now_secs(), "tabs": tabs.iter().map(Tree::to_json).collect::<Vec<_>>() }));
     write(&all)
 }
 
 pub(crate) fn remove(name: &str) -> Result<(), String> {
-    let mut all = list();
-    all.retain(|p| p.name != name);
+    let mut all = raw()?;
+    all.retain(|p| p.get("name").and_then(Value::as_str).map(str::trim) != Some(name));
     write(&all)
 }
 
@@ -152,6 +181,26 @@ pub(crate) fn reopen_at_start() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeping one project leaves the others as written, what this build cannot read included,
+    /// and a file that is not a list is never written over.
+    #[test]
+    fn keeping_a_project_leaves_the_rest_of_the_file_alone() {
+        let f = file().unwrap();
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        let odd = json!({ "name": "Later", "tabs": [{ "terminal-of-a-later-build": 1 }] });
+        std::fs::write(&f, Value::Array(vec![odd.clone()]).to_string()).unwrap();
+        save("Mine", vec![Tree::Leaf(Item::Here { mode: PaneMode::Screen })]).unwrap();
+        let all = raw().unwrap();
+        assert_eq!(all[0], odd);
+        assert_eq!(list().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Mine"]);
+        remove("Mine").unwrap();
+        assert_eq!(raw().unwrap(), vec![odd]);
+        std::fs::write(&f, "{ not a list").unwrap();
+        assert!(save("Mine", vec![Tree::Leaf(Item::Here { mode: PaneMode::Screen })]).is_err());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "{ not a list");
+        std::fs::remove_file(&f).unwrap();
+    }
 
     #[test]
     fn a_project_is_read_back_as_it_was_kept() {
