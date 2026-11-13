@@ -36,11 +36,13 @@ pub struct Config {
     pub ask: bool,
     /// What a viewer may do (`grant`), until the person at the screen changes it.
     pub allow: u8,
+    /// Whether computers on this network may find this one by asking (`lan`).
+    pub lan: bool,
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -58,6 +60,7 @@ impl Config {
             enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
             ask: v.get("ask").and_then(|x| x.as_bool()).unwrap_or(false),
             allow: v.get("allow").and_then(|x| x.as_u64()).map_or(crate::grant::ALL, |a| a as u8 & crate::grant::ALL),
+            lan: v.get("lan").and_then(|x| x.as_bool()).unwrap_or(true),
         })
     }
 }
@@ -178,7 +181,7 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL }
+    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -470,6 +473,9 @@ impl Guard {
 /// Keeps this computer reachable by its ID until `keep` says to stop: a line to the relay, a new
 /// connection for each viewer, and the agent run as a process of its own for each.
 pub fn run(keep: impl Fn() -> Option<Config>) {
+    // Computers on this network that ask are told this one's ID, while remote access is on and
+    // that is allowed (one process answers: another that runs it too finds the port taken).
+    thread::spawn(|| crate::lan::answer(|| stored().ok().flatten().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay))));
     let guard = Arc::new(Guard::default());
     let mut wait = 2;
     let mut password = None;

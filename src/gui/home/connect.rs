@@ -88,6 +88,16 @@ enum RowAct {
     Edit,
     Remove,
     ForgetPassword,
+    Wake,
+}
+
+/// Looking for computers on this network: the answer coming, what answered, and what to say.
+#[derive(Default)]
+pub(in crate::gui) struct Lan {
+    coming: Option<std::sync::mpsc::Receiver<Vec<crate::lan::Found>>>,
+    found: Vec<crate::lan::Found>,
+    looked: bool,
+    said: String,
 }
 
 impl App {
@@ -313,8 +323,13 @@ impl App {
                 if ui.add(kit::ghost(format!("{}  Add a computer", ic::PLUS))).on_hover_text("By SSH or by its ID, with a name, a key, a password and tunnels").clicked() {
                     self.sheet = Some(Sheet::new(what));
                 }
+                let busy = self.lan.coming.is_some();
+                if ui.add_enabled(!busy, kit::ghost(format!("{}  On this network", ic::SEARCH))).on_hover_text("Computers nearby with remote access on, found without typing their ID").clicked() {
+                    self.look_on_network(ui.ctx());
+                }
             });
         });
+        self.network_card(ui);
         let searching = !matches!(what, Typed::Empty);
         let mut act: Option<(Entry, RowAct)> = None;
         egui::ScrollArea::vertical().id_salt("computers").auto_shrink([false, false]).show(ui, |ui| {
@@ -376,6 +391,84 @@ impl App {
                     self.error = Some(format!("The password was not forgotten: {e}"));
                 }
             }
+            RowAct::Wake => match crate::lan::wake(&c.mac) {
+                Ok(()) => self.lan.said = format!("Wake-up sent to {}: it may take a minute to come up.", c.label()),
+                Err(e) => self.error = Some(format!("{} was not woken: {e}", c.label())),
+            },
+        }
+    }
+
+    /// Asks this network who is there, in the background.
+    fn look_on_network(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::lan::find(std::time::Duration::from_millis(1500)));
+            ctx.request_repaint();
+        });
+        self.lan = Lan { coming: Some(rx), ..Default::default() };
+    }
+
+    /// What answered on this network, each with a way to add it; or that nothing did.
+    fn network_card(&mut self, ui: &mut egui::Ui) {
+        if let Some(found) = self.lan.coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            (self.lan.coming, self.lan.found, self.lan.looked) = (None, found, true);
+        }
+        if self.lan.coming.is_none() && !self.lan.looked && self.lan.said.is_empty() {
+            return;
+        }
+        let mut close = false;
+        let mut add = None;
+        kit::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("On this network").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text("Close").clicked();
+                });
+            });
+            if !self.lan.said.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&self.lan.said).color(super::super::brand())).wrap());
+            }
+            if self.lan.coming.is_some() {
+                kit::loading(ui, "Asking the computers nearby\u{2026}");
+                return;
+            }
+            if !self.lan.looked {
+                return;
+            }
+            if self.lan.found.is_empty() {
+                ui.add(egui::Label::new(RichText::new("No computer answered. Those with remote access on, and finding allowed in its settings, answer here; a firewall may keep the question out.").weak().size(12.5)).wrap());
+                return;
+            }
+            for f in &self.lan.found {
+                ui.horizontal(|ui| {
+                    kit::mark(ui, ic::GLOBE, super::super::brand());
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(if f.name.is_empty() { "A computer" } else { &f.name }).strong());
+                        ui.label(RichText::new(format!("ID {}  ·  {}", crate::computers::spaced(&f.id), f.ip)).weak().size(12.0));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let known = self.computers.iter().any(|c| c.id() == Some(f.id.as_str()));
+                        if known {
+                            ui.label(RichText::new("In the list").weak().size(12.5));
+                        } else if ui.add(kit::secondary("Add")).clicked() {
+                            add = Some(f.clone());
+                        }
+                    });
+                });
+            }
+        });
+        ui.add_space(kit::GAP);
+        if let Some(f) = add {
+            crate::computers::update(&f.address(), |c| {
+                c.name = f.name.clone();
+                c.mac = f.mac.clone();
+            });
+            self.computers_at = None;
+            self.lan.said = format!("{} was added: open it with its password.", if f.name.is_empty() { "The computer" } else { &f.name });
+        }
+        if close {
+            self.lan = Lan::default();
         }
     }
 
@@ -487,6 +580,9 @@ impl App {
                 }
                 if crate::vault::has(&c.address) && ui.button(format!("{}  Forget the saved password", ic::LOCK_KEY)).clicked() {
                     act = Some(RowAct::ForgetPassword);
+                }
+                if !c.mac.is_empty() && ui.button(format!("{}  Wake it up", ic::LIGHTNING)).on_hover_text(format!("Wake-on-LAN to {}, on this network", c.mac)).clicked() {
+                    act = Some(RowAct::Wake);
                 }
                 if !c.in_ssh_config && ui.button(format!("{}  Remove from the list", ic::TRASH)).clicked() {
                     act = Some(RowAct::Remove);

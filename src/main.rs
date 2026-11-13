@@ -43,6 +43,7 @@ mod hostctl;
 mod porttunnel;
 mod here;
 mod hosts;
+mod lan;
 #[cfg(windows)]
 #[cfg(feature = "gui")]
 mod keygrab;
@@ -113,6 +114,8 @@ usage: sshremote                       open the window: connect screen, recent h
                                   --view text or markdown starts the first in that view; -- runs CMD
        sshremote module [list | on ID | off ID]   turn parts of the app on or off
        sshremote here                  how others reach this computer: its name, addresses and ID
+       sshremote find                  computers on this network with remote access on
+       sshremote wake MAC|ADDRESS      wake a computer by its network card (Wake-on-LAN)
        sshremote web [--listen ADDR] [--password-file F]
                                   terminals in a browser: this computer and its ~/.ssh/config hosts
        sshremote ext list|available|install FILE-OR-ID|update|remove ID|roll-back ID|pack DIR OUT.sshx|new DIR|dev DIR
@@ -121,7 +124,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
-       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|install|uninstall]
+       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|install|uninstall]
                                        this computer reachable by ID and password through a relay
        sshremote --install-service | --uninstall-service
                                   Windows: add or remove the service alone (remote-access install
@@ -453,6 +456,22 @@ fn run(args: &[String]) -> Result<(), String> {
         "ext" => ext::cli(&args[1..]),
         "module" => modules::cli(&args[1..]),
         "here" => here::cli(),
+        // Computers nearby with remote access on, and waking one by its network card.
+        "find" => {
+            let found = lan::find(std::time::Duration::from_secs(2));
+            if found.is_empty() {
+                println!("No computer answered on this network.");
+            }
+            for f in found {
+                println!("{}  {}  {}  {}  {}", computers::spaced(&f.id), f.ip, f.name, f.mac, f.address());
+            }
+            Ok(())
+        }
+        "wake" => {
+            let what = args.get(1).ok_or("usage: sshremote wake MAC | ADDRESS")?;
+            let mac = if lan::parse_mac(what).is_some() { what.clone() } else { computers::get(what).map(|c| c.mac).filter(|m| !m.is_empty()).ok_or("no hardware address is known for it")? };
+            lan::wake(&mac).map(|()| println!("Wake-up sent to {mac}."))
+        }
         // The gateway browsers reach terminals through (sshremote.dev/web).
         #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),

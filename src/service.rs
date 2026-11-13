@@ -79,6 +79,9 @@ fn stopped() -> bool {
 
 /// Installs and starts the service, and lets services raise Ctrl+Alt+Del. Needs an elevated
 /// prompt. The service runs a copy of this program kept under Program Files.
+/// The firewall rule for questions from computers on this network.
+const FIREWALL: &str = "SSH Remote (found on this network)";
+
 pub fn install() -> Result<(), String> {
     let here = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = installed_exe().ok_or("Program Files was not found")?;
@@ -127,6 +130,12 @@ pub fn install() -> Result<(), String> {
     );
     // SoftwareSASGeneration = 1: services may simulate Ctrl+Alt+Del.
     run("reg", &["add", POLICY_KEY, "/v", "SoftwareSASGeneration", "/t", "REG_DWORD", "/d", "1", "/f"])?;
+    // Computers on this network may ask for it (`lan`); the firewall lets their question in, to it alone.
+    let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
+    let _ = run(
+        "netsh",
+        &["advfirewall", "firewall", "add", "rule", &format!("name={FIREWALL}"), "dir=in", "action=allow", "protocol=UDP", &format!("localport={}", crate::lan::PORT), &format!("program={}", exe.display())],
+    );
     run("sc", &["start", NAME])?;
     println!("sshremote service installed and started ({bin})");
     Ok(())
@@ -136,6 +145,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = run("sc", &["stop", NAME]);
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
+    let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
     // Its copy goes too, once its process has let go of it.
     if let Some(exe) = installed_exe() {
         for _ in 0..50 {

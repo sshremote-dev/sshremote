@@ -46,6 +46,8 @@ pub(in crate::gui) struct Sheet {
     id: String,
     relay: String,
     password: String,
+    /// Its network card's hardware address, for waking it.
+    mac: String,
     tunnels: Vec<TunnelForm>,
     problem: Option<String>,
     sure_to_remove: bool,
@@ -69,6 +71,7 @@ impl Sheet {
             id: String::new(),
             relay: String::new(),
             password: String::new(),
+            mac: String::new(),
             tunnels: Vec::new(),
             problem: None,
             sure_to_remove: false,
@@ -111,6 +114,7 @@ impl Sheet {
             s.port = c.port.map(|p| p.to_string()).unwrap_or_default();
         }
         s.tunnels = c.tunnels.iter().map(|t| TunnelForm { kind: t.kind, port: t.port.to_string(), dest: t.dest.clone(), auto: t.start_with_app }).collect();
+        s.mac = c.mac.clone();
         s
     }
 
@@ -179,12 +183,17 @@ impl Sheet {
                 crate::tools::remove_config_entry(&self.was)?;
             }
         }
+        let mac = self.mac.trim().to_lowercase().replace('-', ":");
+        if !mac.is_empty() && crate::lan::parse_mac(&mac).is_none() {
+            return Err("The hardware address is six pairs of hex digits, such as 3c:52:82:1a:2b:3c.".into());
+        }
         let (name, favorite) = (self.name.trim().to_string(), self.favorite);
         crate::computers::update(&address, |c| {
             c.name = name;
             c.favorite = favorite;
             c.port = port;
             c.tunnels = tunnels;
+            c.mac = mac;
         });
         if !self.password.is_empty() {
             crate::vault::set(&address, &std::mem::take(&mut self.password))?;
@@ -316,6 +325,10 @@ impl App {
                             s.port = s.entry.port.clone();
                         }
                     }
+                    kit::row(ui, "Wake address", |ui| {
+                        ui.add(kit::field(&mut s.mac, "its network card's, to wake it (optional)"))
+                            .on_hover_text("Wake-on-LAN: the hardware address of its network card, such as 3c:52:82:1a:2b:3c; computers found on this network bring theirs")
+                    });
                     let saved_pw = !new && crate::vault::has(&s.was);
                     kit::row(ui, "Password", |ui| {
                         let hint = if saved_pw { "saved: type to replace it" } else if s.by_id { "the one set on that computer" } else { "none: your SSH keys sign in" };

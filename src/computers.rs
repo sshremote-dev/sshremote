@@ -26,6 +26,8 @@ pub struct Computer {
     /// An alias of ~/.ssh/config, whose user, port and key are kept there.
     pub in_ssh_config: bool,
     pub tunnels: Vec<Tunnel>,
+    /// Its network card's hardware address, to wake it (Wake-on-LAN); empty: not known.
+    pub mac: String,
 }
 
 impl Computer {
@@ -54,6 +56,7 @@ impl Computer {
             "favorite": self.favorite,
             "last": self.last_used,
             "tunnels": self.tunnels.iter().map(Tunnel::to_json).collect::<Vec<_>>(),
+            "mac": self.mac,
         })
     }
 
@@ -67,6 +70,7 @@ impl Computer {
             last_used: v.get("last").and_then(Value::as_u64).unwrap_or(0),
             in_ssh_config: false,
             tunnels: v.get("tunnels").and_then(Value::as_array).map(|a| a.iter().filter_map(Tunnel::from_json).collect()).unwrap_or_default(),
+            mac: v.get("mac").and_then(Value::as_str).filter(|m| crate::lan::parse_mac(m).is_some()).unwrap_or("").to_string(),
         })
     }
 }

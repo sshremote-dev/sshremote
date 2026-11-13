@@ -314,6 +314,11 @@ impl App {
                     ui.add(
                         egui::Label::new(RichText::new("They always see the screen. The person at the computer can change these for a session in its window.").weak().size(12.0)).wrap(),
                     );
+                    ui.add_space(8.0);
+                    if ui.checkbox(&mut cfg.lan, "Let computers on this network find this one").changed() {
+                        changed = true;
+                    }
+                    ui.add(egui::Label::new(RichText::new("They are told its ID, name and network card, never its password, and can add it without typing the ID.").weak().size(12.0)).wrap());
                 });
                 ui.add_space(kit::GAP);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(theme::primary("Done")).clicked()).inner
