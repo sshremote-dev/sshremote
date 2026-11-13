@@ -204,6 +204,7 @@ impl App {
         if open_settings {
             // The relay field starts from the one in use; emptied, Use goes back to the default.
             self.access.relay = cfg.relay.clone();
+            self.access.from = cfg.from.clone();
             self.access_sheet_open = true;
         }
         if changed {
@@ -438,6 +439,30 @@ impl App {
                         ui.add(
                             egui::Label::new(
                                 RichText::new("Once the password is right, the two computers look for a path between them that skips the relay, and move to it if there is one: quicker, and the relay no longer carries the session. Each then knows the other's address.")
+                                    .weak()
+                                    .size(12.0),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Only from these addresses").strong());
+                        let bad = access::bad_ranges(&self.access.from);
+                        let typed = access::tidy_ranges(&self.access.from);
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 70.0).max(120.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.access.from).hint_text("Anywhere").desired_width(w).margin(egui::Margin::symmetric(8, 6)));
+                            if ui.add_enabled(bad.is_empty() && typed != cfg.from, kit::secondary("Use")).clicked() {
+                                cfg.from = typed.clone();
+                                self.access.from = typed;
+                                changed = true;
+                            }
+                        });
+                        if !bad.is_empty() {
+                            ui.label(RichText::new(format!("Not an address or a range: {}", bad.join(", "))).color(super::super::bad()).size(12.0));
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Addresses or ranges, like 203.0.113.7 or 192.168.1.0/24: nobody comes in from anywhere else, even with the password. Through the relay, it is where the relay sees the viewer from; through a web page, the address of its server. Empty: from anywhere.")
                                     .weak()
                                     .size(12.0),
                             )

@@ -78,6 +78,29 @@ address. The older `recent.txt`, `favorites.txt` and `seen.txt` are read once in
 Passwords stay in the system's password store, keyed by the computer's address. The window, the
 web gateway and the terminal picker all read this one list.
 
+## Who comes in by ID
+
+The viewer speaks first: two bytes of length, whose top bits say a one-time password (0x8000) or
+none at all (0x4000, a request), then its SPAKE2 message. The agent answers with its own, made with
+the password that kind names; then each proves the key with a sealed confirmation, the viewer
+first, so a guess is counted before the agent says anything about it.
+
+A request's password is public ("sshremote request"), so what stands between the two is the
+six-digit code both screens show, from the key (HKDF, "sshremote code"). For that to hold, the
+viewer sends only the SHA-256 of its message first and shows the message once it has the
+agent's: someone in the middle has to pick its own part before it sees the other, and cannot
+search for one that makes the two codes match. The agent takes the request (one at a time, five
+seconds after the last, held at most 70 s while the person decides) when the hash comes, so
+stopping short counts as a try. Until the person lets them in, nothing about the computer's
+addresses goes out: its offer of a straight path waits for the first 32 KB of the session, which
+only a screen let in sends.
+
+A computer can list the addresses viewers may come from. Through the relay (1.2 and later) it is
+told, before each call, where the relay sees the viewer from (`from NONCE ADDRESS`, a line older
+agents pass over); a viewer from elsewhere is answered 0xfffe in place of the agent's message
+and told why. Without the line (an older relay) nobody comes in past a list. A change of the
+settings ends the sessions it would no longer let in.
+
 ## Straight paths by ID (NAT hole punching)
 
 A session by ID starts on the relay. After the password check an agent that may go straight
@@ -109,8 +132,10 @@ order, with the top bit of the length set, and sent only to a side known to read
 The UDP stream (`udp`) numbers packets of at most 1180 bytes and acknowledges ranges: losses are
 found by later packets arriving (by time and by count) and by timeouts, a lone tail packet is sent
 again early, the window halves on loss and grows as TCP's, and the receiver's room limits the
-sender. Every packet carries the tag; twenty seconds of nothing ends it, and a viewer whose
-straight path was lost uses the relay for that ID for ten minutes. The web gateway, beside the
+sender. Every packet carries the tag; twenty seconds of nothing ends it, as the session's own
+idle limit does, and a viewer whose straight path was lost uses the relay for that ID for ten
+minutes. A viewer that named a path waits three seconds more for its answer, since the agent
+moves on the naming; an agent that ends delivers what it wrote (why it ended) before the end. The web gateway, beside the
 relay, does not look for one.
 
 ## Order of work

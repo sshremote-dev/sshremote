@@ -159,8 +159,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
     if let Some(f) = crate::access::state_file() {
-        let _ = std::fs::remove_file(&f);
-        let _ = f.parent().map(std::fs::remove_dir);
+        let _ = f.parent().map(std::fs::remove_dir_all);
     }
     // Its copy goes too, once its processes have let go of it (the icon's notices the service
     // went within a few seconds).
@@ -211,6 +210,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     std::thread::spawn(|| {
         let mut said = String::new();
         let mut shown = false;
+        let _ = crate::access::secure_shared_folder();
         loop {
             crate::access::take_end_requests();
             crate::access::publish_state(&mut said);

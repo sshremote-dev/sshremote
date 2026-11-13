@@ -132,7 +132,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
                                 straight|lan|direct|requests on|off|passwords lasting|one-time|both|one-time|
-                                viewers|end N|install|uninstall|service start|stop]
+                                from ADDRESS|RANGE...|anywhere|viewers|end N|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay
        sshremote --tray                Windows: the icon in the notification area for the service (remote
                                   access, who comes in, the service); started with each sign-in

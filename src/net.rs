@@ -151,6 +151,13 @@ struct Line {
     ended: AtomicBool,
     /// Asked without a password: the code this side shows.
     code: Option<String>,
+    /// The agent's side of a request: no straight path (and none of this computer's addresses
+    /// told) until the person at the screen let them in, which the first pictures of the screen
+    /// show; before that the agent sends a few words at most. Counts what has been sent.
+    held: AtomicBool,
+    sent: AtomicU64,
+    /// How long the stream may be silent before a read fails, on whichever path it runs.
+    idle: Mutex<Option<Duration>>,
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -188,6 +195,9 @@ impl Line {
         if self.ended.load(Ordering::Acquire) {
             path.end();
             return;
+        }
+        if let Some(d) = *guard(&self.idle) {
+            path.set_idle(d);
         }
         *guard(&self.udp) = Some(path.clone());
         self.udp_ready.notify_all();
@@ -239,7 +249,7 @@ impl Line {
                 }
                 let Ok(peers) = rx.recv_timeout(MOVE_WAIT) else { return };
                 path.punch(tag, &peers, start(first, true));
-                if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
+                if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                     line.go_straight(path.stream(), to);
                     return;
                 }
@@ -250,6 +260,9 @@ impl Line {
     /// The viewer offered its addresses: the agent answers with its own and tries them.
     fn offered(self: &Arc<Self>, tag: [u8; 8], first: &str, peers: Vec<SocketAddr>) {
         let Some(p) = self.punch.clone().filter(|p| !p.viewer) else { return };
+        if self.held.load(Ordering::Acquire) {
+            return;
+        }
         if self.tried.fetch_add(1, Ordering::AcqRel) >= 3 || self.moved.load(Ordering::Acquire) != 0 {
             return;
         }
@@ -262,7 +275,7 @@ impl Line {
                 return;
             }
             path.punch(tag, &peers, start);
-            if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + Duration::from_secs(1)) {
+            if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                 line.go_straight(path.stream(), to);
             }
         });
@@ -283,9 +296,23 @@ impl Ender {
         }
     }
 
-    /// How long the first connection may be silent before a read on it fails.
+    /// Ends it once what was written has gone out: the last words (why it ended) arrive.
+    pub fn finish(&self) {
+        self.0.ended.store(true, Ordering::Release);
+        if let Some(u) = guard(&self.0.udp).as_ref() {
+            u.finish();
+        }
+        let _ = self.0.tcp.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// How long the stream may be silent before a read on it fails, on the first connection
+    /// and on a straight path it moves to.
     pub fn set_idle_limit(&self, d: Duration) {
+        *guard(&self.0.idle) = Some(d);
         let _ = self.0.tcp.set_read_timeout(Some(d));
+        if let Some(u) = guard(&self.0.udp).as_ref() {
+            u.set_idle(d);
+        }
     }
 
     /// Where the straight path goes, once the stream runs on one.
@@ -310,6 +337,13 @@ impl SealedWriter {
             return Ok(());
         }
         let r = self.line.frame(&self.buf, false);
+        if r.is_ok() && self.line.held.load(Ordering::Acquire) && self.line.sent.fetch_add(self.buf.len() as u64, Ordering::AcqRel) + self.buf.len() as u64 >= LET_IN_SHOWN {
+            self.line.held.store(false, Ordering::Release);
+            // Let in: now this side can look for a straight path (an empty frame says so).
+            if self.line.punch.is_some() {
+                let _ = self.line.frame(&[], false);
+            }
+        }
         self.buf.clear();
         r
     }
@@ -514,6 +548,45 @@ const BUSY: &[u8] = b"sshremote/1 busy!";
 /// What a viewer is told then.
 pub const NO_REQUESTS: &str = "that computer lets nobody in without its password: ask for it";
 pub const REQUEST_BUSY: &str = "the person at that computer is answering someone else now; try again in a moment";
+/// What the agent sends in place of its part of the exchange to a viewer at an address it does
+/// not take (`access::Config::from`); older viewers read it as a bad exchange.
+const NOT_FROM_HERE: u16 = 0xfffe;
+pub const NOT_FROM_HERE_WORDS: &str = "that computer takes viewers only from some addresses, and not from where you are";
+
+/// Turns a viewer away for where it is, once its part of the exchange is read (so the connection
+/// ends cleanly, and it hears why).
+pub fn turn_away_address(s: &mut TcpStream) {
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut len = [0u8; 2];
+    if s.read_exact(&mut len).is_ok() {
+        let n = (u16::from_le_bytes(len) & !(ONE_TIME | REQUEST)) as usize;
+        let mut theirs = vec![0u8; n.min(256)];
+        let _ = s.read_exact(&mut theirs);
+        let _ = s.write_all(&NOT_FROM_HERE.to_le_bytes());
+        let _ = s.flush();
+    }
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let _ = s.read(&mut [0u8; 64]);
+}
+
+/// What an agent sends past a request's answer once the person let them in (the screen's first
+/// pictures); never before.
+const LET_IN_SHOWN: u64 = 32 * 1024;
+/// A request commits to its part of the exchange first (its hash), and shows it only once it has
+/// the agent's: nobody between can then pick a part of their own that makes the codes match.
+const COMMIT: usize = 32;
+
+fn commitment(msg: &[u8]) -> [u8; COMMIT] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"sshremote request commit");
+    h.update(msg);
+    h.finalize().into()
+}
+
+/// What a viewer that asked is told when the computer closes before the exchange.
+const NO_REQUESTS_OR_OLD: &str = "that computer lets nobody in without its password (or runs an older SSH Remote): ask for it";
+
 /// What one-time passwords are made of: no letters or digits that read alike.
 const ONE_TIME_SET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
@@ -571,6 +644,8 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
     // The viewer speaks first, saying whether it gives a one-time password; the agent answers
     // with the password that says (older agents speak at once: the viewer's turn comes first
     // either way).
+    // The agent's answer to a request, decided when it is committed.
+    let mut answer: Option<&[u8]> = None;
     let (state, msg, theirs, mut came) = match side {
         Side::Viewer(_) => {
             let once = looks_one_time(password);
@@ -584,16 +659,26 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             };
             let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(given.as_bytes()), &a, &b);
             let flag = if once { ONE_TIME } else if request { REQUEST } else { 0 };
-            s.write_all(&(msg.len() as u16 | flag).to_le_bytes())?;
-            s.write_all(&msg)?;
+            if request {
+                s.write_all(&(COMMIT as u16 | flag).to_le_bytes())?;
+                s.write_all(&commitment(&msg))?;
+            } else {
+                s.write_all(&(msg.len() as u16 | flag).to_le_bytes())?;
+                s.write_all(&msg)?;
+            }
             let mut len = [0u8; 2];
             if let Err(e) = s.read_exact(&mut len) {
                 // A computer that will not check a password now hangs up before the exchange.
-                return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                return Err(if e.kind() == io::ErrorKind::UnexpectedEof && request {
+                    io::Error::new(io::ErrorKind::PermissionDenied, NO_REQUESTS_OR_OLD)
+                } else if e.kind() == io::ErrorKind::UnexpectedEof {
                     io::Error::new(io::ErrorKind::ConnectionRefused, "the computer turned the call away: it is busy, or it stopped taking passwords after too many wrong ones")
                 } else {
                     e
                 });
+            }
+            if u16::from_le_bytes(len) == NOT_FROM_HERE {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_FROM_HERE_WORDS));
             }
             // Both sides' messages are the same size: anything else is not this program.
             if u16::from_le_bytes(len) as usize != msg.len() {
@@ -601,6 +686,11 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             }
             let mut theirs = vec![0u8; msg.len()];
             s.read_exact(&mut theirs)?;
+            // The agent's part is in: now this side's, which the hash sent first binds.
+            if request {
+                s.write_all(&(msg.len() as u16).to_le_bytes())?;
+                s.write_all(&msg)?;
+            }
             let came = if once {
                 Came::OneTime
             } else if request {
@@ -610,13 +700,14 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             };
             (state, msg, theirs, came)
         }
-        Side::Agent { permanent, one_time, .. } => {
+        Side::Agent { permanent, one_time, requests } => {
             let mut len = [0u8; 2];
             s.read_exact(&mut len)?;
             let len = u16::from_le_bytes(len);
             let (once, request) = (len & ONE_TIME != 0, len & REQUEST != 0 && len & ONE_TIME == 0);
-            // A password this computer does not take (one-time passwords off, or only they on)
-            // is one nobody knows: the guess is checked, and counted, as any wrong one.
+            // One that looks one-time where none are taken is checked as the lasting one (set
+            // before one-time passwords, it may look like one); a lasting one where only one-time
+            // ones are taken is one nobody knows. Either way a wrong guess counts as any other.
             let unknown = crate::sys::hex(&crate::sys::random(24));
             let pw = if request {
                 REQUEST_WORDS
@@ -626,13 +717,43 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
                 permanent.unwrap_or(&unknown)
             };
             let (state, msg) = Spake2::<Ed25519Group>::start_b(&Password::new(pw.trim().as_bytes()), &a, &b);
-            if (len & !(ONE_TIME | REQUEST)) as usize != msg.len() {
-                return Err(io::Error::other("bad key exchange"));
-            }
-            let mut theirs = vec![0u8; msg.len()];
-            s.read_exact(&mut theirs)?;
-            s.write_all(&(msg.len() as u16).to_le_bytes())?;
-            s.write_all(&msg)?;
+            let theirs = if request {
+                // Only its hash first (an older viewer sends its part at once: turned away).
+                if (len & !(ONE_TIME | REQUEST)) as usize != COMMIT {
+                    return Err(io::Error::other("bad key exchange: a request from an older viewer"));
+                }
+                let mut commit = [0u8; COMMIT];
+                s.read_exact(&mut commit)?;
+                // Taken or not now, before this side's part is seen: whoever stops short of
+                // showing theirs has had their try, and waits like everyone else.
+                answer = Some(match requests {
+                    None => NEEDS_PASSWORD,
+                    Some(take) if !take() => BUSY,
+                    Some(_) => CONFIRM,
+                });
+                s.write_all(&(msg.len() as u16).to_le_bytes())?;
+                s.write_all(&msg)?;
+                let mut len = [0u8; 2];
+                s.read_exact(&mut len)?;
+                if u16::from_le_bytes(len) as usize != msg.len() {
+                    return Err(io::Error::other("bad key exchange"));
+                }
+                let mut theirs = vec![0u8; msg.len()];
+                s.read_exact(&mut theirs)?;
+                if commitment(&theirs) != commit {
+                    return Err(io::Error::other("bad key exchange: not what the request committed to"));
+                }
+                theirs
+            } else {
+                if (len & !(ONE_TIME | REQUEST)) as usize != msg.len() {
+                    return Err(io::Error::other("bad key exchange"));
+                }
+                let mut theirs = vec![0u8; msg.len()];
+                s.read_exact(&mut theirs)?;
+                s.write_all(&(msg.len() as u16).to_le_bytes())?;
+                s.write_all(&msg)?;
+                theirs
+            };
             let came = if request {
                 Came::Request(String::new())
             } else if once && one_time.is_some() {
@@ -669,6 +790,9 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
         tried: AtomicU8::new(0),
         ended: AtomicBool::new(false),
         code: if let Came::Request(c) = &came { Some(c.clone()) } else { None },
+        held: AtomicBool::new(!viewer && matches!(came, Came::Request(_))),
+        sent: AtomicU64::new(0),
+        idle: Mutex::new(None),
     });
     let mut w = SealedWriter { line: line.clone(), buf: Vec::new() };
     let mut r = SealedReader { line, wire: Wire::Tcp(s), seal: Sealer::new(&recv), plain: Vec::new(), at: 0, limit: CONFIRM.len() };
@@ -685,7 +809,8 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => io::Error::new(io::ErrorKind::PermissionDenied, what.to_string()),
             _ => e,
         };
-        r.read_exact(&mut got).map_err(|e| refused(e, "wrong password"))?;
+        // A computer that does not know requests takes one for a wrong password.
+        r.read_exact(&mut got).map_err(|e| refused(e, if matches!(came, Came::Request(_)) { NO_REQUESTS_OR_OLD } else { "wrong password" }))?;
         // A request the computer does not take, or not now.
         if got == NEEDS_PASSWORD {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, NO_REQUESTS));
@@ -710,21 +835,14 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
         if !r.open(&ct).is_ok_and(|p| p == CONFIRM) {
             return Err(io::Error::other("bad key exchange"));
         }
-        let Side::Agent { requests, .. } = side else { unreachable!() };
-        let answer = match requests {
-            None => NEEDS_PASSWORD,
-            Some(take) if !take() => BUSY,
-            Some(_) => CONFIRM,
-        };
+        let answer = answer.unwrap_or(NEEDS_PASSWORD);
         w.write_all(answer)?;
         w.flush()?;
         if answer != CONFIRM {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a request without the password, not taken"));
         }
         got.copy_from_slice(CONFIRM);
-        if w.line.punch.is_some() {
-            w.line.frame(&[], false)?;
-        }
+        // The empty frame that offers a straight path waits until they are let in (`held`).
     } else {
         // The proof is read as it comes; checking it waits on the judge, with no deadline
         // meanwhile (the network's part is over).
@@ -966,6 +1084,52 @@ mod tests {
         assert_eq!(r2.join().unwrap().unwrap(), sent2);
     }
 
+    /// Someone who asked without a password learns nothing of the computer's addresses, and
+    /// goes no straight path, until let in (the screen's first pictures come).
+    #[test]
+    fn a_request_goes_straight_only_once_let_in() {
+        let relay = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let at = relay.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            let mut b = [0u8; 256];
+            while let Ok((n, from)) = relay.recv_from(&mut b) {
+                if let Some(a) = crate::udp::reflect_answer(&b[..n], from) {
+                    let _ = relay.send_to(&a, from);
+                }
+            }
+        });
+        let p = |viewer| Some(Punch { viewer, relay: at.clone(), id: String::new() });
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let agent_punch = p(false);
+        let agent = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let take = || true;
+            handshake_agent_passwords(s, Some("lasting"), None, Some(&take), None, &now, agent_punch).unwrap()
+        });
+        let (vr, vw) = handshake_2fa(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now, None, p(true)).unwrap();
+        let (ar, aw, came) = agent.join().unwrap();
+        assert!(matches!(came, Came::Request(_)));
+        let (ve, ae) = (vw.ender(), aw.ender());
+        let (r1, r2) = (reader(ar, 7), reader(vr, 8));
+        thread::sleep(Duration::from_secs(2));
+        assert!(ve.straight().is_none() && ae.straight().is_none(), "nothing straight while asking");
+        let stop = Arc::new(AtomicBool::new(false));
+        let w2 = writer(aw, stop.clone(), 8);
+        let started = std::time::Instant::now();
+        while (ve.straight().is_none() || ae.straight().is_none()) && started.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ve.straight().is_some() && ae.straight().is_some(), "straight once the screen flows");
+        stop.store(true, Ordering::Release);
+        let sent2 = w2.join().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        drop(vw);
+        ve.end();
+        assert_eq!(r2.join().unwrap().unwrap(), sent2);
+        let _ = r1.join();
+    }
+
     /// A side that does not look for one (an older version, or turned off) keeps the stream
     /// where it is, and nothing extra reaches it.
     #[test]
@@ -1201,6 +1365,16 @@ mod tests {
         assert_eq!(ask(Some(false)).0.unwrap_err(), REQUEST_BUSY);
         assert_eq!(ask(None).0.unwrap_err(), NO_REQUESTS);
         assert_eq!((CONFIRM.len(), NEEDS_PASSWORD.len(), BUSY.len()), (17, 17, 17));
+    }
+
+    #[test]
+    fn a_viewer_from_an_address_not_taken_hears_why() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let agent = thread::spawn(move || turn_away_address(&mut l.accept().unwrap().0));
+        let e = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), "lasting", true, &now).map(|_| ()).unwrap_err();
+        assert_eq!((e.kind(), e.to_string().as_str()), (io::ErrorKind::PermissionDenied, NOT_FROM_HERE_WORDS));
+        agent.join().unwrap();
     }
 
     #[test]

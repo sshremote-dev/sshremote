@@ -29,6 +29,9 @@ const DEAD: Duration = Duration::from_secs(20);
 const KEEPALIVE: Duration = Duration::from_secs(2);
 /// How long both sides try before the session stays on the relay.
 pub const PUNCH_LIMIT: Duration = Duration::from_secs(6);
+/// How much longer the viewer waits for the answer to a path it named: the agent moves on the
+/// naming, so the viewer giving up just then would leave the two on different paths.
+pub const NOMINATE_GRACE: Duration = Duration::from_secs(3);
 const ACK_DELAY: Duration = Duration::from_millis(3);
 /// One side waits this long before it probes (or until it hears from the other), so the other
 /// side's router has seen its side send first. A probe that reaches a router before its side sent
@@ -111,6 +114,9 @@ struct State {
     opening: bool,
     /// Its IPv4 probes still die two hops out until then (`Start::Low`).
     low_until: Option<Instant>,
+    /// A read fails after this long without new data (`Stream::set_idle`); when data last came.
+    idle: Option<Duration>,
+    got: Instant,
     // Sending: packets numbered from 0, kept until the other side has them.
     seq: u32,
     queue: VecDeque<u8>,
@@ -163,6 +169,8 @@ impl State {
             nominate_at: None,
             opening: false,
             low_until: None,
+            idle: None,
+            got: now,
             seq: 0,
             queue: VecDeque::new(),
             flight: BTreeMap::new(),
@@ -457,6 +465,7 @@ impl Inner {
         }
         if seq == st.expect {
             let gap = !st.ahead.is_empty();
+            st.got = Instant::now();
             st.ready.extend(payload);
             st.expect += 1;
             while let Some(p) = st.ahead.remove(&st.expect) {
@@ -555,7 +564,8 @@ impl Inner {
                     st.opening = false;
                     st.next_probe = now;
                 }
-                if now >= st.started + PUNCH_LIMIT {
+                let grace = if st.nominee.is_some() { NOMINATE_GRACE } else { Duration::ZERO };
+                if now >= st.started + PUNCH_LIMIT + grace {
                     st.phase = Phase::Done;
                     st.error = Some(io::ErrorKind::TimedOut);
                     self.cv.notify_all();
@@ -592,7 +602,7 @@ impl Inner {
                     st.nominee = st.working.iter().min_by_key(|a| rank(a)).copied();
                     st.next_nominate = now;
                 }
-                let mut next = if st.opening { st.started + OPENING } else { st.next_probe.min(st.started + PUNCH_LIMIT) };
+                let mut next = if st.opening { st.started + OPENING } else { st.next_probe.min(st.started + PUNCH_LIMIT + grace) };
                 if st.nominee.is_none()
                     && let Some(at) = st.nominate_at
                 {
@@ -841,6 +851,22 @@ impl Stream {
     pub fn end(&self) {
         self.0.0.abort();
     }
+
+    /// Ends it once what was written has arrived (or after `LINGER`).
+    pub fn finish(&self) {
+        let mut st = self.0.0.lock();
+        if matches!(st.phase, Phase::Up(_)) {
+            st.closing.get_or_insert_with(Instant::now);
+        }
+        self.0.0.cv.notify_all();
+    }
+
+    /// Reads fail when nothing new comes for `d`, as on a connection with a read timeout.
+    pub fn set_idle(&self, d: Duration) {
+        let mut st = self.0.0.lock();
+        st.idle = Some(d);
+        st.got = Instant::now();
+    }
 }
 
 impl Read for Stream {
@@ -877,7 +903,15 @@ impl Read for Stream {
                     None => Ok(0),
                 };
             }
-            st = inner.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            st = match st.idle {
+                Some(idle) => {
+                    let Some(left) = idle.checked_sub(st.got.elapsed()) else {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "nothing came from the other computer"));
+                    };
+                    inner.cv.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0
+                }
+                None => inner.cv.wait(st).unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
 }
@@ -1212,6 +1246,28 @@ mod tests {
         let mut b = [0u8; 4];
         assert_eq!(a.read(&mut b).unwrap(), 0);
         assert!(a.write_all(b"x").is_err());
+        // Finished while copies are still held (a reader waiting elsewhere): what was written
+        // still arrives, then the end.
+        let (v, mut a) = pair(0);
+        let mut w = v.clone();
+        let big: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        w.write_all(&big).unwrap();
+        v.finish();
+        let mut got = Vec::new();
+        a.read_to_end(&mut got).unwrap();
+        assert_eq!(got, big);
+    }
+
+    /// A read with an idle limit fails once nothing new comes for that long.
+    #[test]
+    fn a_silent_path_times_out_a_read() {
+        let (v, mut a) = pair(0);
+        a.set_idle(Duration::from_millis(400));
+        let started = Instant::now();
+        let mut b = [0u8; 4];
+        assert_eq!(a.read(&mut b).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(390));
+        drop(v);
     }
 
     /// A stranger's packets, without the tag, are not taken.

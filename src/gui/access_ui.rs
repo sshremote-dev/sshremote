@@ -18,6 +18,9 @@ pub(super) struct AccessUi {
     pub(super) totp_new: Option<String>,
     #[cfg(feature = "remote")]
     pub(super) totp_code: String,
+    /// The address list being typed (`Config::from`), kept when Use is pressed.
+    #[cfg(feature = "remote")]
+    pub(super) from: String,
     /// Whether the relay sees this ID now (for which ID and relay), looked up in the background
     /// every few seconds, one lookup at a time.
     pub(super) online: Shared<Option<Online>>,

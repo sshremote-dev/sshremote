@@ -51,6 +51,9 @@ pub struct Config {
     /// Whether someone without a password may ask to come in: the person at the screen then
     /// decides, comparing the code both screens show.
     pub requests: bool,
+    /// Where viewers may come from: addresses and ranges ("203.0.113.7 192.168.1.0/24");
+    /// empty: anywhere. Through the relay, it says where it sees each viewer from.
+    pub from: String,
 }
 
 /// Which passwords remote access takes.
@@ -98,7 +101,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -127,6 +130,7 @@ impl Config {
             one_time: s("one_time").filter(|p| crate::net::looks_one_time(p)).unwrap_or_else(crate::net::new_one_time),
             // Off unless chosen: anyone with the ID could ask.
             requests: v.get("requests").and_then(|x| x.as_bool()).unwrap_or(false),
+            from: s("from").unwrap_or_default(),
         })
     }
 }
@@ -263,6 +267,7 @@ pub fn fresh() -> Config {
         passwords: Passwords::Both,
         one_time: crate::net::new_one_time(),
         requests: false,
+        from: String::new(),
     }
 }
 
@@ -352,9 +357,10 @@ pub fn state() -> State {
     if n > 0 { State::InUse(n) } else { s }
 }
 
-/// The viewers being served: a number, the settings they came in by, and their connection, so a
-/// change of those settings (off, a new password, ID or relay) ends them too.
-static SESSIONS: Mutex<Vec<(u64, String, crate::net::Ender)>> = Mutex::new(Vec::new());
+/// The viewers being served: a number, what let them in, and their connection, so a change of
+/// those settings (off, a new password, ID or relay, requests or that password kind off, their
+/// address no longer listed) ends them too.
+static SESSIONS: Mutex<Vec<(u64, Welcome, crate::net::Ender)>> = Mutex::new(Vec::new());
 
 /// When each viewer came in, by its number, in seconds since 1970.
 static SINCE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
@@ -396,6 +402,11 @@ pub fn publish_state(said: &mut String) {
         return;
     }
     let Some(f) = state_file() else { return };
+    #[cfg(windows)]
+    if f.parent().is_some_and(|d| !d.is_dir()) && secure_shared_folder().is_err() {
+        return;
+    }
+    #[cfg(not(windows))]
     let _ = f.parent().map(std::fs::create_dir_all);
     let tmp = f.with_extension("new");
     if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
@@ -461,18 +472,118 @@ fn end_file() -> Option<PathBuf> {
 /// Asks the service to end viewer `n`'s connection (within a second or two).
 pub fn ask_to_end(n: u64) -> Result<(), String> {
     let f = end_file().ok_or("no folder for the request")?;
-    let mut o = std::fs::OpenOptions::new().create(true).append(true).open(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-    writeln!(o, "{n}").map_err(|e| e.to_string())
+    let failed = |e: io::Error| format!("{}: {e}", f.display());
+    // Windows: the service made the file, and lets anyone add to it and do nothing else; while
+    // it takes what is there, the file is its alone for a moment.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const APPEND_ONLY: u32 = 0x0010_0004;
+        for _ in 0..40 {
+            match std::fs::OpenOptions::new().access_mode(APPEND_ONLY).open(&f) {
+                Ok(mut o) => return o.write_all(format!("{n}\n").as_bytes()).map_err(failed),
+                Err(e) if e.raw_os_error() == Some(32) => thread::sleep(Duration::from_millis(50)),
+                Err(e) => return Err(failed(e)),
+            }
+        }
+        Err(format!("{}: in use", f.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut o = std::fs::OpenOptions::new().create(true).append(true).open(&f).map_err(failed)?;
+        writeln!(o, "{n}").map_err(|e| e.to_string())
+    }
 }
 
-/// Ends the connections the window or the icon asked to end since last time (the service).
+/// Ends the connections the window or the icon asked to end since last time (the service). At
+/// most a few kilobytes are read, whatever was written there.
 pub fn take_end_requests() {
     let Some(f) = end_file() else { return };
-    let Ok(text) = std::fs::read_to_string(&f) else { return };
-    let _ = std::fs::remove_file(&f);
-    for n in text.lines().filter_map(|l| l.trim().parse::<u64>().ok()) {
+    let mut got = Vec::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let Ok(mut file) = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&f) else { return };
+        let _ = (&mut file).take(4096).read_to_end(&mut got);
+        if got.is_empty() {
+            return;
+        }
+        let _ = file.set_len(0);
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(file) = std::fs::File::open(&f) else { return };
+        let _ = file.take(4096).read_to_end(&mut got);
+        let _ = std::fs::remove_file(&f);
+    }
+    for n in String::from_utf8_lossy(&got).lines().filter_map(|l| l.trim().parse::<u64>().ok()) {
         disconnect(n);
     }
+}
+
+/// The service's folder under ProgramData, made safe to share (Windows): made by the service
+/// itself (one someone else made first, or a link elsewhere, is removed), written by it and
+/// administrators alone, read by everyone; and in it `end.txt`, which anyone may add to and
+/// nothing more. Without this a user could own the folder, or files in it, that SYSTEM then
+/// writes, replaces and removes.
+#[cfg(windows)]
+pub fn secure_shared_folder() -> Result<(), String> {
+    let f = state_file().ok_or("no ProgramData folder")?;
+    let dir = f.parent().ok_or("no folder")?.to_path_buf();
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+            let _ = std::fs::remove_dir(&dir).or_else(|_| std::fs::remove_file(&dir));
+        }
+        Ok(_) if !win_owner_is_system(&dir) => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        _ => {}
+    }
+    match std::fs::create_dir(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(format!("{}: {e}", dir.display())),
+        _ => {}
+    }
+    win_set_security(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")?;
+    // What earlier versions left there, made by whoever: gone, then made anew.
+    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let p = e.path();
+        let _ = if e.file_type().is_ok_and(|t| t.is_dir()) { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+    }
+    let end = end_file().ok_or("no folder")?;
+    std::fs::write(&end, b"").map_err(|e| format!("{}: {e}", end.display()))?;
+    win_set_security(&end, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x100004;;;BU)")
+}
+
+#[cfg(windows)]
+fn win_set_security(path: &std::path::Path, sddl: &str) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+    let (sddl, p) = (crate::sys::wide(sddl), crate::sys::wide(&path.to_string_lossy()));
+    let mut sd = std::ptr::null_mut();
+    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } == 0 {
+        return Err("the permissions could not be made".into());
+    }
+    let ok = unsafe { SetFileSecurityW(p.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd) } != 0;
+    unsafe { LocalFree(sd as _) };
+    if ok { Ok(()) } else { Err(format!("{}: {}", path.display(), io::Error::last_os_error())) }
+}
+
+/// Whether SYSTEM or the Administrators group owns `path`.
+#[cfg(windows)]
+fn win_owner_is_system(path: &std::path::Path) -> bool {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{IsWellKnownSid, OWNER_SECURITY_INFORMATION, WinBuiltinAdministratorsSid, WinLocalSystemSid};
+    let p = crate::sys::wide(&path.to_string_lossy());
+    let (mut owner, mut sd) = (std::ptr::null_mut(), std::ptr::null_mut());
+    let r = unsafe { GetNamedSecurityInfoW(p.as_ptr(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &mut owner, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd) };
+    if r != 0 {
+        return false;
+    }
+    let ok = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) != 0 || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0 };
+    unsafe { LocalFree(sd as _) };
+    ok
 }
 
 /// Ends one viewer's connection (the person at this screen chose to).
@@ -484,16 +595,49 @@ pub fn disconnect(viewer: u64) {
     }
 }
 
-/// What a viewer had to know to come in: the ID and password at that relay.
-fn credentials(c: &Config) -> String {
-    format!("{}\n{}\n{}", c.id, c.password, c.relay)
+/// What let a viewer in: the ID at that relay, the password it gave (or that it asked), and
+/// where it came from.
+struct Welcome {
+    id: String,
+    relay: String,
+    came: Came,
+    from: Option<std::net::IpAddr>,
 }
 
-/// Ends every viewer that came in by other settings than `now`; all of them when it is off.
+enum Came {
+    Lasting(String),
+    OneTime(String),
+    Request,
+}
+
+impl Welcome {
+    fn new(c: &Config, came: &crate::net::Came, from: Option<std::net::IpAddr>) -> Welcome {
+        let came = match came {
+            crate::net::Came::Lasting => Came::Lasting(c.password.clone()),
+            crate::net::Came::OneTime => Came::OneTime(c.one_time.clone()),
+            crate::net::Came::Request(_) => Came::Request,
+        };
+        Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from }
+    }
+
+    /// Whether the settings `c` would still let it in.
+    fn still(&self, c: &Config) -> bool {
+        c.enabled
+            && c.id == self.id
+            && c.relay == self.relay
+            && comes_from(&c.from, self.from)
+            && match &self.came {
+                Came::Lasting(p) => c.passwords.lasting() && *p == c.password,
+                Came::OneTime(p) => c.passwords.one_time() && *p == c.one_time,
+                Came::Request => c.requests,
+            }
+    }
+}
+
+/// Ends every viewer the settings `now` would not let in; all of them when it is off.
 fn end_sessions_but(now: Option<&Config>) {
-    let keep = now.map(credentials);
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, k, s)| {
-        let stays = keep.as_ref() == Some(k);
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, w, s)| {
+        let stays = now.is_some_and(|c| w.still(c));
         if !stays {
             s.end();
         }
@@ -713,6 +857,7 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
         let mut heard = std::time::Instant::now();
         let mut pending = Vec::new();
+        let mut seen = std::collections::HashMap::new();
         'line: loop {
             let now = keep();
             // Who is asked, what viewers may do and whether they may go straight apply to the next
@@ -721,6 +866,9 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 (cfg.ask, cfg.allow, cfg.punch, cfg.passwords, cfg.requests) = (k.ask, k.allow, k.punch, k.passwords, k.requests);
                 cfg.totp.clone_from(&k.totp);
                 cfg.one_time.clone_from(&k.one_time);
+                cfg.from.clone_from(&k.from);
+                // Those the new settings would not let in go now.
+                end_sessions_but(Some(k));
             }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -753,7 +901,16 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                     if writeln!(s, "pong").is_err() {
                         break 'line;
                     }
+                } else if let Some((nonce, ip)) = l.strip_prefix("from ").and_then(|r| r.split_once(' ')) {
+                    // Where the relay sees the viewer of the next call from.
+                    if seen.len() >= 64 {
+                        seen.clear();
+                    }
+                    if let Ok(ip) = ip.parse::<std::net::IpAddr>() {
+                        seen.insert(nonce.to_string(), ip);
+                    }
                 } else if let Some(nonce) = l.strip_prefix("call ") {
+                    let from = seen.remove(nonce);
                     // A flood of calls is not answered past a handful at once, nor at all while
                     // no password is taken.
                     if guard.locked() {
@@ -765,7 +922,7 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                     }
                     let (cfg, nonce, guard) = (cfg.clone(), nonce.to_string(), guard.clone());
                     thread::spawn(move || {
-                        answer_call(&cfg, &nonce, &guard);
+                        answer_call(&cfg, &nonce, &guard, from);
                         guard.calls.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
@@ -807,7 +964,8 @@ fn listen_direct(guard: Arc<Guard>) {
                 let guard = guard.clone();
                 thread::spawn(move || {
                     if crate::net::accept_direct(&mut s, &cfg.id) {
-                        serve_call(s, &cfg, &guard, false);
+                        let from = s.peer_addr().ok().map(|a| a.ip());
+                        serve_call(s, &cfg, &guard, false, from);
                     }
                     guard.calls.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -819,18 +977,23 @@ fn listen_direct(guard: Arc<Guard>) {
 
 /// One viewer: a connection of its own through the relay at once (the relay waits only so
 /// long), then the password checked in turn, then the agent.
-fn answer_call(cfg: &Config, nonce: &str, guard: &Guard) {
+fn answer_call(cfg: &Config, nonce: &str, guard: &Guard, from: Option<std::net::IpAddr>) {
     let Ok(mut s) = dial(&cfg.relay) else { return };
     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
         return;
     }
-    serve_call(s, cfg, guard, true);
+    serve_call(s, cfg, guard, true, from);
 }
 
 /// A viewer's connection, by the relay or straight: the password checked in turn, then the agent.
-/// Through the relay, it may move to a straight path through the routers.
-fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
+/// Through the relay, it may move to a straight path through the routers. `from`: where the
+/// viewer is, as far as is known.
+fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from: Option<std::net::IpAddr>) {
+    if !comes_from(&cfg.from, from) {
+        crate::net::turn_away_address(&mut s);
+        return;
+    }
     // The exchange runs at the viewer's pace with nobody waiting on it; only checking its proof
     // of the password takes the turn, after the delay wrong ones have earned.
     let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
@@ -855,32 +1018,42 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
     let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
     // A request without a password: one at a time, and a breath after the last, so nobody can
     // fill the screen with them.
+    let took = std::cell::Cell::new(None);
     let take_request = || {
         let quiet = REQUEST_ENDED.lock().unwrap_or_else(|e| e.into_inner()).is_none_or(|t| t.elapsed() > REQUEST_BREATH);
-        quiet && !REQUEST_IN.swap(true, Ordering::AcqRel)
+        let mut slot = REQUEST_IN.lock().unwrap_or_else(|e| e.into_inner());
+        let ok = quiet && slot.is_none_or(|t| t.elapsed() > REQUEST_HOLD);
+        if ok {
+            let now = std::time::Instant::now();
+            *slot = Some(now);
+            took.set(Some(now));
+        }
+        ok
     };
     let requests: Option<&dyn Fn() -> bool> = cfg.requests.then_some(&take_request as &dyn Fn() -> bool);
-    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch) else { return };
+    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch) else {
+        // Taken, then lost before the end of the exchange (or stopped short of showing its
+        // part): the next request may come, after the same breath.
+        request_done(took.get());
+        return;
+    };
     let once = came == crate::net::Came::OneTime;
     if once {
         ONE_TIME_IN.fetch_add(1, Ordering::AcqRel);
     }
     // Someone who asked is always let in by a click, which the code backs.
     let code = if let crate::net::Came::Request(c) = &came { Some(c.replace(' ', "")) } else { None };
-    struct Request(bool);
+    struct Request(Option<std::time::Instant>);
     impl Drop for Request {
         fn drop(&mut self) {
-            if self.0 {
-                *REQUEST_ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-                REQUEST_IN.store(false, Ordering::Release);
-            }
+            request_done(self.0);
         }
     }
-    let _request = Request(code.is_some());
+    let _request = Request(took.get());
     let grant = if code.is_some() { cfg.grant() | crate::grant::ASK } else { cfg.grant() };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), w.ender()));
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, grant, code.as_deref());
@@ -892,11 +1065,71 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != n);
 }
 
-/// A request without a password is being answered; when the last one ended, and how long after
-/// it the next is taken.
-static REQUEST_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// One address or range of `Config::from`: the address and how many of its first bits count.
+fn range(word: &str) -> Option<(std::net::IpAddr, u32)> {
+    let (a, bits) = match word.split_once('/') {
+        Some((a, b)) => (a, Some(b.parse::<u32>().ok()?)),
+        None => (word, None),
+    };
+    let a = a.parse::<std::net::IpAddr>().ok()?.to_canonical();
+    let most = if a.is_ipv4() { 32 } else { 128 };
+    let bits = bits.unwrap_or(most);
+    (bits <= most).then_some((a, bits))
+}
+
+fn words(from: &str) -> impl Iterator<Item = &str> {
+    from.split(|c: char| c == ',' || c == ';' || c.is_whitespace()).filter(|w| !w.is_empty())
+}
+
+/// The words of an address list that are not an address or a range.
+pub fn bad_ranges(from: &str) -> Vec<String> {
+    words(from).filter(|w| range(w).is_none()).map(str::to_string).collect()
+}
+
+/// An address list as kept: one space between its words.
+pub fn tidy_ranges(from: &str) -> String {
+    words(from).collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a viewer at `ip` may come in, by the list (empty: anyone). Where it is not known (an
+/// older relay does not say), nobody comes in past a list.
+pub fn comes_from(from: &str, ip: Option<std::net::IpAddr>) -> bool {
+    use std::net::IpAddr;
+    let mut list = words(from).peekable();
+    if list.peek().is_none() {
+        return true;
+    }
+    let Some(ip) = ip.map(|i| i.to_canonical()) else { return false };
+    list.filter_map(range).any(|(a, bits)| match (a, ip) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let m = u32::MAX.checked_shl(32 - bits).unwrap_or(0);
+            u32::from(a) & m == u32::from(b) & m
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let m = u128::MAX.checked_shl(128 - bits).unwrap_or(0);
+            u128::from(a) & m == u128::from(b) & m
+        }
+        _ => false,
+    })
+}
+
+/// When the request without a password being answered was taken (it holds the turn while the
+/// person at the screen decides, at most `REQUEST_HOLD`); when the last one ended, and how long
+/// after it the next is taken.
+static REQUEST_IN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static REQUEST_ENDED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 const REQUEST_BREATH: Duration = Duration::from_secs(5);
+const REQUEST_HOLD: Duration = Duration::from_secs(70);
+
+/// The request taken at `taken` is over: its turn is free (unless another has it by now).
+fn request_done(taken: Option<std::time::Instant>) {
+    let Some(taken) = taken else { return };
+    let mut slot = REQUEST_IN.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some_and(|t| t == taken) {
+        *slot = None;
+        *REQUEST_ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+}
 
 /// Sessions in now with the one-time password.
 static ONE_TIME_IN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -955,8 +1188,9 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
                 }
             }
         }
-        // The agent is gone: so is the session, and the viewer's side ends with it.
-        ender.end();
+        // The agent is gone: so is the session, and the viewer's side ends with it, once its
+        // last words (why) are through.
+        ender.finish();
     });
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -1209,6 +1443,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         if c.requests {
             println!("requests: anyone with the ID may ask without a password; you decide, comparing the code you both see");
         }
+        if !c.from.is_empty() {
+            println!("from:     only {}", c.from);
+        }
         println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
         println!("viewers:  may use {}", crate::grant::words(c.allow));
         println!("nearby:   {}", match (c.lan, c.direct) {
@@ -1285,6 +1522,21 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             }
             save(&c)?;
             show(&c);
+            Ok(())
+        }
+        // Where viewers may come from.
+        Some("from") => {
+            let list = args[1..].join(" ");
+            if list.trim().is_empty() {
+                return Err("usage: sshremote remote-access from ADDRESS|RANGE ... | anywhere   (e.g. from 203.0.113.7 192.168.1.0/24)".into());
+            }
+            c.from = if list.trim() == "anywhere" { String::new() } else { tidy_ranges(&list) };
+            let bad = bad_ranges(&c.from);
+            if !bad.is_empty() {
+                return Err(format!("not an address or a range: {} (like 203.0.113.7, 192.168.1.0/24 or 2001:db8::/32)", bad.join(", ")));
+            }
+            save(&c)?;
+            println!("{}", if c.from.is_empty() { "viewers may come from anywhere".to_string() } else { format!("viewers come in only from {}", c.from) });
             Ok(())
         }
         // Who is connected through the service now, and ending one of them.
@@ -1396,6 +1648,21 @@ pub fn cli(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn viewers_come_only_from_the_addresses_listed() {
+        let ip = |a: &str| Some(a.parse::<std::net::IpAddr>().unwrap());
+        assert!(comes_from("", None) && comes_from("  ", ip("8.8.8.8")), "no list: anywhere, known or not");
+        let list = "203.0.113.7, 192.168.1.0/24 2001:db8::/32";
+        assert!(comes_from(list, ip("203.0.113.7")) && !comes_from(list, ip("203.0.113.8")));
+        assert!(comes_from(list, ip("192.168.1.250")) && !comes_from(list, ip("192.168.2.1")));
+        assert!(comes_from(list, ip("2001:db8:1::5")) && !comes_from(list, ip("2001:db9::5")));
+        assert!(comes_from(list, ip("::ffff:192.168.1.9")), "an IPv4 address written as IPv6");
+        assert!(!comes_from(list, None), "where it is not known: not past a list");
+        assert!(comes_from("0.0.0.0/0", ip("1.2.3.4")) && !comes_from("0.0.0.0/0", ip("::1")));
+        assert_eq!(bad_ranges("10.0.0.0/8 10.0.0.0/33 host.example 1.2.3"), ["10.0.0.0/33", "host.example", "1.2.3"]);
+        assert_eq!(tidy_ranges(" 10.0.0.1,,  10.0.0.2 ;"), "10.0.0.1 10.0.0.2");
+    }
     use super::*;
 
     #[test]

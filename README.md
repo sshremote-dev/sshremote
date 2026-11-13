@@ -197,6 +197,7 @@ sshremote remote-access viewers | end N          # who is connected now; end one
 sshremote remote-access passwords lasting|one-time|both  # which passwords viewers may give
 sshremote remote-access one-time                 # a new one-time password now
 sshremote remote-access requests on|off          # people without the password may ask
+sshremote remote-access from 203.0.113.7 10.0.0.0/8   # viewers only from there (or: anywhere)
 sshremote sshremote://ID --password ""           # ask to come in, without a password
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on

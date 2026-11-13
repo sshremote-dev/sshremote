@@ -1357,6 +1357,8 @@ fn plain(e: &str) -> String {
         "That computer is not online: its remote access is off, or it has no network.".into()
     } else if l.contains("without its password") {
         "That computer lets nobody in without its password: type it.".into()
+    } else if l.contains("only from some addresses") {
+        "That computer takes viewers only from some addresses, and this gateway's is not one of them.".into()
     } else if l.contains("answering someone else") {
         "Someone else is asking that computer just now; try again in a few seconds.".into()
     } else if l.contains("authenticator") {
