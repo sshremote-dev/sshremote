@@ -240,7 +240,7 @@ impl App {
         let typed = if self.in_field(&host) { std::mem::take(&mut self.form.password) } else { String::new() };
         // Kept once the connection works (a terminal signs in inside itself: kept at once).
         let by_agent = mode != PaneMode::Terminal || host.starts_with("sshremote://");
-        if !typed.is_empty() && self.form.remember {
+        if !typed.is_empty() && self.form.remember && crate::vault::worth_keeping(&host, &typed) {
             if by_agent {
                 self.pending_passwords.insert(host.clone(), typed.clone());
             } else if let Err(e) = crate::vault::set(&host, &typed) {

@@ -270,6 +270,21 @@ pub fn get(host: &str) -> Option<String> {
     sys::get(host)
 }
 
+/// Whether a password that just worked is worth keeping: not a one-time password given for a
+/// computer by its ID ("k7qp-2mz9", gone with that connection).
+pub fn worth_keeping(name: &str, password: &str) -> bool {
+    let by_id = name.starts_with("sshremote://") || (!name.is_empty() && name.chars().all(|c| c.is_ascii_digit() || c == ' '));
+    !(by_id && one_time_shape(password))
+}
+
+/// The form of a one-time password: two groups of four, letters and digits that do not read
+/// alike, a dash between.
+pub fn one_time_shape(p: &str) -> bool {
+    const SET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let p = p.trim().as_bytes();
+    p.len() == 9 && p.iter().enumerate().all(|(i, b)| if i == 4 { *b == b'-' } else { SET.contains(&b.to_ascii_lowercase()) })
+}
+
 pub fn set(host: &str, secret: &str) -> Result<(), String> {
     backend().ok_or("no password store on this system (install secret-tool)")?;
     forget_list();

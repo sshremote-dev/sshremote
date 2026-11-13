@@ -713,6 +713,7 @@ impl Workspace {
         }
         // The password typed to sign in worked: kept now, so it is not asked again.
         if let Some((name, password)) = p.keep.take()
+            && crate::vault::worth_keeping(&name, &password)
             && let Err(e) = crate::vault::set(&name, &password)
         {
             r.notify(&format!("The password was not saved: {e}"));

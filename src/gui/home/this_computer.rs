@@ -123,31 +123,46 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(text).color(color).size(12.5)).wrap());
                 });
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(Vec2::new(64.0, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_width(64.0);
-                        ui.label(RichText::new("Password").weak().size(12.5));
+                // The passwords viewers may give: the lasting one, the one-time one, or both, each
+                // shown on asking, copied, or made anew.
+                let rows: Vec<(bool, &str)> = [(cfg.passwords.lasting(), "Password"), (cfg.passwords.one_time(), "One-time")].into_iter().filter(|r| r.0).collect();
+                for (_, name) in rows {
+                    let once = name == "One-time";
+                    let value = if once { cfg.one_time.clone() } else { cfg.password.clone() };
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(64.0, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_width(64.0);
+                            let l = ui.label(RichText::new(name).weak().size(12.5));
+                            if once {
+                                l.on_hover_text("Works for one connection: a minute after it ends, a new one takes its place");
+                            }
+                        });
+                        let shown = if self.access.show_password { value.clone() } else { "\u{2022}".repeat(value.chars().count()) };
+                        ui.label(RichText::new(shown).monospace().size(14.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let fresh = if once { "A new one-time password now" } else { "A new random password (viewers need the new one)" };
+                            if small_icon(ui, ic::ARROWS_CLOCKWISE, fresh).clicked() {
+                                if once {
+                                    cfg.one_time = crate::net::new_one_time();
+                                } else {
+                                    cfg.password = access::new_password();
+                                }
+                                self.access.show_password = true;
+                                changed = true;
+                            }
+                            let at = egui::Id::unique(if once { "copied-one-time" } else { "copied-password" });
+                            let (g, t) = if kit::copied(ui, at) { (ic::CHECK, "Copied") } else { (ic::COPY, "Copy the password") };
+                            if small_icon(ui, g, t).clicked() {
+                                kit::copy(ui, &value, at);
+                            }
+                            let (g, t) = if self.access.show_password { (ic::EYE_SLASH, "Hide the passwords") } else { (ic::EYE, "Show the passwords") };
+                            if small_icon(ui, g, t).clicked() {
+                                self.access.show_password = !self.access.show_password;
+                            }
+                        });
                     });
-                    let shown = if self.access.show_password { cfg.password.clone() } else { "\u{2022}".repeat(cfg.password.chars().count()) };
-                    ui.label(RichText::new(shown).monospace().size(14.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        if small_icon(ui, ic::ARROWS_CLOCKWISE, "A new random password (viewers need the new one)").clicked() {
-                            cfg.password = access::new_password();
-                            self.access.show_password = true;
-                            changed = true;
-                        }
-                        let at = egui::Id::unique("copied-password");
-                        let (g, t) = if kit::copied(ui, at) { (ic::CHECK, "Copied") } else { (ic::COPY, "Copy the password") };
-                        if small_icon(ui, g, t).clicked() {
-                            kit::copy(ui, &cfg.password, at);
-                        }
-                        let (g, t) = if self.access.show_password { (ic::EYE_SLASH, "Hide the password") } else { (ic::EYE, "Show the password") };
-                        if small_icon(ui, g, t).clicked() {
-                            self.access.show_password = !self.access.show_password;
-                        }
-                    });
-                });
+                }
                 ui.add_space(6.0);
                 kit::heading(ui, "Connected now");
                 // Served by this window or by the service: each with how it came and a way to end it.
@@ -265,8 +280,29 @@ impl App {
                     ui.add_space(kit::GAP);
                     kit::heading(ui, "Access");
                     kit::card(ui, |ui| {
+                        // Which passwords viewers may give.
+                        kit::row(ui, "Passwords", |ui| {
+                            let mut i = access::Passwords::ALL.iter().position(|p| *p == cfg.passwords).unwrap_or(0);
+                            let names: Vec<&str> = access::Passwords::ALL.iter().map(|p| p.label()).collect();
+                            if kit::segmented(ui, &mut i, &names) {
+                                cfg.passwords = access::Passwords::ALL[i];
+                                changed = true;
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(match cfg.passwords {
+                                    access::Passwords::Lasting => "Viewers give the lasting password, until you change it.",
+                                    access::Passwords::OneTime => "Viewers give the one-time password shown here: it works for one connection, and a minute after that ends a new one takes its place, so nobody comes back later with it.",
+                                    access::Passwords::Both => "Viewers give either: the one-time password to someone helping once, the lasting one for yourself.",
+                                })
+                                .weak()
+                                .size(12.0),
+                            )
+                            .wrap(),
+                        );
                         kit::row(ui, "Your own password", |ui| {
-                            let ok = self.access.new_password.trim().chars().count() >= 8;
+                            let ok = self.access.new_password.trim().chars().count() >= 8 && !crate::net::looks_one_time(&self.access.new_password);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add_enabled(ok, kit::secondary("Set")).clicked() {
                                     cfg.password = self.access.new_password.trim().to_string();

@@ -194,10 +194,17 @@ sshremote remote-access allow keyboard files ... # what viewers may use (all, no
 sshremote remote-access straight|lan|direct on|off  # past the relay; found nearby; straight in nearby
 sshremote remote-access service start|stop       # the service, without removing it
 sshremote remote-access viewers | end N          # who is connected now; end one
+sshremote remote-access passwords lasting|one-time|both  # which passwords viewers may give
+sshremote remote-access one-time                 # a new one-time password now
 sshremote sshremote://ID@sshremote.dev --password P [--code C]
 sshremote find                     # computers nearby with remote access on
 sshremote wake MAC|ADDRESS         # Wake-on-LAN
 ```
+
+Viewers give the lasting password, a **one-time password** (as `k7qp-2mz9`, shown beside it), or
+either, as chosen in the settings (new installs take both). A one-time password works for one
+connection and the minute after it, so a viewer whose network dropped comes back in; then a new
+one takes its place and nobody comes back later with what they were told once.
 
 Who comes in and what they may do is the person at the computer's choice: **ask first** (a viewer
 with the right password waits for a click there, turned away after a minute), and rights for the

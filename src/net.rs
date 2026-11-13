@@ -464,27 +464,54 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> i
 
 /// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
 fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
+    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None } };
+    handshake_side(stream, side, judge, totp, punch).map(|(r, w, _)| (r, w))
+}
+
+/// Which side of the exchange, with what it knows: the viewer the password it was given, the
+/// agent the passwords it takes.
+enum Side<'a> {
+    Viewer(&'a str),
+    Agent { permanent: Option<&'a str>, one_time: Option<&'a str> },
+}
+
+fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, bool)> {
     let closer = stream.try_clone()?;
-    let result = handshake_on(stream, password, viewer, judge, totp, punch);
+    let result = handshake_on(stream, side, judge, totp, punch);
     if result.is_err() {
         let _ = closer.shutdown(std::net::Shutdown::Both);
     }
     result
 }
 
-fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
+/// The bit of the key exchange's length that says the viewer gives a one-time password.
+const ONE_TIME: u16 = 0x8000;
+/// What one-time passwords are made of: no letters or digits that read alike.
+const ONE_TIME_SET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+/// A one-time password, as remote access makes them: two groups of four ("k7qp-2mz9"), in any case.
+pub fn looks_one_time(p: &str) -> bool {
+    crate::vault::one_time_shape(p)
+}
+
+/// A new one-time password.
+pub fn new_one_time() -> String {
+    let r = crate::sys::random(8);
+    let c: String = r.iter().map(|x| ONE_TIME_SET[*x as usize % ONE_TIME_SET.len()] as char).collect();
+    format!("{}-{}", &c[..4], &c[4..])
+}
+
+fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, bool)> {
+    let viewer = matches!(side, Side::Viewer(_));
     // A viewer may be given the two-step code with the password.
-    let (password, code) = match password.split_once(CODE_SEP) {
-        Some((p, c)) if viewer => (p, Some(c.trim())),
-        _ => (password, None),
+    let (password, code) = match side {
+        Side::Viewer(p) => match p.split_once(CODE_SEP) {
+            Some((p, c)) => (p, Some(c.trim())),
+            None => (p, None),
+        },
+        Side::Agent { .. } => ("", None),
     };
     let (a, b) = (Identity::new(b"sshremote viewer"), Identity::new(b"sshremote agent"));
-    let pw = Password::new(password.trim().as_bytes());
-    let (state, msg) = if viewer {
-        Spake2::<Ed25519Group>::start_a(&pw, &a, &b)
-    } else {
-        Spake2::<Ed25519Group>::start_b(&pw, &a, &b)
-    };
     let mut s = stream;
     s.set_nodelay(true)?;
     // Past the deadline the connection is shut, which ends any read still waiting on it. The
@@ -513,23 +540,55 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
         }
     }
     let _done = Done(done);
-    s.write_all(&(msg.len() as u16).to_le_bytes())?;
-    s.write_all(&msg)?;
-    let mut len = [0u8; 2];
-    if let Err(e) = s.read_exact(&mut len) {
-        // A computer that will not check a password now hangs up before the exchange.
-        return Err(if viewer && e.kind() == io::ErrorKind::UnexpectedEof {
-            io::Error::new(io::ErrorKind::ConnectionRefused, "the computer turned the call away: it is busy, or it stopped taking passwords after too many wrong ones")
-        } else {
-            e
-        });
-    }
-    // Both sides' messages are the same size: anything else is not this program.
-    if u16::from_le_bytes(len) as usize != msg.len() {
-        return Err(io::Error::other("bad key exchange"));
-    }
-    let mut theirs = vec![0u8; msg.len()];
-    s.read_exact(&mut theirs)?;
+    // The viewer speaks first, saying whether it gives a one-time password; the agent answers
+    // with the password that says (older agents speak at once: the viewer's turn comes first
+    // either way).
+    let (state, msg, theirs, one_time_used) = match side {
+        Side::Viewer(_) => {
+            let once = looks_one_time(password);
+            let given = if once { password.trim().to_ascii_lowercase() } else { password.trim().to_string() };
+            let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(given.as_bytes()), &a, &b);
+            let flag = if once { ONE_TIME } else { 0 };
+            s.write_all(&(msg.len() as u16 | flag).to_le_bytes())?;
+            s.write_all(&msg)?;
+            let mut len = [0u8; 2];
+            if let Err(e) = s.read_exact(&mut len) {
+                // A computer that will not check a password now hangs up before the exchange.
+                return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                    io::Error::new(io::ErrorKind::ConnectionRefused, "the computer turned the call away: it is busy, or it stopped taking passwords after too many wrong ones")
+                } else {
+                    e
+                });
+            }
+            // Both sides' messages are the same size: anything else is not this program.
+            if u16::from_le_bytes(len) as usize != msg.len() {
+                return Err(io::Error::other("bad key exchange"));
+            }
+            let mut theirs = vec![0u8; msg.len()];
+            s.read_exact(&mut theirs)?;
+            (state, msg, theirs, once)
+        }
+        Side::Agent { permanent, one_time } => {
+            let mut len = [0u8; 2];
+            s.read_exact(&mut len)?;
+            let len = u16::from_le_bytes(len);
+            let once = len & ONE_TIME != 0;
+            // A password this computer does not take (one-time passwords off, or only they on)
+            // is one nobody knows: the guess is checked, and counted, as any wrong one.
+            let unknown = crate::sys::hex(&crate::sys::random(24));
+            let pw = if once { one_time.or(permanent) } else { permanent }.unwrap_or(&unknown);
+            let (state, msg) = Spake2::<Ed25519Group>::start_b(&Password::new(pw.trim().as_bytes()), &a, &b);
+            if (len & !ONE_TIME) as usize != msg.len() {
+                return Err(io::Error::other("bad key exchange"));
+            }
+            let mut theirs = vec![0u8; msg.len()];
+            s.read_exact(&mut theirs)?;
+            s.write_all(&(msg.len() as u16).to_le_bytes())?;
+            s.write_all(&msg)?;
+            (state, msg, theirs, once && one_time.is_some())
+        }
+    };
+    let _ = &msg;
     let shared = state.finish(&theirs).map_err(|_| io::Error::other("bad key exchange"))?;
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, &shared);
     let (mut v2a, mut a2v) = ([0u8; 32], [0u8; 32]);
@@ -608,7 +667,7 @@ fn handshake_on(stream: TcpStream, password: &str, viewer: bool, judge: Judge, t
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
     }
     r.limit = MAX_FRAME;
-    Ok((r, w))
+    Ok((r, w, one_time_used))
 }
 
 /// The agent's side of the handshake, for remote access by ID; `judge` checks the viewer's proof
@@ -620,8 +679,22 @@ pub fn handshake_agent(stream: TcpStream, password: &str, judge: Judge) -> io::R
 
 /// `handshake_agent` that also wants the code of the authenticator app set up with `totp`.
 /// `punch`: it also looks for a straight path with a viewer that does.
+#[cfg(test)]
 pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>, judge: Judge, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
     handshake_2fa(stream, password, false, judge, totp, punch)
+}
+
+/// The agent's side with the passwords it takes: the lasting one, a one-time one, or both (None:
+/// that kind is not taken). Also says whether the viewer came in with the one-time password.
+pub fn handshake_agent_passwords(
+    stream: TcpStream,
+    permanent: Option<&str>,
+    one_time: Option<&str>,
+    totp: Option<&str>,
+    judge: Judge,
+    punch: Option<Punch>,
+) -> io::Result<(SealedReader, SealedWriter, bool)> {
+    handshake_side(stream, Side::Agent { permanent, one_time }, judge, totp, punch)
 }
 
 /// A judge that checks at once.
@@ -983,6 +1056,32 @@ mod tests {
         let code = crate::totp::now(&secret);
         assert!(viewer(format!("pw for both{CODE_SEP}{code}"), serve(secret.clone())).is_ok());
         assert!(viewer(format!("wrong pw{CODE_SEP}{code}"), serve(secret)).is_err_and(|e| e.contains("wrong password")));
+    }
+
+    /// The agent takes the lasting password, the one-time one, or both, and says which came in;
+    /// the viewer tells a one-time password by its form, in any case.
+    #[test]
+    fn one_time_passwords_get_in_only_where_taken() {
+        let try_with = |lasting: Option<&'static str>, once: Option<&'static str>, given: &'static str| -> Result<bool, String> {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let agent = thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                handshake_agent_passwords(s, lasting, once, None, &now, None).map(|(_, _, used)| used)
+            });
+            let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ());
+            let used = agent.join().unwrap();
+            viewer.map_err(|e| e.to_string())?;
+            used.map_err(|e| e.to_string())
+        };
+        let (lasting, once) = (Some("a lasting one"), Some("k7qp-2mz9"));
+        assert_eq!(try_with(lasting, once, "a lasting one"), Ok(false));
+        assert_eq!(try_with(lasting, once, "k7qp-2mz9"), Ok(true));
+        assert_eq!(try_with(lasting, once, " K7QP-2MZ9 "), Ok(true), "any case, spaces around");
+        assert!(try_with(lasting, None, "k7qp-2mz9").is_err(), "one-time passwords off");
+        assert!(try_with(None, once, "a lasting one").is_err(), "one-time passwords alone");
+        assert!(try_with(lasting, once, "k7qp-2mz8").is_err(), "a wrong one-time password");
+        assert!(looks_one_time(&new_one_time()) && !looks_one_time("abcdefgh") && !looks_one_time("k7qp-2mz0"));
     }
 
     #[test]

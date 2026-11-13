@@ -44,11 +44,58 @@ pub struct Config {
     pub punch: bool,
     /// Two-step sign-in: the authenticator app's secret (base32); empty: the password is enough.
     pub totp: String,
+    /// Which passwords viewers may give: the lasting one, a one-time one, or either (`Passwords`).
+    pub passwords: Passwords,
+    /// The one-time password now: shown here, and new a minute after each connection with it ends.
+    pub one_time: String,
+}
+
+/// Which passwords remote access takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Passwords {
+    /// Only the lasting password (the one before one-time passwords, and still the default for it).
+    Lasting,
+    /// Only the one-time password: nobody comes back later with what they were told once.
+    OneTime,
+    /// Either.
+    Both,
+}
+
+impl Passwords {
+    pub const ALL: [Passwords; 3] = [Passwords::Lasting, Passwords::OneTime, Passwords::Both];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Passwords::Lasting => "lasting",
+            Passwords::OneTime => "one-time",
+            Passwords::Both => "both",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Passwords::Lasting => "Lasting",
+            Passwords::OneTime => "One-time",
+            Passwords::Both => "Both",
+        }
+    }
+
+    fn from_word(w: &str) -> Option<Passwords> {
+        Passwords::ALL.into_iter().find(|p| p.word() == w)
+    }
+
+    pub fn lasting(self) -> bool {
+        self != Passwords::OneTime
+    }
+
+    pub fn one_time(self) -> bool {
+        self != Passwords::Lasting
+    }
 }
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -72,6 +119,9 @@ impl Config {
             // On, as with other remote desktops: it moves only sealed traffic, after the password.
             punch: v.get("punch").and_then(|x| x.as_bool()).unwrap_or(true),
             totp: s("totp").unwrap_or_default(),
+            // Settings from before one-time passwords keep taking the lasting one alone.
+            passwords: s("passwords").and_then(|w| Passwords::from_word(&w)).unwrap_or(Passwords::Lasting),
+            one_time: s("one_time").filter(|p| crate::net::looks_one_time(p)).unwrap_or_else(crate::net::new_one_time),
         })
     }
 }
@@ -192,7 +242,22 @@ pub fn stored() -> Result<Option<Config>, String> {
 
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
-    Config { id: new_id(), token: hex(&random(16)), password: new_password(), relay: default_relay(), enabled: false, ask: false, allow: crate::grant::ALL, lan: true, direct: false, punch: true, totp: String::new() }
+    Config {
+        id: new_id(),
+        token: hex(&random(16)),
+        password: new_password(),
+        relay: default_relay(),
+        enabled: false,
+        ask: false,
+        allow: crate::grant::ALL,
+        lan: true,
+        direct: false,
+        punch: true,
+        totp: String::new(),
+        // As other remote desktops start: a one-time password beside the lasting one.
+        passwords: Passwords::Both,
+        one_time: crate::net::new_one_time(),
+    }
 }
 
 /// The stored settings, or new ones (off) when there are none or they cannot be read.
@@ -301,7 +366,7 @@ pub fn public_state() -> serde_json::Value {
     };
     serde_json::json!({
         "enabled": c.enabled, "id": c.id, "relay": c.relay, "ask": c.ask, "allow": c.allow, "punch": c.punch,
-        "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "state": state, "viewers": viewers().iter().map(Viewer::json).collect::<Vec<_>>(),
+        "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "passwords": c.passwords.word(), "state": state, "viewers": viewers().iter().map(Viewer::json).collect::<Vec<_>>(),
     })
 }
 
@@ -647,8 +712,9 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
             // Who is asked, what viewers may do and whether they may go straight apply to the next
             // call, with no new line.
             if let Some(k) = &now {
-                (cfg.ask, cfg.allow, cfg.punch) = (k.ask, k.allow, k.punch);
+                (cfg.ask, cfg.allow, cfg.punch, cfg.passwords) = (k.ask, k.allow, k.punch, k.passwords);
                 cfg.totp.clone_from(&k.totp);
+                cfg.one_time.clone_from(&k.one_time);
             }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -779,7 +845,12 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
     };
     let totp = (!cfg.totp.is_empty()).then_some(cfg.totp.as_str());
     let punch = (relayed && cfg.punch).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
-    let Ok((r, w)) = crate::net::handshake_agent_2fa(s, &cfg.password, totp, &judge, punch) else { return };
+    let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str());
+    let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
+    let Ok((r, w, once)) = crate::net::handshake_agent_passwords(s, lasting, one_time, totp, &judge, punch) else { return };
+    if once {
+        ONE_TIME_IN.fetch_add(1, Ordering::AcqRel);
+    }
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, credentials(cfg), w.ender()));
@@ -787,8 +858,35 @@ fn serve_call(s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool) {
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, cfg.grant());
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
+    if once {
+        one_time_used(&cfg.one_time);
+    }
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| *k != n);
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != n);
+}
+
+/// Sessions in now with the one-time password.
+static ONE_TIME_IN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How long a one-time password still works after the connection with it ended: a viewer whose
+/// network dropped comes back in with it.
+const ONE_TIME_GRACE: Duration = Duration::from_secs(60);
+
+/// A session with the one-time password `used` ended: a minute later, with nobody in with it
+/// again, it is replaced.
+fn one_time_used(used: &str) {
+    ONE_TIME_IN.fetch_sub(1, Ordering::AcqRel);
+    let used = used.to_string();
+    thread::spawn(move || {
+        thread::sleep(ONE_TIME_GRACE);
+        if ONE_TIME_IN.load(Ordering::Acquire) > 0 {
+            return;
+        }
+        let mut c = load();
+        if c.one_time == used {
+            c.one_time = crate::net::new_one_time();
+            let _ = save(&c);
+        }
+    });
 }
 
 /// The agent as a process of its own, its input and output the sealed stream.
@@ -1063,7 +1161,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
         println!("ID:       {}", crate::computers::spaced(&c.id));
-        println!("password: {}", c.password);
+        if c.passwords.lasting() {
+            println!("password: {}", c.password);
+        }
+        if c.passwords.one_time() {
+            println!("one-time: {} (a minute after a connection with it ends, a new one)", c.one_time);
+        }
         println!("relay:    {}", c.relay);
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
         println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
@@ -1100,8 +1203,25 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         Some("password") => {
             c.password = args.get(1).cloned().unwrap_or_else(new_password);
+            // A viewer giving it would be taken to give a one-time password.
+            if crate::net::looks_one_time(&c.password) {
+                return Err("that looks like a one-time password (four, a dash, four): choose another".into());
+            }
             save(&c)?;
             println!("password: {}", c.password);
+            Ok(())
+        }
+        // Which passwords viewers may give, and a new one-time password.
+        Some("passwords") => {
+            c.passwords = args.get(1).and_then(|w| Passwords::from_word(w)).ok_or("usage: sshremote remote-access passwords lasting|one-time|both")?;
+            save(&c)?;
+            show(&c);
+            Ok(())
+        }
+        Some("one-time") => {
+            c.one_time = crate::net::new_one_time();
+            save(&c)?;
+            println!("one-time: {}", c.one_time);
             Ok(())
         }
         Some("id") => {
@@ -1229,7 +1349,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct on|off | viewers | end N | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 
