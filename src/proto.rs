@@ -261,6 +261,13 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
+impl MonitorInfo {
+    /// A camera listed after the monitors (`capture::camera`): to look at, not a screen.
+    pub fn camera(&self) -> bool {
+        self.name.starts_with("Camera: ")
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct DirEntry {
     pub name: String,

@@ -1054,9 +1054,9 @@ impl Remote {
         self.send(ToAgent::Settings(s))
     }
 
-    /// The host's monitors, and the one shown here.
+    /// The host's monitors (its cameras apart), and the one shown here.
     pub(super) fn monitors(&self) -> (usize, usize) {
-        (self.monitors.len(), self.monitor)
+        (self.monitors.iter().filter(|m| !m.camera()).count(), self.monitor)
     }
 
     /// What the user chose here, for another connection to the host that shows its monitor `m`.

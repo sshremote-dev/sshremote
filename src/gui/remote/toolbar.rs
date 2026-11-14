@@ -78,6 +78,7 @@ impl Remote {
                     } else {
                         monitors
                             .iter()
+                            .filter(|m| !m.camera())
                             .map(|m| {
                                 (m.name.clone(), format!("{}x{}{}", m.w, m.h, if m.primary { ", primary" } else { "" }))
                             })
@@ -274,7 +275,8 @@ impl Remote {
                 ui.label(RichText::new("Its screens").strong());
                 for (i, m) in self.monitors.iter().enumerate() {
                     let primary = if m.primary { ", primary" } else { "" };
-                    let text = format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h);
+                    // A camera: to look at, shown by its name alone.
+                    let text = if m.camera() { format!("{}  {}", ic::CAMERA, m.name) } else { format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h) };
                     if ui.selectable_label(i == self.monitor, text).clicked() {
                         *action = Some(Box::new(move |r, _| {
                             r.chosen_monitor = Some(i as u8);
@@ -283,6 +285,8 @@ impl Remote {
                         ui.close();
                     }
                 }
+                let screens = self.monitors.iter().filter(|m| !m.camera()).count();
+                if screens > 1 {
                 ui.separator();
                 let locals = crate::sys::monitors().len();
                 let tip = if locals > 1 {
@@ -296,6 +300,7 @@ impl Remote {
                         Ok(())
                     }));
                     ui.close();
+                }
                 }
             });
             screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));

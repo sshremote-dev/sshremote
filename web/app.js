@@ -1317,7 +1317,8 @@ class Client {
   // way (what it needs is handed over between the windows, never put in the address). Where the
   // browser may place windows (Chrome, Edge), each opens on the monitor of the same number here.
   async spread() {
-    const others = this.monitors.list.map((_, i) => i).filter(i => i !== this.monitors.current);
+    // Its screens, not its cameras.
+    const others = this.monitors.list.map((m, i) => m.name.startsWith("Camera: ") ? -1 : i).filter(i => i >= 0 && i !== this.monitors.current);
     let screens = null;
     try { screens = window.getScreenDetails ? (await window.getScreenDetails()).screens : null; } catch { /* not allowed */ }
     for (const [k, i] of others.entries()) {
@@ -1485,9 +1486,10 @@ class Client {
       ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
       ["One window or program…", () => this.send({ windows: 1 })],
     ], at);
+    const camera = m => m.name.startsWith("Camera: ");
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
-      [(i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
-      null, ["All its screens, a window each", () => this.spread()]], at);
+      [camera(m) ? m.name : (i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
+      ...(this.monitors.list.filter(m => !camera(m)).length > 1 ? [null, ["All its screens, a window each", () => this.spread()]] : [])], at);
     // The computer itself: asked what it can do the first time, then opened where it was asked for.
     const computerMenu = this.computerMenu = at => {
       const H = this.host;
