@@ -1,5 +1,6 @@
 // sshremote helper: lets the sshremote agent list windows and bring one forward, which
-// GNOME Shell otherwise allows only its own screen-sharing portal to do.
+// GNOME Shell otherwise allows only its own screen-sharing portal to do, and type text no key of
+// the keyboard layout makes (Korean, accented letters), as GNOME's on-screen keyboard does.
 
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
@@ -17,6 +18,10 @@ const IFACE = `
     </method>
     <method name="Activate">
       <arg type="t" direction="in" name="id"/>
+    </method>
+    <method name="Commit">
+      <arg type="s" direction="in" name="text"/>
+      <arg type="b" direction="out" name="done"/>
     </method>
   </interface>
 </node>`;
@@ -62,5 +67,13 @@ export default class DeskHelper extends Extension {
         const w = global.display.list_all_windows().find(x => x.get_id() === id);
         if (w)
             Main.activateWindow(w);
+    }
+
+    // Text into the focused text field through the input method; false when none takes text so.
+    Commit(text) {
+        if (!Main.inputMethod.currentFocus)
+            return false;
+        Main.inputMethod.commit(text);
+        return true;
     }
 }

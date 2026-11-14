@@ -187,6 +187,9 @@ impl Capture for WithCameras {
     fn input(&mut self, ev: Input) -> Result<(), String> {
         self.now_mut().input(ev)
     }
+    fn commit_text(&mut self, text: &str) -> bool {
+        self.now_mut().commit_text(text)
+    }
 }
 
 #[cfg(target_os = "linux")]

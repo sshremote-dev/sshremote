@@ -419,7 +419,7 @@ fn serve_with(
         }
         for m in msgs {
             // Text waiting to be pasted goes in before any later input, so the order is kept.
-            let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym));
+            let typed_text = matches!(m, ToAgent::Key { keysym, mods: 0 } if beyond_layout(keysym));
             if !typed_text && matches!(m, ToAgent::Key { .. } | ToAgent::KeyState { .. } | ToAgent::Button { .. }) {
                 paste(&mut pending, &mut clip, cap.as_mut());
             }
@@ -572,8 +572,9 @@ fn serve_with(
                     send(enc, &m).map_err(io_err)?;
                 }
                 ToAgent::Ping(t) => send(enc, &ToClient::Pong(t)).map_err(io_err)?,
-                // GNOME types only what its keyboard layout has; other text (Korean, emoji...) is pasted.
-                ToAgent::Key { keysym, mods: 0 } if xk::is_unicode(keysym) && cap.name() == "gnome" => {
+                // GNOME types only what its keyboard layout has; other text (Korean, accented
+                // letters, emoji...) goes in as text, or is pasted.
+                ToAgent::Key { keysym, mods: 0 } if beyond_layout(keysym) && cap.name() == "gnome" => {
                     if let Some(c) = char::from_u32(keysym & 0x00ff_ffff) {
                         pending.push(c);
                     }
@@ -998,9 +999,19 @@ fn serve_with(
     }
 }
 
-/// Pastes text the backend cannot type, through the clipboard and Ctrl+V.
+/// A character a keyboard layout may lack: beyond ASCII (Latin-1's own keysyms, or Unicode's).
+fn beyond_layout(keysym: u32) -> bool {
+    xk::is_unicode(keysym) || (0xa0..=0xff).contains(&keysym)
+}
+
+/// Puts in text the backend cannot type: as text where it can (GNOME with the helper: terminals
+/// too), else through the clipboard and Ctrl+V.
 fn paste(pending: &mut String, clip: &mut crate::clip::Clip, cap: &mut dyn capture::Capture) {
     if pending.is_empty() {
+        return;
+    }
+    if cap.commit_text(pending) {
+        pending.clear();
         return;
     }
     if !clip.stage_paste(std::mem::take(pending)) {

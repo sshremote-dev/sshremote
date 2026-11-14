@@ -1,7 +1,7 @@
 {
   "uuid": "sshremote-helper@thinkbigx.github.io",
   "name": "sshremote helper",
-  "description": "Lets the sshremote agent list windows so a viewer can share one window or application.",
+  "description": "Lets the sshremote agent list windows so a viewer can share one window or application, and type text the keyboard layout lacks.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51", "52"],
   "url": "https://github.com/thinkbigx/sshremote"
 }
