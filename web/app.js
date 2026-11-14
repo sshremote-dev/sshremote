@@ -825,6 +825,8 @@ class Client {
       else this.keepTimer = setTimeout(() => this.remember(), 5000);
       if (this.view === "term") this.term.focus();
       if (this.t.monitor !== undefined) this.send({ monitor: this.t.monitor });
+      // A window opened for one of the host's programs starts it, once.
+      if (this.t.launch) { this.send({ launch: this.t.launch }); delete this.t.launch; }
     }
     if (v.agent) this.agentUp(v.agent.screen);
     if (v.agentError) this.agentDown(v.agentError);
@@ -852,6 +854,8 @@ class Client {
     if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
     if (v.chat !== undefined) this.chatIn(v.chat);
     if (v.windows) this.windowPick(v.windows);
+    if (v.apps) { this.apps = v.apps; if (this.appsShown) this.appsShown(); }
+    if (v.launched) toast(v.launched.text, { bad: !v.launched.ok });
     if (v.sharing) { this.sharing = v.sharing; toast("Sharing " + v.sharing.text + "."); this.screenTools(); }
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
     if (v.qualities) {
@@ -1339,6 +1343,57 @@ class Client {
       if (this.view === "screen") this.send({ view: this.want() });
     }, 0);
   }
+  // One of the host's programs, found among those installed or named by a command line, a file
+  // or an address, opened in a window of its own that shows it alone (as the app opens it in a
+  // pane beside).
+  programPick() {
+    const box = $("modal").firstElementChild;
+    box.textContent = "";
+    const finish = () => { $("modal").hidden = true; removeEventListener("keydown", keys, true); this.appsShown = null; };
+    const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(); } };
+    const open = (kind, text, name) => { finish(); this.openProgram(kind, text, name); };
+    const find = h("input", { type: "search", placeholder: "Find a program", autocomplete: "off" });
+    const list = h("div", { class: "picklist" });
+    const hits = () => {
+      const q = find.value.trim().toLowerCase();
+      return (this.apps?.list || []).filter(a => !q || a.name.toLowerCase().includes(q) || (a.detail || "").toLowerCase().includes(q)).slice(0, 300);
+    };
+    const show = this.appsShown = () => {
+      list.textContent = "";
+      if (!this.apps) { list.append(h("p", { text: "Looking at what is installed there…" })); return; }
+      if (this.apps.error && !this.apps.list.length) { list.append(h("p", { class: "bad", text: this.apps.error })); return; }
+      const found = hits();
+      if (!found.length) list.append(h("p", { text: "Nothing installed there by that name." }));
+      for (const a of found) {
+        list.append(h("div", { class: "pick" }, h("div", { class: "grow" }, h("b", { text: a.name }), a.detail ? h("small", { text: a.detail }) : ""),
+          h("button", { type: "button", class: "btn", text: "Open", onclick: () => open(0, a.id, a.name) })));
+      }
+    };
+    find.addEventListener("input", show);
+    find.addEventListener("keydown", e => { if (e.key === "Enter") { const a = hits()[0]; if (a) open(0, a.id, a.name); } });
+    const line = h("input", { type: "text", placeholder: "gedit notes.txt, ~/report.pdf, https://…", autocomplete: "off" });
+    const fileLike = t => /^([\/~]|[A-Za-z]:[\\/])/.test(t) || t.includes("://");
+    const nameOf = t => t.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || t;
+    const run = () => { const t = line.value.trim(); if (t) open(1, t, nameOf(t.split(/\s+/)[0])); };
+    const opn = () => { const t = line.value.trim(); if (t) open(2, t, nameOf(t)); };
+    line.addEventListener("keydown", e => { if (e.key === "Enter") (fileLike(line.value.trim()) ? opn : run)(); });
+    box.append(h("h2", { text: "Open one of its programs" }),
+      h("p", { text: "It opens in a window of its own here, showing that program alone." }), find, list,
+      h("p", { text: "Or a command line, a file or an address:" }), line,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn", text: "Run", onclick: run }), h("button", { type: "button", class: "btn", text: "Open", onclick: opn }),
+        h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: finish })));
+    show();
+    if (!this.apps) this.send({ apps: 1 });
+    $("modal").hidden = false;
+    addEventListener("keydown", keys, true);
+    find.focus();
+  }
+  // A window of its own for a program of the host's, reaching the host the same way.
+  openProgram(kind, text, name) {
+    const win = window.open(location.pathname + "#program", "_blank", "left=120,top=120,width=1000,height=700");
+    if (!win) { toast("The browser kept the new window from opening: allow pop-ups for this page.", { bad: true }); return; }
+    spreads.set(win, { t: { ...this.t, view: "screen", launch: { kind, text }, title: name, retry: 0 }, gateway: gatewayAuth() });
+  }
   // The host's windows to choose from: one, or every window of its program.
   windowPick(w) {
     const box = $("modal").firstElementChild;
@@ -1485,6 +1540,8 @@ class Client {
       ["The window in front", () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
       ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
       ["One window or program…", () => this.send({ windows: 1 })],
+      null,
+      ["Open one of its programs…", () => this.programPick()],
     ], at);
     const camera = m => m.name.startsWith("Camera: ");
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
@@ -2151,7 +2208,7 @@ addEventListener("message", e => {
     connect(t);
   }
 });
-if (/^#screen=\d+$/.test(location.hash) && window.opener) window.opener.postMessage("spread-ready", location.origin);
+if ((/^#screen=\d+$/.test(location.hash) || location.hash === "#program") && window.opener) window.opener.postMessage("spread-ready", location.origin);
 
 // The page moved here from another address (sshremote.dev/web to web.sshremote.dev): the
 // computers that browser kept there come along once the person says so; their passwords stay
