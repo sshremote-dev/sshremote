@@ -71,12 +71,30 @@ impl Drop for User {
     }
 }
 
+/// The sessions someone is signed in to and using now: the console's, and those by Remote Desktop.
+pub fn active_sessions() -> Vec<u32> {
+    use windows_sys::Win32::System::RemoteDesktop::{WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory};
+    let (mut info, mut count): (*mut WTS_SESSION_INFOW, u32) = (null_mut(), 0);
+    if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut info, &mut count) } == 0 || info.is_null() {
+        return Vec::new();
+    }
+    let list = unsafe { std::slice::from_raw_parts(info, count as usize) };
+    let ids = list.iter().filter(|s| s.State == WTSActive && s.SessionId != 0).map(|s| s.SessionId).collect();
+    unsafe { WTSFreeMemory(info as _) };
+    ids
+}
+
 impl User {
     /// The user signed in at the console now; only SYSTEM may ask.
     pub fn at_console() -> Option<User> {
+        User::in_session(unsafe { WTSGetActiveConsoleSessionId() })
+    }
+
+    /// The user signed in to session `id` (the console's, or one by Remote Desktop).
+    pub fn in_session(id: u32) -> Option<User> {
         unsafe {
             let mut token: HANDLE = null_mut();
-            if WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token) == 0 {
+            if WTSQueryUserToken(id, &mut token) == 0 {
                 return None;
             }
             let mut buf = vec![0u16; 260];

@@ -1620,7 +1620,8 @@ pub fn ssh_profile(host: &str, port: &str) -> Profile {
 pub(crate) fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
     if cfg!(windows) {
         // "start" opens the default terminal (Windows Terminal or the console host).
-        std::process::Command::new("cmd").arg("/c").arg("start").arg("").args(cmd).spawn()?;
+        // cmd itself with no window: only the terminal "start" opens shows.
+        crate::sys::quiet(&mut std::process::Command::new("cmd")).arg("/c").arg("start").arg("").args(cmd).spawn()?;
         return Ok(());
     }
     for (term, flag) in [("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"), ("xterm", "-e")] {

@@ -145,8 +145,8 @@ pub fn install() -> Result<(), String> {
         "netsh",
         &["advfirewall", "firewall", "add", "rule", &format!("name={FIREWALL}"), "dir=in", "action=allow", "protocol=TCP", &format!("localport={}", crate::net::DIRECT_PORT), &format!("program={}", exe.display())],
     );
-    // Its icon in the notification area, from the next sign-in on (the service shows it now).
-    let _ = run("reg", &["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &format!("\"{}\" --tray", exe.display()), "/f"]);
+    // The service shows its icon at each sign-in; the start at sign-in older versions set is gone.
+    let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
     run("sc", &["start", NAME])?;
     println!("sshremote service installed and started ({bin})");
     Ok(())
@@ -209,15 +209,23 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     // whoever is signed in now (a sign-in later starts it by itself).
     std::thread::spawn(|| {
         let mut said = String::new();
-        let mut shown = false;
+        // The sessions given the icon, while they are in use. Started from here with no console
+        // (a start at sign-in would flash one on Windows before 11 24H2); one already there keeps
+        // to itself (`tray::alone_runs`).
+        let mut shown = std::collections::HashSet::new();
         loop {
             crate::access::take_end_requests();
             crate::access::publish_state(&mut said);
-            if !shown
-                && let Some(u) = crate::console_user::User::at_console()
-                && let Some(exe) = installed_exe()
-            {
-                shown = crate::console_user::spawn_piped(&u, &format!("\"{}\" --tray", exe.display())).is_ok();
+            let now = crate::console_user::active_sessions();
+            shown.retain(|s| now.contains(s));
+            for id in now {
+                if !shown.contains(&id)
+                    && let Some(u) = crate::console_user::User::in_session(id)
+                    && let Some(exe) = installed_exe()
+                    && crate::console_user::spawn_piped(&u, &format!("\"{}\" --tray", exe.display())).is_ok()
+                {
+                    shown.insert(id);
+                }
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
