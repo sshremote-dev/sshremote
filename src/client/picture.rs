@@ -157,9 +157,14 @@ impl Viewer {
                 }
                 let mut img = Vec::new();
                 let (top, left) = self.tmux.unwrap_or((0, 0));
-                let _ = write!(img, "\x1b[{};{}H", top + r + 1, left + c + 1);
+                // Through tmux kitty images go unplaced, placed by text tmux keeps in the pane.
+                let mut placeholders = Vec::new();
+                if self.kitty.is_none() || self.tmux.is_none() {
+                    let _ = write!(img, "\x1b[{};{}H", top + r + 1, left + c + 1);
+                }
                 if let Some(k) = &mut self.kitty {
-                    k.place(&mut img, self.px.as_flattened(), w, h, (cols, img_rows), (c, c1, r, r1));
+                    let text = self.tmux.is_some().then_some(&mut placeholders);
+                    k.place(&mut img, self.px.as_flattened(), w, h, (cols, img_rows), (c, c1, r, r1), text);
                 } else if adaptive {
                     quant::quantize(&self.px, &mut self.qpal, &mut self.idx);
                     self.sixel.encode(&mut img, w, h, &self.idx, &self.qpal);
@@ -176,6 +181,7 @@ impl Viewer {
                     for w in cuts.windows(2) {
                         tmux_wrap(out, &img[w[0]..w[1]]);
                     }
+                    out.extend_from_slice(&placeholders);
                 } else if self.tmux.is_some() {
                     tmux_wrap(out, &img);
                 } else {

@@ -920,6 +920,11 @@ pub fn run(opt: Options) -> Result<(), String> {
             v.cell_queried = query_cell();
         }
         v.kitty = kitty_images(v.tmux.is_some()).then(crate::kitty::Kitty::new);
+        // Kitty images placed by text: sent on while the pane is out of sight too (they show
+        // only where tmux draws their text), so a pane brought back is whole.
+        if v.kitty.is_some() && v.tmux.is_some() {
+            let _ = std::process::Command::new("tmux").args(["set", "-p", "allow-passthrough", "all"]).stderr(std::process::Stdio::null()).status();
+        }
         let _ = execute!(
             v.out,
             terminal::EnterAlternateScreen,
@@ -1191,12 +1196,14 @@ fn query_cell() -> Option<(usize, usize)> {
 }
 
 /// Whether to draw with kitty images: `SSHREMOTE_GRAPHICS=kitty` or `sixel` says so; otherwise
-/// the terminal is asked (not through tmux, which answers for itself).
+/// the terminal is asked. Through tmux (which answers for itself) only when tmux runs in kitty,
+/// which takes the images placed by text there.
 fn kitty_images(tmux: bool) -> bool {
     match std::env::var("SSHREMOTE_GRAPHICS").as_deref() {
         Ok("kitty") => true,
         Ok("sixel") => false,
-        _ => !tmux && query_kitty(),
+        _ if tmux => std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        _ => query_kitty(),
     }
 }
 

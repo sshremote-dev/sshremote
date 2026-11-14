@@ -8,7 +8,8 @@ in one zstd stream (H.264 only for areas that keep moving).
 Hosts: Windows (GDI capture, SendInput) and GNOME on Wayland (Mutter RemoteDesktop, PipeWire).
 Viewers: a native window, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE)
 or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found by asking the
-terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead).
+terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead). Inside tmux in kitty, kitty images
+are placed by Unicode placeholders, so the picture moves and hides with tmux's windows and panes.
 
 ## Build
 
