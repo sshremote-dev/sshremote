@@ -153,6 +153,8 @@ impl Capture for NoScreen {
 /// desktop's through X itself.
 #[cfg(target_os = "linux")]
 fn linux_desktop() -> Result<Box<dyn Capture>, String> {
+    // Started by the service or over ssh: the desktop's own variables first.
+    gnome::ensure_env();
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
     if desktop.to_ascii_lowercase().contains("gnome") || desktop.is_empty() && wayland {

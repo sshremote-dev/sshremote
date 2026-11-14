@@ -88,6 +88,7 @@ fn err(e: impl std::fmt::Display) -> String {
 
 impl X11 {
     pub fn open() -> Result<X11, String> {
+        super::gnome::ensure_env();
         let (conn, screen) = x11rb::connect(None).map_err(|e| format!("no X display ({e})"))?;
         let s = &conn.setup().roots[screen];
         let root = s.root;
