@@ -273,7 +273,7 @@ impl App {
             // auto picks the capture for the computer's desktop.
             kit::row(ui, "Screen capture", |ui| {
                 let test = cfg!(feature = "test-desktop").then_some("synthetic");
-                let options: Vec<&str> = ["auto", "gnome", "windows"].into_iter().chain(test).collect();
+                let options: Vec<&str> = ["auto", "gnome", "x11", "windows"].into_iter().chain(test).collect();
                 let mut i = options.iter().position(|o| *o == self.form.capture).unwrap_or(0);
                 if kit::segmented(ui, &mut i, &options) {
                     self.form.capture = options[i].to_string();

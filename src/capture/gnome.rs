@@ -125,7 +125,7 @@ pub fn ensure_env() {
     let env = std::process::Command::new("systemctl").args(["--user", "show-environment"]).output();
     if let Ok(out) = env {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if let Some((k @ ("DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY"), v)) = line.split_once('=')
+            if let Some((k @ ("DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_CURRENT_DESKTOP" | "XDG_SESSION_TYPE"), v)) = line.split_once('=')
                 && std::env::var_os(k).is_none()
             {
                 // SAFETY: as above.
@@ -133,6 +133,38 @@ pub fn ensure_env() {
             }
         }
     }
+    // A desktop that tells the user manager nothing (some X11 ones): the session's own programs
+    // know their display.
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        for (k, v) in session_env(&uid) {
+            if std::env::var_os(&k).is_none() {
+                // SAFETY: as above.
+                unsafe { std::env::set_var(k, v) };
+            }
+        }
+    }
+}
+
+/// The display variables of a program of this user's that runs on a desktop (the newest such).
+fn session_env(uid: &str) -> Vec<(String, String)> {
+    const WANTED: [&str; 5] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let mut best: Option<(u64, Vec<(String, String)>)> = None;
+    for e in dir.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
+        let mine = std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| s.lines().any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some(uid)));
+        let Some(env) = mine.then(|| std::fs::read(e.path().join("environ")).ok()).flatten() else { continue };
+        let vars: Vec<(String, String)> = env
+            .split(|b| *b == 0)
+            .filter_map(|kv| std::str::from_utf8(kv).ok()?.split_once('='))
+            .filter(|(k, _)| WANTED.contains(k))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        if vars.iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY") && best.as_ref().is_none_or(|(p, _)| pid > *p) {
+            best = Some((pid, vars));
+        }
+    }
+    best.map(|(_, v)| v).unwrap_or_default()
 }
 
 /// A capture pipeline; it stops when it goes (one dropped while playing keeps its threads and its

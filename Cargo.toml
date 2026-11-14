@@ -47,6 +47,8 @@ wayland-backend = { optional = true, version = "0.3", features = ["client_system
 x11-dl = { optional = true, version = "2.21" }
 raw-window-handle = { optional = true, version = "0.6" }
 zbus = { optional = true, version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+# X11 desktops' screens and input (already in the build through winit).
+x11rb = { optional = true, version = "0.13", default-features = false, features = ["allow-unsafe-code", "shm", "damage", "xfixes", "xtest", "randr"] }
 
 [target."cfg(windows)".dependencies]
 uiautomation = { optional = true, version = "0.24" }
@@ -57,7 +59,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:uiautomation", "dep:windows"]
+remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:uiautomation", "dep:windows"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:eframe", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:x11-dl", "dep:raw-window-handle"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

@@ -5,6 +5,8 @@ mod dxgi;
 mod gnome;
 #[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "linux")]
+mod x11;
 pub mod region;
 pub use crate::shared::{Image, Share, WindowInfo};
 mod synthetic;
@@ -142,6 +144,28 @@ impl Capture for NoScreen {
     }
 }
 
+/// The capture for the desktop this session is signed in to: GNOME's own way in, any X11
+/// desktop's through X itself.
+#[cfg(target_os = "linux")]
+fn linux_desktop() -> Result<Box<dyn Capture>, String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+    if desktop.to_ascii_lowercase().contains("gnome") || desktop.is_empty() && wayland {
+        match gnome::Gnome::open() {
+            Ok(g) => return Ok(Box::new(g)),
+            // GNOME on Xorg: X11's own way in.
+            Err(e) if wayland => return Err(e),
+            Err(_) => {}
+        }
+    }
+    if wayland {
+        // X11 here would see only the programs running under Xwayland.
+        let name = if desktop.is_empty() { "this desktop".to_string() } else { desktop.replace(':', " / ") };
+        return Err(format!("sharing the screen of {name} under Wayland is not supported yet (GNOME, and X11 desktops, are)"));
+    }
+    Ok(Box::new(x11::X11::open()?))
+}
+
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
     match name {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),
@@ -149,7 +173,11 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         n if n.starts_with("browser:") => Ok(Box::new(browser::Browser::open(&n["browser:".len()..])?)),
         "synthetic2" => Ok(Box::new(synthetic::Synthetic::with_screens(2))),
         #[cfg(target_os = "linux")]
-        "gnome" | "auto" => Ok(Box::new(gnome::Gnome::open()?)),
+        "gnome" => Ok(Box::new(gnome::Gnome::open()?)),
+        #[cfg(target_os = "linux")]
+        "x11" => Ok(Box::new(x11::X11::open()?)),
+        #[cfg(target_os = "linux")]
+        "auto" => linux_desktop(),
         #[cfg(windows)]
         "windows" | "auto" => Ok(Box::new(windows::Gdi::open()?)),
         _ => Err(format!("capture backend '{name}' is not available on this system")),
