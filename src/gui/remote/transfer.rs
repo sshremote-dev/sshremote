@@ -244,8 +244,11 @@ impl Remote {
                     self.send(start)?;
                 }
                 Err(e) => {
-                    let text = format!("{} failed: {e}", u.name);
-                    self.uploads.remove(i);
+                    let (id, text) = (u.id, format!("{} failed: {e}", u.name));
+                    // A terminal's copy hears it too, and goes on with the rest.
+                    if !self.term_drop_done(id, false, &text) {
+                        self.uploads.remove(i);
+                    }
                     self.notify(&text);
                     return Ok(());
                 }

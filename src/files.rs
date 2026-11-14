@@ -54,6 +54,43 @@ pub fn clip_file(path: &Path) -> crate::proto::ClipFile {
 /// Where an upload goes that is to be pasted from the clipboard: `CLIPBOARD` and a batch number
 /// in place of the folder.
 pub const CLIPBOARD: &str = "\u{0}clipboard/";
+/// A file's name as a shell takes it whole once quoted, on either kind of computer: no character
+/// that Windows' shells read inside double quotes (`$` and a backquote in PowerShell, `%` and `!`
+/// in cmd), no double quote and no control character (a paste's end among them); not one of
+/// Windows' device names, and not ending in a dot or a space.
+pub fn typable(name: &str) -> String {
+    let s: String = name.chars().take(200).map(|c| if c.is_control() || "\"$`%!".contains(c) { '_' } else { c }).collect();
+    let mut s = s.trim_end_matches([' ', '.']).trim_start().to_string();
+    if s.is_empty() || s == "." || s == ".." {
+        s = "file".into();
+    }
+    let stem = s.split('.').next().unwrap_or("").to_ascii_lowercase();
+    if ["con", "prn", "aux", "nul"].contains(&stem.as_str()) || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.as_bytes()[3].is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+/// `name` made free of `taken`: "shot.png", then "shot-2.png" and so on; and taken.
+pub fn unique(name: String, taken: &mut std::collections::HashSet<String>) -> String {
+    let mut n = 1;
+    let mut out = name.clone();
+    while !taken.insert(out.to_lowercase()) {
+        n += 1;
+        out = match name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) {
+            Some((stem, ext)) => format!("{stem}-{n}.{ext}"),
+            None => format!("{name}-{n}"),
+        };
+    }
+    out
+}
+
+/// A batch name no other copy from this program has: the time, the process and a count.
+pub fn batch_name() -> String {
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    format!("{}-{}-{}", crate::sys::now_secs(), std::process::id(), COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Where an upload goes for a terminal: `DROP` and a batch name, into `drop_dir`.
 pub const DROP: &str = "\u{0}drop/";
 
@@ -61,6 +98,13 @@ pub const DROP: &str = "\u{0}drop/";
 /// `sshremote`'s ssh copies use too); those over a day old are cleared as a new one is made.
 pub fn drop_dir(batch: &str) -> PathBuf {
     let base = if cfg!(windows) { home().join(r"AppData\Local\Temp\sshremote-drop") } else { home().join(".cache/sshremote/drop") };
+    // What is dropped (screenshots) is the user's alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&base);
+        let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
+    }
     if let Ok(rd) = std::fs::read_dir(&base) {
         for e in rd.flatten() {
             let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 24 * 3600);

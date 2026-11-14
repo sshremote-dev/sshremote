@@ -111,11 +111,23 @@ impl Remote {
                 // Files alone on the clipboard make no paste event, only the V let go after it.
                 Event::Key { key: Key::V, pressed: false, modifiers, .. } if !local && modifiers.command && !std::mem::take(&mut self.paste_seen) => {
                     let files = if self.share_clipboard { crate::clip::files_here() } else { Vec::new() };
-                    // A picture alone (a screenshot): onto the host's clipboard, then pasted there.
+                    // A picture alone (a screenshot): onto the host's clipboard, then pasted there;
+                    // not one that was here before something was copied there (that is newer).
                     let picture = if self.share_clipboard && files.is_empty() && !self.view_only { crate::clip::image_png() } else { None };
-                    if let Some(png) = picture {
-                        self.send(ToAgent::ClipImage(png))?;
-                        self.tap('v' as u32)?;
+                    let stale = *self.stale_picture.lock().unwrap_or_else(|e| e.into_inner());
+                    let picture = picture.filter(|(mark, _)| Some(*mark) != stale);
+                    if let Some((mark, png)) = picture {
+                        if png.len() > crate::clip::IMAGE_MAX {
+                            // Too large to go as a picture: as a file, as files are pasted.
+                            if let Some(path) = crate::clip::image_here() {
+                                self.paste_files(vec![path])?;
+                            }
+                        } else {
+                            self.send(ToAgent::ClipImage(png))?;
+                            self.tap('v' as u32)?;
+                        }
+                        // Sent: that clipboard holds it now.
+                        *self.stale_picture.lock().unwrap_or_else(|e| e.into_inner()) = Some(mark);
                     } else if files.is_empty() {
                         self.key('v' as u32, false)?;
                     } else {
@@ -145,6 +157,8 @@ impl Remote {
                     self.key(sym, pressed)?;
                 }
                 Event::ModifiersChanged(m) if !local => self.sync_mods(m)?,
+                // Shift+Insert's paste is over with the key (no V to let go of).
+                Event::Key { key: Key::Insert, pressed: false, .. } => self.paste_seen = false,
                 // Clipboard keys reach here as copy, cut and paste: the host gets the keys pressed,
                 // Ctrl+C, X and V, or Ctrl+Insert, Shift+Delete and Shift+Insert (with the
                 // modifiers already held there), never a bare letter.

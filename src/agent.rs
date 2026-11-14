@@ -581,6 +581,7 @@ fn serve_with(
                 ToAgent::Clipboard(text) => clip.set(text),
                 // A picture for the paste the viewer sends next.
                 ToAgent::Density(d) => cap.set_density(d as f64 / 100.0),
+                ToAgent::ClipImage(png) if png.is_empty() => {}
                 ToAgent::ClipImage(png) => {
                     if !clip.set_image(png) {
                         send(enc, &ToClient::Notice("The picture could not be put on this computer's clipboard".into())).map_err(io_err)?;
@@ -592,7 +593,9 @@ fn serve_with(
                     } else if let Some(batch) = dir.strip_prefix(crate::files::CLIPBOARD) {
                         inbox.start_in(id, size, &crate::files::clipboard_dir(batch), &name)
                     } else if let Some(batch) = dir.strip_prefix(crate::files::DROP) {
-                        inbox.start_in(id, size, &crate::files::drop_dir(batch), &name)
+                        // Named so that its path, typed at a prompt, is read as it is.
+                        let name: Vec<String> = name.split(['/', '\\']).map(crate::files::typable).collect();
+                        inbox.start_in(id, size, &crate::files::drop_dir(batch), &name.join("/"))
                     } else {
                         inbox.start_in(id, size, std::path::Path::new(&dir), &name)
                     };

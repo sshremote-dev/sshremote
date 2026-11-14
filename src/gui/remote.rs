@@ -48,6 +48,11 @@ pub(super) struct Remote {
     pan: Vec2,
     clip: Clip,
     share_clipboard: bool,
+    /// A picture from there being put on this clipboard.
+    image_in: Option<std::sync::mpsc::Receiver<bool>>,
+    /// The mark of the picture on this clipboard when that computer's clipboard last changed:
+    /// it is older than what is there, and Ctrl+V does not paste it over it.
+    pub(super) stale_picture: std::sync::Arc<std::sync::Mutex<Option<(usize, u64)>>>,
     /// Watching only: no key, click or wheel reaches the SSH host.
     view_only: bool,
     held: BTreeSet<u32>,
@@ -257,6 +262,8 @@ impl Remote {
             fill_full: true,
             pan: Vec2::ZERO,
             clip: Clip::new(),
+            image_in: None,
+            stale_picture: Default::default(),
             share_clipboard: true,
             view_only: false,
             held: BTreeSet::new(),
@@ -522,8 +529,29 @@ impl Remote {
         Ok(())
     }
 
+    /// That computer's clipboard changed: the picture on this one now is older than it.
+    fn copied_there(&mut self) {
+        let stale = self.stale_picture.clone();
+        std::thread::spawn(move || {
+            let m = crate::clip::image_mark();
+            *stale.lock().unwrap_or_else(|e| e.into_inner()) = m;
+        });
+    }
+
     pub(super) fn pump(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let start = Instant::now();
+        // A picture from there, on this clipboard now (or not).
+        if let Some(rx) = &self.image_in {
+            match rx.try_recv() {
+                Ok(ok) => {
+                    self.image_in = None;
+                    self.copied_there();
+                    self.notify(if ok { "A picture copied there is on this computer's clipboard" } else { "A picture copied there could not be put on this computer's clipboard" });
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.image_in = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
         loop {
             // A flood of messages waits for the next frame rather than keep this one from drawing.
             if start.elapsed() > PUMP_BUDGET {
@@ -559,6 +587,7 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Allowed(bits))) => self.allowed = bits,
                 Ok(Ev::Net(ToClient::HostState { can, on })) => self.host = Some((can, on)),
                 Ok(Ev::Net(ToClient::ClipFiles(list))) => {
+                    self.copied_there();
                     if self.share_clipboard && self.active {
                         self.files_copied_there(list)?;
                     }
@@ -607,11 +636,15 @@ impl Remote {
                     if self.share_clipboard && self.active {
                         self.clip.set(t);
                     }
+                    self.copied_there();
                 }
-                // A picture copied there (a screenshot): on this clipboard, to paste here.
+                // A picture copied there (a screenshot): on this clipboard, to paste here; one too
+                // large to come over comes empty.
                 Ok(Ev::Net(ToClient::ClipImage(png))) => {
-                    if self.share_clipboard && self.active && self.clip.set_image(png) {
-                        self.notify("A picture copied there is on this computer's clipboard");
+                    if png.is_empty() || !(self.share_clipboard && self.active) {
+                        self.copied_there();
+                    } else {
+                        self.image_in = Some(self.clip.set_image_later(png));
                     }
                 }
                 Ok(Ev::Net(ToClient::FileProgress { id, received })) => {

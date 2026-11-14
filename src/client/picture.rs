@@ -168,7 +168,15 @@ impl Viewer {
                     self.idx.extend(self.px.iter().map(|p| self.lut.get(p[0], p[1], p[2])));
                     self.sixel.encode(&mut img, w, h, &self.idx, &self.pal);
                 }
-                if self.tmux.is_some() {
+                if self.tmux.is_some() && self.kitty.is_some() {
+                    // Through tmux one sequence at a time: it keeps no passthrough of a whole picture.
+                    let mut cuts: Vec<usize> = img.windows(3).enumerate().filter(|(_, w)| *w == b"\x1b_G").map(|(i, _)| i).skip(1).collect();
+                    cuts.insert(0, 0);
+                    cuts.push(img.len());
+                    for w in cuts.windows(2) {
+                        tmux_wrap(out, &img[w[0]..w[1]]);
+                    }
+                } else if self.tmux.is_some() {
                     tmux_wrap(out, &img);
                 } else {
                     out.extend_from_slice(&img);

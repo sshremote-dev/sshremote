@@ -18,27 +18,39 @@ use super::*;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Place {
     Here,
-    Ssh { host: String, port: Option<String> },
+    /// `opts`: the options of the pane's own ssh command (its user, key, jump host, config).
+    Ssh { host: String, port: Option<String>, opts: Vec<String> },
     Agent,
 }
 
 pub(super) fn place(t: &Tab) -> Place {
     match (&t.backend, &t.profile.launch) {
         (Backend::Agent, _) => Place::Agent,
-        (_, Launch::Local(argv)) => ssh_of(argv).map_or(Place::Here, |(host, port)| Place::Ssh { host, port }),
+        (_, Launch::Local(argv)) => ssh_of(argv).map_or(Place::Here, |(host, port, opts)| Place::Ssh { host, port, opts }),
         _ => Place::Here,
     }
 }
 
-/// The host and port of an `ssh` command line (possibly after the saved-login wrapper).
-pub(super) fn ssh_of(argv: &[String]) -> Option<(String, Option<String>)> {
-    let at = argv.iter().position(|a| {
+/// The host, port and options of an `ssh` command line (ssh itself, or after the saved-login
+/// wrapper): the options that choose who and how (-l, -i, -J, -F, -o...) go with the copy too;
+/// those that would forward ports, ask for a terminal or go to the background do not.
+pub(super) fn ssh_of(argv: &[String]) -> Option<(String, Option<String>, Vec<String>)> {
+    let is_ssh = |a: &String| {
         let name = a.rsplit(['/', '\\']).next().unwrap_or(a).to_ascii_lowercase();
         name == "ssh" || name == "ssh.exe"
-    })?;
-    // Options of ssh that take a value.
-    const VALUED: &[&str] = &["-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-Q", "-R", "-S", "-W", "-w", "-B"];
+    };
+    let at = if argv.first().is_some_and(is_ssh) {
+        0
+    } else {
+        // sshremote --saved-login HOST -- ssh ...
+        let dash = argv.iter().position(|a| a == "--")?;
+        (argv.get(1).is_some_and(|a| a == "--saved-login") && argv.get(dash + 1).is_some_and(is_ssh)).then_some(dash + 1)?
+    };
+    // Options of ssh that take a value, and those left out of a copy.
+    const VALUED: &[&str] = &["-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-P", "-Q", "-R", "-S", "-W", "-w"];
+    const LEFT_OUT: &[&str] = &["-D", "-L", "-R", "-W", "-O", "-S", "-E", "-w", "-e", "-Q"];
     let mut port = None;
+    let mut opts = Vec::new();
     let mut it = argv[at + 1..].iter();
     while let Some(a) = it.next() {
         if a == "-p" {
@@ -46,9 +58,23 @@ pub(super) fn ssh_of(argv: &[String]) -> Option<(String, Option<String>)> {
         } else if let Some(p) = a.strip_prefix("-p").filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
             port = Some(p.to_string());
         } else if VALUED.contains(&a.as_str()) {
-            it.next();
-        } else if !a.starts_with('-') {
-            return Some((a.clone(), port));
+            let v = it.next()?;
+            if !LEFT_OUT.contains(&a.as_str()) {
+                opts.extend([a.clone(), v.clone()]);
+            }
+        } else if a.len() > 2 && a.starts_with('-') && VALUED.contains(&&a[..2]) {
+            // A value written on: -lalice, -oUser=alice.
+            if !LEFT_OUT.contains(&&a[..2]) {
+                opts.push(a.clone());
+            }
+        } else if a.starts_with('-') {
+            // Flags: those that change only how it goes (-4, -6, -A, -C, -q, -v...) stay.
+            let kept: String = a[1..].chars().filter(|c| !"tTNfnMsGVxXyY".contains(*c)).collect();
+            if !kept.is_empty() {
+                opts.push(format!("-{kept}"));
+            }
+        } else {
+            return Some((a.clone(), port, opts));
         }
     }
     None
@@ -119,33 +145,77 @@ fn size_of(paths: &[PathBuf]) -> u64 {
 /// Starts copying `paths` for the shell of pane `t`; an agent's goes out as `Cmd::Upload`.
 pub(super) fn start(t: &mut Tab, paths: Vec<PathBuf>, out: &mut Vec<Cmd>) {
     let paths: Vec<PathBuf> = paths.into_iter().filter(|p| !p.as_os_str().is_empty() && p.exists()).collect();
-    if paths.is_empty() || t.drop.as_ref().is_some_and(Job::running) {
+    // A shell that ended (or never started) takes nothing.
+    if paths.is_empty() || t.exited.is_some() || t.drop.as_ref().is_some_and(Job::running) {
         return;
     }
     let what = label(&paths);
     match place(t) {
         Place::Here => {
-            let job = Job::new(what, "here".into(), 0);
-            *job.end.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(paths.iter().map(|p| p.display().to_string()).collect()));
+            // A name the shell would read otherwise ($ or % in it, a control character) is
+            // copied under one it reads whole; the others are typed as they are.
+            let odd: Vec<bool> = paths.iter().map(|p| p.to_string_lossy().chars().any(|c| c.is_control() || (cfg!(windows) && "\"$`%!".contains(c)))).collect();
+            let size = paths.iter().zip(&odd).filter(|(_, o)| **o).map(|(p, _)| size_of(std::slice::from_ref(p))).sum();
+            let job = Job::new(what, "here".into(), size);
+            let (done, end) = (job.done.clone(), job.end.clone());
+            if odd.iter().any(|o| *o) {
+                std::thread::spawn(move || {
+                    let r = copy_here(&paths, &odd, &done);
+                    *end.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                });
+            } else {
+                *end.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(paths.iter().map(|p| p.display().to_string()).collect()));
+            }
             t.drop = Some(job);
         }
         Place::Agent => {
             t.drop = Some(Job::new(what, "the host".into(), size_of(&paths)));
             out.push(Cmd::Upload { tab: t.id, paths });
         }
-        Place::Ssh { host, port } => {
+        Place::Ssh { host, port, opts } => {
             let job = Job::new(what, host.clone(), size_of(&paths));
             let (done, cancel, end) = (job.done.clone(), job.cancel.clone(), job.end.clone());
             let windows = Arc::new(AtomicBool::new(false));
             let w = windows.clone();
             std::thread::spawn(move || {
-                let r = ssh_copy(&host, port.as_deref(), &paths, &done, &cancel, &w);
+                let r = ssh_copy(&host, port.as_deref(), &opts, &paths, &done, &cancel, &w);
                 *end.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
             });
             t.drop = Some(job);
             t.drop_windows = Some(windows);
         }
     }
+}
+
+/// Copies the `odd` ones of `paths` into a drop folder here under names a shell reads whole.
+fn copy_here(paths: &[PathBuf], odd: &[bool], done: &AtomicU64) -> Outcome {
+    let folder = crate::files::drop_dir(&crate::files::batch_name());
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let mut taken = std::collections::HashSet::new();
+    let mut there = Vec::new();
+    for (p, odd) in paths.iter().zip(odd) {
+        if !odd {
+            there.push(p.display().to_string());
+            continue;
+        }
+        let name = crate::files::unique(crate::files::typable(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), &mut taken);
+        let mut files = Vec::new();
+        if p.is_dir() {
+            crate::files::walk(p, &name, &mut files);
+        } else {
+            files.push((p.clone(), name.clone()));
+        }
+        for (f, rel) in files {
+            let to = folder.join(rel.split(['/', '\\']).map(crate::files::typable).collect::<Vec<_>>().join(std::path::MAIN_SEPARATOR_STR));
+            if let Some(d) = to.parent() {
+                std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+            }
+            let n = std::fs::copy(&f, &to).map_err(|e| format!("{}: {e}", f.display()))?;
+            done.fetch_add(n, Ordering::AcqRel);
+        }
+        there.push(folder.join(&name).display().to_string());
+    }
+    Ok(there)
 }
 
 /// What the clipboard holds that is pasted as files: files copied in a file manager, or a
@@ -162,9 +232,13 @@ pub(super) fn clipboard_files() -> Option<Vec<PathBuf>> {
 pub(super) fn typed(paths: &[String], windows: bool) -> String {
     let mut s = String::new();
     for p in paths {
+        // Never a control character (a paste's end among them), whatever a name holds.
+        let p: String = p.chars().filter(|c| !c.is_control()).collect();
+        let p = &p;
         let plain = |c: char| c.is_ascii_alphanumeric() || "-_./:@%+,=~\\".contains(c);
         if windows {
-            if p.chars().all(|c| plain(c) && c != '~') {
+            // cmd splits names at , ; = and reads %: those are quoted.
+            if p.chars().all(|c| plain(c) && !"~%,=".contains(c)) {
                 s.push_str(p);
             } else {
                 s.push('"');
@@ -287,9 +361,12 @@ pub(super) fn hint(t: &Tab, ui: &egui::Ui, area: Rect) {
     p.galley(r.min + Vec2::new(14.0, 8.0), galley, ui.visuals().strong_text_color());
 }
 
-fn ssh_command(host: &str, port: Option<&str>) -> std::process::Command {
+fn ssh_command(host: &str, port: Option<&str>, opts: &[String]) -> std::process::Command {
     let mut c = std::process::Command::new("ssh");
     c.arg("-T");
+    c.args(opts);
+    // A host that stops answering ends the copy instead of holding it.
+    c.args(["-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]);
     if let Some(p) = port.filter(|p| !p.is_empty()) {
         c.args(["-p", p]);
     }
@@ -316,38 +393,34 @@ fn first_line(s: &str) -> Option<&str> {
     s.lines().map(str::trim).find(|l| !l.is_empty())
 }
 
-/// A name with no character either kind of computer reads specially.
-fn plain_name(name: &str) -> String {
-    let s: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
-    let s = s.trim_start_matches('.').to_string();
-    if s.is_empty() { "file".into() } else { s.chars().take(120).collect() }
-}
-
 /// Copies each file (a folder's files in their places) into a folder of its own in the host's
 /// drop folder, over SFTP: ssh's own file transfer, the same on Linux and Windows hosts, with no
 /// shell between (Windows' shells stall on large input). What is a day old there is cleared after.
-fn ssh_copy(host: &str, port: Option<&str>, paths: &[PathBuf], done: &AtomicU64, cancel: &AtomicBool, windows_out: &AtomicBool) -> Outcome {
-    let mut sftp = Sftp::start(host, port)?;
+fn ssh_copy(host: &str, port: Option<&str>, opts: &[String], paths: &[PathBuf], done: &AtomicU64, cancel: &Arc<AtomicBool>, windows_out: &AtomicBool) -> Outcome {
+    let mut sftp = Sftp::start(host, port, opts)?;
+    // Stop ends ssh at once, even while it waits on a host that does not answer.
+    let _watch = Watch::start(sftp.child.clone(), cancel.clone());
     let home = sftp.realpath(".")?;
     // "/C:/Users/alex" is how Windows' SFTP server names a folder.
     let windows = home.as_bytes().get(2) == Some(&b':') || home.as_bytes().get(1) == Some(&b':');
     windows_out.store(windows, Ordering::Release);
     let base = format!("{}/{}", home.trim_end_matches('/'), if windows { "AppData/Local/Temp/sshremote-drop" } else { ".cache/sshremote/drop" });
-    let batch = format!("{}-{}", crate::sys::now_secs(), std::process::id());
-    let folder = format!("{base}/{batch}");
+    let folder = format!("{base}/{}", crate::files::batch_name());
     sftp.mkdirs(&folder)?;
     let mut there = Vec::new();
+    let mut taken = std::collections::HashSet::new();
     for p in paths {
         if cancel.load(Ordering::Acquire) {
             return Err("stopped".into());
         }
-        let name = plain_name(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        // Two files of one name (from two folders) both arrive, the second as "name-2".
+        let name = crate::files::unique(crate::files::typable(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), &mut taken);
         if p.is_dir() {
             let mut files = Vec::new();
             crate::files::walk(p, &name, &mut files);
             sftp.mkdirs(&format!("{folder}/{name}"))?;
             for (f, rel) in files {
-                let rel: Vec<String> = rel.split(['/', '\\']).map(plain_name).collect();
+                let rel: Vec<String> = rel.split(['/', '\\']).map(crate::files::typable).collect();
                 let to = format!("{folder}/{}", rel.join("/"));
                 if let Some((dir, _)) = to.rsplit_once('/') {
                     sftp.mkdirs(dir)?;
@@ -362,13 +435,13 @@ fn ssh_copy(host: &str, port: Option<&str>, paths: &[PathBuf], done: &AtomicU64,
         }
     }
     drop(sftp);
-    clear_old(host, port, windows);
+    clear_old(host, port, opts, windows);
     // As the host's own programs name them.
     Ok(there.into_iter().map(|p| if windows { p.trim_start_matches('/').replace('/', "\\") } else { p }).collect())
 }
 
 /// Clears what was dropped there over a day ago, in the background.
-fn clear_old(host: &str, port: Option<&str>, windows: bool) {
+fn clear_old(host: &str, port: Option<&str>, opts: &[String], windows: bool) {
     let remote = if windows {
         let script = "Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Temp\\sshremote-drop') -Directory -ErrorAction SilentlyContinue | \
                       Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue";
@@ -378,7 +451,7 @@ fn clear_old(host: &str, port: Option<&str>, windows: bool) {
     } else {
         "sh -c 'find \"$HOME/.cache/sshremote/drop\" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null'".to_string()
     };
-    let mut c = ssh_command(host, port);
+    let mut c = ssh_command(host, port, opts);
     c.arg(host).arg(remote).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     if let Ok(mut child) = c.spawn() {
         std::thread::spawn(move || {
@@ -389,10 +462,40 @@ fn clear_old(host: &str, port: Option<&str>, windows: bool) {
 
 /// The few requests of SFTP (version 3) a copy needs, over `ssh -s HOST sftp`.
 struct Sftp {
-    child: std::process::Child,
+    child: Arc<Mutex<std::process::Child>>,
     w: std::process::ChildStdin,
     r: std::io::BufReader<std::process::ChildStdout>,
     next: u32,
+    /// The last of what ssh said (read as it comes, so a talkative ssh never stalls).
+    said: Arc<Mutex<String>>,
+    /// Folders made already.
+    made: std::collections::HashSet<String>,
+}
+
+/// Ends the copy's ssh when Stop is pressed, until the copy is over.
+struct Watch(Arc<AtomicBool>);
+
+impl Watch {
+    fn start(child: Arc<Mutex<std::process::Child>>, cancel: Arc<AtomicBool>) -> Watch {
+        let finished = Arc::new(AtomicBool::new(false));
+        let f = finished.clone();
+        std::thread::spawn(move || {
+            while !f.load(Ordering::Acquire) {
+                if cancel.load(Ordering::Acquire) {
+                    let _ = child.lock().unwrap_or_else(|e| e.into_inner()).kill();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        Watch(finished)
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 const FXP_INIT: u8 = 1;
@@ -415,14 +518,29 @@ fn put_str(b: &mut Vec<u8>, s: &[u8]) {
 }
 
 impl Sftp {
-    fn start(host: &str, port: Option<&str>) -> Result<Sftp, String> {
-        let mut c = ssh_command(host, port);
+    fn start(host: &str, port: Option<&str>, opts: &[String]) -> Result<Sftp, String> {
+        let mut c = ssh_command(host, port, opts);
         c.arg("-s").arg(host).arg("sftp");
         let mut child = c.spawn().map_err(|e| format!("ssh: {e}"))?;
         crate::sys::tie(&child);
         let w = child.stdin.take().ok_or("ssh")?;
         let r = std::io::BufReader::new(child.stdout.take().ok_or("ssh")?);
-        let mut s = Sftp { child, w, r, next: 1 };
+        let said = Arc::new(Mutex::new(String::new()));
+        if let Some(mut e) = child.stderr.take() {
+            let said = said.clone();
+            std::thread::spawn(move || {
+                let mut b = [0u8; 4096];
+                while let Ok(n @ 1..) = e.read(&mut b) {
+                    let mut s = said.lock().unwrap_or_else(|e| e.into_inner());
+                    s.push_str(&String::from_utf8_lossy(&b[..n]));
+                    if s.len() > 8000 {
+                        let cut = s.ceil_char_boundary(s.len() - 4000);
+                        s.drain(..cut);
+                    }
+                }
+            });
+        }
+        let mut s = Sftp { child: Arc::new(Mutex::new(child)), w, r, next: 1, said, made: std::collections::HashSet::new() };
         let mut init = vec![FXP_INIT];
         init.extend_from_slice(&3u32.to_be_bytes());
         if s.send(&init).is_err() || !matches!(s.read(), Ok((FXP_VERSION, _))) {
@@ -433,11 +551,14 @@ impl Sftp {
 
     /// Why ssh failed, from what it said.
     fn why(&mut self, otherwise: &str) -> String {
-        let _ = self.child.kill();
-        let mut err = String::new();
-        if let Some(mut e) = self.child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
+        {
+            let mut c = self.child.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = c.kill();
+            let _ = c.wait();
         }
+        // What ssh said last, once its output is all read.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let err = self.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let why = first_line(&err).unwrap_or(otherwise).to_string();
         if why.to_lowercase().contains("permission denied") { "it needs SSH keys, or a password saved for this host".into() } else { why }
     }
@@ -507,13 +628,15 @@ impl Sftp {
         let mut at = String::new();
         for part in path.split('/').filter(|p| !p.is_empty()) {
             at = if at.is_empty() && !path.starts_with('/') { part.to_string() } else { format!("{at}/{part}") };
-            // Its drive ("/C:") is no folder to make.
-            if part.ends_with(':') {
+            // Its drive ("/C:") is no folder to make, nor one made already.
+            if part.ends_with(':') || !self.made.insert(at.clone()) {
                 continue;
             }
             let mut b = Vec::new();
             put_str(&mut b, at.as_bytes());
-            b.extend_from_slice(&0u32.to_be_bytes());
+            // Made the user's alone (where the host keeps permissions).
+            b.extend_from_slice(&4u32.to_be_bytes());
+            b.extend_from_slice(&0o700u32.to_be_bytes());
             self.request(FXP_MKDIR, &b)?;
             // One that is there already says so; the file's own open says if it is not a folder.
             let _ = self.reply()?;
@@ -527,7 +650,8 @@ impl Sftp {
         let mut b = Vec::new();
         put_str(&mut b, to.as_bytes());
         b.extend_from_slice(&(0x02u32 | 0x08 | 0x10).to_be_bytes()); // write, create, truncate
-        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(&4u32.to_be_bytes());
+        b.extend_from_slice(&0o600u32.to_be_bytes());
         self.request(FXP_OPEN, &b)?;
         let (kind, body) = self.reply()?;
         if kind != FXP_HANDLE || body.len() < 8 {
@@ -590,8 +714,9 @@ impl Sftp {
 
 impl Drop for Sftp {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut c = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
 
@@ -609,24 +734,34 @@ mod tests {
         std::fs::create_dir_all(dir.join("folder/sub")).unwrap();
         std::fs::write(dir.join("my shot.png"), vec![7u8; 300_000]).unwrap();
         std::fs::write(dir.join("folder/sub/note.txt"), b"hello").unwrap();
-        let (done, cancel, win) = (AtomicU64::new(0), AtomicBool::new(false), AtomicBool::new(false));
-        let paths = ssh_copy(&host, None, &[dir.join("my shot.png"), dir.join("folder")], &done, &cancel, &win).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::write(dir.join("other/my shot.png"), b"second").unwrap();
+        let (done, cancel, win) = (AtomicU64::new(0), Arc::new(AtomicBool::new(false)), AtomicBool::new(false));
+        let paths = ssh_copy(&host, None, &[], &[dir.join("my shot.png"), dir.join("folder"), dir.join("other/my shot.png")], &done, &cancel, &win).unwrap();
         println!("windows={} paths={paths:?}", win.load(Ordering::Acquire));
-        assert_eq!(done.load(Ordering::Acquire), 300_005);
-        assert_eq!(paths.len(), 2);
-        assert!(paths[0].ends_with("my_shot.png") && paths[1].ends_with("folder"), "{paths:?}");
+        assert_eq!(done.load(Ordering::Acquire), 300_011);
+        assert_eq!(paths.len(), 3);
+        assert!(paths[0].ends_with("my shot.png") && paths[1].ends_with("folder") && paths[2].ends_with("my shot-2.png"), "{paths:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn the_host_of_an_ssh_command_line() {
         let v = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
-        assert_eq!(ssh_of(&v("ssh web1")), Some(("web1".into(), None)));
-        assert_eq!(ssh_of(&v("ssh -p 2222 dev@build")), Some(("dev@build".into(), Some("2222".into()))));
-        assert_eq!(ssh_of(&v("ssh -p2222 -i key -o A=b dev@build")), Some(("dev@build".into(), Some("2222".into()))));
-        assert_eq!(ssh_of(&v("/usr/bin/sshremote --saved-login web1 -- ssh web1")), Some(("web1".into(), None)));
-        assert_eq!(ssh_of(&v(r"C:\Windows\System32\OpenSSH\ssh.exe host")), Some(("host".into(), None)));
+        let none = Vec::<String>::new();
+        assert_eq!(ssh_of(&v("ssh web1")), Some(("web1".into(), None, none.clone())));
+        assert_eq!(ssh_of(&v("ssh -p 2222 dev@build")), Some(("dev@build".into(), Some("2222".into()), none.clone())));
+        // Who and how go with the copy; a terminal, port forwards and the background do not.
+        assert_eq!(
+            ssh_of(&v("ssh -p2222 -t -i key -o A=b -l alice -J jump -L 80:x:80 -NCv dev@build ls")),
+            Some(("dev@build".into(), Some("2222".into()), v("-i key -o A=b -l alice -J jump -Cv")))
+        );
+        assert_eq!(ssh_of(&v("ssh -lalice -oUser=bob web1")).unwrap().2, v("-lalice -oUser=bob"));
+        assert_eq!(ssh_of(&v("/usr/bin/sshremote --saved-login web1 -- ssh web1")), Some(("web1".into(), None, none.clone())));
+        assert_eq!(ssh_of(&v(r"C:\Windows\System32\OpenSSH\ssh.exe host")), Some(("host".into(), None, none.clone())));
         assert_eq!(ssh_of(&v("bash -l")), None);
+        // "ssh" as another program's word is no ssh command.
+        assert_eq!(ssh_of(&v("docker exec -it ssh bash")), None);
     }
 
     #[test]
@@ -634,8 +769,17 @@ mod tests {
         let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(typed(&p(&["/tmp/a.png", "/tmp/my shot.png", "/tmp/it's"]), false), "/tmp/a.png '/tmp/my shot.png' '/tmp/it'\\''s' ");
         assert_eq!(typed(&p(&[r"C:\Users\a\x.png", r"C:\Users\a b\y.png"]), true), r#"C:\Users\a\x.png "C:\Users\a b\y.png" "#);
-        assert_eq!(plain_name("my shot (1).png"), "my_shot__1_.png");
-        assert_eq!(plain_name("..hidden"), "hidden");
-        assert_eq!(plain_name("한글.png"), "__.png");
+        // cmd splits at , and =: quoted. A paste's end in a name never reaches the shell.
+        assert_eq!(typed(&p(&[r"C:\t\a,b.png"]), true), r#""C:\t\a,b.png" "#);
+        assert_eq!(typed(&p(&["/tmp/x\u{1b}[201~\r.png"]), false), "'/tmp/x[201~.png' ");
+        // Names a shell reads whole on either computer; two of one name apart.
+        assert_eq!(crate::files::typable("$(calc).png"), "_(calc).png");
+        assert_eq!(crate::files::typable("100% `x`!.png"), "100_ _x__.png");
+        assert_eq!(crate::files::typable("한글 사진.png"), "한글 사진.png");
+        assert_eq!(crate::files::typable("con.txt"), "_con.txt");
+        assert_eq!(crate::files::typable("x\u{1b}[201~\r"), "x_[201~_");
+        let mut taken = std::collections::HashSet::new();
+        let names: Vec<String> = ["shot.png", "shot.png", "Shot.png", "a"].iter().map(|n| crate::files::unique(n.to_string(), &mut taken)).collect();
+        assert_eq!(names, ["shot.png", "shot-2.png", "Shot-3.png", "a"]);
     }
 }

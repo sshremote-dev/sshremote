@@ -1039,6 +1039,8 @@ pub fn run(opt: Options) -> Result<(), String> {
     })();
     if interactive {
         let _ = v.release_all();
+        // The kitty images go with the viewer (the terminal would keep them otherwise).
+        let _ = v.unpicture();
         #[cfg(unix)]
         if v.key_states {
             let _ = execute!(v.out, event::PopKeyboardEnhancementFlags);

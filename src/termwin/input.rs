@@ -206,11 +206,18 @@ pub(super) fn keyboard_with(
             }
             // A picture or files alone on the clipboard make no paste event, only the V let go:
             // they are pasted as files (copied to where the shell runs, their paths typed).
-            Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command && !modifiers.shift => {
-                if !std::mem::take(&mut t.pasted) {
+            Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => {
+                if !std::mem::take(&mut t.pasted) && !modifiers.shift {
                     paste_files(t, out);
                 }
             }
+            // A picture alone on the clipboard, as egui reads it.
+            Event::PasteImage(_) => {
+                t.pasted = true;
+                paste_files(t, out);
+            }
+            // Shift+Insert's paste is over with the key (no V to let go of).
+            Event::Key { key: Key::Insert, pressed: false, .. } => t.pasted = false,
             // Ctrl+Insert copies and Shift+Insert pastes, as in GNOME Terminal and xterm (on
             // Windows they arrive as copy and paste already).
             Event::Key { key: Key::Insert, pressed: true, modifiers, .. } if modifiers.ctrl && !modifiers.shift => {

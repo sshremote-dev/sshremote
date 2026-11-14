@@ -795,7 +795,8 @@ class Client {
         toast("A lossless picture of the screen was saved.");
       }
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
-      else if (b[0] === 8) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" }));
+      // A picture copied on the host; none (too large to come over) still says the host's clipboard is newer.
+      else if (b[0] === 8) { this.hostTurn = true; if (b.length > 1) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" })); else this.hostImage = null; }
       return;
     }
     const v = JSON.parse(m.data);
@@ -1161,20 +1162,27 @@ class Client {
     const held = new Map();
     // Ctrl+V there pastes what is copied here: the browser's paste brings it (a picture, files
     // or text), it goes onto the host's clipboard, then Ctrl+V goes to the host.
+    // Keys typed while a paste goes over wait for it, so they come after what is pasted.
     const swallowed = new Set();
-    let pasteWait = null;
+    let pasteWait = null, later = null;
+    const keySend = m => later ? later.push(m) : send(m);
+    const settle = () => { const q = later; later = null; clearTimeout(this.pasteGiveUp); for (const m of q || []) send(m); };
     const pasteThere = () => {
       const ctrl = [...held.values()].some(k => k === 0xffe3 || k === 0xffe4);
       if (!ctrl) send({ key: [K.ctrl, 1] });
       tap(0x76);
       if (!ctrl) send({ key: [K.ctrl, 0] });
+      settle();
     };
-    kbd.addEventListener("paste", e => {
+    const pasting = () => { later ||= []; clearTimeout(this.pasteGiveUp); this.pasteGiveUp = setTimeout(settle, 10000); };
+    // One handler for the field, whichever connection has it now.
+    kbd.onpaste = e => {
       e.preventDefault();
       clearTimeout(pasteWait); pasteWait = null;
-      if (this.viewOnly) return;
-      this.pasteData(e.clipboardData, pasteThere);
-    });
+      if (this.viewOnly) { settle(); return; }
+      pasting();
+      this.pasteData(e.clipboardData, pasteThere, settle);
+    };
     kbd.onkeydown = e => {
       // An input method is composing (Korean, Japanese, Chinese) or a phone keyboard sends no
       // key: its text comes when it is done.
@@ -1182,6 +1190,7 @@ class Client {
       if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.code === "KeyV" && !this.viewOnly) {
         // Left to the browser, which pastes into the field; a browser that does not still pastes there.
         swallowed.add(e.code);
+        pasting();
         clearTimeout(pasteWait);
         pasteWait = setTimeout(() => { pasteWait = null; pasteThere(); }, 400);
         return;
@@ -1194,13 +1203,13 @@ class Client {
         send({ key: [K.win, 1] }); send({ key: [k, 1] }); send({ key: [k, 0] }); send({ key: [K.win, 0] });
         return;
       }
-      held.set(e.code || e.key, k); send({ key: [k, 1] });
+      held.set(e.code || e.key, k); keySend({ key: [k, 1] });
     };
     kbd.onkeyup = e => {
       const id = e.code || e.key;
       if (swallowed.delete(id)) { e.preventDefault(); return; }
       const k = held.get(id) ?? keysym(e); if (!k) return;
-      e.preventDefault(); held.delete(id); send({ key: [k, 0] });
+      e.preventDefault(); held.delete(id); keySend({ key: [k, 0] });
     };
     const tap = k => { send({ key: [k, 1] }); send({ key: [k, 0] }); };
     // Text typed in as text, each character as the key that makes it.
@@ -1218,7 +1227,8 @@ class Client {
     reset();
     // Keys still down when the page loses focus come up, so none sticks on the host.
     this.releaseKeys = () => { for (const k of held.values()) this.send({ key: [k, 0] }); held.clear(); };
-    kbd.onblur = () => this.releaseKeys();
+    // Keys still down when the field loses the keyboard come up; a V left to a paste is forgotten.
+    kbd.onblur = () => { swallowed.clear(); later = null; this.releaseKeys(); };
     // Files dropped on the screen go to the host's Downloads folder, as in the app.
     const scr = $("vscreen");
     scr.ondragover = e => { if (!this.viewOnly) e.preventDefault(); };
@@ -1614,20 +1624,24 @@ class Client {
   }
   // What a paste in the screen brought: a picture onto the host's clipboard, files as files, or
   // text; then `paste` (Ctrl+V there).
-  pasteData(dt, paste) {
+  // `settle` lets held keys go when nothing is pasted by keys (files paste there by themselves).
+  pasteData(dt, paste, settle = () => {}) {
     const files = [...(dt?.files || [])];
-    if (files.length === 1 && files[0].type.startsWith("image/")) { this.sendImage(files[0], paste); return; }
-    if (files.length) { this.pasteFileList(files); return; }
+    // A screenshot comes as one unnamed picture ("image.png"); a picture file copied in a file
+    // manager keeps its name and is pasted as the file it is.
+    if (files.length === 1 && files[0].type.startsWith("image/") && /^(image|untitled)?(\.\w+)?$/i.test(files[0].name)) { this.sendImage(files[0], paste, settle); return; }
+    if (files.length) { this.pasteFileList(files); settle(); return; }
     const text = dt?.getData("text/plain");
     if (text && text !== this.sentClip && text !== this.hostClip) {
       this.sentClip = text;
+      this.hostTurn = false;
       this.send({ clipboard: text });
       setTimeout(paste, 150);
     } else paste();
   }
   // A picture onto the host's clipboard as PNG, in parts; larger than the host takes, it goes as
   // a file instead.
-  async sendImage(blob, paste) {
+  async sendImage(blob, paste, settle = () => {}) {
     try {
       if (blob.type !== "image/png") {
         const bmp = await createImageBitmap(blob);
@@ -1637,10 +1651,19 @@ class Client {
       }
       if (blob.size > 4 << 20) {
         this.pasteFileList([new File([blob], "picture-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png", { type: "image/png" })]);
+        settle();
         return;
       }
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (this.ws?.readyState !== 1) return;
+      if (this.ws?.readyState !== 1) { settle(); return; }
+      // The picture sent last, while the host has copied something since: theirs is newer.
+      let mark = 0x811c9dc5;
+      for (let i = 0; i < bytes.length; i++) mark = Math.imul(mark ^ bytes[i], 16777619);
+      mark = bytes.length + ":" + (mark >>> 0);
+      if (this.hostTurn && mark === this.sentImage) { paste(); return; }
+      this.sentImage = mark;
+      this.hostTurn = false;
+      this.sentClip = null;
       for (let at = 0; at < bytes.length; at += 512 << 10) {
         const part = bytes.subarray(at, at + (512 << 10));
         const fr = new Uint8Array(part.length + 1);
@@ -1649,7 +1672,7 @@ class Client {
       }
       this.send({ clipImageEnd: true });
       setTimeout(paste, 250);
-    } catch { toast("The picture could not be read.", { bad: true }); }
+    } catch { settle(); toast("The picture could not be read.", { bad: true }); }
   }
   // A picture copied on the host: onto this computer's clipboard when the browser allows it, or
   // a button to do it (or to save it, where pictures cannot be copied).
@@ -1668,6 +1691,7 @@ class Client {
     if (this.hostImage) saveBlob(this.hostImage, "picture-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
   }
   clipboardIn(text) {
+    this.hostTurn = true;
     this.hostClip = text;
     navigator.clipboard?.writeText(text).then(() => {}, () => toast("Copied on the host.", { action: ["Copy here", () => this.copyHostClip()] }));
   }

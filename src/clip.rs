@@ -58,21 +58,43 @@ fn to_png(w: usize, h: usize, rgba: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A PNG as the clipboard's pixels.
+/// A PNG as the clipboard's pixels: one the other side sent, so no larger than it may send
+/// (`IMAGE_MAX`) and no larger in pixels than a screen of 16384 a side (a small file can say huge).
 fn from_png(png: &[u8]) -> Option<arboard::ImageData<'static>> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    if png.len() > IMAGE_MAX {
+        return None;
+    }
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::proto::MAX_SIDE as u32);
+    limits.max_image_height = Some(crate::proto::MAX_SIDE as u32);
+    limits.max_alloc = Some((crate::proto::MAX_PIXELS * 4) as u64);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    if img.width() as usize * img.height() as usize > crate::proto::MAX_PIXELS {
+        return None;
+    }
+    let img = img.to_rgba8();
     let (w, h) = (img.width() as usize, img.height() as usize);
     Some(arboard::ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(img.into_raw()) })
 }
 
-/// The picture on this computer's clipboard now, as PNG, if it holds one (and no text).
-pub fn image_png() -> Option<Vec<u8>> {
+/// The picture on this computer's clipboard now, if it holds one (and no text): its mark, and
+/// it as PNG.
+pub fn image_png() -> Option<((usize, u64), Vec<u8>)> {
     let mut b = arboard::Clipboard::new().ok()?;
     if b.get_text().is_ok_and(|t| !t.is_empty()) {
         return None;
     }
     let img = b.get_image().ok()?;
-    to_png(img.width, img.height, &img.bytes)
+    let m = mark_image(img.width, img.height, &img.bytes);
+    Some((m, to_png(img.width, img.height, &img.bytes)?))
+}
+
+/// The mark of the picture on this computer's clipboard now, if it holds one.
+pub fn image_mark() -> Option<(usize, u64)> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    Some(mark_image(img.width, img.height, &img.bytes))
 }
 
 pub struct Clip {
@@ -188,6 +210,10 @@ impl Clip {
                 last = board.get_image().ok().map(|i| mark_image(i.width, i.height, &i.bytes));
             }
             let mut polls = 0u32;
+            // When to look at a picture next, and how many looks found the same one.
+            let (mut next_image, mut same) = (0u32, 0u32);
+            #[cfg(windows)]
+            let mut seen_seq = 0u32;
             // Text put there only to be pasted, what to put back afterwards, and when.
             let mut restore: Option<(Before, (usize, u64), std::time::Instant)> = None;
             loop {
@@ -248,6 +274,16 @@ impl Clip {
                         last = put.map(|t| mark(&t)).or(last);
                     }
                 }
+                // Windows counts each change of the clipboard: nothing is read until it changes.
+                #[cfg(windows)]
+                {
+                    let seq = unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+                    if seq != 0 && seq == seen_seq && restore.is_none() {
+                        polls = polls.wrapping_add(1);
+                        continue;
+                    }
+                    seen_seq = seq;
+                }
                 // Copied files first: a file manager may offer their paths as text as well.
                 if let Some(paths) = files.then(|| board.get().file_list().ok()).flatten().filter(|p| !p.is_empty()) {
                     let m = mark_files(&paths);
@@ -265,17 +301,25 @@ impl Clip {
                             return;
                         }
                     }
-                } else if files && polls.is_multiple_of(IMAGE_EVERY)
+                // (Windows reads it only when it changed: no waiting longer there.)
+                } else if files && polls.is_multiple_of(IMAGE_EVERY) && (cfg!(windows) || polls >= next_image)
                     && let Ok(img) = board.get_image()
                 {
                     // A picture copied (a screenshot): over by itself when it is not too large.
+                    // The same one again is looked at less and less often (each look reads it all).
                     let m = mark_image(img.width, img.height, &img.bytes);
+                    if last == Some(m) {
+                        same = (same + 1).min(10);
+                    } else {
+                        same = 0;
+                    }
+                    next_image = polls.wrapping_add(IMAGE_EVERY * (1 << same.min(4)));
                     if last != Some(m) {
                         last = Some(m);
-                        if img.width * img.height <= 40_000_000
-                            && let Some(png) = to_png(img.width, img.height, &img.bytes).filter(|p| p.len() <= IMAGE_MAX)
-                            && notify.send(Copied::Image(png)).is_err()
-                        {
+                        // Too large to bring over: told as no picture, so the other side knows
+                        // its own clipboard is older and does not paste it over this one.
+                        let png = (img.width * img.height <= 40_000_000).then(|| to_png(img.width, img.height, &img.bytes)).flatten().filter(|p| p.len() <= IMAGE_MAX);
+                        if notify.send(Copied::Image(png.unwrap_or_default())).is_err() {
                             return;
                         }
                     }
@@ -304,6 +348,14 @@ impl Clip {
         if self.to_board.send(Req::Set(text, tx)).is_ok() {
             let _ = rx.recv_timeout(Duration::from_millis(500));
         }
+    }
+
+    /// Puts a picture (PNG) from the other side on the local clipboard, not waited for: what
+    /// comes on the channel says whether it is there.
+    pub fn set_image_later(&mut self, png: Vec<u8>) -> Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        let _ = self.to_board.send(Req::Image(png, tx));
+        rx
     }
 
     /// Puts a picture (PNG) from the other side on the local clipboard; true once it is there.
