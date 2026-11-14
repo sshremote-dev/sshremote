@@ -221,7 +221,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
             let _ = chat.notice(allowed);
         }
     }
-    let mut cap = capture::open(backend)?;
+    // A screen that cannot be shared leaves the rest of the session: terminals, files, clipboard.
+    let mut cap = capture::open(backend).unwrap_or_else(|e| -> Box<dyn capture::Capture> {
+        eprintln!("sshremote: no screen to share: {e}");
+        Box::new(capture::NoScreen(e))
+    });
     let mut held = Held::default();
     let result = serve_with(enc, input, &mut cap, &mut held, chat, allowed);
     // What the viewer still held down at the host is let go, however the session ended.
@@ -276,6 +280,11 @@ fn serve_with(
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
+    if cap.name() == "none"
+        && let Err(why) = cap.windows()
+    {
+        send(enc, &ToClient::Notice(format!("This computer's screen cannot be shown: {why}. Its terminal and files work."))).map_err(io_err)?;
+    }
 
     let (tx, rx) = mpsc::channel();
     // Why the viewer's stream ended, when it ended badly, for the viewer to see.

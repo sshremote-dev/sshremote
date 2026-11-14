@@ -112,6 +112,36 @@ pub fn ensure_session_env() {
     gnome::ensure_env();
 }
 
+/// No screen: what a session has when this computer's screen cannot be shared (a desktop with
+/// no way in yet, nobody signed in): its terminals, files, clipboard and chat still work.
+pub struct NoScreen(pub String);
+
+impl Capture for NoScreen {
+    fn name(&self) -> &'static str {
+        "none"
+    }
+
+    fn desktop_size(&self) -> (usize, usize) {
+        (1280, 720)
+    }
+
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        Err(self.0.clone())
+    }
+
+    fn set_target(&mut self, _w: usize, _h: usize) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn grab(&mut self) -> Result<Option<Image>, String> {
+        Ok(None)
+    }
+
+    fn input(&mut self, _ev: Input) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
     match name {
         "synthetic" => Ok(Box::new(synthetic::Synthetic::new())),

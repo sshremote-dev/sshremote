@@ -748,6 +748,43 @@ impl Control {
 mod tests {
     use super::*;
 
+    /// A computer whose screen cannot be shared keeps the rest of the session: it says so, and
+    /// its files and terminal work. SSHREMOTE_EXE=target/debug/sshremote cargo test -- --ignored
+    /// no_screen_leaves_the_rest
+    #[test]
+    #[ignore]
+    fn no_screen_leaves_the_rest() {
+        let target = Target::Local { capture: "no-such-screen".into() };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        assert_eq!(sess.backend, "none");
+        let wait = |want: &dyn Fn(&ToClient) -> bool| -> ToClient {
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                if let Ok(Ev::Net(m)) = rx.recv_timeout(Duration::from_millis(200))
+                    && want(&m)
+                {
+                    return m;
+                }
+            }
+            panic!("no answer in time");
+        };
+        let ToClient::Notice(n) = wait(&|m| matches!(m, ToClient::Notice(_))) else { unreachable!() };
+        assert!(n.contains("screen cannot be shown"), "{n}");
+        sess.send(ToAgent::ListDir { path: String::new() }).unwrap();
+        let ToClient::DirList { error, .. } = wait(&|m| matches!(m, ToClient::DirList { .. })) else { unreachable!() };
+        assert!(error.is_empty(), "{error}");
+        sess.send(ToAgent::TermOpen { id: 1, cols: 80, rows: 24 }).unwrap();
+        sess.send(ToAgent::TermInput { id: 1, data: b"echo no-screen-$((6*7))\r".to_vec() }).unwrap();
+        let mut out = String::new();
+        let until = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < until && !out.contains("no-screen-42") {
+            if let Ok(Ev::Net(ToClient::TermOutput { data, .. })) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+        assert!(out.contains("no-screen-42"), "the shell answered: {out}");
+    }
+
     /// A GNOME host's screen turned on its side during a session is followed: the viewer is told
     /// the new size, and frames come at it, scaled to fit as before. Needs SSHREMOTE_GNOME_HOST
     /// (an ssh alias of a host signed in to GNOME with one monitor, which is turned and turned

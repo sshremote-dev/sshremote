@@ -20,6 +20,9 @@ pub(super) struct Remote {
     /// A web app's page (`capture::browser`): a page's controls (back, forward, reload), not a
     /// computer's.
     pub(super) web: bool,
+    /// The host has no screen to show (`capture::NoScreen`): the pane opens on its terminal.
+    screenless: bool,
+    screen_moved: bool,
     /// The pixels to a point a web page was last told (it lays itself out by them).
     density: Option<u16>,
     /// Ctrl+Alt+Enter was pressed in it: the workspace turns full screen on or off.
@@ -235,6 +238,8 @@ impl Remote {
         let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
         Remote {
             web: sess.backend == "browser",
+            screenless: sess.backend == "none",
+            screen_moved: false,
             density: None,
             active: true,
             full_toggle: false,
@@ -320,6 +325,11 @@ impl Remote {
     /// session is closed.
     pub(super) fn show(&mut self, ui: &mut egui::Ui, grabbed: Vec<(u32, bool)>) -> Result<(), String> {
         let ctx = ui.ctx().clone();
+        // A host with no screen to show opens on its terminal (or its files, without a terminal).
+        if self.screenless && self.mode() == super::workspace::PaneMode::Screen && !std::mem::replace(&mut self.screen_moved, true) {
+            let to = if self.allowed & crate::grant::TERMINAL != 0 { super::workspace::PaneMode::Terminal } else { super::workspace::PaneMode::Files };
+            self.set_mode(to)?;
+        }
         #[cfg(windows)]
         {
             // System keys go to the remote host while its screen is the active pane of the window
@@ -455,9 +465,16 @@ impl Remote {
                 self.density = Some(d);
                 let _ = self.send(ToAgent::Density(d));
             }
-            self.resize(pic_area.size() * ppp)?;
-            self.edge_pan(&ctx, pic_area);
-            self.picture(ui, pic_area, ppp)
+            if self.screenless {
+                // No picture will come: what there is instead, said where it would be.
+                let text = "This computer's screen cannot be shown here.\nIts terminal and files work: pick them above.";
+                ui.painter().text(pic_area.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(15.0), ui.visuals().weak_text_color());
+                None
+            } else {
+                self.resize(pic_area.size() * ppp)?;
+                self.edge_pan(&ctx, pic_area);
+                self.picture(ui, pic_area, ppp)
+            }
         };
         if let Some(r) = term_area {
             self.terminal_panel(ui, r)?;
