@@ -1633,7 +1633,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Switches, each `on` or `off`.
-        Some(what @ ("straight" | "lan" | "direct" | "requests")) => {
+        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras")) => {
             let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
@@ -1643,6 +1643,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 "straight" => c.punch = on,
                 "lan" => c.lan = on,
                 "requests" => c.requests = on,
+                "cameras" => c.cameras = on,
                 _ => c.direct = on,
             }
             save(&c)?;

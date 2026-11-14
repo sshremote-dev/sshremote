@@ -11,6 +11,12 @@ XTest, with no dialog); and other Wayland desktops through the xdg desktop porta
 COSMIC: allowed once at the screen, then kept where the desktop keeps it), with input of its own on
 wlroots ones that take none through the portal (Sway, Hyprland: a virtual pointer and keyboard).
 A desktop whose screen cannot be shared still gives its terminal and files.
+
+**Cameras** (as RustDesk's view camera): the host's cameras are listed after its monitors, in the
+window's monitor menu, the web page's and the terminal viewer's (Ctrl+] n), and shown when picked,
+to look at only (Linux through GStreamer, Windows through Media Foundation). A viewer by ID sees
+them only when the computer's settings allow it (`remote-access cameras on`, off by default), and
+the person at the screen is told each time one is looked at.
 Viewers: a native window, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE)
 or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found by asking the
 terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead). Inside tmux in kitty, kitty images
