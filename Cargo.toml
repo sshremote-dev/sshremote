@@ -14,6 +14,7 @@ crossterm = "0.29.0"
 eframe = { optional = true, version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 getrandom = "0.2"
 hkdf = { optional = true, version = "0.12" }
+curve25519-dalek = { optional = true, version = "4" }
 openh264 = { optional = true, version = "0.9" }
 opus = { optional = true, version = "0.3" }
 png = "0.17"
@@ -56,7 +57,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:uiautomation", "dep:windows"]
+remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:uiautomation", "dep:windows"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:eframe", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:x11-dl", "dep:raw-window-handle"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

@@ -54,6 +54,9 @@ pub struct Config {
     /// Where viewers may come from: addresses and ranges ("203.0.113.7 192.168.1.0/24");
     /// empty: anywhere. Through the relay, it says where it sees each viewer from.
     pub from: String,
+    /// A relay of one's own and its lasting key ("RELAY HEX"), as first seen: the line to it is
+    /// sealed with that key from then on (`relaylink`; the public relay's is known).
+    pub relay_key: String,
 }
 
 /// Which passwords remote access takes.
@@ -101,7 +104,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -131,6 +134,7 @@ impl Config {
             // Off unless chosen: anyone with the ID could ask.
             requests: v.get("requests").and_then(|x| x.as_bool()).unwrap_or(false),
             from: s("from").unwrap_or_default(),
+            relay_key: s("relay_key").unwrap_or_default(),
         })
     }
 }
@@ -268,6 +272,7 @@ pub fn fresh() -> Config {
         one_time: crate::net::new_one_time(),
         requests: false,
         from: String::new(),
+        relay_key: String::new(),
     }
 }
 
@@ -720,7 +725,7 @@ fn end_sessions_but(now: Option<&Config>) {
     });
 }
 
-pub(crate) fn line(s: &mut TcpStream) -> io::Result<String> {
+pub(crate) fn line(s: &mut impl Read) -> io::Result<String> {
     // Byte by byte: what follows the line belongs to the handshake.
     let mut out = Vec::new();
     let mut b = [0u8; 1];
@@ -895,16 +900,15 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         }
         password = Some(cfg.password.clone());
         set_state(State::Connecting);
-        let mut s = match dial(&cfg.relay) {
+        let mut s = match sealed_line(&mut cfg) {
             Ok(s) => s,
             Err(e) => {
-                set_state(State::Failed(format!("Could not reach {e}")));
+                set_state(State::Failed(e));
                 sleep_while(&keep, wait);
                 wait = (wait * 2).min(60);
                 continue;
             }
         };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
         let answer = writeln!(s, "listen {} {}", cfg.id, cfg.token).and_then(|_| line(&mut s));
         let refused = match answer.as_deref() {
             Ok("ok") => None,
@@ -1009,6 +1013,42 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
     set_state(State::Off);
     // Off: nobody stays in.
     end_sessions_but(None);
+}
+
+/// The relay's lasting key this computer knows it by: the public relay's, or one of its own's as
+/// first seen.
+fn known_key(cfg: &Config) -> Option<[u8; 32]> {
+    let relay = crate::computers::relay_name(&cfg.relay);
+    if relay.eq_ignore_ascii_case(crate::computers::RELAY) {
+        return crate::relaylink::unhex(crate::relaylink::PUBLIC_RELAY_KEY);
+    }
+    let (r, k) = cfg.relay_key.split_once(' ')?;
+    (r == relay).then(|| crate::relaylink::unhex(k)).flatten()
+}
+
+/// The line to the relay, sealed: with the key it is known by, or (a relay of one's own seen
+/// for the first time) the key it shows, kept. A relay before 1.3 gets the plain line, unless
+/// it was known sealed: then someone in between is refusing the seal, and nothing is said.
+fn sealed_line(cfg: &mut Config) -> Result<crate::relaylink::Link, String> {
+    use crate::relaylink::{Link, Outcome};
+    let reach = |relay: &str| -> Result<TcpStream, String> {
+        let s = dial(relay).map_err(|e| format!("Could not reach {e}"))?;
+        let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
+        Ok(s)
+    };
+    let known = known_key(cfg);
+    match Link::seal(reach(&cfg.relay)?, known) {
+        Ok(Outcome::Sealed(link, lasting)) => {
+            if known.is_none() {
+                cfg.relay_key = format!("{} {}", crate::computers::relay_name(&cfg.relay), hex(&lasting));
+                let _ = save(cfg);
+            }
+            Ok(link)
+        }
+        Ok(Outcome::Older) if known.is_none() => Ok(Link::plain(reach(&cfg.relay)?)),
+        Ok(Outcome::Older) => Err("The relay did not seal the line as it always has: someone between may be in the way".into()),
+        Err(e) => Err(format!("The relay could not be trusted: {e}")),
+    }
 }
 
 fn sleep_while(keep: &impl Fn() -> Option<Config>, secs: u64) {
@@ -1741,6 +1781,89 @@ mod tests {
         assert_eq!(tidy_ranges(" 10.0.0.1,,  10.0.0.2 ;"), "10.0.0.1 10.0.0.2");
     }
     use super::*;
+
+    /// The line to a relay of one's own is sealed and its key kept; a relay showing another key
+    /// later is refused, and so is one that no longer seals once it did; an older relay gets
+    /// the plain line the first time.
+    #[test]
+    fn the_line_to_the_relay_is_sealed_with_the_key_it_is_known_by() {
+        use std::net::TcpListener;
+        // A relay of 1.3 with `lasting` (None: one before, which drops a line it does not know).
+        let relay = |lasting: Option<([u8; 32], [u8; 32])>| -> String {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap().to_string();
+            thread::spawn(move || {
+                for s in l.incoming().take(2) {
+                    let mut s = s.unwrap();
+                    let first = line(&mut s).unwrap();
+                    let Some(lasting) = lasting else {
+                        if let Some(rest) = first.strip_prefix("listen ") {
+                            let _ = rest;
+                            writeln!(s, "ok").unwrap();
+                        }
+                        continue;
+                    };
+                    let e = crate::relaylink::unhex(first.strip_prefix("secure ").unwrap()).unwrap();
+                    let (answer, seal) = crate::relaylink::answer(&e, &lasting, [4; 32]).unwrap();
+                    writeln!(s, "{answer}").unwrap();
+                    let crate::relaylink::Sealed { mut out, mut inn } = seal;
+                    let mut raw = Vec::new();
+                    let mut b = [0u8; 512];
+                    // As the relay reads it: frames until a line is whole, three words.
+                    let mut words = Vec::new();
+                    while !words.ends_with(b"\n") {
+                        if let Some(w) = inn.open(&mut raw).unwrap() {
+                            words.extend(w);
+                            continue;
+                        }
+                        let n = s.read(&mut b).unwrap();
+                        raw.extend_from_slice(&b[..n]);
+                    }
+                    let text = String::from_utf8(words).unwrap();
+                    assert_eq!(text.split_whitespace().count(), 3, "{text:?}");
+                    assert!(text.starts_with("listen "));
+                    s.write_all(&out.seal(b"ok\n")).unwrap();
+                }
+            });
+            addr
+        };
+        let mut cfg = fresh();
+        cfg.relay = relay(Some(crate::relaylink::keypair([1; 32])));
+        let mut link = sealed_line(&mut cfg).unwrap();
+        writeln!(link, "listen {} {}", cfg.id, cfg.token).unwrap();
+        assert_eq!(line(&mut link).unwrap(), "ok");
+        assert!(cfg.relay_key.starts_with(&format!("{} ", cfg.relay)), "kept: {}", cfg.relay_key);
+        // The same address with another key: refused.
+        let other = relay(Some(crate::relaylink::keypair([2; 32])));
+        cfg.relay_key = cfg.relay_key.replace(&cfg.relay, &other);
+        cfg.relay = other;
+        assert!(sealed_line(&mut cfg).err().unwrap().contains("another key"));
+        // One before 1.3: the plain line, the first time only.
+        let mut fresh_cfg = fresh();
+        fresh_cfg.relay = relay(None);
+        let mut plain = sealed_line(&mut fresh_cfg).unwrap();
+        writeln!(plain, "listen {} {}", fresh_cfg.id, fresh_cfg.token).unwrap();
+        assert_eq!(line(&mut plain).unwrap(), "ok");
+        assert!(fresh_cfg.relay_key.is_empty());
+        let old = relay(None);
+        cfg.relay_key = format!("{old} {}", "ab".repeat(32));
+        cfg.relay = old;
+        assert!(sealed_line(&mut cfg).err().unwrap().contains("as it always has"));
+        // The public relay is known by the key shipped.
+        cfg.relay = crate::computers::OLD_RELAY.into();
+        assert_eq!(known_key(&cfg), crate::relaylink::unhex(crate::relaylink::PUBLIC_RELAY_KEY));
+    }
+
+    /// The public relay seals the line with the key shipped: cargo test -- --ignored public_relay_seals
+    #[test]
+    #[ignore]
+    fn public_relay_seals() {
+        let mut cfg = fresh();
+        cfg.relay = crate::computers::RELAY.into();
+        let mut link = sealed_line(&mut cfg).unwrap();
+        writeln!(link, "listen {} {}", cfg.id, cfg.token).unwrap();
+        assert_eq!(line(&mut link).unwrap(), "ok");
+    }
 
     /// The service never takes a link (a junction elsewhere) for its folder, and never makes its
     /// folder over something already there.

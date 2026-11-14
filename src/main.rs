@@ -83,6 +83,8 @@ mod shot;
 #[cfg(feature = "remote")]
 mod sixel;
 mod kitty;
+#[cfg(feature = "remote")]
+mod relaylink;
 mod script;
 mod sys;
 #[cfg(feature = "gui")]

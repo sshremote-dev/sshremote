@@ -120,8 +120,16 @@ told, before each call, where the relay sees the viewer from (`from NONCE ADDRES
 agents pass over); a viewer from elsewhere is answered 0xfffe in place of the agent's message
 and told why. Without the line (an older relay) nobody comes in past a list. A change of the
 settings ends the sessions it would no longer let in. The list adds to the password, it does not
-stand in for it: the line comes over the agent's own connection to the relay, which is not
-signed, so someone on the network path of the computer itself could write another address.
+stand in for it.
+
+The computer's own line to the relay is sealed (relay 1.3 and later): it opens with `secure E`, a
+fresh X25519 key, the relay answers with a fresh key of its own and its lasting key, and every
+line after that (`listen ID TOKEN`, `from`, `call`, the pings) goes as a ChaCha20-Poly1305 frame
+under keys drawn from both exchanges (`relaylink`). The computer knows the public relay's lasting
+key from the app and keeps another relay's from its first visit; a relay that shows another key,
+or stops sealing once it did, is refused. Nobody in between can then read the token that holds
+the ID, or write the address a viewer is seen from. The viewers' connections and the computer's
+answering ones carry only what both ends already seal themselves.
 
 ## Straight paths by ID (NAT hole punching)
 
