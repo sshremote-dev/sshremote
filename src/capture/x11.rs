@@ -1,6 +1,7 @@
 //! X11 desktops (Xfce, MATE, LXQt, Cinnamon, i3, KDE and GNOME on Xorg): the screen read with
 //! MIT-SHM only when XDamage says something changed, the pointer drawn in from XFixes, and input
-//! given through XTest, as X11 lets any program of the session do, with no dialog.
+//! given through XTest, as X11 lets any program of the session do, with no dialog. One window or
+//! one program is shown by reading only where its windows are (brought to the front).
 
 use std::os::raw::c_void;
 
@@ -15,7 +16,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use super::{Capture, Image, Input, Monitor, scale_nearest};
+use super::{Capture, Image, Input, Monitor, Share, WindowInfo, scale_nearest};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 /// A shared memory segment the X server writes the screen into.
@@ -47,6 +48,44 @@ pub struct X11 {
     /// The last picture as read, without the pointer, for a pointer that moved alone.
     clean: Option<Vec<u8>>,
     keys: Keys,
+    /// What is shown: the monitor, a window, or a program's windows; and where they are now.
+    scope: Scope,
+    shown: Option<(i16, i16, usize, usize)>,
+    looked: std::time::Instant,
+    root_size: (usize, usize),
+    atoms: Atoms,
+}
+
+#[derive(Clone, PartialEq)]
+enum Scope {
+    Screen,
+    Window(u32),
+    /// Every window of the program by its class (WM_CLASS).
+    App(String),
+}
+
+x11rb::atom_manager! {
+    Atoms: AtomsCookie {
+        _NET_CLIENT_LIST_STACKING,
+        _NET_ACTIVE_WINDOW,
+        _NET_WM_NAME,
+        _NET_FRAME_EXTENTS,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_DOCK,
+        _NET_WM_WINDOW_TYPE_DESKTOP,
+        _NET_WM_STATE,
+        _NET_WM_STATE_HIDDEN,
+        UTF8_STRING,
+    }
+}
+
+/// A window of the desktop's own (not a panel or the desktop), as the window manager lists it.
+struct Client {
+    id: u32,
+    title: String,
+    class: String,
+    /// Its frame, title bar included, on the X screen.
+    frame: (i16, i16, usize, usize),
 }
 
 // SAFETY: the segment is this capture's own, used from the thread that holds it.
@@ -97,6 +136,7 @@ impl X11 {
         }
         let (w, h) = (s.width_in_pixels as usize, s.height_in_pixels as usize);
         let keys = Keys::read(&conn)?;
+        let atoms = Atoms::new(&conn).map_err(err)?.reply().map_err(err)?;
         if conn.xtest_get_version(2, 2).ok().and_then(|c| c.reply().ok()).is_none() {
             return Err("the X server has no XTest, so it cannot be controlled".into());
         }
@@ -112,6 +152,11 @@ impl X11 {
             pointer: (0, 0, 0),
             clean: None,
             keys,
+            scope: Scope::Screen,
+            shown: None,
+            looked: std::time::Instant::now(),
+            root_size: (w, h),
+            atoms,
         };
         x.screens = x.read_monitors().unwrap_or_default();
         if x.screens.is_empty() {
@@ -167,8 +212,99 @@ impl X11 {
     }
 
     fn area(&self) -> (i16, i16, usize, usize) {
+        if let Some(r) = self.shown {
+            return r;
+        }
         let (m, x, y) = &self.screens[self.current];
         (*x, *y, m.w, m.h)
+    }
+
+    fn property(&self, win: u32, prop: u32, kind: u32) -> Option<xproto::GetPropertyReply> {
+        self.conn.get_property(false, win, prop, kind, 0, 1 << 16).ok()?.reply().ok()
+    }
+
+    /// The desktop's windows, the topmost first: shown ones only, panels and the desktop left out.
+    fn clients(&self) -> Vec<Client> {
+        let a = &self.atoms;
+        let Some(list) = self.property(self.root, a._NET_CLIENT_LIST_STACKING, xproto::AtomEnum::WINDOW.into()) else { return Vec::new() };
+        let ids: Vec<u32> = list.value32().map(|v| v.collect()).unwrap_or_default();
+        let mut out = Vec::new();
+        for &id in ids.iter().rev() {
+            let viewable = self.conn.get_window_attributes(id).ok().and_then(|c| c.reply().ok()).is_some_and(|w| w.map_state == xproto::MapState::VIEWABLE);
+            if !viewable {
+                continue;
+            }
+            let atoms_of = |prop| self.property(id, prop, xproto::AtomEnum::ATOM.into()).and_then(|p| p.value32().map(|v| v.collect::<Vec<u32>>())).unwrap_or_default();
+            let types = atoms_of(a._NET_WM_WINDOW_TYPE);
+            if types.contains(&a._NET_WM_WINDOW_TYPE_DOCK) || types.contains(&a._NET_WM_WINDOW_TYPE_DESKTOP) || atoms_of(a._NET_WM_STATE).contains(&a._NET_WM_STATE_HIDDEN) {
+                continue;
+            }
+            let title = self
+                .property(id, a._NET_WM_NAME, a.UTF8_STRING)
+                .filter(|p| !p.value.is_empty())
+                .or_else(|| self.property(id, xproto::AtomEnum::WM_NAME.into(), xproto::AtomEnum::ANY.into()))
+                .map(|p| String::from_utf8_lossy(&p.value).into_owned())
+                .unwrap_or_default();
+            // "instance\0Class\0": the class names the program.
+            let class = self
+                .property(id, xproto::AtomEnum::WM_CLASS.into(), xproto::AtomEnum::STRING.into())
+                .map(|p| p.value.split(|b| *b == 0).rfind(|x| !x.is_empty()).map(|c| String::from_utf8_lossy(c).into_owned()).unwrap_or_default())
+                .unwrap_or_default();
+            let Some(g) = self.conn.get_geometry(id).ok().and_then(|c| c.reply().ok()) else { continue };
+            let Some(t) = self.conn.translate_coordinates(id, self.root, 0, 0).ok().and_then(|c| c.reply().ok()) else { continue };
+            let ext: Vec<u32> = self.property(id, a._NET_FRAME_EXTENTS, xproto::AtomEnum::CARDINAL.into()).and_then(|p| p.value32().map(|v| v.collect())).unwrap_or_default();
+            let (l, r, top, b) = if ext.len() == 4 { (ext[0] as i32, ext[1] as i32, ext[2] as i32, ext[3] as i32) } else { (0, 0, 0, 0) };
+            let frame = (t.dst_x as i32 - l, t.dst_y as i32 - top, g.width as i32 + l + r, g.height as i32 + top + b);
+            out.push(Client { id, title, class, frame: self.clamp(frame) });
+        }
+        out
+    }
+
+    /// A rectangle within the X screen, at least a pixel each way.
+    fn clamp(&self, (x, y, w, h): (i32, i32, i32, i32)) -> (i16, i16, usize, usize) {
+        let (rw, rh) = (self.root_size.0 as i32, self.root_size.1 as i32);
+        let (x0, y0) = (x.clamp(0, rw - 1), y.clamp(0, rh - 1));
+        let (x1, y1) = ((x + w).clamp(x0 + 1, rw), (y + h).clamp(y0 + 1, rh));
+        (x0 as i16, y0 as i16, (x1 - x0) as usize, (y1 - y0) as usize)
+    }
+
+    /// Where the shown window or program is now; None when it is gone.
+    fn place(&self) -> Option<(i16, i16, usize, usize)> {
+        let clients = self.clients();
+        let frames: Vec<_> = match &self.scope {
+            Scope::Screen => return None,
+            Scope::Window(w) => clients.iter().filter(|c| c.id == *w).map(|c| c.frame).collect(),
+            Scope::App(class) => clients.iter().filter(|c| &c.class == class).map(|c| c.frame).collect(),
+        };
+        let x0 = frames.iter().map(|f| f.0 as i32).min()?;
+        let y0 = frames.iter().map(|f| f.1 as i32).min()?;
+        let x1 = frames.iter().map(|f| f.0 as i32 + f.2 as i32).max()?;
+        let y1 = frames.iter().map(|f| f.1 as i32 + f.3 as i32).max()?;
+        Some(self.clamp((x0, y0, x1 - x0, y1 - y0)))
+    }
+
+    /// Follows the shown window or program as it moves; the whole monitor again once it is gone.
+    fn follow(&mut self) {
+        if self.scope == Scope::Screen || self.looked.elapsed() < std::time::Duration::from_millis(250) {
+            return;
+        }
+        self.looked = std::time::Instant::now();
+        let now = self.place();
+        if now.is_none() {
+            self.scope = Scope::Screen;
+        }
+        if now != self.shown {
+            self.shown = now;
+            (self.dirty, self.clean) = (true, None);
+        }
+    }
+
+    /// Brings a window to the front, as a taskbar does.
+    fn raise(&self, id: u32) {
+        let ev = xproto::ClientMessageEvent::new(32, id, self.atoms._NET_ACTIVE_WINDOW, [2u32, 0, 0, 0, 0]);
+        let mask = xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = self.conn.send_event(false, self.root, mask, ev);
+        let _ = self.conn.flush();
     }
 
     /// The shown monitor's pixels (BGRx rows).
@@ -264,8 +400,50 @@ impl Capture for X11 {
             return Err("no such monitor".into());
         }
         self.current = index;
+        (self.scope, self.shown) = (Scope::Screen, None);
         (self.dirty, self.clean) = (true, None);
         Ok(())
+    }
+
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        Ok(self.clients().into_iter().map(|c| WindowInfo { id: c.id as u64, title: c.title, app: c.class, w: c.frame.2 as u16, h: c.frame.3 as u16 }).collect())
+    }
+
+    fn share(&mut self, scope: Share) -> Result<String, String> {
+        let active = || self.property(self.root, self.atoms._NET_ACTIVE_WINDOW, xproto::AtomEnum::WINDOW.into()).and_then(|p| p.value32().and_then(|mut v| v.next())).filter(|w| *w != 0);
+        let (scope, id) = match scope {
+            Share::Screen => {
+                (self.scope, self.shown) = (Scope::Screen, None);
+                (self.dirty, self.clean) = (true, None);
+                return Ok("the whole screen".into());
+            }
+            Share::Window(w) => (true, w as u32),
+            Share::App(w) => (false, w as u32),
+            Share::ActiveWindow => (true, active().ok_or("no window has the focus")?),
+            Share::ActiveApp => (false, active().ok_or("no window has the focus")?),
+        };
+        let clients = self.clients();
+        let c = clients.iter().find(|c| c.id == id).ok_or("that window is gone")?;
+        let text = if scope || c.class.is_empty() { c.title.clone() } else { c.class.clone() };
+        self.scope = if scope || c.class.is_empty() { Scope::Window(id) } else { Scope::App(c.class.clone()) };
+        self.raise(id);
+        self.shown = self.place();
+        (self.dirty, self.clean) = (true, None);
+        Ok(text)
+    }
+
+    fn shared_window(&self) -> Option<u64> {
+        match self.scope {
+            Scope::Window(w) => Some(w as u64),
+            _ => None,
+        }
+    }
+
+    fn shared_app(&self) -> Option<String> {
+        match &self.scope {
+            Scope::App(c) => Some(c.clone()),
+            _ => None,
+        }
     }
 
     fn desktop_size(&self) -> (usize, usize) {
@@ -285,6 +463,7 @@ impl Capture for X11 {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        self.follow();
         // What the X server said since the last look: damage, or nothing.
         let mut damaged = self.damage.is_none();
         while let Some(e) = self.conn.poll_for_event().map_err(err)? {
