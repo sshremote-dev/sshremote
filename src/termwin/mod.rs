@@ -1466,9 +1466,7 @@ impl TermWindow {
                 {
                     // Where the pointer let go, when the system says: on this pane, or the focused
                     // pane when it does not (a terminal beside a remote screen takes only its own).
-                    let on_pane = crate::sys::pointer_on_screen()
-                        .map(|(x, y)| crate::gui::workspace::window_point(ui.ctx(), Pos2::new(x as f32, y as f32)))
-                        .is_none_or(|p| r.contains(p));
+                    let on_pane = crate::gui::drop_point(ui.ctx()).is_none_or(|p| r.contains(p));
                     if focused && takes_drops && on_pane {
                         if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
                             drop::hint(t, ui, r);

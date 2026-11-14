@@ -39,6 +39,8 @@ mod lottie;
 pub(crate) mod snapshot;
 mod signin;
 pub(crate) mod project;
+#[cfg(target_os = "linux")]
+pub(crate) mod wl_drop;
 mod extui;
 mod dock;
 mod toast;
@@ -886,9 +888,17 @@ impl eframe::App for App {
         drive::hook(ctx, raw);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
+        // Files dropped under Wayland, which winit does not take.
+        #[cfg(target_os = "linux")]
+        {
+            wl_drop::start(frame, &ctx);
+            wl_drop::feed(&ctx, true);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = frame;
         crate::exthost::pump();
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         // The open window is not dressed in the look: that is for the working windows.
@@ -1308,6 +1318,8 @@ impl App {
             ctx.show_viewport_immediate(*id, builder, |ui, _| {
                 lottie::note_focus(ui.ctx());
                 let ctx = ui.ctx().clone();
+                #[cfg(target_os = "linux")]
+                wl_drop::feed(&ctx, false);
                 // Closing asks first (the workspace does that); once empty the window goes.
                 chrome::behaviour(&ctx);
                 let mine = if owner == Some(*id) { keys.take().unwrap_or_default() } else { Vec::new() };
@@ -1338,6 +1350,19 @@ impl App {
         }
         grab
     }
+}
+
+/// Where files are being dragged over this window or were just dropped on it, in its points,
+/// when the window system says: Windows and X11 by the pointer, Wayland by the drag itself.
+pub(crate) fn drop_point(ctx: &egui::Context) -> Option<Pos2> {
+    if ctx.input(|i| i.raw.dropped_files.is_empty() && i.raw.hovered_files.is_empty()) {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(p) = wl_drop::point(ctx) {
+        return Some(p);
+    }
+    crate::sys::pointer_on_screen().map(|(x, y)| workspace::window_point(ctx, Pos2::new(x as f32, y as f32)))
 }
 
 /// The picture of a tab being dragged where it cannot go in: a small window under the pointer,

@@ -1079,8 +1079,7 @@ impl Workspace {
         }
         // Files dropped go to the pane they were dropped on, which becomes the active one.
         if ctx.input(|i| !i.raw.dropped_files.is_empty())
-            && let Some((x, y)) = crate::sys::pointer_on_screen()
-            && let p = window_point(&ctx, Pos2::new(x as f32, y as f32))
+            && let Some(p) = super::drop_point(&ctx)
             && let Some((id, _)) = rects.iter().find(|(_, r)| r.contains(p))
         {
             tab.active = *id;

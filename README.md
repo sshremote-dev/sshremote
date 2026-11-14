@@ -86,7 +86,9 @@ What is opened goes into the workspace:
   runs (over SFTP for an `ssh` tab, through the session for a remote screen's terminal; a local
   shell takes its own paths) and their paths are typed at the prompt as a paste, the way an AI
   agent like Claude Code takes a dropped file or screenshot. Progress shows in the pane; what is a
-  day old is cleared from that folder as new files come.
+  day old is cleared from that folder as new files come. Files dropped go to the pane they are let
+  go over, on Windows, X11 and Wayland alike (under Wayland the app takes drops itself, which
+  winit does not).
 - **Markdown view**: a terminal's output read as Markdown (its results gathered, live lines left
   out), copied whole or downloaded as a `.md` or `.txt` file, and each code block copied or saved
   as a file of its language.

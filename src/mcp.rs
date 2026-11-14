@@ -81,9 +81,11 @@ fn tools() -> Value {
             "double": {"type": "boolean"}}))}},
         {"name": "move", "description": "Move the pointer to (x, y) without clicking (for hover menus).",
          "inputSchema": {"type": "object", "required": ["x", "y"], "properties": xy}},
-        {"name": "drag", "description": "Press the left button at (x, y), move to (to_x, to_y) and release.",
+        {"name": "drag", "description": "Press the left button at (x, y), move to (to_x, to_y), hold a moment there and release (drag-and-drop works between windows).",
          "inputSchema": {"type": "object", "required": ["x", "y", "to_x", "to_y"], "properties": props(json!({
-            "to_x": {"type": "integer"}, "to_y": {"type": "integer"}}))}},
+            "to_x": {"type": "integer"}, "to_y": {"type": "integer"},
+            "steps": {"type": "integer", "description": "Points along the way (default 20)."},
+            "step_ms": {"type": "integer", "description": "Milliseconds between them (default 25)."}}))}},
         {"name": "type", "description": "Type text (any language) into the focused field.",
          "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
         {"name": "key", "description": "Press a key or combination, e.g. \"enter\", \"ctrl+c\", \"alt+tab\", \"win+r\", \"ctrl+shift+esc\", \"f5\", \"ctrl+grave\" (punctuation by name: grave, comma, period, slash, backslash, semicolon, quote, equal, minus, plus, bracketleft, bracketright).",
@@ -385,17 +387,23 @@ impl Server {
             }
             "drag" => {
                 let (a, b) = (self.point(args, "x", "y")?, self.point(args, "to_x", "to_y")?);
+                // As a hand drags: a pause after the press, steps along the way (`steps`, each
+                // `step_ms` apart), so a drag-and-drop source starts its drag before the pointer
+                // leaves it, then a moment over the target: a window takes a drop only once it
+                // has said it will.
+                let num = |k: &str, d: u64, max: u64| args.get(k).and_then(Value::as_u64).unwrap_or(d).clamp(1, max);
+                let (steps, step_ms) = (num("steps", 20, 200), num("step_ms", 25, 500));
                 self.pointer(a)?;
                 self.send(ToAgent::Button { button: 1, pressed: true })?;
-                std::thread::sleep(short);
-                // Intermediate points so drag-and-drop targets notice the motion.
-                for i in 1..=8 {
-                    let t = i as f64 / 8.0;
+                std::thread::sleep(short.max(Duration::from_millis(150)));
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
                     let x = a.0 as f64 + (b.0 as f64 - a.0 as f64) * t;
                     let y = a.1 as f64 + (b.1 as f64 - a.1 as f64) * t;
                     self.pointer((x as u16, y as u16))?;
-                    std::thread::sleep(Duration::from_millis(15));
+                    std::thread::sleep(Duration::from_millis(step_ms));
                 }
+                std::thread::sleep(Duration::from_millis(400));
                 self.send(ToAgent::Button { button: 1, pressed: false })?;
                 Ok(text_result("dragged"))
             }
