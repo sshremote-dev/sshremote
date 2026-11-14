@@ -145,14 +145,24 @@ pub fn ensure_env() {
     }
 }
 
-/// The display variables of a program of this user's that runs on a desktop (the newest such).
+/// The programs a desktop session runs (its shell, compositor or session manager): only theirs
+/// tell the desktop's display; any other (a test's Xvfb) could point somewhere else.
+const DESKTOPS: &[&str] = &[
+    "gnome-shell", "gnome-session-b", "xfce4-session", "xfwm4", "xfce4-panel", "plasmashell", "kwin_x11", "kwin_wayland", "ksmserver",
+    "lxqt-session", "lxqt-panel", "openbox", "mate-session", "marco", "mate-panel", "cinnamon", "cinnamon-sessio", "muffin", "budgie-wm",
+    "budgie-panel", "i3", "sway", "Hyprland", "cosmic-comp", "cosmic-session", "cosmic-panel", "labwc", "wayfire", "river", "niri",
+];
+
+/// The display variables of this user's desktop session, as its own programs have them (the
+/// newest such program's).
 fn session_env(uid: &str) -> Vec<(String, String)> {
     const WANTED: [&str; 5] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
     let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
     let mut best: Option<(u64, Vec<(String, String)>)> = None;
     for e in dir.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
-        let mine = std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| s.lines().any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some(uid)));
+        let desktop = std::fs::read_to_string(e.path().join("comm")).ok().is_some_and(|c| DESKTOPS.contains(&c.trim()));
+        let mine = desktop && std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| s.lines().any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some(uid)));
         let Some(env) = mine.then(|| std::fs::read(e.path().join("environ")).ok()).flatten() else { continue };
         let vars: Vec<(String, String)> = env
             .split(|b| *b == 0)
