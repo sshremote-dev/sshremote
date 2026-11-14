@@ -5,7 +5,12 @@ mouse, files, and an MCP server for AI agents. Over SSH there is no relay, ID se
 the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles sent
 in one zstd stream (H.264 only for areas that keep moving).
 
-Hosts: Windows (GDI capture, SendInput) and GNOME on Wayland (Mutter RemoteDesktop, PipeWire).
+Hosts: Windows (GDI capture, SendInput); GNOME on Wayland (Mutter RemoteDesktop, PipeWire); X11
+desktops such as Xfce, MATE, LXQt, Cinnamon, i3, and KDE or GNOME on Xorg (MIT-SHM, XDamage, XFixes,
+XTest, with no dialog); and other Wayland desktops through the xdg desktop portal (KDE Plasma,
+COSMIC: allowed once at the screen, then kept where the desktop keeps it), with input of its own on
+wlroots ones that take none through the portal (Sway, Hyprland: a virtual pointer and keyboard).
+A desktop whose screen cannot be shared still gives its terminal and files.
 Viewers: a native window, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE)
 or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found by asking the
 terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead). Inside tmux in kitty, kitty images

@@ -7,6 +7,10 @@ mod gnome;
 mod portal;
 #[cfg(target_os = "linux")]
 mod x11;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+mod wlinput;
 pub mod region;
 pub use crate::shared::{Image, Share, WindowInfo};
 mod synthetic;
@@ -159,9 +163,9 @@ fn linux_desktop() -> Result<Box<dyn Capture>, String> {
         }
     }
     if wayland {
-        // X11 here would see only the programs running under Xwayland.
+        // Through the desktop's portal (X11 here would see only the programs under Xwayland).
         let name = if desktop.is_empty() { "this desktop".to_string() } else { desktop.replace(':', " / ") };
-        return Err(format!("sharing the screen of {name} under Wayland is not supported yet (GNOME, and X11 desktops, are)"));
+        return wayland::Wayland::open().map(|w| Box::new(w) as Box<dyn Capture>).map_err(|e| format!("{name} did not share its screen through its portal: {e}"));
     }
     Ok(Box::new(x11::X11::open()?))
 }
@@ -176,6 +180,8 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         "gnome" => Ok(Box::new(gnome::Gnome::open()?)),
         #[cfg(target_os = "linux")]
         "x11" => Ok(Box::new(x11::X11::open()?)),
+        #[cfg(target_os = "linux")]
+        "portal" => Ok(Box::new(wayland::Wayland::open()?)),
         #[cfg(target_os = "linux")]
         "auto" => linux_desktop(),
         #[cfg(windows)]

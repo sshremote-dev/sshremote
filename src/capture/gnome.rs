@@ -169,9 +169,9 @@ fn session_env(uid: &str) -> Vec<(String, String)> {
 
 /// A capture pipeline; it stops when it goes (one dropped while playing keeps its threads and its
 /// PipeWire connection).
-struct Pipe {
+pub(super) struct Pipe {
     p: gst::Pipeline,
-    sink: gst_app::AppSink,
+    pub(super) sink: gst_app::AppSink,
     src: gst::Element,
 }
 
@@ -191,7 +191,7 @@ impl Drop for Pipe {
 }
 
 /// `source` is what pipewiresrc reads: "path=NODE", or "fd=FD path=NODE" for a portal stream.
-fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pipe, String> {
+pub(super) fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pipe, String> {
     let caps = match size {
         Some((w, h)) => format!(",width={w},height={h},pixel-aspect-ratio=1/1"),
         None => String::new(),
@@ -215,7 +215,7 @@ fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pipe, String> 
     Ok(pipe)
 }
 
-fn to_image(sample: &gst::Sample) -> Result<Image, String> {
+pub(super) fn to_image(sample: &gst::Sample) -> Result<Image, String> {
     let caps = sample.caps().ok_or("frame without caps")?;
     let info = gst_video::VideoInfo::from_caps(caps).map_err(|e| e.to_string())?;
     let buf = sample.buffer().ok_or("frame without buffer")?;
@@ -394,41 +394,7 @@ impl Gnome {
     /// Input for a stream chosen in the portal dialog goes through the portal.
     fn portal_input(&self, ev: Input) -> Result<(), String> {
         let Some(p) = &self.portal else { return Ok(()) };
-        match ev {
-            Input::Move { x, y } => {
-                p.motion(x.clamp(0.0, self.desk.0 as f64 - 1.0), y.clamp(0.0, self.desk.1 as f64 - 1.0))
-            }
-            Input::Button { button, pressed } => {
-                let code = match button {
-                    1 => 0x110,
-                    2 => 0x112,
-                    3 => 0x111,
-                    8 => 0x113,
-                    9 => 0x114,
-                    _ => return Ok(()),
-                };
-                p.button(code, pressed)
-            }
-            Input::Scroll { steps } => p.axis(0, steps),
-            Input::HScroll { steps } => p.axis(1, steps),
-            Input::KeyState { keysym, down } => p.keysym(keysym, down),
-            Input::SecureAttention => Ok(()),
-            Input::Key { keysym, mods } => {
-                let held: Vec<u32> = [(MOD_CTRL, 29), (MOD_SHIFT, 42), (MOD_ALT, 56), (MOD_SUPER, 125)]
-                    .into_iter()
-                    .filter(|(m, _)| mods & m != 0)
-                    .map(|(_, c)| c)
-                    .collect();
-                for &c in &held {
-                    p.keycode(c, true)?;
-                }
-                let r = p.keysym(keysym, true).and_then(|_| p.keysym(keysym, false));
-                for &c in held.iter().rev() {
-                    p.keycode(c, false)?;
-                }
-                r
-            }
-        }
+        p.input(ev, self.desk)
     }
 
     fn native(&self) -> bool {

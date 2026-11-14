@@ -3717,6 +3717,8 @@ dependencies = [
  "wat",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows",
  "windows-sys 0.61.2",
  "x11-dl",

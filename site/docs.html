@@ -126,7 +126,7 @@ sshremote ext dev my-extension</code></pre>
     <details><summary>Can someone take over my ID or guess the password?</summary><p>An ID is held at the relay by a secret token only your computer has. Each wrong password is answered more slowly than the last, and the relay limits the attempts from each address.</p></details>
     <details><summary>Are passwords stored?</summary><p>Not unless you choose to. Passwords you choose to save go to the system's password store, and backups of <code>~/.ssh</code> are encrypted under a passphrase.</p></details>
     <details><summary>How are extensions checked?</summary><p>The registry's index is signed, each package is checked by its SHA-256, and native extensions are packed per platform. At run time every request is held to the manifest's permissions.</p></details>
-    <details><summary>Which systems work?</summary><p>Hosts: Windows and GNOME on Wayland. Viewers: the native window on Windows and Linux, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE) or kitty images in true colour (kitty, Ghostty, WezTerm).</p></details>
+    <details><summary>Which systems work?</summary><p>Hosts: Windows; GNOME on Wayland; X11 desktops (Xfce, MATE, LXQt, Cinnamon, i3, KDE or GNOME on Xorg), with no dialog; other Wayland desktops through their screen-sharing portal (KDE Plasma, COSMIC: allowed once at the screen), and Sway or Hyprland with a virtual pointer and keyboard. Where the screen cannot be shared, the terminal and files still work. Viewers: the native window on Windows and Linux, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE) or kitty images in true colour (kitty, Ghostty, WezTerm).</p></details>
   </div>
 </article>
 </div>

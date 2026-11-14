@@ -285,6 +285,9 @@ fn serve_with(
     {
         send(enc, &ToClient::Notice(format!("This computer's screen cannot be shown: {why}. Its terminal and files work."))).map_err(io_err)?;
     }
+    if cap.name() == "portal-view" {
+        send(enc, &ToClient::Notice("This desktop lets its screen be seen, not controlled: it has no remote-desktop portal (as with Sway). Its terminal and files work.".into())).map_err(io_err)?;
+    }
 
     let (tx, rx) = mpsc::channel();
     // Why the viewer's stream ended, when it ended badly, for the viewer to see.
