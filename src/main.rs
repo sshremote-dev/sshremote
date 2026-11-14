@@ -524,7 +524,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let pipe = get("--pipe");
             // Started for a viewer who came by this computer's ID: the person at the screen is told.
             if args.iter().any(|a| a == "--by-id") {
-                agent::mark_by_id(get("--grant").and_then(|g| g.parse().ok()).unwrap_or(grant::ALL));
+                agent::mark_by_id(get("--grant").and_then(|g| g.parse().ok()).unwrap_or(grant::ALL), args.iter().any(|a| a == "--cameras"));
                 if let Some(c) = get("--code") {
                     agent::set_code(c);
                 }

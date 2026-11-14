@@ -1,4 +1,5 @@
 mod browser;
+pub mod camera;
 #[cfg(windows)]
 mod dxgi;
 #[cfg(target_os = "linux")]

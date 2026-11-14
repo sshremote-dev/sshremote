@@ -57,6 +57,9 @@ pub struct Config {
     /// A relay of one's own and its lasting key ("RELAY HEX"), as first seen: the line to it is
     /// sealed with that key from then on (`relaylink`; the public relay's is known).
     pub relay_key: String,
+    /// Whether viewers may look at this computer's cameras (listed after its monitors); off
+    /// unless chosen, and the person at the screen is told each time.
+    pub cameras: bool,
 }
 
 /// Which passwords remote access takes.
@@ -104,7 +107,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -135,6 +138,7 @@ impl Config {
             requests: v.get("requests").and_then(|x| x.as_bool()).unwrap_or(false),
             from: s("from").unwrap_or_default(),
             relay_key: s("relay_key").unwrap_or_default(),
+            cameras: v.get("cameras").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
 }
@@ -273,6 +277,7 @@ pub fn fresh() -> Config {
         requests: false,
         from: String::new(),
         relay_key: String::new(),
+        cameras: false,
     }
 }
 
@@ -1171,7 +1176,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
-    let _ = serve_viewer(r, w, grant, code.as_deref());
+    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     if once {
         one_time_used(&cfg.one_time);
@@ -1274,7 +1279,7 @@ fn one_time_used(used: &str) {
 
 /// The agent as a process of its own, its input and output the sealed stream.
 /// `code`: someone who asked without a password, and the code to show the person at the screen.
-fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8, code: Option<&str>) -> Result<(), String> {
+fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8, code: Option<&str>, cameras: bool) -> Result<(), String> {
     // The session's own pings come every second; two minutes of nothing means it is gone.
     let ender = w.ender();
     ender.set_idle_limit(Duration::from_secs(120));
@@ -1283,6 +1288,9 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
     cmd.args(["--agent", "--capture", "auto", "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(c) = code {
         cmd.args(["--code", c]);
+    }
+    if cameras {
+        cmd.arg("--cameras");
     }
     #[cfg(windows)]
     {

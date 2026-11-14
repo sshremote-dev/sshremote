@@ -96,9 +96,18 @@ static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// What such a viewer may do, and whether the person at the screen is asked first (`grant`).
 static GRANT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(crate::grant::ALL);
 
-pub fn mark_by_id(grant: u8) {
+pub fn mark_by_id(grant: u8, cameras: bool) {
     BY_ID.store(true, std::sync::atomic::Ordering::Relaxed);
     GRANT.store(grant, std::sync::atomic::Ordering::Relaxed);
+    CAMERAS.store(cameras, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the viewer may look at this computer's cameras: one by ID where the settings let
+/// viewers; one over SSH (the computer's own user) always.
+static CAMERAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn cameras_allowed() -> bool {
+    !by_id() || CAMERAS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn by_id() -> bool {
@@ -226,6 +235,11 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         eprintln!("sshremote: no screen to share: {e}");
         Box::new(capture::NoScreen(e))
     });
+    // The cameras after the monitors, where the viewer may look at them.
+    let cams = if cameras_allowed() { capture::camera::list() } else { Vec::new() };
+    if !cams.is_empty() {
+        cap = Box::new(capture::camera::WithCameras::new(cap, cams));
+    }
     let mut held = Held::default();
     let result = serve_with(enc, input, &mut cap, &mut held, chat, allowed);
     // What the viewer still held down at the host is let go, however the session ended.
@@ -662,10 +676,22 @@ fn serve_with(
                 }
                 ToAgent::SelectMonitor(i) => {
                     if let Err(e) = cap.select(i as usize) {
-                        report(Err(e));
+                        // The viewer hears why (a camera another program holds, one unplugged).
+                        send(enc, &ToClient::Notice(e)).map_err(io_err)?;
                         continue;
                     }
-                    if let Ok(text) = cap.share(crate::capture::Share::Screen) {
+                    // A camera looked at by someone who came by the ID is never a secret from
+                    // the person in front of it.
+                    if cap.name() == "camera"
+                        && by_id()
+                        && let Some(m) = cap.monitors().get(cap.current())
+                    {
+                        let _ = chat.show(&format!("(The viewer is looking at {}.)", m.name.replacen("Camera: ", "your camera ", 1)));
+                    }
+                    // A monitor shows all of it (not a window shared before); a camera is itself.
+                    if cap.name() != "camera"
+                        && let Ok(text) = cap.share(crate::capture::Share::Screen)
+                    {
                         send(enc, &ToClient::Sharing { kind: 0, text }).map_err(io_err)?;
                     }
                     resized!();

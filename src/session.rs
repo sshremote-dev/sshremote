@@ -748,6 +748,52 @@ impl Control {
 mod tests {
     use super::*;
 
+    /// A camera listed after the screen is picked like a monitor: the viewer hears its size and
+    /// gets its pictures. SSHREMOTE_EXE=... SSHREMOTE_TEST_CAMERA=1 cargo test -- --ignored
+    /// a_camera_is_picked_like_a_monitor (GStreamer's videotestsrc)
+    #[test]
+    #[ignore]
+    fn a_camera_is_picked_like_a_monitor() {
+        if std::env::var_os("SSHREMOTE_TEST_CAMERA").is_none() {
+            return;
+        }
+        let target = Target::Local { capture: "synthetic".into() };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let wait = |want: &dyn Fn(&ToClient) -> bool| -> ToClient {
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                if let Ok(Ev::Net(m)) = rx.recv_timeout(Duration::from_millis(200))
+                    && want(&m)
+                {
+                    return m;
+                }
+            }
+            panic!("no answer in time");
+        };
+        let ToClient::Monitors { list, .. } = wait(&|m| matches!(m, ToClient::Monitors { .. })) else { unreachable!() };
+        let at = list.iter().position(|m| m.name == "Camera: Test camera").expect("the camera listed");
+        sess.send(ToAgent::SelectMonitor(at as u8)).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        let m = loop {
+            assert!(Instant::now() < until, "no new size: {seen:?}\n{}", sess.log());
+            if let Ok(Ev::Net(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+                if matches!(m, ToClient::Hello { w: 640, .. } | ToClient::Notice(_)) {
+                    break m;
+                }
+                if !matches!(m, ToClient::Frame(_)) {
+                    seen.push(format!("{m:?}").chars().take(80).collect::<String>());
+                }
+            }
+        };
+        assert!(matches!(m, ToClient::Hello { w: 640, h: 480, .. }), "{m:?}");
+        // Pictures come once the viewer says how it shows them.
+        let s = crate::proto::Settings { view_w: 640, view_h: 480, scale: 100, mode: crate::color::Mode::True, fps: 15, formats: crate::proto::FORMATS };
+        sess.send(ToAgent::Settings(s)).unwrap();
+        let ToClient::Frame(f) = wait(&|m| matches!(m, ToClient::Frame(_))) else { unreachable!() };
+        assert!(f.w > 0, "a picture of it");
+    }
+
     /// A computer whose screen cannot be shared keeps the rest of the session: it says so, and
     /// its files and terminal work. SSHREMOTE_EXE=target/debug/sshremote cargo test -- --ignored
     /// no_screen_leaves_the_rest

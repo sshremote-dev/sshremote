@@ -373,6 +373,13 @@ impl App {
                         ui.add(
                             egui::Label::new(RichText::new("They always see the screen. The person at the computer can change these for a session in its window.").weak().size(12.0)).wrap(),
                         );
+                        ui.add_space(4.0);
+                        if ui.checkbox(&mut cfg.cameras, "Let viewers look at this computer's cameras").changed() {
+                            changed = true;
+                        }
+                        ui.add(
+                            egui::Label::new(RichText::new("They are listed after the monitors; the person at the computer is told each time one is looked at.").weak().size(12.0)).wrap(),
+                        );
                         ui.add_space(8.0);
                         if ui.checkbox(&mut cfg.lan, "Let computers on this network find this one").changed() {
                             changed = true;
