@@ -124,7 +124,19 @@ impl Remote {
                 }
                 Event::Key { key, physical_key, pressed, modifiers, .. } if !local => {
                     self.sync_mods(modifiers)?;
-                    let Some(sym) = keysym(physical_key.unwrap_or(key)) else { continue };
+                    // A computer gets the keys where they are (its own layout makes the
+                    // characters); a web page gets the characters this keyboard makes, as text,
+                    // and with Ctrl, Alt or the command key a key as it is labelled here.
+                    let command = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
+                    let key = if self.web {
+                        if !command && keysym(key).is_some_and(|s| (0x20..0x7f).contains(&s)) {
+                            continue;
+                        }
+                        key
+                    } else {
+                        physical_key.unwrap_or(key)
+                    };
+                    let Some(sym) = keysym(key) else { continue };
                     if pressed && std::mem::take(&mut self.win_next) {
                         let (sym, mods) = if sym == ' ' as u32 { (SUPER_L, 0) } else { (sym, MOD_SUPER) };
                         self.send(ToAgent::Key { keysym: sym, mods })?;
@@ -152,6 +164,11 @@ impl Remote {
                         self.send(ToAgent::Clipboard(text))?;
                     }
                     self.tap(if self.mods.shift && !self.mods.ctrl { xk::INSERT } else { 'v' as u32 })?
+                }
+                Event::Text(text) if !local && self.web => {
+                    for c in text.chars() {
+                        self.send(ToAgent::Key { keysym: xk::unicode(c as u32), mods: 0 })?;
+                    }
                 }
                 Event::Ime(egui::ImeEvent::Commit(text)) if !local => {
                     for c in text.chars() {

@@ -81,6 +81,9 @@ pub enum ToAgent {
     /// A picture on the viewer's clipboard (a screenshot), as PNG, put on the host's for the
     /// paste that follows.
     ClipImage(Vec<u8>),
+    /// The viewer's pixels to a point, in hundredths (200 on a HiDPI screen), for a screen that
+    /// lays itself out by it (a web page).
+    Density(u16),
     /// Ctrl+Alt+Del, which no viewer can capture locally.
     SecureAttention,
     /// A file upload begins, into `dir` (empty: the remote user's Downloads folder); `name` may
@@ -598,6 +601,10 @@ impl ToAgent {
                 b.extend_from_slice(png);
                 45
             }
+            ToAgent::Density(d) => {
+                b.extend_from_slice(&d.to_le_bytes());
+                46
+            }
             ToAgent::SecureAttention => 12,
             // The short forms (Downloads, tag 0) keep their first codes, which every agent knows.
             ToAgent::FileStart { id, size, dir, name } if dir.is_empty() => {
@@ -770,6 +777,7 @@ impl ToAgent {
             10 => ToAgent::HScroll { steps: c.u8()? as i8 },
             11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
             45 => ToAgent::ClipImage(c.rest().to_vec()),
+            46 => ToAgent::Density(c.u16()?),
             12 => ToAgent::SecureAttention,
             13 => ToAgent::FileStart {
                 id: c.u32()?,
@@ -1300,6 +1308,7 @@ mod tests {
             ToAgent::KeyState { keysym: xk::SHIFT_L, down: true },
             ToAgent::HScroll { steps: -3 },
             ToAgent::Clipboard("hello".into()),
+            ToAgent::Density(200),
             ToAgent::SecureAttention,
             ToAgent::FileStart { id: 1, size: 3, dir: String::new(), name: "a.txt".into() },
             ToAgent::FileData { id: 1, data: vec![1, 2, 3] },

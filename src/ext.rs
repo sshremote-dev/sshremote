@@ -265,7 +265,9 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 .filter_map(|p| {
                     let get = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
                     let (id, url) = (get("id"), get("url"));
-                    let web = url.starts_with("https://") || url.starts_with("http://");
+                    // An extension's page is a site reached safely: a look-alike on a plain
+                    // address could not pass for what its title says.
+                    let web = url.starts_with("https://");
                     (word(&id) && web && url.len() < 2000).then(|| PaneDef { title: if get("title").is_empty() { id.clone() } else { get("title") }, description: get("description"), id, url })
                 })
                 .collect()

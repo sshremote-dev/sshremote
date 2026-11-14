@@ -99,6 +99,8 @@ pub trait Capture {
         None
     }
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String>;
+    /// The viewer's pixels to a point (2 on a HiDPI screen): a page lays itself out by it.
+    fn set_density(&mut self, _d: f64) {}
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     fn input(&mut self, ev: Input) -> Result<(), String>;

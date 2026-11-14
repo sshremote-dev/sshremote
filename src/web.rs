@@ -351,7 +351,10 @@ fn send_json(w: &Mutex<TcpStream>, v: serde_json::Value) -> Result<(), String> {
 /// (its ~/.ssh/config aliases among them), favorites first.
 fn hosts() -> Vec<String> {
     let mut out = vec![HERE.to_string()];
-    out.extend(crate::computers::all().into_iter().filter(|c| c.id().is_none()).map(|c| c.address));
+    // Web apps kept in the list are the app's panes, not hosts.
+    out.extend(
+        crate::computers::all().into_iter().filter(|c| c.id().is_none() && !c.address.starts_with("https://") && !c.address.starts_with("http://")).map(|c| c.address),
+    );
     out.dedup();
     out
 }

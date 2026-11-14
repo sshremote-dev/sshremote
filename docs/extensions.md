@@ -39,7 +39,8 @@ A tool in a pane:
 ```
 
 It needs no code and no permission: the page runs in the browser's own sandbox, sees nothing of the
-app, and gets only what is typed and clicked in its pane. Any other site opens the same way by
+app, and gets only what is typed and clicked in its pane. Its `url` must be `https://` (a pane with
+another address is left out). Any other site opens the same way by
 typing its `https://` address on the home or in Quick open.
 
 ## The manifest

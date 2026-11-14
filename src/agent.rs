@@ -43,9 +43,10 @@ fn target(desk: (usize, usize), s: &Settings, resizable: bool) -> (usize, usize)
     let (dw, dh) = (desk.0.max(1) as f64, desk.1.max(1) as f64);
     let (vw, vh) = (s.view_w.max(16) as f64, s.view_h.max(16) as f64);
     let k = s.scale.clamp(1, 100) as f64 / 100.0;
-    // A screen that takes any size (a web page) is laid out at the size it is shown at.
+    // A screen that takes any size (a web page) is laid out at the size it is shown at, within
+    // what it takes (`Browser::set_target`), so its pictures come at the size asked for.
     if resizable {
-        return (((vw * k).round() as usize).max(16), ((vh * k).round() as usize).max(16));
+        return (((vw * k).round() as usize).clamp(200, 3840), ((vh * k).round() as usize).clamp(150, 2160));
     }
     let (w, h) = if vw * dh <= vh * dw {
         let w = vw.min(dw);
@@ -579,6 +580,7 @@ fn serve_with(
                 ToAgent::SecureAttention => report(cap.input(Input::SecureAttention)),
                 ToAgent::Clipboard(text) => clip.set(text),
                 // A picture for the paste the viewer sends next.
+                ToAgent::Density(d) => cap.set_density(d as f64 / 100.0),
                 ToAgent::ClipImage(png) => {
                     if !clip.set_image(png) {
                         send(enc, &ToClient::Notice("The picture could not be put on this computer's clipboard".into())).map_err(io_err)?;

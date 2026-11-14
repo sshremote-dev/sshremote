@@ -5,9 +5,8 @@
 //! profile (and so its sign-ins) under the settings folder.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -17,23 +16,37 @@ use serde_json::{Value, json};
 use super::{Capture, Image, Input};
 use crate::xk;
 
-/// What the reader thread shares: replies awaited, the newest picture, why it ended.
+/// Where DevTools' messages go: the pipe the browser reads (`--remote-debugging-pipe`).
+type Out = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// What the reader thread shares: replies awaited, the newest picture (as it came, decoded when
+/// taken), why it ended, and a window the page opened that is to be shown, or one that closed.
 struct Shared {
     replies: Mutex<HashMap<u64, mpsc::Sender<Value>>>,
-    frame: Mutex<Option<Image>>,
+    frame: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
-    /// A page our page opened (a link to a new tab): shown in its place once it has an address.
-    opened: Mutex<Vec<String>>,
+    popup: Mutex<Option<String>>,
+    popup_gone: Mutex<bool>,
 }
 
 pub struct Browser {
-    ws: Arc<Mutex<TcpStream>>,
+    out: Out,
     ids: Arc<AtomicU64>,
     shared: Arc<Shared>,
+    /// The page shown (the site's, or a window it opened, such as a sign-in) and the site's own.
     session: String,
     target: String,
+    main: (String, String),
+    /// The shown page's session and target, as the reader thread knows them.
+    cells: (Arc<Mutex<String>>, Arc<Mutex<String>>),
+    /// The picture's size in pixels, and the screen's pixels to a page's (2 on a HiDPI screen).
     size: (usize, usize),
-    child: Option<std::process::Child>,
+    density: f64,
+    proc: Proc,
+    /// The browser's last words on its error output, to say why it would not start.
+    errors: Arc<Mutex<String>>,
+    /// Held while the page is open: no other pane runs a browser on this profile.
+    _lock: std::fs::File,
     /// What is held now: the pointer, its buttons (DevTools' mask), the modifier keys (its bits).
     at: (f64, f64),
     buttons: u32,
@@ -68,117 +81,299 @@ fn find_browser() -> Option<PathBuf> {
     list.into_iter().find(|p| p.is_file())
 }
 
-/// The folder of a site's profile: its sign-ins and settings, apart from the user's own browser.
-fn profile_dir(url: &str) -> Result<PathBuf, String> {
-    let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or("site");
-    let name: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
-    let dir = crate::hosts::config_dir().ok_or("no settings folder")?.join("browser").join(if name.is_empty() { "site".into() } else { name });
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-/// The DevTools port and path of the browser running on `dir`, as it wrote them there.
-fn active_port(dir: &std::path::Path) -> Option<(u16, String)> {
-    let text = std::fs::read_to_string(dir.join("DevToolsActivePort")).ok()?;
-    let mut lines = text.lines();
-    let port = lines.next()?.trim().parse().ok()?;
-    Some((port, lines.next()?.trim().to_string()))
-}
-
-fn ws_connect(port: u16, path: &str) -> std::io::Result<TcpStream> {
-    use base64::Engine;
-    let mut s = TcpStream::connect(("127.0.0.1", port))?;
-    s.set_nodelay(true)?;
-    let key = base64::engine::general_purpose::STANDARD.encode(crate::sys::random(16));
-    write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")?;
-    // The answer's head, byte by byte: what follows it is the first frame.
-    let mut head = Vec::new();
-    let mut b = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        if head.len() > 8192 || s.read(&mut b)? == 0 {
-            return Err(std::io::Error::other("DevTools closed the connection"));
-        }
-        head.push(b[0]);
+/// The snap a browser runs in (Ubuntu's Chromium), whose confinement keeps it out of hidden
+/// folders such as ~/.config: its profiles go in the snap's own folder instead.
+fn snap_of(exe: &Path) -> Option<String> {
+    let name = exe.file_name()?.to_string_lossy().into_owned();
+    if exe.starts_with("/snap/bin") {
+        return Some(name);
     }
-    if !String::from_utf8_lossy(&head).lines().next().is_some_and(|l| l.contains(" 101")) {
-        return Err(std::io::Error::other("DevTools refused the connection"));
-    }
-    Ok(s)
+    // /usr/bin/chromium-browser on Ubuntu is a script that runs the snap.
+    let text = std::fs::read(exe).ok().filter(|t| t.len() < 64 << 10)?;
+    String::from_utf8_lossy(&text).contains("/snap/bin/chromium").then(|| "chromium".to_string())
 }
 
-/// Sends one text message, masked as a client's must be.
-fn ws_send(s: &mut TcpStream, text: &str) -> std::io::Result<()> {
-    let data = text.as_bytes();
-    let mut frame = vec![0x81u8];
-    match data.len() {
-        n if n < 126 => frame.push(0x80 | n as u8),
-        n if n < 65536 => {
-            frame.push(0x80 | 126);
-            frame.extend_from_slice(&(n as u16).to_be_bytes());
+/// A site's profile (its sign-ins and settings, apart from the user's own browser), locked by
+/// this page while it is open. A second pane of a site already open gets a profile of its own
+/// beside the first, so two browsers never share one.
+fn profile(url: &str, snap: Option<&str>) -> Result<(PathBuf, std::fs::File), String> {
+    let host = url.split_once("://").map_or("page", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let mut name: String = host.chars().take(100).map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+    if name.trim_matches('.').is_empty() {
+        name = "site".into();
+    }
+    // Windows' device names are no folder names (con, nul, com1...).
+    let stem = name.split('.').next().unwrap_or("").to_ascii_lowercase();
+    if ["con", "prn", "aux", "nul"].contains(&stem.as_str()) || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.as_bytes()[3].is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    let base = match snap {
+        Some(s) => std::env::var_os("HOME").map(PathBuf::from).ok_or("no home folder")?.join("snap").join(s).join("common").join("sshremote-browser"),
+        None => crate::hosts::config_dir().ok_or("no settings folder")?.join("browser"),
+    };
+    for n in 1..=8 {
+        let dir = if n == 1 { base.join(&name) } else { base.join(format!("{name}~{n}")) };
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // Its sign-ins are the user's alone.
+        #[cfg(unix)]
+        for d in [&base, &dir] {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
         }
-        n => {
-            frame.push(0x80 | 127);
-            frame.extend_from_slice(&(n as u64).to_be_bytes());
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("sshremote.lock")).map_err(|e| e.to_string())?;
+        if lock.try_lock().is_ok() {
+            return Ok((dir, lock));
         }
     }
-    let mask = crate::sys::random(4);
-    frame.extend_from_slice(&mask);
-    frame.extend(data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-    s.write_all(&frame)
+    Err("this site is open in too many panes".into())
 }
 
-/// The next whole text message; pings are answered on the way.
-fn ws_read(r: &mut TcpStream, w: &Mutex<TcpStream>) -> std::io::Result<String> {
-    let mut message = Vec::new();
-    loop {
-        let mut h = [0u8; 2];
-        r.read_exact(&mut h)?;
-        let (fin, op) = (h[0] & 0x80 != 0, h[0] & 0x0f);
-        let mut len = (h[1] & 0x7f) as u64;
-        if len == 126 {
-            let mut b = [0u8; 2];
-            r.read_exact(&mut b)?;
-            len = u16::from_be_bytes(b) as u64;
-        } else if len == 127 {
-            let mut b = [0u8; 8];
-            r.read_exact(&mut b)?;
-            len = u64::from_be_bytes(b);
-        }
-        if len > 64 << 20 {
-            return Err(std::io::Error::other("an oversized DevTools message"));
-        }
-        let mask = if h[1] & 0x80 != 0 {
-            let mut m = [0u8; 4];
-            r.read_exact(&mut m)?;
-            Some(m)
-        } else {
-            None
-        };
-        let mut payload = vec![0u8; len as usize];
-        r.read_exact(&mut payload)?;
-        if let Some(m) = mask {
-            payload.iter_mut().enumerate().for_each(|(i, b)| *b ^= m[i % 4]);
-        }
-        match op {
-            0x8 => return Err(std::io::Error::other("the browser closed DevTools")),
-            0x9 => {
-                // A pong carries the ping's payload back.
-                let mut s = w.lock().unwrap_or_else(|e| e.into_inner());
-                let mut f = vec![0x8au8, 0x80 | payload.len().min(125) as u8];
-                let m = crate::sys::random(4);
-                f.extend_from_slice(&m);
-                f.extend(payload.iter().take(125).enumerate().map(|(i, b)| b ^ m[i % 4]));
-                s.write_all(&f)?;
+/// One DevTools message: JSON, then a NUL.
+fn send_msg(out: &Out, text: &str) -> std::io::Result<()> {
+    let mut w = out.lock().unwrap_or_else(|e| e.into_inner());
+    w.write_all(text.as_bytes())?;
+    w.write_all(&[0])?;
+    w.flush()
+}
+
+/// The next whole DevTools message.
+fn read_msg(r: &mut impl BufRead) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    r.take(64 << 20).read_until(0, &mut buf)?;
+    match buf.pop() {
+        Some(0) => Ok(String::from_utf8_lossy(&buf).into_owned()),
+        None => Err(std::io::Error::other("the browser closed DevTools")),
+        Some(_) => Err(std::io::Error::other("an oversized or cut DevTools message")),
+    }
+}
+
+/// The browser's process, ended with the page.
+enum Proc {
+    #[cfg(unix)]
+    Child(std::process::Child),
+    #[cfg(windows)]
+    Handle(std::os::windows::io::OwnedHandle),
+}
+
+impl Proc {
+    fn ended(&mut self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Proc::Child(c) => c.try_wait().ok().flatten().is_some(),
+            #[cfg(windows)]
+            Proc::Handle(h) => {
+                use std::os::windows::io::AsRawHandle;
+                unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(h.as_raw_handle(), 0) == 0 }
             }
-            0xa => {}
-            _ => {
-                message.extend_from_slice(&payload);
-                if fin {
-                    return Ok(String::from_utf8_lossy(&message).into_owned());
+        }
+    }
+
+    fn kill(&mut self) {
+        match self {
+            #[cfg(unix)]
+            Proc::Child(c) => {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            #[cfg(windows)]
+            Proc::Handle(h) => {
+                use std::os::windows::io::AsRawHandle;
+                unsafe { windows_sys::Win32::System::Threading::TerminateProcess(h.as_raw_handle(), 1) };
+            }
+        }
+    }
+}
+
+/// The browser started, its DevTools on two pipes only this process holds: no port that
+/// another user or program on this computer could reach.
+struct Started {
+    to: Box<dyn Write + Send>,
+    from: Box<dyn Read + Send>,
+    proc: Proc,
+    errors: Arc<Mutex<String>>,
+}
+
+/// Keeps the last of what `r` says (the browser's error output).
+#[cfg_attr(windows, allow(dead_code))]
+fn keep_tail(r: Option<impl Read + Send + 'static>) -> Arc<Mutex<String>> {
+    let tail = Arc::new(Mutex::new(String::new()));
+    if let Some(mut r) = r {
+        let t = tail.clone();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 4096];
+            while let Ok(n @ 1..) = r.read(&mut b) {
+                let mut s = t.lock().unwrap_or_else(|e| e.into_inner());
+                s.push_str(&String::from_utf8_lossy(&b[..n]));
+                if s.len() > 4000 {
+                    let cut = s.ceil_char_boundary(s.len() - 2000);
+                    s.drain(..cut);
                 }
             }
+        });
+    }
+    tail
+}
+
+/// The browser on descriptors 3 (what it reads) and 4 (what it writes), ended by SIGTERM (which
+/// it takes as a close, keeping its sign-ins) when this thread or process ends.
+#[cfg(unix)]
+fn spawn(exe: &Path, args: &[String]) -> std::io::Result<Started> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    let pipe = || -> std::io::Result<(OwnedFd, OwnedFd)> {
+        let mut p = [0; 2];
+        if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { (OwnedFd::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) })
+    };
+    // Its ends at 10 and up, so that moving them to 3 and 4 overwrites neither.
+    let high = |fd: OwnedFd| -> std::io::Result<OwnedFd> {
+        let n = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(unsafe { OwnedFd::from_raw_fd(n) }) }
+    };
+    let (its_in, ours_out) = pipe()?;
+    let (ours_in, its_out) = pipe()?;
+    let (r, w) = (high(its_in)?, high(its_out)?);
+    let (rfd, wfd) = (r.as_raw_fd(), w.as_raw_fd());
+    #[cfg(target_os = "linux")]
+    let parent = unsafe { libc::getpid() };
+    let mut c = std::process::Command::new(exe);
+    c.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    unsafe {
+        c.pre_exec(move || {
+            if libc::dup2(rfd, 3) < 0 || libc::dup2(wfd, 4) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                if libc::getppid() != parent {
+                    libc::_exit(1);
+                }
+            }
+            Ok(())
+        })
+    };
+    let mut child = c.spawn()?;
+    drop((r, w));
+    let errors = keep_tail(child.stderr.take());
+    Ok(Started { to: Box::new(std::fs::File::from(ours_out)), from: Box::new(std::fs::File::from(ours_in)), proc: Proc::Child(child), errors })
+}
+
+/// The browser with its C runtime's descriptors 3 and 4 on two pipes (passed as the runtime
+/// reads them at start, as Node does), and no other handle of this process; ended with it.
+#[cfg(windows)]
+fn spawn(exe: &Path, args: &[String]) -> std::io::Result<Started> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+    let last = std::io::Error::last_os_error;
+    let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 };
+    let (mut its_in, mut ours_out, mut ours_in, mut its_out): (HANDLE, HANDLE, HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+    unsafe {
+        if CreatePipe(&mut its_in, &mut ours_out, &sa, 0) == 0 {
+            return Err(last());
+        }
+        if CreatePipe(&mut ours_in, &mut its_out, &sa, 0) == 0 {
+            let e = last();
+            CloseHandle(its_in);
+            CloseHandle(ours_out);
+            return Err(e);
+        }
+        SetHandleInformation(ours_out, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(ours_in, HANDLE_FLAG_INHERIT, 0);
+    }
+    let nul = unsafe { CreateFileW(crate::sys::wide("NUL").as_ptr(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, std::ptr::null_mut()) };
+    // The runtime's inherited descriptors: none for 0 to 2, then 3 and 4 open on pipes.
+    let mut crt: Vec<u8> = 5i32.to_le_bytes().to_vec();
+    crt.extend([0, 0, 0, 0x09, 0x09]);
+    for h in [INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, its_in, its_out] {
+        crt.extend((h as usize).to_le_bytes());
+    }
+    let handles: [HANDLE; 3] = [its_in, its_out, nul];
+    let mut line = crate::sys::wide(&std::iter::once(exe.to_string_lossy().into_owned()).chain(args.iter().cloned()).map(|a| win_quote(&a)).collect::<Vec<_>>().join(" "));
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        let mut size = 0;
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+        let mut attrs = vec![0u8; size];
+        let list = attrs.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        let mut ok = InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0
+            && UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, handles.as_ptr() as _, size_of_val(&handles), std::ptr::null_mut(), std::ptr::null()) != 0;
+        if ok {
+            let mut si: STARTUPINFOEXW = std::mem::zeroed();
+            si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            (si.StartupInfo.hStdInput, si.StartupInfo.hStdOutput, si.StartupInfo.hStdError) = (nul, nul, nul);
+            si.StartupInfo.cbReserved2 = crt.len() as u16;
+            si.StartupInfo.lpReserved2 = crt.as_mut_ptr();
+            si.lpAttributeList = list;
+            ok = CreateProcessW(
+                std::ptr::null(),
+                line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si as *const STARTUPINFOEXW as *const _,
+                &mut pi,
+            ) != 0;
+        }
+        let e = last();
+        DeleteProcThreadAttributeList(list);
+        for h in [its_in, its_out, nul] {
+            CloseHandle(h);
+        }
+        if !ok {
+            CloseHandle(ours_out);
+            CloseHandle(ours_in);
+            return Err(e);
+        }
+        CloseHandle(pi.hThread);
+        ok
+    };
+    debug_assert!(ok);
+    crate::sys::tie_handle(pi.hProcess);
+    let (to, from) = unsafe { (std::fs::File::from_raw_handle(ours_out as _), std::fs::File::from_raw_handle(ours_in as _)) };
+    Ok(Started { to: Box::new(to), from: Box::new(from), proc: Proc::Handle(unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) }), errors: Arc::new(Mutex::new(String::new())) })
+}
+
+/// One argument on a Windows command line, as programs split it again.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn win_quote(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(slashes));
+                out.push(c);
+                slashes = 0;
+            }
         }
     }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
 }
 
 /// A JPEG frame as the screen's pixels: BGRx rows.
@@ -199,89 +394,104 @@ impl Browser {
         // An address with a scheme (https:, http:, data:, file:) as it is; a bare name is a site.
         let scheme = url.split_once(':').is_some_and(|(s, rest)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()) && !rest.starts_with(|c: char| c.is_ascii_digit()));
         let url = if scheme { url.to_string() } else { format!("https://{url}") };
-        let dir = profile_dir(&url)?;
-        // The browser already running on this profile (the same site in another pane) takes this
-        // page too; else one starts.
-        let mut child = None;
-        let running = active_port(&dir).and_then(|(port, path)| ws_connect(port, &path).ok());
-        let stream = match running {
-            Some(s) => s,
-            None => {
-                let _ = std::fs::remove_file(dir.join("DevToolsActivePort"));
-                let exe = find_browser().ok_or("this needs Chrome, Edge or Chromium installed (or SSHREMOTE_BROWSER naming one)")?;
-                let mut c = std::process::Command::new(exe);
-                c.arg("--headless=new")
-                    .arg("--remote-debugging-port=0")
-                    .arg(format!("--user-data-dir={}", dir.display()))
-                    .args(["--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800", "about:blank"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                crate::sys::quiet(&mut c);
-                let p = c.spawn().map_err(|e| format!("the browser did not start: {e}"))?;
-                crate::sys::tie(&p);
-                child = Some(p);
-                let started = Instant::now();
-                loop {
-                    if let Some((port, path)) = active_port(&dir)
-                        && let Ok(s) = ws_connect(port, &path)
-                    {
-                        break s;
-                    }
-                    if started.elapsed() > Duration::from_secs(20) {
-                        return Err("the browser did not open DevTools in time".into());
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        };
-        let reader = stream.try_clone().map_err(|e| e.to_string())?;
-        let ws = Arc::new(Mutex::new(stream));
-        let shared = Arc::new(Shared { replies: Mutex::new(HashMap::new()), frame: Mutex::new(None), error: Mutex::new(None), opened: Mutex::new(Vec::new()) });
+        let exe = find_browser().ok_or("this needs Chrome, Edge or Chromium installed (or SSHREMOTE_BROWSER naming one)")?;
+        let (dir, lock) = profile(&url, snap_of(&exe).as_deref())?;
+        let mut args: Vec<String> = vec![
+            "--headless=new".into(),
+            "--remote-debugging-pipe".into(),
+            format!("--user-data-dir={}", dir.display()),
+            "--no-first-run".into(),
+            "--no-default-browser-check".into(),
+            "--disable-background-networking".into(),
+            "--window-size=1280,800".into(),
+        ];
+        // Chrome will not run its sandbox as root.
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } == 0 {
+            args.push("--no-sandbox".into());
+        }
+        args.push("about:blank".into());
+        let started = spawn(&exe, &args).map_err(|e| format!("the browser did not start: {e}"))?;
+        let Started { to, from, proc, errors } = started;
+        let out: Out = Arc::new(Mutex::new(to));
+        let shared = Arc::new(Shared { replies: Mutex::new(HashMap::new()), frame: Mutex::new(None), error: Mutex::new(None), popup: Mutex::new(None), popup_gone: Mutex::new(false) });
         let ids = Arc::new(AtomicU64::new(1));
-        let mut b = Browser {
-            ws: ws.clone(),
-            ids: ids.clone(),
-            shared: shared.clone(),
-            session: String::new(),
-            target: String::new(),
-            size: (1280, 800),
-            child,
-            at: (0.0, 0.0),
-            buttons: 0,
-            mods: 0,
-            last_press: None,
-        };
-        let session_cell = Arc::new(Mutex::new(String::new()));
-        let target_cell = Arc::new(Mutex::new(String::new()));
+        let cells = (Arc::new(Mutex::new(String::new())), Arc::new(Mutex::new(String::new())));
+        let main_target = Arc::new(Mutex::new(String::new()));
         {
-            let (shared, ws, ids, session_cell, target_cell) = (shared.clone(), ws.clone(), ids.clone(), session_cell.clone(), target_cell.clone());
-            let mut reader = reader;
+            let (shared, out, ids, cells, main_target) = (shared.clone(), out.clone(), ids.clone(), cells.clone(), main_target.clone());
+            let mut reader = BufReader::with_capacity(1 << 16, from);
             std::thread::spawn(move || {
-                let r = read_loop(&mut reader, &ws, &shared, &ids, &session_cell, &target_cell);
+                let r = read_loop(&mut reader, &out, &shared, &ids, &cells, &main_target);
                 let why = r.err().map_or_else(|| "the page closed".to_string(), |e| e.to_string());
                 shared.error.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(why);
                 // Whoever waits for a reply hears the end too.
                 shared.replies.lock().unwrap_or_else(|e| e.into_inner()).clear();
             });
         }
-        let created = b.call("Target.createTarget", json!({ "url": url }), false)?;
-        b.target = created["targetId"].as_str().unwrap_or_default().to_string();
-        *target_cell.lock().unwrap_or_else(|e| e.into_inner()) = b.target.clone();
+        let mut b = Browser {
+            out,
+            ids,
+            shared,
+            session: String::new(),
+            target: String::new(),
+            main: (String::new(), String::new()),
+            cells,
+            size: (1280, 800),
+            density: 1.0,
+            proc,
+            errors,
+            _lock: lock,
+            at: (0.0, 0.0),
+            buttons: 0,
+            mods: 0,
+            last_press: None,
+        };
+        let why = |b: &Browser, e: String| -> String {
+            let tail = b.errors.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match tail.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+                Some(l) => format!("{e} (the browser said: {})", l.chars().take(200).collect::<String>()),
+                None => e,
+            }
+        };
+        let created = b.call("Target.createTarget", json!({ "url": url }), false).map_err(|e| why(&b, e))?;
+        let target = created["targetId"].as_str().unwrap_or_default().to_string();
+        *main_target.lock().unwrap_or_else(|e| e.into_inner()) = target.clone();
         let _ = b.call("Target.setDiscoverTargets", json!({ "discover": true }), false);
-        let attached = b.call("Target.attachToTarget", json!({ "targetId": b.target, "flatten": true }), false)?;
-        b.session = attached["sessionId"].as_str().unwrap_or_default().to_string();
-        *session_cell.lock().unwrap_or_else(|e| e.into_inner()) = b.session.clone();
-        b.call("Page.enable", json!({}), true)?;
-        b.resize(1280, 800)?;
+        b.show(&target).map_err(|e| why(&b, e))?;
+        b.main = (b.session.clone(), b.target.clone());
         Ok(b)
+    }
+
+    /// Shows `target` (the site's page, or a window it opened): its pictures, and the input goes
+    /// to it.
+    fn show(&mut self, target: &str) -> Result<(), String> {
+        self.session = if target == self.main.1 {
+            self.main.0.clone()
+        } else {
+            let attached = self.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), false)?;
+            attached["sessionId"].as_str().unwrap_or_default().to_string()
+        };
+        self.target = target.to_string();
+        *self.cells.0.lock().unwrap_or_else(|e| e.into_inner()) = self.session.clone();
+        *self.cells.1.lock().unwrap_or_else(|e| e.into_inner()) = self.target.clone();
+        self.call("Page.enable", json!({}), true)?;
+        let (w, h) = self.size;
+        self.resize(w, h)
     }
 
     /// A command, waited for: its result, or the browser's error.
     fn call(&self, method: &str, params: Value, on_page: bool) -> Result<Value, String> {
         let id = self.ids.fetch_add(1, Ordering::AcqRel);
         let (tx, rx) = mpsc::channel();
-        self.shared.replies.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        {
+            // Not waited for once the reader has ended (it empties the list as it goes).
+            let mut replies = self.shared.replies.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(e) = self.ended() {
+                return Err(e);
+            }
+            replies.insert(id, tx);
+        }
         self.post(id, method, params, on_page).map_err(|e| e.to_string())?;
         let v = rx.recv_timeout(Duration::from_secs(15)).map_err(|_| self.ended().unwrap_or_else(|| format!("the browser did not answer {method}")))?;
         match v.get("error") {
@@ -302,19 +512,27 @@ impl Browser {
             m["sessionId"] = json!(self.session);
         }
         if std::env::var_os("SSHREMOTE_CDP_DEBUG").is_some() {
-            eprintln!("cdp> {}", &m.to_string()[..m.to_string().len().min(300)]);
+            eprintln!("cdp> {}", m.to_string().chars().take(300).collect::<String>());
         }
-        ws_send(&mut self.ws.lock().unwrap_or_else(|e| e.into_inner()), &m.to_string())
+        send_msg(&self.out, &m.to_string())
+    }
+
+    /// A browser-wide command not waited for.
+    fn tell_browser(&self, method: &str) -> Result<(), String> {
+        let id = self.ids.fetch_add(1, Ordering::AcqRel);
+        self.post(id, method, json!({}), false).map_err(|e| e.to_string())
     }
 
     fn ended(&self) -> Option<String> {
         self.shared.error.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// The page laid out at this size, and its pictures sent at it.
+    /// The page laid out at this size (in the screen's pixels; its own are `density` of them), and
+    /// its pictures sent at it.
     fn resize(&mut self, w: usize, h: usize) -> Result<(), String> {
         self.size = (w, h);
-        self.call("Emulation.setDeviceMetricsOverride", json!({ "width": w, "height": h, "deviceScaleFactor": 1, "mobile": false }), true)?;
+        let (cw, ch) = ((w as f64 / self.density).round() as u32, (h as f64 / self.density).round() as u32);
+        self.call("Emulation.setDeviceMetricsOverride", json!({ "width": cw, "height": ch, "deviceScaleFactor": self.density, "mobile": false }), true)?;
         let _ = self.call("Page.stopScreencast", json!({}), true);
         self.call("Page.startScreencast", json!({ "format": "jpeg", "quality": 92, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1 }), true)?;
         Ok(())
@@ -323,7 +541,7 @@ impl Browser {
     fn mouse(&self, kind: &str, button: &str, clicks: u32) -> Result<(), String> {
         self.tell(
             "Input.dispatchMouseEvent",
-            json!({ "type": kind, "x": self.at.0, "y": self.at.1, "button": button, "buttons": self.buttons, "clickCount": clicks, "modifiers": self.mods }),
+            json!({ "type": kind, "x": self.at.0 / self.density, "y": self.at.1 / self.density, "button": button, "buttons": self.buttons, "clickCount": clicks, "modifiers": self.mods }),
         )
     }
 
@@ -351,7 +569,12 @@ impl Browser {
         if !down && matches!((keysym, mods), (xk::LEFT | xk::RIGHT, 1)) || (!down && keysym == xk::F1 + 4 && mods == 0) {
             return Ok(());
         }
-        let ch = if xk::is_unicode(keysym) { char::from_u32(keysym & 0x00ff_ffff) } else if (0x20..0x100).contains(&keysym) { char::from_u32(keysym) } else { None };
+        // A character typed whole (as this keyboard's layout or an input method made it): text.
+        if xk::is_unicode(keysym) {
+            let Some(c) = char::from_u32(keysym & 0x00ff_ffff).filter(|_| down) else { return Ok(()) };
+            return self.tell("Input.insertText", json!({ "text": c.to_string() }));
+        }
+        let ch = if (0x20..0x100).contains(&keysym) { char::from_u32(keysym) } else { None };
         let kind = if down { "keyDown" } else { "keyUp" };
         if let Some(c) = ch {
             // The viewer sends keys as they are on the keyboard; Shift makes the character, as a
@@ -464,13 +687,15 @@ fn devtools_mods(m: u8) -> u32 {
     (if m & MOD_ALT != 0 { 1 } else { 0 }) | (if m & MOD_CTRL != 0 { 2 } else { 0 }) | (if m & MOD_SUPER != 0 { 4 } else { 0 }) | (if m & MOD_SHIFT != 0 { 8 } else { 0 })
 }
 
-/// DevTools' messages, as they come: replies to whoever waits, frames kept (and acknowledged, so
-/// the next is sent), pages our page opens shown in its place.
-fn read_loop(r: &mut TcpStream, ws: &Mutex<TcpStream>, shared: &Shared, ids: &AtomicU64, session: &Mutex<String>, target: &Mutex<String>) -> std::io::Result<()> {
+/// DevTools' messages, as they come: replies to whoever waits, frames of the page shown kept (and
+/// acknowledged, so the next is sent), and a window the site's page opens (a sign-in, a link to a
+/// new tab) told, to be shown in its place until it closes.
+fn read_loop(r: &mut impl BufRead, out: &Out, shared: &Shared, ids: &AtomicU64, cells: &(Arc<Mutex<String>>, Arc<Mutex<String>>), main: &Mutex<String>) -> std::io::Result<()> {
+    let mut opened: Vec<String> = Vec::new();
     loop {
-        let text = ws_read(r, ws)?;
+        let text = read_msg(r)?;
         if std::env::var_os("SSHREMOTE_CDP_DEBUG").is_some() {
-            eprintln!("cdp< {}", &text[..text.len().min(300)]);
+            eprintln!("cdp< {}", text.chars().take(300).collect::<String>());
         }
         let v: Value = serde_json::from_str(&text).unwrap_or_default();
         if let Some(id) = v.get("id").and_then(Value::as_u64) {
@@ -479,37 +704,45 @@ fn read_loop(r: &mut TcpStream, ws: &Mutex<TcpStream>, shared: &Shared, ids: &At
             }
             continue;
         }
-        let ours = session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let shown = cells.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mine = main.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let p = &v["params"];
         match v["method"].as_str().unwrap_or("") {
-            "Page.screencastFrame" if v["sessionId"].as_str() == Some(ours.as_str()) => {
-                let ack = json!({ "id": ids.fetch_add(1, Ordering::AcqRel), "method": "Page.screencastFrameAck", "params": { "sessionId": p["sessionId"] }, "sessionId": ours });
-                ws_send(&mut ws.lock().unwrap_or_else(|e| e.into_inner()), &ack.to_string())?;
-                if let Some(img) = p["data"].as_str().and_then(decode) {
-                    *shared.frame.lock().unwrap_or_else(|e| e.into_inner()) = Some(img);
+            "Page.screencastFrame" if v["sessionId"].as_str() == Some(shown.as_str()) => {
+                let ack = json!({ "id": ids.fetch_add(1, Ordering::AcqRel), "method": "Page.screencastFrameAck", "params": { "sessionId": p["sessionId"] }, "sessionId": shown });
+                send_msg(out, &ack.to_string())?;
+                if let Some(data) = p["data"].as_str() {
+                    *shared.frame.lock().unwrap_or_else(|e| e.into_inner()) = Some(data.to_string());
                 }
             }
-            "Target.targetCreated" | "Target.targetInfoChanged" => {
+            "Target.targetCreated" => {
                 let info = &p["targetInfo"];
-                let mine = target.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let (id, url) = (info["targetId"].as_str().unwrap_or(""), info["url"].as_str().unwrap_or(""));
-                if info["type"] == "page" && info["openerId"].as_str() == Some(mine.as_str()) && id != mine && !url.is_empty() && url != "about:blank" {
-                    // A link that opens a new tab: the page goes there instead, and the tab closes.
-                    let navigate = json!({ "id": ids.fetch_add(1, Ordering::AcqRel), "method": "Page.navigate", "params": { "url": url }, "sessionId": ours });
-                    let close = json!({ "id": ids.fetch_add(1, Ordering::AcqRel), "method": "Target.closeTarget", "params": { "targetId": id } });
-                    let mut s = ws.lock().unwrap_or_else(|e| e.into_inner());
-                    ws_send(&mut s, &navigate.to_string())?;
-                    ws_send(&mut s, &close.to_string())?;
-                    shared.opened.lock().unwrap_or_else(|e| e.into_inner()).push(url.to_string());
+                let id = info["targetId"].as_str().unwrap_or("");
+                if info["type"] == "page" && info["openerId"].as_str() == Some(mine.as_str()) && id != mine && !opened.iter().any(|o| o == id) {
+                    opened.push(id.to_string());
+                    *shared.popup.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
                 }
             }
-            "Target.targetDestroyed" if p["targetId"].as_str() == Some(target.lock().unwrap_or_else(|e| e.into_inner()).as_str()) => {
-                return Err(std::io::Error::other("the page was closed"));
+            "Target.targetDestroyed" | "Target.targetCrashed" => {
+                let id = p["targetId"].as_str().unwrap_or("");
+                if id == mine {
+                    return Err(std::io::Error::other(if v["method"] == "Target.targetCrashed" { "the page crashed" } else { "the page was closed" }));
+                }
+                if let Some(at) = opened.iter().position(|o| o == id) {
+                    opened.remove(at);
+                    let mut popup = shared.popup.lock().unwrap_or_else(|e| e.into_inner());
+                    if popup.as_deref() == Some(id) {
+                        *popup = None;
+                    }
+                    if id == cells.1.lock().unwrap_or_else(|e| e.into_inner()).as_str() {
+                        *shared.popup_gone.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    }
+                }
             }
-            "Target.targetCrashed" if p["targetId"].as_str() == Some(target.lock().unwrap_or_else(|e| e.into_inner()).as_str()) => {
-                return Err(std::io::Error::other("the page crashed"));
+            // The site's page let go of while shown (a window it opened going is no end).
+            "Inspector.detached" if v["sessionId"].as_str().is_none_or(|s| s == shown) && *cells.1.lock().unwrap_or_else(|e| e.into_inner()) == mine => {
+                return Err(std::io::Error::other("the browser let go of the page"));
             }
-            "Inspector.detached" => return Err(std::io::Error::other("the browser let go of the page")),
             _ => {}
         }
     }
@@ -536,11 +769,30 @@ impl Capture for Browser {
         Ok(())
     }
 
+    fn set_density(&mut self, d: f64) {
+        let d = if d.is_finite() { d.clamp(0.5, 4.0) } else { 1.0 };
+        if (d - self.density).abs() > 0.01 {
+            self.density = d;
+            let (w, h) = self.size;
+            let _ = self.resize(w, h);
+        }
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         if let Some(e) = self.ended() {
             return Err(e);
         }
-        Ok(self.shared.frame.lock().unwrap_or_else(|e| e.into_inner()).take())
+        // A window the page opened shows in its place; when it closes, the page again.
+        let popup = self.shared.popup.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let gone = std::mem::take(&mut *self.shared.popup_gone.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some(id) = popup {
+            self.show(&id)?;
+        } else if gone && self.target != self.main.1 {
+            let main = self.main.1.clone();
+            self.show(&main)?;
+        }
+        let data = self.shared.frame.lock().unwrap_or_else(|e| e.into_inner()).take();
+        Ok(data.and_then(|d| decode(&d)))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
@@ -581,7 +833,7 @@ impl Capture for Browser {
                 let d = steps as f64 * 100.0;
                 self.tell(
                     "Input.dispatchMouseEvent",
-                    json!({ "type": "mouseWheel", "x": self.at.0, "y": self.at.1, "deltaX": if horizontal { d } else { 0.0 }, "deltaY": if horizontal { 0.0 } else { d }, "modifiers": self.mods }),
+                    json!({ "type": "mouseWheel", "x": self.at.0 / self.density, "y": self.at.1 / self.density, "deltaX": if horizontal { d } else { 0.0 }, "deltaY": if horizontal { 0.0 } else { d }, "modifiers": self.mods }),
                 )
             }
             Input::KeyState { keysym, down } => {
@@ -601,19 +853,30 @@ impl Capture for Browser {
     }
 }
 
+impl Browser {
+    #[cfg(test)]
+    fn proc_id(&self) -> u32 {
+        match &self.proc {
+            #[cfg(unix)]
+            Proc::Child(c) => c.id(),
+            #[cfg(windows)]
+            Proc::Handle(h) => {
+                use std::os::windows::io::AsRawHandle;
+                unsafe { windows_sys::Win32::System::Threading::GetProcessId(h.as_raw_handle()) }
+            }
+        }
+    }
+}
+
 impl Drop for Browser {
     fn drop(&mut self) {
-        // This page goes; the browser with it when it started it (another pane's stays).
-        let _ = self.call("Target.closeTarget", json!({ "targetId": self.target }), false);
-        if let Some(mut c) = self.child.take() {
-            let _ = self.call("Browser.close", json!({}), false);
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while Instant::now() < deadline && c.try_wait().ok().flatten().is_none() {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            let _ = c.kill();
-            let _ = c.wait();
+        // Closed as a window is, so its sign-ins are written out; ended if it does not.
+        let _ = self.tell_browser("Browser.close");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !self.proc.ended() {
+            std::thread::sleep(Duration::from_millis(50));
         }
+        self.proc.kill();
     }
 }
 
@@ -640,8 +903,12 @@ mod tests {
         for c in "hi 한글".chars() {
             b.input(Input::Key { keysym: xk::of_char(c), mods: 0 }).unwrap();
         }
+        // What another layout makes (an AZERTY é, a German ß) comes as text.
+        for c in "éß".chars() {
+            b.input(Input::Key { keysym: xk::unicode(c as u32), mods: 0 }).unwrap();
+        }
         let typed = b.call("Runtime.evaluate", json!({ "expression": "document.getElementById('i').value", "returnByValue": true }), true).unwrap();
-        assert_eq!(typed["result"]["value"], "hi 한글");
+        assert_eq!(typed["result"]["value"], "hi 한글éß");
         // Shift held makes capitals and the symbols over the digits.
         b.input(Input::Key { keysym: 'a' as u32, mods: crate::proto::MOD_CTRL }).unwrap();
         b.input(Input::KeyState { keysym: xk::SHIFT_L, down: true }).unwrap();
@@ -682,5 +949,32 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let t = b.call("Runtime.evaluate", json!({ "expression": "document.title", "returnByValue": true }), true).unwrap();
         assert_eq!(t["result"]["value"], "clicked 300 300");
+        // On a HiDPI screen the page lays itself out in its own pixels, half as many.
+        b.set_density(2.0);
+        let w = b.call("Runtime.evaluate", json!({ "expression": "innerWidth + 'x' + devicePixelRatio", "returnByValue": true }), true).unwrap();
+        assert_eq!(w["result"]["value"], "400x2");
+        b.set_density(1.0);
+        // A window the page opens (a sign-in) shows in its place, its opener kept; closed, the page is back.
+        let main = b.target.clone();
+        b.call("Runtime.evaluate", json!({ "expression": "window.open('data:text/html,<title>popup</title><body style=background:red>', 'w', 'popup'); 1", "userGesture": true }), true).unwrap();
+        let started = Instant::now();
+        while b.target == main && started.elapsed() < Duration::from_secs(10) {
+            let _ = b.grab().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_ne!(b.target, main, "the popup shown");
+        let opener = b.call("Runtime.evaluate", json!({ "expression": "!!window.opener", "returnByValue": true }), true).unwrap();
+        assert_eq!(opener["result"]["value"], true);
+        b.call("Runtime.evaluate", json!({ "expression": "window.close()" }), true).unwrap();
+        let started = Instant::now();
+        while b.target != main && started.elapsed() < Duration::from_secs(10) {
+            let _ = b.grab().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(b.target, main, "the page again");
+        // The same site in a second pane runs on a profile of its own.
+        let other = Browser::open(page).expect("a second browser");
+        assert_ne!(other.proc_id(), b.proc_id());
+        drop(other);
     }
 }

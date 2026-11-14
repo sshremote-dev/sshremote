@@ -20,6 +20,8 @@ pub(super) struct Remote {
     /// A web app's page (`capture::browser`): a page's controls (back, forward, reload), not a
     /// computer's.
     pub(super) web: bool,
+    /// The pixels to a point a web page was last told (it lays itself out by them).
+    density: Option<u16>,
     /// Ctrl+Alt+Enter was pressed in it: the workspace turns full screen on or off.
     pub(super) full_toggle: bool,
     /// The pane is the whole full-screen window (zoomed, or the window's only pane in full
@@ -228,6 +230,7 @@ impl Remote {
         let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
         Remote {
             web: sess.backend == "browser",
+            density: None,
             active: true,
             full_toggle: false,
             filling: false,
@@ -440,6 +443,11 @@ impl Remote {
             self.inline_terminal(ui, rest)?;
             None
         } else {
+            if self.web && self.density != Some((ppp * 100.0).round() as u16) {
+                let d = (ppp * 100.0).round() as u16;
+                self.density = Some(d);
+                let _ = self.send(ToAgent::Density(d));
+            }
             self.resize(pic_area.size() * ppp)?;
             self.edge_pan(&ctx, pic_area);
             self.picture(ui, pic_area, ppp)

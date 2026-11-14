@@ -224,6 +224,16 @@ pub fn tie(child: &std::process::Child) {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
+        tie_handle(child.as_raw_handle() as _);
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+/// `tie` for a process made otherwise (its handle).
+#[cfg(windows)]
+pub fn tie_handle(process: windows_sys::Win32::Foundation::HANDLE) {
+    {
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -240,11 +250,9 @@ pub fn tie(child: &std::process::Child) {
             job as usize
         });
         if job != 0 {
-            unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+            unsafe { AssignProcessToJobObject(job as _, process) };
         }
     }
-    #[cfg(not(windows))]
-    let _ = child;
 }
 
 /// Starts `cmd` tied to this program (see `tie`). On Unix it leads a process group of its own,
