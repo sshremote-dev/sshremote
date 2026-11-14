@@ -265,9 +265,50 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
     });
     let grant = grant.unwrap_or(crate::grant::ALL);
     let asking = by_id && grant & crate::grant::ASK != 0;
+    // Only telling that someone came by the ID: it must not take the keyboard from what the
+    // viewer is typing into. Asking takes it: nobody types there before the answer.
+    let quiet = by_id && !asking;
+    // Lines that came while no window was open, for the window to show first.
+    #[cfg_attr(not(all(target_os = "linux", feature = "remote")), allow(unused_mut))]
+    let mut early = Vec::new();
+    #[cfg(all(target_os = "linux", feature = "remote"))]
+    if quiet && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty()) {
+        // A Wayland window cannot open without the keyboard: a notification says it instead, and
+        // the window opens when something comes for it or the person asks for it.
+        if let Some((note, acts)) = note::Note::show(CONNECTED_TITLE, "They see this screen and can use it, with this computer's ID and password.") {
+            loop {
+                match acts.try_recv() {
+                    Ok(note::Act::End) => {
+                        tell(END);
+                        note.close();
+                        return Ok(());
+                    }
+                    Ok(note::Act::Open) => break,
+                    _ => {}
+                }
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(m) if m != "\u{0}" => {
+                        early.push(m);
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    // The viewer went away before anything needed the window.
+                    _ => {
+                        note.close();
+                        return Ok(());
+                    }
+                }
+            }
+            note.close();
+        }
+    }
     let title = if asking { "SSH Remote: someone wants to connect" } else if by_id { CONNECTED_TITLE } else { "SSH Remote chat" };
     let mut native = crate::gui::native_options(title, [400.0, if asking { 600.0 } else { 460.0 }]);
     native.viewport = native.viewport.with_always_on_top();
+    // Windows and macOS open it without the keyboard when asked; X11 is told below.
+    if quiet {
+        native.viewport = native.viewport.with_active(false);
+    }
     #[cfg(feature = "drive")]
     crate::gui::drive::start();
     eframe::run_native(
@@ -275,8 +316,15 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
         native,
         Box::new(move |cc| {
             crate::gui::style(&cc.egui_ctx);
+            #[cfg(target_os = "linux")]
+            if quiet {
+                x11_no_focus(cc);
+            }
             let ctx = cc.egui_ctx.clone();
             let (wake_tx, wake_rx) = mpsc::channel::<String>();
+            for m in early {
+                let _ = wake_tx.send(m);
+            }
             std::thread::spawn(move || {
                 while let Ok(m) = rx.recv() {
                     if wake_tx.send(m).is_err() {
@@ -350,6 +398,93 @@ pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut 
         code: asking.then(|| "482913".to_string()),
     };
     move |ui| app.draw(ui)
+}
+
+/// Asks the X11 window manager not to give the keyboard to the window when it shows
+/// (`_NET_WM_USER_TIME` 0, before eframe maps it after its first frame).
+#[cfg(all(feature = "gui", target_os = "linux"))]
+fn x11_no_focus(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11_dl::xlib::{PropModeReplace, XA_CARDINAL, Xlib};
+    let window = match cc.window_handle().map(|w| w.as_raw()) {
+        Ok(RawWindowHandle::Xlib(w)) => w.window,
+        Ok(RawWindowHandle::Xcb(w)) => u32::from(w.window) as std::os::raw::c_ulong,
+        _ => return,
+    };
+    let Ok(xlib) = Xlib::open() else { return };
+    // SAFETY: a connection of its own, closed here; the property is one CARDINAL.
+    unsafe {
+        let d = (xlib.XOpenDisplay)(std::ptr::null());
+        if d.is_null() {
+            return;
+        }
+        let atom = (xlib.XInternAtom)(d, c"_NET_WM_USER_TIME".as_ptr(), 0);
+        let zero: std::os::raw::c_long = 0;
+        (xlib.XChangeProperty)(d, window, atom, XA_CARDINAL, 32, PropModeReplace, (&zero as *const std::os::raw::c_long).cast(), 1);
+        (xlib.XFlush)(d);
+        (xlib.XCloseDisplay)(d);
+    }
+}
+
+/// A desktop notification (org.freedesktop.Notifications) with buttons, for what a Wayland
+/// window cannot say without taking the keyboard.
+#[cfg(all(feature = "gui", target_os = "linux", feature = "remote"))]
+mod note {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+
+    use zbus::blocking::{Connection, Proxy};
+    use zbus::zvariant::Value;
+
+    pub enum Act {
+        End,
+        Open,
+    }
+
+    pub struct Note {
+        proxy: Proxy<'static>,
+        id: u32,
+    }
+
+    const DEST: &str = "org.freedesktop.Notifications";
+
+    impl Note {
+        /// Shown, with what is pressed on it; None where no notifications with buttons are shown.
+        pub fn show(summary: &str, body: &str) -> Option<(Note, mpsc::Receiver<Act>)> {
+            let conn = Connection::session().ok()?;
+            let proxy = Proxy::new(&conn, DEST, "/org/freedesktop/Notifications", DEST).ok()?;
+            let caps: Vec<String> = proxy.call("GetCapabilities", &()).ok()?;
+            if !caps.iter().any(|c| c == "actions") {
+                return None;
+            }
+            // Heard before it is shown, so no press is missed.
+            let signals = proxy.receive_all_signals().ok()?;
+            let actions = ["default", "Show", "show", "Show", "end", "End the connection"];
+            let mut hints: HashMap<&str, Value> = HashMap::new();
+            // Kept until dismissed or the connection ends.
+            hints.insert("urgency", Value::U8(2));
+            hints.insert("resident", Value::Bool(true));
+            let id: u32 = proxy.call("Notify", &("SSH Remote", 0u32, "", summary, body, &actions[..], hints, 0i32)).ok()?;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                for m in signals {
+                    let member = m.header().member().map(|n| n.to_string()).unwrap_or_default();
+                    if member != "ActionInvoked" {
+                        continue;
+                    }
+                    let Ok((which, key)) = m.body().deserialize::<(u32, String)>() else { continue };
+                    if which == id && tx.send(if key == "end" { Act::End } else { Act::Open }).is_err() {
+                        return;
+                    }
+                }
+            });
+            Some((Note { proxy, id }, rx))
+        }
+
+        pub fn close(&self) {
+            let _ = self.proxy.call_noreply("CloseNotification", &(self.id,));
+        }
+    }
 }
 
 /// The window's title while someone is connected by this computer's ID: what the taskbar shows.
