@@ -3,15 +3,19 @@
 //! removed. They contribute background layers (Lottie animations and pictures) to Appearance,
 //! commands and settings, programs (helpers run beside the app, and commands they provide:
 //! `sshremote web`, `mcp`, `remote` in builds without them), and tools that open in a pane of
-//! their own: web apps (`contributes.panes`, API 3), each a page of a browser run with no window
-//! (`capture::browser`). See docs/extensions.md.
+//! their own (`contributes.panes`): web apps (API 3), each a page of a browser run with no window
+//! (`capture::browser`), and this computer's programs (API 4), each started and shown alone (an
+//! installed one by name, or with the "programs" permission a command line or a file to open).
+//! See docs/extensions.md.
 //!
 //! extension.json (`api` is the extension API it needs, at most [`API`]):
 //!   { "id": "dev.sshremote.ocean", "name": "Ocean", "version": "1.0.0", "api": 1,
 //!     "description": "...", "contributes": { "layers": [
 //!       { "file": "sea.json", "label": "Ocean: the sea", "still": true } ] } }
 //!   A tool in a pane: "contributes": { "panes": [
-//!       { "id": "translate", "title": "Translate", "url": "https://translate.google.com" } ] }
+//!       { "id": "translate", "title": "Translate", "url": "https://translate.google.com" },
+//!       { "id": "calc", "title": "Calculator", "app": ["Calculator", "KCalc"] },
+//!       { "id": "notes", "title": "Notes", "open": "~/notes.txt" } ] }   ("open", "command": "programs")
 //!
 //! The registry is a static index (build.py in the sshremote-extensions repository writes it):
 //!   { "extensions": [ { "id", "name", "version", "description", "url", "sha256", "size" } ] }
@@ -26,7 +30,7 @@ use eframe::egui::{self, RichText};
 use crate::gui::ic;
 
 /// What extensions this program can read.
-pub const API: u64 = 3;
+pub const API: u64 = 4;
 /// Where the registry's index is unless a setting names another (a company's own mirror).
 pub const REGISTRY: &str = "https://sshremote.dev/registry/v1/index.json";
 
@@ -53,14 +57,17 @@ pub struct Manifest {
     pub panes: Vec<PaneDef>,
 }
 
-/// A tool an extension opens in a pane of its own: a web app at an address, shown as a page of a
-/// browser run with no window (`capture::browser`), beside terminals and screens.
+/// A tool an extension opens in a pane of its own, beside terminals and screens: a web app at an
+/// address, shown as a page of a browser run with no window (`capture::browser`), or a program of
+/// this computer's shown alone (`program`: how it is named, `apps`, and the names, the first
+/// installed one taken; else the command line or the file).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneDef {
     pub id: String,
     pub title: String,
     pub url: String,
     pub description: String,
+    pub program: Option<(u8, Vec<String>)>,
 }
 
 /// The tools of every installed extension, with the extension's name; looked at again every few
@@ -257,7 +264,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
     if !programs.is_empty() && !permissions.iter().any(|p| p == "native") {
         return Err("extension.json brings programs without the \"native\" permission".into());
     }
-    let panes = v
+    let panes: Vec<PaneDef> = v
         .pointer("/contributes/panes")
         .and_then(|x| x.as_array())
         .map(|list| {
@@ -265,14 +272,41 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 .filter_map(|p| {
                     let get = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
                     let (id, url) = (get("id"), get("url"));
+                    // An installed program by its name (or the first of several found), a command
+                    // line, or a file to open with its program.
+                    let names: Vec<String> = match p.get("app") {
+                        Some(serde_json::Value::String(n)) => vec![n.trim().to_string()],
+                        Some(serde_json::Value::Array(a)) => a.iter().filter_map(|n| n.as_str()).map(|n| n.trim().to_string()).collect(),
+                        _ => Vec::new(),
+                    };
+                    let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && n.len() < 200).collect();
+                    let program = if !names.is_empty() {
+                        Some((crate::apps::APP, names))
+                    } else if !get("command").is_empty() {
+                        Some((crate::apps::COMMAND, vec![get("command")]))
+                    } else if !get("open").is_empty() {
+                        Some((crate::apps::OPEN, vec![get("open")]))
+                    } else {
+                        None
+                    };
                     // An extension's page is a site reached safely: a look-alike on a plain
                     // address could not pass for what its title says.
-                    let web = url.starts_with("https://");
-                    (word(&id) && web && url.len() < 2000).then(|| PaneDef { title: if get("title").is_empty() { id.clone() } else { get("title") }, description: get("description"), id, url })
+                    let web = url.starts_with("https://") && url.len() < 2000;
+                    (word(&id) && (web || program.is_some())).then(|| PaneDef {
+                        title: if get("title").is_empty() { id.clone() } else { get("title") },
+                        description: get("description"),
+                        id,
+                        url: if program.is_some() { String::new() } else { url },
+                        program,
+                    })
                 })
                 .collect()
         })
         .unwrap_or_default();
+    // A command line or a file is the extension's to name, so it may only with the permission.
+    if panes.iter().any(|p| matches!(&p.program, Some((k, _)) if *k != crate::apps::APP)) && !permissions.iter().any(|p| p == "programs") {
+        return Err("extension.json starts a command line or opens a file without the \"programs\" permission".into());
+    }
     let activation = v.get("activation").and_then(|x| x.as_str()).map(str::to_string);
     if activation.is_some() && programs.is_empty() {
         return Err("extension.json has an activation but no program to run".into());
@@ -1462,6 +1496,26 @@ mod tests {
     }
 
     /// Ids that would name the extensions folder or its parent are refused everywhere.
+    #[test]
+    fn a_pane_opens_a_site_or_starts_a_program() {
+        let programs = r#"{"id":"dev.sshremote.programs","name":"Programs","version":"1.0.0","api":4,"contributes":{"panes":[
+            {"id":"calculator","title":"Calculator","app":["Calculator","KCalc"]},
+            {"id":"editor","title":"Text editor","app":["Text Editor","Notepad"]}]}}"#;
+        let m = parse_manifest(programs).unwrap();
+        assert_eq!(m.panes.len(), 2);
+        let calc = &m.panes[0];
+        assert_eq!((calc.title.as_str(), calc.url.as_str()), ("Calculator", ""));
+        assert!(matches!(&calc.program, Some((k, names)) if *k == crate::apps::APP && names[0] == "Calculator"));
+        // A site, a name, and nothing at all.
+        let m = parse_manifest(r#"{"id":"x.y","contributes":{"panes":[{"id":"a","url":"https://a.example"},{"id":"b","app":"Calculator"},{"id":"c"},{"id":"d","url":"http://plain.example"}]}}"#).unwrap();
+        assert_eq!(m.panes.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        // A command line or a file only with the permission.
+        let cmd = r#"{"id":"x.y","contributes":{"panes":[{"id":"a","command":"gedit"}]}}"#;
+        assert!(parse_manifest(cmd).unwrap_err().contains("programs"));
+        let ok = parse_manifest(r#"{"id":"x.y","permissions":["programs"],"contributes":{"panes":[{"id":"a","open":"~/notes.txt"}]}}"#).unwrap();
+        assert!(matches!(&ok.panes[0].program, Some((k, t)) if *k == crate::apps::OPEN && t[0] == "~/notes.txt"));
+    }
+
     #[test]
     fn ids_never_name_a_folder_above() {
         for bad in ["", ".", "..", "a..b", ".hidden", "trailing.", "-x", "a/b", "a\\b", "a b"] {

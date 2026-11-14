@@ -22,12 +22,13 @@ const MEMORY: usize = 64 << 20;
 const OUTPUT: usize = 1 << 20;
 
 /// What a script may be given and may do, as extension.json names them.
-pub const PERMISSIONS: [(&str, &str); 5] = [
+pub const PERMISSIONS: [(&str, &str); 6] = [
     ("workspace.open", "Open terminals in the workspace"),
     ("workspace.read", "Know which tabs and hosts are open"),
     ("native", "Run its own program on this computer, with your rights"),
     ("terminal.selection", "Read the text selected in a terminal when you run its command"),
     ("terminal.write", "Type its result into the terminal (as a paste you can still edit)"),
+    ("programs", "Start programs of this computer's in a pane: a command line or a file it names"),
 ];
 
 /// A command an extension offers.
