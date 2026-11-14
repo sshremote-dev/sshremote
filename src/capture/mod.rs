@@ -111,6 +111,12 @@ pub trait Capture {
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     fn input(&mut self, ev: Input) -> Result<(), String>;
+
+    /// Puts `text` into the focused text field as text, where keys cannot type it; false where
+    /// this desktop cannot (the agent pastes it then).
+    fn commit_text(&mut self, _text: &str) -> bool {
+        false
+    }
 }
 
 /// Points an ssh-started process at the desktop session's bus and runtime directory.
@@ -160,8 +166,8 @@ fn linux_desktop() -> Result<Box<dyn Capture>, String> {
     if desktop.to_ascii_lowercase().contains("gnome") || desktop.is_empty() && wayland {
         match gnome::Gnome::open() {
             Ok(g) => return Ok(Box::new(g)),
-            // GNOME on Xorg: X11's own way in.
-            Err(e) if wayland => return Err(e),
+            // GNOME on Xorg: X11's own way in; a desktop that did not say which it is: its portal.
+            Err(e) if wayland && !desktop.is_empty() => return Err(e),
             Err(_) => {}
         }
     }

@@ -89,6 +89,8 @@ pub struct Gnome {
     /// The helper's interface, made once without a property cache: it is asked several times a
     /// second while a program is shared.
     helper: std::sync::OnceLock<Proxy<'static>>,
+    /// What was typed last, text (true) or keys, and when (`settle`).
+    last_typed: Option<(bool, std::time::Instant)>,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -143,38 +145,88 @@ pub fn ensure_env() {
             }
         }
     }
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        let run = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| run.clone().into());
+        if let Some(socket) = wayland_socket(&run) {
+            // SAFETY: as above.
+            unsafe {
+                std::env::set_var("WAYLAND_DISPLAY", socket);
+                if std::env::var_os("XDG_SESSION_TYPE").is_none() {
+                    std::env::set_var("XDG_SESSION_TYPE", "wayland");
+                }
+            }
+        }
+    }
 }
 
-/// The programs a desktop session runs (its shell, compositor or session manager): only theirs
-/// tell the desktop's display; any other (a test's Xvfb) could point somewhere else.
-const DESKTOPS: &[&str] = &[
-    "gnome-shell", "gnome-session-b", "xfce4-session", "xfwm4", "xfce4-panel", "plasmashell", "kwin_x11", "kwin_wayland", "ksmserver",
-    "lxqt-session", "lxqt-panel", "openbox", "mate-session", "marco", "mate-panel", "cinnamon", "cinnamon-sessio", "muffin", "budgie-wm",
-    "budgie-panel", "i3", "sway", "Hyprland", "cosmic-comp", "cosmic-session", "cosmic-panel", "labwc", "wayfire", "river", "niri",
+/// The programs a desktop session runs (its shell, compositor, session manager or panel), each
+/// with the desktop it tells of: only theirs tell the desktop's display; any other (a test's
+/// Xvfb) could point somewhere else.
+const DESKTOPS: &[(&str, &str)] = &[
+    ("gnome-shell", "GNOME"), ("gnome-session-b", "GNOME"), ("xfce4-session", "XFCE"), ("xfwm4", "XFCE"), ("xfce4-panel", "XFCE"),
+    ("plasmashell", "KDE"), ("kwin_x11", "KDE"), ("kwin_wayland", "KDE"), ("ksmserver", "KDE"), ("lxqt-session", "LXQt"),
+    ("lxqt-panel", "LXQt"), ("openbox", ""), ("mate-session", "MATE"), ("marco", "MATE"), ("mate-panel", "MATE"),
+    ("cinnamon", "X-Cinnamon"), ("cinnamon-sessio", "X-Cinnamon"), ("muffin", "X-Cinnamon"), ("budgie-wm", "Budgie:GNOME"),
+    ("budgie-panel", "Budgie:GNOME"), ("i3", "i3"), ("sway", "sway"), ("swaybar", "sway"), ("swaybg", "sway"), ("Hyprland", "Hyprland"),
+    ("cosmic-comp", "COSMIC"), ("cosmic-session", "COSMIC"), ("cosmic-panel", "COSMIC"), ("labwc", "labwc"), ("wayfire", "wayfire"),
+    ("river", "river"), ("niri", "niri"), ("waybar", ""),
 ];
 
-/// The display variables of this user's desktop session, as its own programs have them (the
-/// newest such program's).
+/// The display variables of this user's desktop session, as its own programs have them: the
+/// newest one that knows its display, else the newest at all (a compositor's own start has no
+/// display yet); the desktop's name from which program it is when none says it.
 fn session_env(uid: &str) -> Vec<(String, String)> {
     const WANTED: [&str; 5] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
     let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
-    let mut best: Option<(u64, Vec<(String, String)>)> = None;
+    // (knows its display, pid): the best first.
+    let mut best: Option<((bool, u64), Vec<(String, String)>)> = None;
     for e in dir.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
-        let desktop = std::fs::read_to_string(e.path().join("comm")).ok().is_some_and(|c| DESKTOPS.contains(&c.trim()));
-        let mine = desktop && std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| s.lines().any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some(uid)));
-        let Some(env) = mine.then(|| std::fs::read(e.path().join("environ")).ok()).flatten() else { continue };
+        let Some(&(_, name)) = std::fs::read_to_string(e.path().join("comm")).ok().and_then(|c| DESKTOPS.iter().find(|d| d.0 == c.trim())) else {
+            continue;
+        };
+        let mine = std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| s.lines().any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some(uid)));        let Some(env) = mine.then(|| std::fs::read(e.path().join("environ")).ok()).flatten() else { continue };
         let vars: Vec<(String, String)> = env
             .split(|b| *b == 0)
             .filter_map(|kv| std::str::from_utf8(kv).ok()?.split_once('='))
             .filter(|(k, _)| WANTED.contains(k))
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        if vars.iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY") && best.as_ref().is_none_or(|(p, _)| pid > *p) {
-            best = Some((pid, vars));
+        // Another session's, whose displays are not where this one looks for them.
+        let theirs = env.split(|b| *b == 0).find_map(|kv| kv.strip_prefix(b"XDG_RUNTIME_DIR="));
+        if let (Some(t), Some(ours)) = (theirs, std::env::var_os("XDG_RUNTIME_DIR")) {
+            if t != ours.as_encoded_bytes() {
+                continue;
+            }
+        }
+        let mut vars = vars;
+        if !name.is_empty() && !vars.iter().any(|(k, _)| k == "XDG_CURRENT_DESKTOP") {
+            vars.push(("XDG_CURRENT_DESKTOP".into(), name.into()));
+        }
+        let rank = (vars.iter().any(|(k, _)| k == "DISPLAY" || k == "WAYLAND_DISPLAY"), pid);
+        if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+            best = Some((rank, vars));
         }
     }
     best.map(|(_, v)| v).unwrap_or_default()
+}
+
+/// The newest Wayland display of this user's that answers (`wayland-1`): a compositor whose
+/// display no program tells of.
+fn wayland_socket(run: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut found: Option<(std::time::SystemTime, String)> = None;
+    for e in std::fs::read_dir(run).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("wayland-") || name.ends_with(".lock") || !e.file_type().is_ok_and(|t| t.is_socket()) {
+            continue;
+        }
+        let when = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        if found.as_ref().is_none_or(|(w, _)| when > *w) && std::os::unix::net::UnixStream::connect(e.path()).is_ok() {
+            found = Some((when, name));
+        }
+    }
+    found.map(|(_, n)| n)
 }
 
 /// A capture pipeline; it stops when it goes (one dropped while playing keeps its threads and its
@@ -328,6 +380,11 @@ impl Gnome {
         let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
         let mut added = sproxy.receive_signal("PipeWireStreamAdded").map_err(err("signal"))?;
         session.call::<_, _, ()>("Start", &()).map_err(err("Start"))?;
+        // Mutter makes the session's keyboard and pointer at their first event, and drops what
+        // comes while it does (a viewer's first keys): both are made now, by events that do
+        // nothing (a key no key makes, a move by nothing).
+        let _ = session.call_noreply("NotifyKeyboardKeysym", &(0u32, true));
+        let _ = session.call_noreply("NotifyPointerMotionRelative", &(0f64, 0f64));
         let started = (|| {
             let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
             let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
@@ -366,6 +423,7 @@ impl Gnome {
             checked_alive: std::time::Instant::now(),
             ended: false,
             helper: std::sync::OnceLock::new(),
+            last_typed: None,
         })
     }
 
@@ -445,6 +503,28 @@ impl Gnome {
                 format!("GNOME helper: {e}")
             }
         })
+    }
+
+    /// `text` typed into the focused text field by the helper; false without it, or with no
+    /// such field (an X11 program).
+    fn helper_commit(&self, text: &str) -> bool {
+        self.helper().ok().and_then(|p| p.call::<_, _, bool>("Commit", &(text,)).ok()).unwrap_or(false)
+    }
+
+    /// Waits until key events sent `GAP` ago or more and text committed so are both through:
+    /// Mutter passes keys on through its input thread, and text the helper commits straight, so
+    /// one sent right after the other could arrive first.
+    fn settle(&mut self, now_text: bool) {
+        const GAP: std::time::Duration = std::time::Duration::from_millis(25);
+        if let Some((text, at)) = self.last_typed
+            && text != now_text
+        {
+            let left = GAP.saturating_sub(at.elapsed());
+            if !left.is_zero() {
+                std::thread::sleep(left);
+            }
+        }
+        self.last_typed = Some((now_text, std::time::Instant::now()));
     }
 
     fn helper_activate(&self, id: u64) {
@@ -915,6 +995,14 @@ impl Capture for Gnome {
         Ok(Some(Image { w: cw, h: ch, stride: cw * 4, data }))
     }
 
+    fn commit_text(&mut self, text: &str) -> bool {
+        if self.portal.is_some() {
+            return false;
+        }
+        self.settle(true);
+        self.helper_commit(text)
+    }
+
     fn input(&mut self, ev: Input) -> Result<(), String> {
         if self.portal.is_some() {
             return self.portal_input(ev);
@@ -956,7 +1044,10 @@ impl Capture for Gnome {
             }
             Input::Scroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(0u32, steps)),
             Input::HScroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(1u32, steps)),
-            Input::KeyState { keysym, down } => notify!(self, "NotifyKeyboardKeysym", &(keysym, down)),
+            Input::KeyState { keysym, down } => {
+                self.settle(false);
+                notify!(self, "NotifyKeyboardKeysym", &(keysym, down))
+            }
             Input::SecureAttention => {
                 // GNOME answers Ctrl+Alt+Del with its log-out dialog.
                 for (c, down) in [(29u32, true), (56, true), (111, true), (111, false), (56, false), (29, false)] {
@@ -965,6 +1056,7 @@ impl Capture for Gnome {
                 Ok(())
             }
             Input::Key { keysym, mods } => {
+                self.settle(false);
                 // evdev keycodes for the modifiers; the key itself goes by keysym.
                 let held: Vec<u32> = [(MOD_CTRL, 29), (MOD_SHIFT, 42), (MOD_ALT, 56), (MOD_SUPER, 125)]
                     .into_iter()
