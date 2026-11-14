@@ -181,9 +181,10 @@ impl Portal {
     where
         B: zbus::export::serde::ser::Serialize + zbus::zvariant::DynamicType,
     {
-        // Without waiting for the reply, as for Mutter's own interface.
+        // Each waits for its reply: the portal service handles calls on a pool of threads, so
+        // calls sent ahead of their replies reach the desktop out of order (keys swapped or lost).
         let rd = self.rd.as_ref().ok_or("this desktop lets its screen be seen, not controlled (it has no remote-desktop portal)")?;
-        rd.call_noreply(method, body).map_err(err(method))
+        rd.call_method(method, body).map(drop).map_err(err(method))
     }
 
     fn none() -> HashMap<&'static str, Value<'static>> {
