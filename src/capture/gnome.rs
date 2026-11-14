@@ -179,7 +179,8 @@ fn session_env(uid: &str) -> Vec<(String, String)> {
     const WANTED: [&str; 5] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
     let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
     // (knows its display, pid): the best first.
-    let mut best: Option<((bool, u64), Vec<(String, String)>)> = None;
+    type Vars = Vec<(String, String)>;
+    let mut best: Option<((bool, u64), Vars)> = None;
     for e in dir.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
         let Some(&(_, name)) = std::fs::read_to_string(e.path().join("comm")).ok().and_then(|c| DESKTOPS.iter().find(|d| d.0 == c.trim())) else {
@@ -194,10 +195,10 @@ fn session_env(uid: &str) -> Vec<(String, String)> {
             .collect();
         // Another session's, whose displays are not where this one looks for them.
         let theirs = env.split(|b| *b == 0).find_map(|kv| kv.strip_prefix(b"XDG_RUNTIME_DIR="));
-        if let (Some(t), Some(ours)) = (theirs, std::env::var_os("XDG_RUNTIME_DIR")) {
-            if t != ours.as_encoded_bytes() {
-                continue;
-            }
+        if let (Some(t), Some(ours)) = (theirs, std::env::var_os("XDG_RUNTIME_DIR"))
+            && t != ours.as_encoded_bytes()
+        {
+            continue;
         }
         let mut vars = vars;
         if !name.is_empty() && !vars.iter().any(|(k, _)| k == "XDG_CURRENT_DESKTOP") {
