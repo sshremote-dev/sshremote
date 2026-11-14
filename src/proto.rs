@@ -206,6 +206,15 @@ pub enum ToAgent {
         act: UiAction,
         text: String,
     },
+    /// Asks for the programs installed on the host, answered with `AppList`.
+    Apps,
+    /// Starts a program on the host and shows it alone: `kind` says how `text` names it
+    /// (`apps::APP` an id from `AppList`, `apps::COMMAND` a command line, `apps::OPEN` a file or
+    /// an address opened with its program). Answered with `Launched`.
+    Launch {
+        kind: u8,
+        text: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -411,6 +420,16 @@ pub enum ToClient {
     /// What is shared now; `kind` is `Share`'s number on the wire (0: the whole screen).
     Sharing {
         kind: u8,
+        text: String,
+    },
+    /// The programs installed on the host (`Apps`): id, name, a line about it; or why none.
+    AppList {
+        list: Vec<(String, String, String)>,
+        error: String,
+    },
+    /// What `Launch` did: started (and shown alone once its window came), or why not.
+    Launched {
+        ok: bool,
         text: String,
     },
     /// The window in front: its title, the other windows (id, title), its elements, how many more
@@ -717,6 +736,12 @@ impl ToAgent {
                 b.extend_from_slice(text.as_bytes());
                 37
             }
+            ToAgent::Apps => 47,
+            ToAgent::Launch { kind, text } => {
+                b.push(*kind);
+                b.extend_from_slice(text.as_bytes());
+                48
+            }
             ToAgent::Host { act, on } => {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
@@ -783,6 +808,8 @@ impl ToAgent {
             9 => ToAgent::KeyState { keysym: c.u32()?, down: c.u8()? != 0 },
             10 => ToAgent::HScroll { steps: c.u8()? as i8 },
             11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
+            47 => ToAgent::Apps,
+            48 => ToAgent::Launch { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             45 => ToAgent::ClipImage(c.rest().to_vec()),
             46 => ToAgent::Density(c.u16()?),
             12 => ToAgent::SecureAttention,
@@ -1020,6 +1047,21 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 122
             }
+            ToClient::AppList { list, error } => {
+                put_str(&mut b, error);
+                b.extend_from_slice(&(list.len() as u32).to_le_bytes());
+                for (id, name, detail) in list {
+                    put_str(&mut b, id);
+                    put_str(&mut b, name);
+                    put_str(&mut b, detail);
+                }
+                136
+            }
+            ToClient::Launched { ok, text } => {
+                b.push(*ok as u8);
+                b.extend_from_slice(text.as_bytes());
+                137
+            }
             ToClient::UiTree { title, windows, elems, more, note } => {
                 put_str(&mut b, title);
                 put_str(&mut b, note);
@@ -1220,6 +1262,16 @@ impl ToClient {
                 ToClient::WindowList { list, error }
             }
             122 => ToClient::Sharing { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            136 => {
+                let error = c.str()?;
+                let n = c.u32()? as usize;
+                let mut list = Vec::with_capacity(n.min(4096));
+                for _ in 0..n {
+                    list.push((c.str()?, c.str()?, c.str()?));
+                }
+                ToClient::AppList { list, error }
+            }
+            137 => ToClient::Launched { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             123 => {
                 let (title, note, more) = (c.str()?, c.str()?, c.u32()?);
                 let n = c.u32()? as usize;
@@ -1337,6 +1389,8 @@ mod tests {
             ToAgent::PickOnRemote,
             ToAgent::UiState { text: true, max: 150 },
             ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
+            ToAgent::Apps,
+            ToAgent::Launch { kind: 1, text: "gnome-calculator".into() },
             ToAgent::Host { act: 4, on: true },
             ToAgent::Call(true),
             ToAgent::Voice(vec![7, 8]),
@@ -1371,6 +1425,8 @@ mod tests {
                 error: String::new(),
             },
             ToClient::Sharing { kind: 1, text: "Inbox".into() },
+            ToClient::AppList { list: vec![("calc.desktop".into(), "계산기".into(), "Sums".into())], error: String::new() },
+            ToClient::Launched { ok: true, text: "Calculator".into() },
             ToClient::UiTree {
                 title: "Notepad".into(),
                 windows: vec![(42, "Chrome".into())],

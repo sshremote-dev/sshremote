@@ -140,6 +140,7 @@ pub fn code_arg() -> String {
 
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
 pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
+    let backend = starting(backend);
     #[cfg(windows)]
     if pipe.is_none()
         && matches!(backend, "auto" | "windows")
@@ -195,6 +196,7 @@ impl Read for EndsWithViewer {
 
 /// Serves one viewer over any pair of streams (stdio, relay pipes, a sealed network link).
 pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>) -> Result<(), String> {
+    let backend = starting(backend);
     let mut enc =
         zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, output), 3).map_err(|e| e.to_string())?;
     // A long window lets earlier screens act as a dictionary for repeats.
@@ -386,6 +388,15 @@ fn serve_with(
     // A voice call: ringing (None) or answered, with the microphone here and a player for theirs.
     let mut call: Option<Option<(Option<crate::audio::Capture>, Option<crate::audio::Player>)>> = None;
     let mut pending = String::new();
+    // A program started for the viewer, until its window is found and shown alone: one this
+    // pane was opened for first (`app:` capture).
+    let mut launching: Option<Launching> = None;
+    if let Some((kind, text)) = START.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        match Launching::start(cap.as_ref(), kind, &text) {
+            Ok(l) => launching = Some(l),
+            Err(e) => send(enc, &ToClient::Launched { ok: false, text: e }).map_err(io_err)?,
+        }
+    }
     let mut in_flight = 0u32;
     // Sizes of the frames in flight, oldest first, matched to acknowledgements in order.
     let mut flight_sizes: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
@@ -758,6 +769,16 @@ fn serve_with(
                     };
                     send(enc, &reply).map_err(io_err)?;
                 }
+                ToAgent::Apps => {
+                    let list = crate::apps::list();
+                    let error = if list.is_empty() { "no programs were found on that computer".to_string() } else { String::new() };
+                    let list = list.into_iter().map(|a| (a.id, a.name, a.detail)).collect();
+                    send(enc, &ToClient::AppList { list, error }).map_err(io_err)?;
+                }
+                ToAgent::Launch { kind, text } => match Launching::start(cap.as_ref(), kind, &text) {
+                    Ok(l) => launching = Some(l),
+                    Err(e) => send(enc, &ToClient::Launched { ok: false, text: e }).map_err(io_err)?,
+                },
                 ToAgent::Share(scope) => {
                     let kind = scope.to_wire().0;
                     match cap.share(scope) {
@@ -772,6 +793,28 @@ fn serve_with(
             }
         }
         paste(&mut pending, &mut clip, cap.as_mut());
+        if let Some(l) = launching.as_mut()
+            && l.looked.elapsed() >= Duration::from_millis(300)
+        {
+            l.looked = Instant::now();
+            let found = l.window(cap.as_ref());
+            let late = l.since.elapsed() > Duration::from_secs(20);
+            if found.is_some() || late {
+                let l = launching.take().expect("checked");
+                let reply = match found.map(|w| cap.share(crate::shared::Share::App(w)).map(|t| (w, t))) {
+                    Some(Ok((w, text))) => {
+                        let kind = crate::shared::Share::App(w).to_wire().0;
+                        send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
+                        ui.pin(kind);
+                        resized!();
+                        ToClient::Launched { ok: true, text: format!("{} opened, shown alone", l.what) }
+                    }
+                    Some(Err(e)) => ToClient::Launched { ok: true, text: format!("{} opened; it cannot be shown alone here ({e})", l.what) },
+                    None => ToClient::Launched { ok: true, text: format!("{} opened, with no window of its own to show alone", l.what) },
+                };
+                send(enc, &reply).map_err(io_err)?;
+            }
+        }
         if host.taken_back() {
             send(enc, &ToClient::Notice("The person at that computer took its keyboard and mouse back (Ctrl+P).".into())).map_err(io_err)?;
             send(enc, &ToClient::HostState { can: crate::hostctl::can(), on: host.on() }).map_err(io_err)?;
@@ -996,6 +1039,58 @@ fn serve_with(
         in_flight += 1;
         flight_sizes.push_back(bytes);
         due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
+    }
+}
+
+/// A program started for the viewer, whose window is looked for to show it alone.
+struct Launching {
+    /// The windows there before it started.
+    before: std::collections::HashSet<u64>,
+    /// Its program's name, to know it by when it opened no new window (one already running).
+    name: String,
+    /// What the viewer is told it is.
+    what: String,
+    since: Instant,
+    looked: Instant,
+}
+
+/// What a pane opened for a program asks to start (`app:KIND:TEXT` as its capture).
+static START: std::sync::Mutex<Option<(u8, String)>> = std::sync::Mutex::new(None);
+
+/// The capture to open, keeping aside a program to start (`app:KIND:TEXT`, on the desktop's own).
+fn starting(backend: &str) -> &str {
+    let Some(rest) = backend.strip_prefix("app:") else { return backend };
+    let (kind, text) = rest.split_once(':').unwrap_or(("1", rest));
+    *START.lock().unwrap_or_else(|e| e.into_inner()) = Some((kind.parse().unwrap_or(crate::apps::COMMAND), text.to_string()));
+    "auto"
+}
+
+impl Launching {
+    /// Starts it, with the windows there before it so its own is the one that is new.
+    fn start(cap: &dyn capture::Capture, kind: u8, text: &str) -> Result<Launching, String> {
+        let before = cap.windows().map(|l| l.iter().map(|w| w.id).collect()).unwrap_or_default();
+        let name = crate::apps::launch(kind, text)?;
+        let what = if name.is_empty() { text.trim().to_string() } else { name.clone() };
+        Ok(Launching { before, name, what, since: Instant::now(), looked: Instant::now() })
+    }
+
+    /// Its window: the first that is new, or (after a few seconds) the topmost of the program
+    /// started (a program already running brings its window forward instead of opening one).
+    fn window(&self, cap: &dyn capture::Capture) -> Option<u64> {
+        let list = cap.windows().ok()?;
+        if let Some(w) = list.iter().find(|w| !self.before.contains(&w.id)) {
+            return Some(w.id);
+        }
+        let name = self.name.to_lowercase();
+        if self.since.elapsed() < Duration::from_secs(3) || name.is_empty() {
+            return None;
+        }
+        list.iter()
+            .find(|w| {
+                let app = w.app.to_lowercase();
+                !app.is_empty() && (app.contains(&name) || name.contains(&app))
+            })
+            .map(|w| w.id)
     }
 }
 

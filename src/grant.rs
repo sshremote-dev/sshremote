@@ -51,7 +51,9 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::SecureAttention
         | ToAgent::UiAct { .. }
         | ToAgent::PickOnRemote
-        | ToAgent::InstallHelper => CONTROL,
+        | ToAgent::InstallHelper
+        | ToAgent::Apps
+        | ToAgent::Launch { .. } => CONTROL,
         ToAgent::Clipboard(_) | ToAgent::ClipImage(_) => CLIPBOARD,
         ToAgent::FileStart { .. }
         | ToAgent::FileData { .. }

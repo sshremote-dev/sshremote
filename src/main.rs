@@ -5,6 +5,7 @@ mod access;
 mod admin;
 #[cfg(feature = "remote")]
 mod agent;
+mod apps;
 #[cfg(feature = "remote")]
 mod audio;
 mod backup;

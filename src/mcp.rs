@@ -37,6 +37,9 @@ struct Server {
     clipboard: String,
     monitors: Vec<crate::proto::MonitorInfo>,
     windows: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
+    /// The host's installed programs, and what the last `launch` did.
+    apps: Option<Result<Vec<(String, String, String)>, String>>,
+    launched: Option<(bool, String)>,
     sharing: Option<String>,
     /// The last accessibility listing or action result.
     ui: Option<ToClient>,
@@ -101,6 +104,10 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
         {"name": "windows", "description": "List the remote windows that can be shared on their own (id, program, title, size).",
          "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "apps", "description": "List the programs installed on the remote computer (id, name, about), optionally only those whose name has `search`, to start one with launch.",
+         "inputSchema": {"type": "object", "properties": {"search": {"type": "string"}}}},
+        {"name": "launch", "description": "Start a program on the remote computer and show it alone (screenshots, clicks and keys then go to it): app (an id from apps), command (a command line), or open (a file path or an address, opened with its program). Waits up to 25 s for its window.",
+         "inputSchema": {"type": "object", "properties": {"app": {"type": "string"}, "command": {"type": "string"}, "open": {"type": "string"}}}},
         {"name": "share", "description": "Limit the picture, clicks and keys to one window or program, which makes screenshots smaller and cheaper. target: \"screen\", \"active\" (the focused window), \"active-app\" (every window of its program), a window id from windows, or \"app:<window id>\" for every window of that program.",
          "inputSchema": {"type": "object", "required": ["target"], "properties": {"target": {"type": "string"}}}},
         {"name": "clipboard_get", "description": "Text last copied on the SSH host.",
@@ -298,6 +305,8 @@ impl Server {
                     self.windows = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                 }
                 Ev::Net(ToClient::Sharing { text, .. }) => self.sharing = Some(text),
+                Ev::Net(ToClient::AppList { list, error }) => self.apps = Some(if list.is_empty() && !error.is_empty() { Err(error) } else { Ok(list) }),
+                Ev::Net(ToClient::Launched { ok, text }) => self.launched = Some((ok, text)),
                 Ev::Net(m @ (ToClient::UiTree { .. } | ToClient::UiDone { .. })) => self.ui = Some(m),
                 Ev::Net(ToClient::Hello { w, h, .. }) => self.screen = (w as u32, h as u32),
                 Ev::Net(ToClient::Notice(t)) if until.is_some() => return Err(t),
@@ -519,6 +528,50 @@ impl Server {
                 }
                 Ok(done)
             }
+            "apps" => {
+                self.apps = None;
+                self.send(ToAgent::Apps)?;
+                let until = Instant::now() + Duration::from_secs(10);
+                while self.apps.is_none() && Instant::now() < until {
+                    self.drain(Some(Instant::now() + Duration::from_millis(100)))?;
+                }
+                let search = args.get("search").and_then(Value::as_str).unwrap_or("").to_lowercase();
+                match self.apps.take() {
+                    Some(Ok(list)) => Ok(text_result(
+                        list.iter()
+                            .filter(|(_, name, _)| name.to_lowercase().contains(&search))
+                            .map(|(id, name, about)| format!("{id}  {name}{}", if about.is_empty() { String::new() } else { format!("  ({about})") }))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )),
+                    Some(Err(e)) => Ok(error_result(e)),
+                    None => Ok(error_result("no list of programs within 10 s")),
+                }
+            }
+            "launch" => {
+                let pick = |k: &str| args.get(k).and_then(Value::as_str).filter(|t| !t.trim().is_empty()).map(str::to_string);
+                let (kind, text) = if let Some(t) = pick("app") {
+                    (crate::apps::APP, t)
+                } else if let Some(t) = pick("command") {
+                    (crate::apps::COMMAND, t)
+                } else if let Some(t) = pick("open") {
+                    (crate::apps::OPEN, t)
+                } else {
+                    return Err("give app, command or open".into());
+                };
+                self.launched = None;
+                self.send(ToAgent::Launch { kind, text })?;
+                let until = Instant::now() + Duration::from_secs(25);
+                while self.launched.is_none() && Instant::now() < until {
+                    self.drain(Some(Instant::now() + Duration::from_millis(100)))?;
+                }
+                self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
+                match self.launched.take() {
+                    Some((true, t)) => Ok(text_result(format!("{t}; take a screenshot"))),
+                    Some((false, e)) => Ok(error_result(e)),
+                    None => Ok(error_result("it did not start within 25 s")),
+                }
+            }
             "windows" => {
                 self.windows = None;
                 self.send(ToAgent::ListWindows)?;
@@ -593,6 +646,8 @@ pub fn run(opt: &Options) -> Result<(), String> {
         clipboard: String::new(),
         monitors: Vec::new(),
         windows: None,
+        apps: None,
+        launched: None,
         sharing: None,
         ui: None,
         ui_windows: Vec::new(),
