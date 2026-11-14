@@ -113,6 +113,12 @@ function toast(text, opts = {}) {
   setTimeout(() => t.remove(), opts.ms || (opts.action ? 12000 : 5000));
 }
 
+// When the page last lost the keyboard to another window or tab: something may have been copied
+// there since, newer than what the host copied before.
+let leftAt = 0;
+addEventListener("blur", () => { leftAt = Date.now(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) leftAt = Date.now(); });
+
 // A menu of [label, action, {on, kbd, danger}] items (null for a rule, a string for a heading),
 // under `anchor` or at a point.
 let openMenu = null;
@@ -796,7 +802,7 @@ class Client {
       }
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       // A picture copied on the host; none (too large to come over) still says the host's clipboard is newer.
-      else if (b[0] === 8) { this.hostTurn = true; if (b.length > 1) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" })); else this.hostImage = null; }
+      else if (b[0] === 8) { this.hostTurn = true; this.hostAt = Date.now(); if (b.length > 1) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" })); else this.hostImage = null; }
       return;
     }
     const v = JSON.parse(m.data);
@@ -1632,7 +1638,10 @@ class Client {
     if (files.length === 1 && files[0].type.startsWith("image/") && /^(image|untitled)?(\.\w+)?$/i.test(files[0].name)) { this.sendImage(files[0], paste, settle); return; }
     if (files.length) { this.pasteFileList(files); settle(); return; }
     const text = dt?.getData("text/plain");
-    if (text && text !== this.sentClip && text !== this.hostClip) {
+    // What was sent before is sent again only if this page was left since the host copied
+    // something (it may have been copied anew there); the host's copy is newer otherwise.
+    const sentStill = text === this.sentClip && !(leftAt > (this.hostAt || 0));
+    if (text && !sentStill && text !== this.hostClip) {
       this.sentClip = text;
       this.hostTurn = false;
       this.send({ clipboard: text });
@@ -1660,7 +1669,7 @@ class Client {
       let mark = 0x811c9dc5;
       for (let i = 0; i < bytes.length; i++) mark = Math.imul(mark ^ bytes[i], 16777619);
       mark = bytes.length + ":" + (mark >>> 0);
-      if (this.hostTurn && mark === this.sentImage) { paste(); return; }
+      if (this.hostTurn && mark === this.sentImage && !(leftAt > (this.hostAt || 0))) { paste(); return; }
       this.sentImage = mark;
       this.hostTurn = false;
       this.sentClip = null;
@@ -1692,6 +1701,7 @@ class Client {
   }
   clipboardIn(text) {
     this.hostTurn = true;
+    this.hostAt = Date.now();
     this.hostClip = text;
     navigator.clipboard?.writeText(text).then(() => {}, () => toast("Copied on the host.", { action: ["Copy here", () => this.copyHostClip()] }));
   }
