@@ -26,6 +26,7 @@ an app that must stay safe on machines that hold SSH keys:
 | Script | `main` (a `.wasm` file), `contributes.commands` | Commands in the terminal's right-click menu and the command palette that change the selected text |
 | Host extension | `programs`, `"activation": "startup"`, `contributes.commands` | Runs beside the app for as long as it is open: status bar items, panels, commands, terminals, events |
 | Tools (API 3) | `contributes.panes` | Web apps listed under Tools on the home and in Quick open (`+`); each opens in a pane of its own as a page of Chrome, Edge or Chromium run with no window, its sign-ins kept in a profile of its own per site |
+| Programs (API 4) | `contributes.panes` with `app`, `command` or `open` | This computer's own programs under Tools: each is started and its windows shown alone in a pane of its own |
 
 A tool in a pane:
 
@@ -42,6 +43,27 @@ It needs no code and no permission: the page runs in the browser's own sandbox, 
 app, and gets only what is typed and clicked in its pane. Its `url` must be `https://` (a pane with
 another address is left out). Any other site opens the same way by
 typing its `https://` address on the home or in Quick open.
+
+A program of this computer's in a pane (API 4) gives, instead of `url`, one of:
+
+| Key | What starts | Permission |
+|---|---|---|
+| `app` | An installed program by its name as the system's menu shows it (Linux: its desktop entry; Windows: the Start menu, Store apps too), or a list of names, the first installed one taken | none: only what is installed starts, when the person clicks it |
+| `command` | A command line, as typed in a terminal | `programs` |
+| `open` | A file or an address, opened with the program the system opens it with | `programs` |
+
+```json
+{
+  "id": "dev.sshremote.programs", "name": "Programs", "version": "1.0.0", "api": 4,
+  "contributes": { "panes": [
+    { "id": "calculator", "title": "Calculator", "app": ["Calculator", "KCalc", "Galculator"] } ] }
+}
+```
+
+The program starts on this computer's desktop, as the person using it; its pane then shows its
+windows alone (with their menus and dialogs) and takes clicks and keys for it, as sharing one
+program does. On a computer reached by SSH or by its ID the same is done from a screen's menu
+(Open a program), with that computer's programs; the web page offers it too.
 
 ## The manifest
 
@@ -81,6 +103,7 @@ Permissions:
 | `workspace.read` | Receiving `event` notifications about the panes opened and closed |
 | `terminal.selection` | Receiving the selected terminal text with a command |
 | `terminal.write` | `terminal.paste`: typing text into the active terminal, as a paste |
+| `programs` | A pane that starts a command line (`command`) or opens a file (`open`) on this computer |
 
 ## The protocol (API 2)
 

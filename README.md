@@ -17,10 +17,19 @@ window's monitor menu, the web page's and the terminal viewer's (Ctrl+] n), and 
 to look at only (Linux through GStreamer, Windows through Media Foundation). A viewer by ID sees
 them only when the computer's settings allow it (`remote-access cameras on`, off by default), and
 the person at the screen is told each time one is looked at.
+
 Viewers: a native window, or a terminal that shows pictures: sixel (Windows Terminal, foot, VTE)
 or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found by asking the
 terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead). Inside tmux in kitty, kitty images
 are placed by Unicode placeholders, so the picture moves and hides with tmux's windows and panes.
+
+**Programs in a pane** (as Remote Desktop's RemoteApp): a screen's Open a program menu finds the
+computer's installed programs (its desktop entries on Linux, the Start menu on Windows, Store apps
+too), or takes a command line, a file or an address; what it starts opens in a pane beside, showing
+that program alone (with its menus and dialogs) and taking clicks and keys for it. Home's Tools does
+the same for this computer, and extensions can list programs there (`docs/extensions.md`). Programs
+are shown alone on Windows, GNOME (with its helper) and X11 desktops; elsewhere the pane shows the
+screen.
 
 ## Build
 
