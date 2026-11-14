@@ -432,23 +432,97 @@ impl App {
         ui.add_space(6.0);
     }
 
-    /// The tools installed extensions open in a pane (a translator, a chat): one click opens one.
+    /// A program of this computer's in a pane, and the tools installed extensions open in one (a
+    /// translator, a chat): one click opens one.
     fn tools(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         let tools = crate::ext::panes();
-        if tools.is_empty() {
-            return;
-        }
         kit::heading(ui, "Tools");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            let button = kit::secondary(format!("{}  Open a program\u{2026}", ic::APP_WINDOW)).min_size(Vec2::new(0.0, kit::CONTROL_H));
+            let (r, _) = egui::containers::menu::MenuButton::from_button(button).config(config).ui(ui, |ui| {
+                crate::gui::menu_look(ui);
+                self.programs_menu(ui, go);
+            });
+            r.on_hover_text("One of this computer's programs, found among those installed or named by a command line or a file, in a pane of its own");
             for (ext, t) in tools {
-                let tip = if t.description.is_empty() { format!("{} ({ext})", t.url) } else { format!("{}\n{} ({ext})", t.description, t.url) };
-                if ui.add(kit::secondary(format!("{}  {}", ic::APP_WINDOW, t.title)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
-                    *go = Some((t.url.clone(), String::new(), How::Web(t.url.clone(), t.title.clone())));
+                // What it opens: a site, or which program of this computer's.
+                let what = match &t.program {
+                    Some((k, names)) if *k == crate::apps::APP => names.join(", "),
+                    Some((_, names)) => names.first().cloned().unwrap_or_default(),
+                    None => t.url.clone(),
+                };
+                let tip = if t.description.is_empty() { format!("{what} ({ext})") } else { format!("{}\n{what} ({ext})", t.description) };
+                let glyph = if t.program.is_some() { ic::APP_WINDOW } else { ic::GLOBE };
+                if !ui.add(kit::secondary(format!("{glyph}  {}", t.title)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
+                    continue;
+                }
+                match &t.program {
+                    None => *go = Some((t.url.clone(), String::new(), How::Web(t.url.clone(), t.title.clone()))),
+                    // The first of its names installed here.
+                    Some((k, names)) if *k == crate::apps::APP => {
+                        let list = self.apps.get_or_insert_with(crate::apps::list);
+                        match names.iter().find_map(|n| list.iter().find(|a| a.name.eq_ignore_ascii_case(n) || a.id == *n)) {
+                            Some(a) => *go = Some((String::new(), String::new(), How::App(crate::apps::APP, a.id.clone(), t.title.clone()))),
+                            None => self.error = Some(format!("{} is not installed on this computer (looked for {})", t.title, names.join(", "))),
+                        }
+                    }
+                    Some((k, names)) => {
+                        if let Some(text) = names.first() {
+                            *go = Some((String::new(), String::new(), How::App(*k, text.clone(), t.title.clone())));
+                        }
+                    }
                 }
             }
         });
         ui.add_space(10.0);
+    }
+
+    /// The menu that opens a program of this computer's in a pane: a search over what is
+    /// installed, and a command line, a file or an address to open with its program.
+    fn programs_menu(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        let mut pick: Option<(u8, String, String)> = None;
+        ui.set_width(320.0);
+        let list = self.apps.get_or_insert_with(crate::apps::list);
+        let find = ui.add(egui::TextEdit::singleline(&mut self.apps_find).hint_text(format!("{}  Find a program", ic::SEARCH)).desired_width(f32::INFINITY));
+        let q = self.apps_find.to_lowercase();
+        let hits: Vec<&crate::apps::App> = list.iter().filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q) || a.detail.to_lowercase().contains(&q)).take(300).collect();
+        if find.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && let Some(a) = hits.first() {
+            pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
+        }
+        if hits.is_empty() {
+            ui.label(RichText::new(if list.is_empty() { "No programs were found here" } else { "Nothing installed by that name" }).weak());
+        }
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            for a in hits {
+                let r = ui.add(egui::Button::new(format!("{}  {}", ic::APP_WINDOW, a.name)).frame(false).min_size(Vec2::new(ui.available_width(), 24.0)));
+                let r = if a.detail.is_empty() { r } else { r.on_hover_text(&a.detail) };
+                if r.clicked() {
+                    pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
+                }
+            }
+        });
+        ui.separator();
+        ui.label(RichText::new("Or a command line, a file or an address").weak());
+        let line = ui.add(egui::TextEdit::singleline(&mut self.apps_line).hint_text("gedit notes.txt, ~/report.pdf, https://\u{2026}").desired_width(f32::INFINITY));
+        let typed = self.apps_line.trim().to_string();
+        let file_like = typed.starts_with('/') || typed.starts_with('~') || typed.contains("://") || typed.get(1..3) == Some(":\\") || typed.get(1..3) == Some(":/");
+        let enter = line.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal(|ui| {
+            let ready = !typed.is_empty();
+            if ui.add_enabled(ready, egui::Button::new(format!("{}  Run", ic::TERMINAL))).on_hover_text("Run it as a command line").clicked() || (enter && ready && !file_like) {
+                pick = Some((crate::apps::COMMAND, typed.clone(), crate::apps::program_of(&typed)));
+            }
+            if ui.add_enabled(ready, egui::Button::new(format!("{}  Open", ic::FOLDER_OPEN))).on_hover_text("Open the file or address with its own program").clicked() || (enter && ready && file_like) {
+                let name = typed.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(&typed).to_string();
+                pick = Some((crate::apps::OPEN, typed.clone(), name));
+            }
+        });
+        if let Some((kind, text, name)) = pick {
+            ui.close();
+            *go = Some((String::new(), String::new(), How::App(kind, text, name)));
+        }
     }
 
     /// The projects kept (the last session first): one click opens its tabs as they were; its

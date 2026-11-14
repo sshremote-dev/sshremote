@@ -95,6 +95,15 @@ pub(super) struct Remote {
     /// Every monitor of the host was asked for, each in a window of its own (taken by the
     /// workspace, which opens them).
     pub(super) spread_asked: bool,
+    /// The host's installed programs once asked for (`Apps`), and what is typed in the menu that
+    /// opens one: a name to find it by, or a command line, a file or an address.
+    pub(super) apps: Option<Result<Vec<AppRow>, String>>,
+    pub(super) apps_asked: bool,
+    pub(super) apps_find: String,
+    pub(super) apps_line: String,
+    /// A program to open in a pane beside this one, on the same host and shown alone (how it is
+    /// named, the name, what the pane is called): taken by the workspace.
+    pub(super) launch_asked: Option<(u8, String, String)>,
     /// What the person at a computer reached by its ID lets this viewer do (`grant`).
     pub(super) allowed: u8,
     /// What can be done to the computer itself and what is on (`hostctl` bits), once asked.
@@ -201,6 +210,9 @@ const UPLOAD_CHUNK: usize = 64 << 10;
 /// How long one frame may spend on network messages before the window is drawn.
 const PUMP_BUDGET: Duration = Duration::from_millis(12);
 
+/// One of the host's programs as `AppList` gives it: id, name, a line about it.
+pub(super) type AppRow = (String, String, String);
+
 /// What the user chose for a connection, carried over when it is made again after a drop: a
 /// host set to view only stays view only.
 pub(super) struct Prefs {
@@ -297,6 +309,11 @@ impl Remote {
             monitor: 0,
             chosen_monitor: None,
             spread_asked: false,
+            apps: None,
+            apps_asked: false,
+            apps_find: String::new(),
+            apps_line: String::new(),
+            launch_asked: None,
             allowed: crate::grant::ALL,
             host: None,
             host_asked: false,
@@ -679,6 +696,10 @@ impl Remote {
                         p.0 = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                     }
                 }
+                Ok(Ev::Net(ToClient::AppList { list, error })) => {
+                    self.apps = Some(if list.is_empty() && !error.is_empty() { Err(error) } else { Ok(list) });
+                }
+                Ok(Ev::Net(ToClient::Launched { text, .. })) => self.notify(&text),
                 // The chooser shows what happened; a helper in place may list the windows already.
                 Ok(Ev::Net(ToClient::HelperInstalled { ok, text })) => {
                     if let Some(p) = self.picker.as_mut() {
@@ -1063,6 +1084,13 @@ impl Remote {
     pub(super) fn prefs_on(&self, m: u8) -> Prefs {
         let mut p = self.prefs();
         p.monitor = Some(m);
+        p
+    }
+
+    /// What the user chose here, for a pane beside it that shows one program of the host's.
+    pub(super) fn prefs_for_app(&self) -> Prefs {
+        let mut p = self.prefs();
+        (p.monitor, p.paused) = (None, false);
         p
     }
 

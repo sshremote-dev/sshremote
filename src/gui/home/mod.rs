@@ -205,6 +205,12 @@ impl App {
                 ssh_cmd: None,
                 mode: PaneMode::Screen,
             },
+            How::App(kind, text, name) => Launch::Agent {
+                target: Target::Local { capture: format!("app:{kind}:{text}") },
+                label: name,
+                ssh_cmd: None,
+                mode: PaneMode::Screen,
+            },
             How::TestDesktop => Launch::Agent {
                 target: Target::Local { capture: "synthetic".into() },
                 label: "Test desktop".into(),
@@ -279,6 +285,12 @@ impl App {
             Item::Web { url, label } => Some(Launch::Agent {
                 target: Target::Local { capture: format!("browser:{url}") },
                 label: if label.is_empty() { web_label(url) } else { label.clone() },
+                ssh_cmd: None,
+                mode: PaneMode::Screen,
+            }),
+            Item::App { kind, text, label } => Some(Launch::Agent {
+                target: Target::Local { capture: format!("app:{kind}:{text}") },
+                label: label.clone(),
                 ssh_cmd: None,
                 mode: PaneMode::Screen,
             }),
@@ -375,6 +387,9 @@ pub(super) enum How {
     /// A web app at this address, as a page in a pane, and what the pane is called (empty: its
     /// name in the list, else its site).
     Web(String, String),
+    /// A program of this computer's started and shown alone in a pane: how it is named (`apps`),
+    /// the name, what the pane is called.
+    App(u8, String, String),
 }
 
 /// An address, its port, and what to open on it.

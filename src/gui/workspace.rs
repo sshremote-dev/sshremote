@@ -121,6 +121,10 @@ fn item_of(p: &Pane) -> Option<super::project::Item> {
     };
     match &p.target {
         Target::Local { capture } if capture.starts_with("browser:") => Some(Item::Web { url: capture["browser:".len()..].to_string(), label: p.label.clone() }),
+        Target::Local { capture } if capture.starts_with("app:") => {
+            let (kind, text) = capture["app:".len()..].split_once(':')?;
+            Some(Item::App { kind: kind.parse().ok()?, text: text.to_string(), label: p.label.clone() })
+        }
         Target::Local { capture } if capture.starts_with("synthetic") => None,
         Target::Local { .. } if mode == PaneMode::Terminal => Some(Item::Shell { profile: p.label.clone() }),
         Target::Local { .. } => Some(Item::Here { mode }),
@@ -193,6 +197,8 @@ struct Pane {
     prefs: Option<remote::Prefs>,
     /// A password typed in the sign-in dialog, kept in the password store once it works.
     keep: Option<(String, String)>,
+    /// A program to start on the host once connected and show alone (`ToAgent::Launch`).
+    launch: Option<(u8, String)>,
     /// The screen quality chosen when it was opened (None: adapts to the connection).
     preset: Option<usize>,
     state: State,
@@ -514,6 +520,7 @@ impl Workspace {
                 start,
                 prefs: None,
                 keep: None,
+                launch: None,
                 preset: self.opt.preset,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
@@ -527,6 +534,7 @@ impl Workspace {
                 start,
                 prefs: None,
                 keep: None,
+                launch: None,
                 preset: self.opt.preset,
                 state: State::Down(Down::new(false, String::new())),
             },
@@ -846,6 +854,9 @@ impl Workspace {
         let mut result = r.set_mode(p.mode);
         if let Some(prefs) = p.prefs.take() {
             result = result.and_then(|_| r.restore(prefs));
+        }
+        if let Some((kind, text)) = p.launch.take() {
+            result = result.and_then(|_| r.send(crate::proto::ToAgent::Launch { kind, text }));
         }
         if again {
             r.notify("Connected again");
@@ -1208,6 +1219,36 @@ impl Workspace {
                     self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
                 }
                 self.spread_from = Some(shown);
+            }
+        }
+        // A program of a host's asked for in a pane: a pane beside it, on the same host, opens
+        // showing that program alone (on this computer, the pane says what it starts, so a
+        // project opens it again).
+        let mut beside = Vec::new();
+        for p in &mut self.panes {
+            if let State::Live(r) = &mut p.state
+                && let Some((kind, text, name)) = r.launch_asked.take()
+            {
+                let (target, start) = match &p.target {
+                    Target::Local { .. } => (Target::Local { capture: format!("app:{kind}:{text}") }, None),
+                    t => (t.clone(), Some((kind, text))),
+                };
+                let launch = Launch::Agent { target, label: name, ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
+                beside.push((p.id, launch, r.prefs_for_app(), start));
+            }
+        }
+        for (from, launch, prefs, start) in beside {
+            if let Some(t) = self.tabs.iter().position(|t| {
+                let mut ids = Vec::new();
+                t.root.leaves(&mut ids);
+                ids.contains(&from)
+            }) {
+                self.current = t;
+                self.tabs[t].active = from;
+            }
+            self.add(launch, Place::Split { below: false }, PaneStart::default());
+            if let Some(p) = self.panes.last_mut() {
+                (p.prefs, p.launch) = (Some(prefs), start);
             }
         }
         if let Some(n) = self.full_later.as_mut() {

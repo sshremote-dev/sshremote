@@ -24,6 +24,8 @@ pub(crate) enum Item {
     Shell { profile: String },
     /// A web app's page.
     Web { url: String, label: String },
+    /// A program of this computer's shown alone, started again when the project opens.
+    App { kind: u8, text: String, label: String },
 }
 
 /// How a tab's panes divide it.
@@ -61,6 +63,7 @@ impl Tree {
             Tree::Leaf(Item::Here { mode }) => json!({ "here": mode.key() }),
             Tree::Leaf(Item::Shell { profile }) => json!({ "shell": profile }),
             Tree::Leaf(Item::Web { url, label }) => json!({ "web": url, "label": label }),
+            Tree::Leaf(Item::App { kind, text, label }) => json!({ "app": text, "kind": kind, "label": label }),
         }
     }
 
@@ -77,6 +80,9 @@ impl Tree {
             Item::Here { mode: mode("here")? }
         } else if let Some(profile) = s("shell") {
             Item::Shell { profile }
+        } else if let Some(text) = s("app").filter(|t| !t.trim().is_empty()) {
+            let kind = v.get("kind").and_then(Value::as_u64).filter(|k| *k <= crate::apps::OPEN as u64)? as u8;
+            Item::App { kind, text, label: s("label").unwrap_or_default() }
         } else {
             let url = s("web").filter(|u| u.starts_with("https://") || u.starts_with("http://"))?;
             Item::Web { url, label: s("label").unwrap_or_default() }

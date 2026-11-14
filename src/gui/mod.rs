@@ -316,6 +316,11 @@ pub struct App {
     computers_at: Option<Instant>,
     /// The tag whose computers the list shows; None: all of them.
     tag: Option<String>,
+    /// This computer's installed programs once looked at, and what is typed in the menu that
+    /// opens one in a pane.
+    apps: Option<Vec<crate::apps::App>>,
+    apps_find: String,
+    apps_line: String,
     /// The row of the list the arrow keys are on, and whether they just moved it.
     picked: Option<usize>,
     picked_moved: bool,
@@ -730,6 +735,9 @@ impl App {
             computers: Vec::new(),
             computers_at: None,
             tag: None,
+            apps: None,
+            apps_find: String::new(),
+            apps_line: String::new(),
             picked: None,
             picked_moved: false,
             row_menu: None,
