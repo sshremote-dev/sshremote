@@ -271,7 +271,8 @@ impl Remote {
 
         // A program of the host's, found among those installed or named by a command line or a
         // file, opened in a pane beside this one that shows it alone.
-        if !self.view_only && self.allowed & crate::grant::CONTROL != 0 {
+        // With the Programs extension.
+        if !self.view_only && self.allowed & crate::grant::CONTROL != 0 && crate::ext::programs_enabled() {
             let host = self.label.split("  ").next().unwrap_or("it").to_string();
             let apps = icon_menu(ui, ic::ARROW_SQUARE_OUT, |ui| self.apps_menu(ui, action));
             apps.on_hover_text(format!("Open a program of {host} in a pane beside this one, shown alone"));

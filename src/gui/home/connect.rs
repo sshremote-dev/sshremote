@@ -355,6 +355,19 @@ impl App {
     /// A web address typed: it opens in a pane as a web app, and can be kept in the list.
     fn web_typed(&mut self, ui: &mut egui::Ui, url: &str, enter: bool, go: &mut Option<Choice>) {
         let weak = ui.visuals().weak_text_color();
+        // Web pages in panes come with an extension (Web apps); without one, said where to get it.
+        if !crate::ext::sites_enabled() {
+            kit::card(ui, |ui| {
+                ui.label(RichText::new(url).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new("Web pages open in a pane with the Web apps extension.").color(weak));
+                ui.add_space(6.0);
+                if ui.add(kit::secondary(format!("{}  Extensions\u{2026}", ic::PUZZLE_PIECE))).on_hover_text("Settings, Extensions: install Web apps").clicked() {
+                    crate::gui::ask_settings("extensions");
+                }
+            });
+            return;
+        }
         let known = self.computers.iter().any(|c| c.address == url);
         let mut open = enter;
         kit::card(ui, |ui| {
@@ -436,8 +449,15 @@ impl App {
     /// translator, a chat): one click opens one.
     fn tools(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         let tools = crate::ext::panes();
+        // Each comes with an extension: the menu that opens programs with Programs, web apps with
+        // Web apps; with none of them installed there are no tools.
+        let programs = crate::ext::programs_enabled();
+        if tools.is_empty() && !programs {
+            return;
+        }
         // This computer's programs read once, in the background, by the time a menu needs them.
-        if self.apps.is_none() && self.apps_coming.is_none() {
+        let wants_list = programs || tools.iter().any(|(_, t)| t.program.is_some());
+        if wants_list && self.apps.is_none() && self.apps_coming.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
@@ -453,13 +473,15 @@ impl App {
         kit::heading(ui, "Tools");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-            let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-            let button = kit::secondary(format!("{}  Open a program\u{2026}", ic::APP_WINDOW)).min_size(Vec2::new(0.0, kit::CONTROL_H));
-            let (r, _) = egui::containers::menu::MenuButton::from_button(button).config(config).ui(ui, |ui| {
-                crate::gui::menu_look(ui);
-                self.programs_menu(ui, go);
-            });
-            r.on_hover_text("One of this computer's programs, found among those installed or named by a command line or a file, in a pane of its own");
+            if programs {
+                let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                let button = kit::secondary(format!("{}  Open a program\u{2026}", ic::APP_WINDOW)).min_size(Vec2::new(0.0, kit::CONTROL_H));
+                let (r, _) = egui::containers::menu::MenuButton::from_button(button).config(config).ui(ui, |ui| {
+                    crate::gui::menu_look(ui);
+                    self.programs_menu(ui, go);
+                });
+                r.on_hover_text("One of this computer's programs, found among those installed or named by a command line or a file, in a pane of its own (the Programs extension)");
+            }
             for (ext, t) in tools {
                 // What it opens: a site, or which program of this computer's.
                 let what = match &t.program {

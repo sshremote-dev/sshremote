@@ -185,6 +185,11 @@ impl App {
     pub(super) fn choose(&mut self, (host, port, how): Choice, place: Place) {
         self.error = None;
         let start = PaneStart::default();
+        // Web pages and programs in panes come with their extensions.
+        if let Some(e) = needs_extension(&how) {
+            self.error = Some(e);
+            return;
+        }
         let launch = match how {
             How::System => {
                 self.system_terminal(&host, &port);
@@ -281,6 +286,10 @@ impl App {
                     return None;
                 };
                 Some(Launch::Shell { label: p.name.clone(), profile: p, target: Target::Local { capture: "auto".into() }, ssh_cmd: None })
+            }
+            Item::Web { .. } | Item::App { .. } if extension_missing(item).is_some() => {
+                self.error = extension_missing(item);
+                None
             }
             Item::Web { url, label } => Some(Launch::Agent {
                 target: Target::Local { capture: format!("browser:{url}") },
@@ -396,6 +405,29 @@ pub(super) enum How {
 pub(super) type Choice = (String, String, How);
 
 /// What a web app's pane is called before it is given a name: its site.
+/// What opening `how` needs and is not installed: web pages come with Web apps (or an extension
+/// with sites of its own), programs with Programs (or an extension with programs of its own).
+fn needs_extension(how: &How) -> Option<String> {
+    match how {
+        How::Web(..) if !crate::ext::sites_enabled() => Some(WEB_NEEDS.into()),
+        How::App(..) if !crate::ext::program_panes_enabled() => Some(PROGRAMS_NEED.into()),
+        _ => None,
+    }
+}
+
+/// The same for a pane a project kept.
+fn extension_missing(item: &crate::gui::project::Item) -> Option<String> {
+    use crate::gui::project::Item;
+    match item {
+        Item::Web { url, .. } if !crate::ext::sites_enabled() => Some(format!("{url}: {WEB_NEEDS}")),
+        Item::App { label, .. } if !crate::ext::program_panes_enabled() => Some(format!("{label}: {PROGRAMS_NEED}")),
+        _ => None,
+    }
+}
+
+const WEB_NEEDS: &str = "web pages open in a pane with the Web apps extension (Settings, Extensions)";
+const PROGRAMS_NEED: &str = "programs open in a pane with the Programs extension (Settings, Extensions)";
+
 pub(super) fn web_label(url: &str) -> String {
     let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or(url);
     host.trim_start_matches("www.").to_string()
