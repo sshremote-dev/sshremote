@@ -188,9 +188,10 @@ impl Window {
         cmd.args(by_id.split_whitespace());
         #[cfg(target_os = "linux")]
         {
-            // An agent started over ssh has no display variables; the desktop session uses the defaults.
+            // An agent started over ssh has no display variables; the desktop session uses the
+            // defaults: Wayland's only where it is there (an X11 session has none).
             crate::capture::ensure_session_env();
-            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
                 cmd.env("WAYLAND_DISPLAY", "wayland-0");
             }
             if std::env::var_os("DISPLAY").is_none() {
@@ -272,7 +273,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
     #[cfg_attr(not(all(target_os = "linux", feature = "remote")), allow(unused_mut))]
     let mut early = Vec::new();
     #[cfg(all(target_os = "linux", feature = "remote"))]
-    if quiet && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty()) {
+    if quiet && wayland_here() {
         // A Wayland window cannot open without the keyboard: a notification says it instead, and
         // the window opens when something comes for it or the person asks for it.
         if let Some((note, acts)) = note::Note::show(CONNECTED_TITLE, "They see this screen and can use it, with this computer's ID and password.") {
@@ -316,10 +317,11 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
         native,
         Box::new(move |cc| {
             crate::gui::style(&cc.egui_ctx);
+            // What gives the keyboard back if the window takes it, started with its first frame.
             #[cfg(target_os = "linux")]
-            if quiet {
-                x11_no_focus(cc);
-            }
+            let give_back = if quiet { x11_no_focus(cc).or_else(wayland_give_back) } else { None };
+            #[cfg(not(target_os = "linux"))]
+            let give_back = None;
             let ctx = cc.egui_ctx.clone();
             let (wake_tx, wake_rx) = mpsc::channel::<String>();
             for m in early {
@@ -346,6 +348,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
                 call: None,
                 minimized_once: false,
                 code,
+                give_back,
             }))
         }),
     )
@@ -376,6 +379,9 @@ struct ChatApp {
     minimized_once: bool,
     /// They asked without a password: the code their screen shows, to compare before letting them in.
     code: Option<String>,
+    /// Started when the window first draws (it shows right after): gives the keyboard back to
+    /// the window that had it, where the desktop gives it to this one anyway.
+    give_back: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Tests: the window shown on the remote screen, as one connected by ID sees it (asking first,
@@ -396,33 +402,148 @@ pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut 
         call: None,
         minimized_once: false,
         code: asking.then(|| "482913".to_string()),
+        give_back: None,
     };
     move |ui| app.draw(ui)
 }
 
-/// Asks the X11 window manager not to give the keyboard to the window when it shows
-/// (`_NET_WM_USER_TIME` 0, before eframe maps it after its first frame).
+/// This window would open on Wayland: its display is named and there (a name alone, left by
+/// someone else, may point at nothing on an X11 desktop).
 #[cfg(all(feature = "gui", target_os = "linux"))]
-fn x11_no_focus(cc: &eframe::CreationContext<'_>) {
+fn wayland_here() -> bool {
+    let Some(name) = std::env::var_os("WAYLAND_DISPLAY").filter(|d| !d.is_empty()) else { return false };
+    let path = std::path::PathBuf::from(&name);
+    let path = if path.is_absolute() { path } else { std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_default().join(path) };
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+/// Asks the X11 window manager not to give the keyboard to the window when it shows
+/// (`_NET_WM_USER_TIME` 0, before eframe maps it after its first frame), and gives it back to the
+/// window that had it where the window manager gives it anyway (i3): what the viewer types into
+/// goes on getting it.
+#[cfg(all(feature = "gui", target_os = "linux"))]
+fn x11_no_focus(cc: &eframe::CreationContext<'_>) -> Option<Box<dyn FnOnce() + Send>> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use x11_dl::xlib::{PropModeReplace, XA_CARDINAL, Xlib};
+    use std::os::raw::{c_int, c_long, c_uchar, c_ulong};
+    use x11_dl::xlib::{ClientMessage, PropModeReplace, SubstructureNotifyMask, SubstructureRedirectMask, XA_CARDINAL, XA_WINDOW, XClientMessageEvent, XEvent, Xlib};
     let window = match cc.window_handle().map(|w| w.as_raw()) {
         Ok(RawWindowHandle::Xlib(w)) => w.window,
-        Ok(RawWindowHandle::Xcb(w)) => u32::from(w.window) as std::os::raw::c_ulong,
-        _ => return,
+        Ok(RawWindowHandle::Xcb(w)) => u32::from(w.window) as c_ulong,
+        _ => return None,
     };
-    let Ok(xlib) = Xlib::open() else { return };
-    // SAFETY: a connection of its own, closed here; the property is one CARDINAL.
+    let Ok(xlib) = Xlib::open() else { return None };
+    // SAFETY: connections of its own, closed here; properties read and written as X lays them out.
     unsafe {
         let d = (xlib.XOpenDisplay)(std::ptr::null());
         if d.is_null() {
-            return;
+            return None;
         }
-        let atom = (xlib.XInternAtom)(d, c"_NET_WM_USER_TIME".as_ptr(), 0);
-        let zero: std::os::raw::c_long = 0;
-        (xlib.XChangeProperty)(d, window, atom, XA_CARDINAL, 32, PropModeReplace, (&zero as *const std::os::raw::c_long).cast(), 1);
+        let user_time = (xlib.XInternAtom)(d, c"_NET_WM_USER_TIME".as_ptr(), 0);
+        let zero: c_long = 0;
+        (xlib.XChangeProperty)(d, window, user_time, XA_CARDINAL, 32, PropModeReplace, (&zero as *const c_long).cast(), 1);
         (xlib.XFlush)(d);
+        let active_atom = (xlib.XInternAtom)(d, c"_NET_ACTIVE_WINDOW".as_ptr(), 0);
+        let root = (xlib.XDefaultRootWindow)(d);
+        // The window with the keyboard now.
+        unsafe fn active(xlib: &Xlib, d: *mut x11_dl::xlib::Display, root: c_ulong, atom: c_ulong) -> c_ulong {
+            let (mut kind, mut format, mut n, mut after, mut data): (c_ulong, c_int, c_ulong, c_ulong, *mut c_uchar) = (0, 0, 0, 0, std::ptr::null_mut());
+            // SAFETY: one WINDOW asked for, read only when X says it gave one.
+            unsafe {
+                let ok = (xlib.XGetWindowProperty)(d, root, atom, 0, 1, 0, XA_WINDOW, &mut kind, &mut format, &mut n, &mut after, &mut data) == 0;
+                let w = if ok && n == 1 && !data.is_null() { *(data as *const c_ulong) } else { 0 };
+                if !data.is_null() {
+                    (xlib.XFree)(data.cast());
+                }
+                w
+            }
+        }
+        let before = active(&xlib, d, root, active_atom);
         (xlib.XCloseDisplay)(d);
+        if before == 0 || before == window {
+            return None;
+        }
+        // Watched while the window comes up: once it has the keyboard, the other window gets it back.
+        Some(Box::new(move || {
+            std::thread::spawn(move || {
+                let d = (xlib.XOpenDisplay)(std::ptr::null());
+                if d.is_null() {
+                    return;
+                }
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if active(&xlib, d, root, active_atom) == window {
+                        let mut ev: XClientMessageEvent = std::mem::zeroed();
+                        (ev.type_, ev.window, ev.message_type, ev.format) = (ClientMessage, before, active_atom, 32);
+                        // A request as a taskbar makes it (source 2), at the current time.
+                        ev.data.set_long(0, 2);
+                        let mut e = XEvent { client_message: ev };
+                        (xlib.XSendEvent)(d, root, 0, SubstructureRedirectMask | SubstructureNotifyMask, &mut e);
+                        (xlib.XFlush)(d);
+                        break;
+                    }
+                }
+                (xlib.XCloseDisplay)(d);
+            });
+        }))
+    }
+}
+
+/// Where the compositor takes the window in front and has a way to be told otherwise (Sway's
+/// swaymsg, Hyprland's hyprctl): the window that had the keyboard gets it back once this one took it.
+#[cfg(all(feature = "gui", target_os = "linux"))]
+fn wayland_give_back() -> Option<Box<dyn FnOnce() + Send>> {
+    use std::process::Command;
+    let run = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_default();
+    let newest = |dir: &std::path::Path, keep: &dyn Fn(&str) -> bool| {
+        std::fs::read_dir(dir).ok()?.flatten().filter(|e| keep(&e.file_name().to_string_lossy())).max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok()).map(|e| e.path())
+    };
+    let json = |cmd: &mut Command| cmd.output().ok().and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok());
+    let me = std::process::id() as u64;
+    // Sway: the tree's focused window, by its id, and whose process it is.
+    let sway = std::env::var_os("SWAYSOCK").map(std::path::PathBuf::from).or_else(|| newest(&run, &|n| n.starts_with("sway-ipc.") && n.ends_with(".sock")));
+    if let Some(sock) = sway {
+        let focused = move || {
+            fn find(v: &serde_json::Value) -> Option<(u64, u64)> {
+                if v.get("focused").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return Some((v.get("id")?.as_u64()?, v.get("pid").and_then(serde_json::Value::as_u64).unwrap_or(0)));
+                }
+                ["nodes", "floating_nodes"].iter().filter_map(|k| v.get(*k)?.as_array()).flatten().find_map(find)
+            }
+            json(Command::new("swaymsg").arg("-s").arg(&sock).args(["-t", "get_tree", "-r"])).as_ref().and_then(find).map(|f| (f, sock.clone()))
+        };
+        let ((before, _), sock) = focused().filter(|((_, pid), _)| *pid != me)?;
+        return Some(Box::new(move || {
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if focused().is_some_and(|((_, pid), _)| pid == me) {
+                        let _ = Command::new("swaymsg").arg("-s").arg(&sock).arg(format!("[con_id={before}] focus")).output();
+                        break;
+                    }
+                }
+            });
+        }));
+    }
+    // Hyprland: the active window, by its address, and whose process it is.
+    let dir = newest(&run.join("hypr"), &|_| true)?;
+    {
+        let sig = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let active = move || {
+            let v = json(Command::new("hyprctl").env("HYPRLAND_INSTANCE_SIGNATURE", &sig).args(["activewindow", "-j"]))?;
+            Some((v.get("address")?.as_str()?.to_string(), v.get("pid").and_then(serde_json::Value::as_u64).unwrap_or(0), sig.clone()))
+        };
+        let (before, _, sig) = active().filter(|(_, pid, _)| *pid != me)?;
+        Some(Box::new(move || {
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if active().is_some_and(|(_, pid, _)| pid == me) {
+                        let _ = Command::new("hyprctl").env("HYPRLAND_INSTANCE_SIGNATURE", &sig).args(["dispatch", "focuswindow", &format!("address:{before}")]).output();
+                        break;
+                    }
+                }
+            });
+        }))
     }
 }
 
@@ -452,6 +573,12 @@ mod note {
         /// Shown, with what is pressed on it; None where no notifications with buttons are shown.
         pub fn show(summary: &str, body: &str) -> Option<(Note, mpsc::Receiver<Act>)> {
             let conn = Connection::session().ok()?;
+            // Only a service already running: starting one by its name may start a waiter for a
+            // desktop that is not there (Plasma's, under Sway or Hyprland), which never answers.
+            let dbus = zbus::blocking::fdo::DBusProxy::new(&conn).ok()?;
+            if !dbus.name_has_owner(zbus::names::BusName::try_from(DEST).ok()?).ok()? {
+                return None;
+            }
             let proxy = Proxy::new(&conn, DEST, "/org/freedesktop/Notifications", DEST).ok()?;
             let caps: Vec<String> = proxy.call("GetCapabilities", &()).ok()?;
             if !caps.iter().any(|c| c == "actions") {
@@ -593,6 +720,9 @@ impl eframe::App for ChatApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(f) = self.give_back.take() {
+            f();
+        }
         self.draw(ui);
     }
 }
