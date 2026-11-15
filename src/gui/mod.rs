@@ -618,9 +618,13 @@ pub(crate) fn combo(id: &str, text: impl Into<egui::WidgetText>) -> egui::ComboB
 pub(crate) fn icon_menu<R>(ui: &mut egui::Ui, glyph: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
     let config =
         egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    let (r, inner) = egui::containers::menu::MenuButton::from_button(tool_button(glyph, false))
-        .config(config)
-        .ui(ui, |ui| menu(ui, add));
+    // Inside another menu (a pane's controls folded into "More" in a narrow window) a menu of
+    // its own would close that one: it opens beside it instead.
+    let (r, inner) = if egui::containers::menu::is_in_menu(ui) {
+        egui::containers::menu::SubMenuButton::from_button(tool_button(glyph, false)).config(config).ui(ui, |ui| menu(ui, add))
+    } else {
+        egui::containers::menu::MenuButton::from_button(tool_button(glyph, false)).config(config).ui(ui, |ui| menu(ui, add))
+    };
     if inner.is_some() {
         // Remembered for the next frame, so an auto-hidden toolbar stays while its menu is open.
         let pass = ui.ctx().cumulative_pass_nr();
