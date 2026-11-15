@@ -228,9 +228,11 @@ mod tests {
         let found = find(Duration::from_millis(800));
         on.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = t.join();
-        // A machine whose firewall or network drops broadcasts finds nobody: then there is nothing to check.
-        if let Some(f) = found.first() {
-            assert_eq!((f.id.as_str(), f.address().as_str()), ("482913075", "sshremote://482913075@relay.example"));
+        // A machine whose firewall or network drops broadcasts finds nobody: then there is nothing
+        // to check. Other computers on the network may answer too: this one is looked for.
+        if !found.is_empty() {
+            let f = found.iter().find(|f| f.id == "482913075").expect("this computer's answer among those found");
+            assert_eq!(f.address(), "sshremote://482913075@relay.example");
         }
     }
 }
