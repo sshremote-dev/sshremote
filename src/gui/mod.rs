@@ -1750,6 +1750,8 @@ mod tests {
     #[test]
     fn a_project_opens_its_tabs_as_they_were_divided() {
         use project::{Item, Project, Tree};
+        // Web pages come with Web apps: with it installed the web pane opens, without it it is left out.
+        crate::ext::install_for_test(&[r#"{"id":"x.web","api":3,"contributes":{"panes":[{"id":"t","url":"https://translate.google.com"}]}}"#]);
         let opt = crate::parse_client(&["--gui".into()]).unwrap();
         let mut app = App::new(Form::from(&opt), None, "", None);
         let p = Project {
@@ -1776,6 +1778,11 @@ mod tests {
             _ => panic!("the first tab divided as kept"),
         }
         assert!(matches!(&app.queued_tabs[1], workspace::Opening::One(workspace::Launch::Shell { label, .. }) if label.starts_with("dev@build")));
+        crate::ext::install_for_test(&[]);
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        app.open_project(&p);
+        assert!(matches!(&app.queued_tabs[0], workspace::Opening::One(workspace::Launch::Agent { mode: PaneMode::Files, .. })), "the web pane left out");
+        assert!(app.error.as_ref().is_some_and(|e| e.contains("Web apps")), "and why said: {:?}", app.error);
     }
 
     /// The tabs open now are kept as they are divided: a web app beside this computer's files,

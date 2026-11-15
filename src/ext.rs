@@ -55,6 +55,44 @@ pub struct Manifest {
     pub activation: Option<String>,
     /// Tools it opens in a pane (`contributes.panes`).
     pub panes: Vec<PaneDef>,
+    /// Any site typed on the home or in Quick open opens in a pane (`contributes.sites`).
+    pub sites: bool,
+    /// Programs open in panes from menus of their own (`contributes.programs`, with the
+    /// "programs" permission): a search over what a computer has, a command line, a file.
+    pub open_programs: bool,
+}
+
+/// What the installed extensions add, looked at again every few seconds like `panes`.
+fn installed_kept() -> Vec<Manifest> {
+    // Tests each have extensions of their own (`TEST_ROOT`, per thread): read every time.
+    if cfg!(test) {
+        return installed();
+    }
+    static KEPT: std::sync::Mutex<Option<(std::time::Instant, Vec<Manifest>)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, list)) = kept.as_ref()
+        && at.elapsed() < std::time::Duration::from_secs(5)
+    {
+        return list.clone();
+    }
+    let list = installed();
+    *kept = Some((std::time::Instant::now(), list.clone()));
+    list
+}
+
+/// Web pages open in panes: an extension lets any site (Web apps), or brings sites of its own.
+pub fn sites_enabled() -> bool {
+    installed_kept().iter().any(|m| m.sites || m.panes.iter().any(|p| !p.url.is_empty()))
+}
+
+/// The menus that open programs in panes are there (the Programs extension).
+pub fn programs_enabled() -> bool {
+    installed_kept().iter().any(|m| m.open_programs)
+}
+
+/// Programs open in panes at all: from those menus, or as an extension's own tools.
+pub fn program_panes_enabled() -> bool {
+    installed_kept().iter().any(|m| m.open_programs || m.panes.iter().any(|p| p.program.is_some()))
 }
 
 /// A tool an extension opens in a pane of its own, beside terminals and screens: a web app at an
@@ -73,6 +111,9 @@ pub struct PaneDef {
 /// The tools of every installed extension, with the extension's name; looked at again every few
 /// seconds (installing one shows it soon after).
 pub fn panes() -> Vec<(String, PaneDef)> {
+    if cfg!(test) {
+        return installed().into_iter().flat_map(|m| m.panes.into_iter().map(move |p| (m.name.clone(), p))).collect();
+    }
     static KEPT: std::sync::Mutex<Option<(std::time::Instant, Vec<(String, PaneDef)>)>> = std::sync::Mutex::new(None);
     let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, list)) = kept.as_ref()
@@ -158,6 +199,19 @@ fn root() -> Option<PathBuf> {
         return Some(r);
     }
     crate::hosts::config_dir().map(|d| d.join("extensions"))
+}
+
+/// For a test elsewhere: these manifests as the installed extensions of this thread.
+#[cfg(test)]
+pub(crate) fn install_for_test(manifests: &[&str]) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("sshremote-ext-for-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    for (i, m) in manifests.iter().enumerate() {
+        let one = dir.join(format!("ext{i}"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::write(one.join("extension.json"), m).unwrap();
+    }
+    TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir));
 }
 
 #[cfg(test)]
@@ -303,8 +357,11 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 .collect()
         })
         .unwrap_or_default();
-    // A command line or a file is the extension's to name, so it may only with the permission.
-    if panes.iter().any(|p| matches!(&p.program, Some((k, _)) if *k != crate::apps::APP)) && !permissions.iter().any(|p| p == "programs") {
+    // A command line or a file is the extension's to name, so it may only with the permission;
+    // the menus that run what the user types too.
+    let flag = |k: &str| v.pointer(&format!("/contributes/{k}")).and_then(|x| x.as_bool()).unwrap_or(false);
+    let (sites, open_programs) = (flag("sites"), flag("programs"));
+    if (open_programs || panes.iter().any(|p| matches!(&p.program, Some((k, _)) if *k != crate::apps::APP))) && !permissions.iter().any(|p| p == "programs") {
         return Err("extension.json starts a command line or opens a file without the \"programs\" permission".into());
     }
     let activation = v.get("activation").and_then(|x| x.as_str()).map(str::to_string);
@@ -316,6 +373,8 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         settings,
         activation,
         panes,
+        sites,
+        open_programs,
         programs,
         name: if s("name").is_empty() { id.clone() } else { s("name") },
         id,
@@ -1519,9 +1578,13 @@ mod tests {
         // A site, a name, and nothing at all.
         let m = parse_manifest(r#"{"id":"x.y","contributes":{"panes":[{"id":"a","url":"https://a.example"},{"id":"b","app":"Calculator"},{"id":"c"},{"id":"d","url":"http://plain.example"}]}}"#).unwrap();
         assert_eq!(m.panes.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
-        // A command line or a file only with the permission.
+        // A command line or a file only with the permission, and the menus that open programs too.
         let cmd = r#"{"id":"x.y","contributes":{"panes":[{"id":"a","command":"gedit"}]}}"#;
         assert!(parse_manifest(cmd).unwrap_err().contains("programs"));
+        assert!(parse_manifest(r#"{"id":"x.y","contributes":{"programs":true}}"#).unwrap_err().contains("programs"));
+        let m = parse_manifest(r#"{"id":"x.y","permissions":["programs"],"contributes":{"programs":true,"sites":true}}"#).unwrap();
+        assert!(m.open_programs && m.sites);
+        assert!(!parse_manifest(r#"{"id":"x.y"}"#).unwrap().open_programs);
         let ok = parse_manifest(r#"{"id":"x.y","permissions":["programs"],"contributes":{"panes":[{"id":"a","open":"~/notes.txt"}]}}"#).unwrap();
         assert!(matches!(&ok.panes[0].program, Some((k, t)) if *k == crate::apps::OPEN && t[0] == "~/notes.txt"));
     }
