@@ -319,6 +319,8 @@ pub struct App {
     /// This computer's installed programs once looked at, and what is typed in the menu that
     /// opens one in a pane.
     apps: Option<Vec<crate::apps::App>>,
+    /// The list being read (Windows asks PowerShell: a second or two), off the window's thread.
+    apps_coming: Option<std::sync::mpsc::Receiver<Vec<crate::apps::App>>>,
     apps_find: String,
     apps_line: String,
     /// The row of the list the arrow keys are on, and whether they just moved it.
@@ -740,6 +742,7 @@ impl App {
             computers_at: None,
             tag: None,
             apps: None,
+            apps_coming: None,
             apps_find: String::new(),
             apps_line: String::new(),
             picked: None,

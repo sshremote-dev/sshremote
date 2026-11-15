@@ -436,6 +436,20 @@ impl App {
     /// translator, a chat): one click opens one.
     fn tools(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         let tools = crate::ext::panes();
+        // This computer's programs read once, in the background, by the time a menu needs them.
+        if self.apps.is_none() && self.apps_coming.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::apps::list());
+                ctx.request_repaint();
+            });
+            self.apps_coming = Some(rx);
+        }
+        if let Some(list) = self.apps_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.apps = Some(list);
+            self.apps_coming = None;
+        }
         kit::heading(ui, "Tools");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
@@ -484,25 +498,36 @@ impl App {
     fn programs_menu(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         let mut pick: Option<(u8, String, String)> = None;
         ui.set_width(320.0);
-        let list = self.apps.get_or_insert_with(crate::apps::list);
         let find = ui.add(egui::TextEdit::singleline(&mut self.apps_find).hint_text(format!("{}  Find a program", ic::SEARCH)).desired_width(f32::INFINITY));
-        let q = self.apps_find.to_lowercase();
-        let hits: Vec<&crate::apps::App> = list.iter().filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q) || a.detail.to_lowercase().contains(&q)).take(300).collect();
-        if find.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && let Some(a) = hits.first() {
-            pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
-        }
-        if hits.is_empty() {
-            ui.label(RichText::new(if list.is_empty() { "No programs were found here" } else { "Nothing installed by that name" }).weak());
-        }
-        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
-            for a in hits {
-                let r = ui.add(egui::Button::new(format!("{}  {}", ic::APP_WINDOW, a.name)).frame(false).min_size(Vec2::new(ui.available_width(), 24.0)));
-                let r = if a.detail.is_empty() { r } else { r.on_hover_text(&a.detail) };
-                if r.clicked() {
+        // The list's room is the same before it comes (a menu keeps the size it opened with).
+        let mut list_ui = ui.new_child(egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)));
+        list_ui.set_min_height(300.0);
+        match &self.apps {
+            None => {
+                list_ui.label(RichText::new("Looking at what is installed\u{2026}").weak());
+            }
+            Some(list) => {
+                let q = self.apps_find.to_lowercase();
+                let hits: Vec<&crate::apps::App> = list.iter().filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q) || a.detail.to_lowercase().contains(&q)).take(300).collect();
+                if find.lost_focus() && list_ui.input(|i| i.key_pressed(egui::Key::Enter)) && let Some(a) = hits.first() {
                     pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
                 }
+                if hits.is_empty() {
+                    list_ui.label(RichText::new(if list.is_empty() { "No programs were found here" } else { "Nothing installed by that name" }).weak());
+                }
+                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(&mut list_ui, |ui| {
+                    for a in hits {
+                        let r = ui.add(egui::Button::new(format!("{}  {}", ic::APP_WINDOW, a.name)).frame(false).min_size(Vec2::new(ui.available_width(), 24.0)));
+                        let r = if a.detail.is_empty() { r } else { r.on_hover_text(&a.detail) };
+                        if r.clicked() {
+                            pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
+                        }
+                    }
+                });
             }
-        });
+        }
+        let used = list_ui.min_rect();
+        ui.advance_cursor_after_rect(used);
         ui.separator();
         ui.label(RichText::new("Or a command line, a file or an address").weak());
         let line = ui.add(egui::TextEdit::singleline(&mut self.apps_line).hint_text("gedit notes.txt, ~/report.pdf, https://\u{2026}").desired_width(f32::INFINITY));
