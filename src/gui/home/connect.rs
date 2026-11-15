@@ -115,6 +115,11 @@ pub(in crate::gui) fn is_web(c: &Computer) -> bool {
     matches!(typed(&c.address), Typed::Web { .. })
 }
 
+/// A row of the list, the room over its name, and between its name and the line under it.
+const ROW_H: f32 = 60.0;
+const ROW_TEXT_TOP: f32 = 9.0;
+const ROW_LINE_GAP: f32 = 3.0;
+
 /// A line of the list.
 #[derive(Clone)]
 enum Entry {
@@ -781,7 +786,7 @@ impl App {
     /// A row: where it is drawn, its look when picked or under the mouse, and the
     /// space for its buttons on the right. Returns the row's response and its inner ui.
     fn row_frame(&mut self, ui: &mut egui::Ui, picked: bool, key: &str) -> (egui::Response, egui::Ui, bool) {
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), egui::Sense::click());
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), egui::Sense::click());
         // Its menu open keeps its buttons there, the pointer gone over to the menu.
         let picked = picked || self.row_menu.as_deref() == Some(key);
         // Brought into view when the arrow keys reach it, not while the wheel scrolls past it.
@@ -836,9 +841,9 @@ impl App {
             }
         }
         let room = (right.min_rect().left() - row.cursor().left() - 8.0).max(40.0);
-        row.allocate_ui_with_layout(Vec2::new(room, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.add_space(7.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
+        row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add_space(ROW_TEXT_TOP);
+            ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
             ui.add(egui::Label::new(RichText::new("This computer").strong()).truncate());
             ui.add(egui::Label::new(RichText::new("Its own terminals, screen and files").small().weak()).truncate());
         });
@@ -912,9 +917,9 @@ impl App {
             }
         }
         let room = (right.min_rect().left() - row.cursor().left() - 8.0).max(40.0);
-        row.allocate_ui_with_layout(Vec2::new(room, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.add_space(7.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
+        row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add_space(ROW_TEXT_TOP);
+            ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
             ui.add(egui::Label::new(RichText::new(c.label()).strong()).truncate());
             let mut sub: Vec<String> = Vec::new();
             if !c.name.is_empty() {
@@ -934,6 +939,9 @@ impl App {
             if open > 0 {
                 sub.push(format!("{open} tunnel{} open", if open == 1 { "" } else { "s" }));
             }
+            // As tall as its text and tags, not as a button: the line keeps the room under it
+            // that This computer's has.
+            ui.spacing_mut().interact_size.y = 0.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for t in &c.tags {
