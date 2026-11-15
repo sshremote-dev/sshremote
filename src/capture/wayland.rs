@@ -44,7 +44,9 @@ impl Wayland {
         let pipe = pipeline(&portal.source(), None)?;
         let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the shared screen within 10 s")?;
         let img = to_image(&first)?;
-        let wl = if portal.controls() { None } else { super::wlinput::WlInput::open().ok() };
+        // Keys through a virtual keyboard where the compositor offers one (it types any character;
+        // COSMIC's portal may not pass keys on), the rest through the portal.
+        let wl = super::wlinput::WlInput::open().ok().filter(|w| w.has_pointer() || portal.controls());
         Ok(Wayland { portal, wl, pipe, desk: (img.w, img.h), target: (img.w, img.h), last: img, again: true })
     }
 
@@ -94,7 +96,8 @@ impl Capture for Wayland {
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
         // A desktop that only lets its screen be seen: said once, when the session starts.
-        if let Some(wl) = &mut self.wl {
+        let key = matches!(ev, Input::Key { .. } | Input::KeyState { .. });
+        if let Some(wl) = self.wl.as_mut().filter(|w| key || w.has_pointer()) {
             return wl.input(ev, self.desk);
         }
         if !self.portal.controls() {

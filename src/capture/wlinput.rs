@@ -52,13 +52,16 @@ const MODS: [(u32, u32); 4] = [(0xffe1, 1), (0xffe3, 4), (0xffe9, 8), (0xffeb, 6
 pub struct WlInput {
     conn: Connection,
     queue: EventQueue<Globals>,
-    pointer: ZwlrVirtualPointerV1,
+    /// None where the compositor has a virtual keyboard only (COSMIC): its pointer goes by the portal.
+    pointer: Option<ZwlrVirtualPointerV1>,
     keyboard: ZwpVirtualKeyboardV1,
     /// The keysyms the keymap has, each on its own key after the modifiers'.
     syms: Vec<u32>,
     /// Modifiers held (their bits), and when this began (event times count from it).
     mods: u32,
     start: std::time::Instant,
+    /// The last key, to send the keymap again when typing starts after a pause.
+    last_key: Option<std::time::Instant>,
 }
 
 impl WlInput {
@@ -69,15 +72,20 @@ impl WlInput {
         conn.display().get_registry(&qh, ());
         let mut g = Globals::default();
         queue.roundtrip(&mut g).map_err(|e| e.to_string())?;
-        let (Some(seat), Some(pm), Some(km)) = (g.seat.clone(), g.pointers.clone(), g.keyboards.clone()) else {
-            return Err("this desktop offers no virtual pointer and keyboard".into());
+        let (Some(seat), Some(km)) = (g.seat.clone(), g.keyboards.clone()) else {
+            return Err("this desktop offers no virtual keyboard".into());
         };
-        let pointer = pm.create_virtual_pointer(Some(&seat), &qh, ());
+        let pointer = g.pointers.clone().map(|pm| pm.create_virtual_pointer(Some(&seat), &qh, ()));
         let keyboard = km.create_virtual_keyboard(&seat, &qh, ());
-        let mut w = WlInput { conn, queue, pointer, keyboard, syms: MODS.iter().map(|m| m.0).collect(), mods: 0, start: std::time::Instant::now() };
+        let mut w = WlInput { conn, queue, pointer, keyboard, syms: MODS.iter().map(|m| m.0).collect(), mods: 0, start: std::time::Instant::now(), last_key: None };
         w.upload()?;
         w.queue.roundtrip(&mut g).map_err(|e| e.to_string())?;
         Ok(w)
+    }
+
+    /// Whether the pointer goes this way too.
+    pub fn has_pointer(&self) -> bool {
+        self.pointer.is_some()
     }
 
     fn time(&self) -> u32 {
@@ -123,6 +131,12 @@ impl WlInput {
     }
 
     fn press(&mut self, keysym: u32, down: bool) -> Result<(), String> {
+        // Typing after a pause: the keymap again first, as the window with the keyboard may have
+        // changed meanwhile and some compositors (Hyprland) give it the real keyboard's keymap.
+        if self.last_key.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(1)) {
+            self.upload()?;
+        }
+        self.last_key = Some(std::time::Instant::now());
         let key = self.key_of(keysym)?;
         if let Some((_, bit)) = MODS.iter().find(|(s, _)| *s == keysym) {
             self.mods = if down { self.mods | bit } else { self.mods & !bit };
@@ -152,11 +166,13 @@ impl WlInput {
     /// The viewer's input, on a screen of `desk` pixels.
     pub fn input(&mut self, ev: Input, desk: (usize, usize)) -> Result<(), String> {
         let t = self.time();
+        let pointer = || self.pointer.as_ref().ok_or_else(|| "this desktop offers no virtual pointer".to_string());
         match ev {
             Input::Move { x, y } => {
                 let (w, h) = (desk.0.max(1) as u32, desk.1.max(1) as u32);
-                self.pointer.motion_absolute(t, (x.max(0.0) as u32).min(w - 1), (y.max(0.0) as u32).min(h - 1), w, h);
-                self.pointer.frame();
+                let p = pointer()?;
+                p.motion_absolute(t, (x.max(0.0) as u32).min(w - 1), (y.max(0.0) as u32).min(h - 1), w, h);
+                p.frame();
             }
             Input::Button { button, pressed } => {
                 let code = match button {
@@ -168,15 +184,17 @@ impl WlInput {
                     _ => return Ok(()),
                 };
                 let state = if pressed { wayland_client::protocol::wl_pointer::ButtonState::Pressed } else { wayland_client::protocol::wl_pointer::ButtonState::Released };
-                self.pointer.button(t, code, state);
-                self.pointer.frame();
+                let p = pointer()?;
+                p.button(t, code, state);
+                p.frame();
             }
             Input::Scroll { steps } | Input::HScroll { steps } => {
                 use wayland_client::protocol::wl_pointer::{Axis, AxisSource};
                 let axis = if matches!(ev, Input::HScroll { .. }) { Axis::HorizontalScroll } else { Axis::VerticalScroll };
-                self.pointer.axis_source(AxisSource::Wheel);
-                self.pointer.axis_discrete(t, axis, steps as f64 * 15.0, steps);
-                self.pointer.frame();
+                let p = pointer()?;
+                p.axis_source(AxisSource::Wheel);
+                p.axis_discrete(t, axis, steps as f64 * 15.0, steps);
+                p.frame();
             }
             Input::KeyState { keysym, down } => {
                 let sym = self.shifted(keysym);
