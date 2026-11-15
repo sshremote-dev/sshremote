@@ -27,6 +27,12 @@ an app that must stay safe on machines that hold SSH keys:
 | Host extension | `programs`, `"activation": "startup"`, `contributes.commands` | Runs beside the app for as long as it is open: status bar items, panels, commands, terminals, events |
 | Tools (API 3) | `contributes.panes` | Web apps listed under Tools on the home and in Quick open (`+`); each opens in a pane of its own as a page of Chrome, Edge or Chromium run with no window, its sign-ins kept in a profile of its own per site |
 | Programs (API 4) | `contributes.panes` with `app`, `command` or `open` | This computer's own programs under Tools: each is started and its windows shown alone in a pane of its own |
+| Menus of the app (API 4) | `contributes.programs`, `contributes.sites` | What the app shows only with such an extension installed: `programs` (with the `programs` permission) the Open a program menus (Home and Quick open, a screen's menu, the web page where its gateway has it, the MCP server's `apps` and `launch`); `sites` any typed `https://` address opening in a pane |
+
+Each of these comes with an extension, not with the app: with none installed there are no Tools,
+no Open a program menus and no web pages in panes. The Programs extension declares
+`"programs": true` and Web apps `"sites": true` (Web apps 1.0.0, which only lists sites, still
+counts for web pages).
 
 A tool in a pane:
 

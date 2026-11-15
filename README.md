@@ -23,13 +23,14 @@ or, in true colour, the kitty graphics protocol (kitty, Ghostty, WezTerm), found
 terminal (`SSHREMOTE_GRAPHICS=sixel` or `kitty` decides instead). Inside tmux in kitty, kitty images
 are placed by Unicode placeholders, so the picture moves and hides with tmux's windows and panes.
 
-**Programs in a pane** (as Remote Desktop's RemoteApp): a screen's Open a program menu finds the
-computer's installed programs (its desktop entries on Linux, the Start menu on Windows, Store apps
-too), or takes a command line, a file or an address; what it starts opens in a pane beside, showing
-that program alone (with its menus and dialogs) and taking clicks and keys for it. Home's Tools does
-the same for this computer, and extensions can list programs there (`docs/extensions.md`). Programs
-are shown alone on Windows, GNOME (with its helper) and X11 desktops; elsewhere the pane shows the
-screen.
+**Programs in a pane** (as Remote Desktop's RemoteApp, with the **Programs** extension): a screen's
+Open a program menu finds the computer's installed programs (its desktop entries on Linux, the Start
+menu on Windows, Store apps too), or takes a command line, a file or an address; what it starts opens
+in a pane beside, showing that program alone (with its menus and dialogs) and taking clicks and keys
+for it. Home's Tools and Quick open (also when splitting a pane) do the same for this computer; the
+web page offers it where its gateway has the extension. Programs are shown alone on Windows, GNOME
+(with its helper) and X11 desktops; elsewhere the pane shows the screen. Without the extension none
+of these menus are there.
 
 ## Build
 
@@ -77,9 +78,10 @@ Tests that reach other computers name them by ssh alias:
   **On this network** lists the computers nearby with remote access on, to add without typing
   their ID. Computers can carry **tags** (work, servers), and the chips over the list show one
   tag's.
-- **Web apps**: an `https://` address opens as a pane (**Open in a pane**, or + to keep it in the
-  list), and installed extensions list theirs under **Tools** (the Web apps extension: Google
-  Translate, Papago, DeepL, Claude, ChatGPT, Gemini, Gmail, Calendar, Keep, Notion). Each is a page
+- **Web apps** (with the **Web apps** extension): an `https://` address opens as a pane (**Open in
+  a pane**, or + to keep it in the list), and its tools are listed under **Tools** (Google
+  Translate, Papago, DeepL, Claude, ChatGPT, Gemini, Gmail, Calendar, Keep, Notion); without it a
+  typed address says where to get it. Each is a page
   of Chrome, Edge or Chromium run with no window of its own, shown and driven as a screen is, laid
   out at the pane's size, with back, forward and reload, and the sign-ins of its site kept in a
   profile of its own. Ctrl+V pastes this computer's clipboard there, Ctrl+C copies back.
