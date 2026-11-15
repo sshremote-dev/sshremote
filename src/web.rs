@@ -725,7 +725,10 @@ fn ask(frame: Frame) -> Option<Ask> {
     if v.get("windows").is_some() {
         return Some(Ask::Agent(ToAgent::ListWindows));
     }
-    // The host's installed programs, and one started there and shown alone.
+    // The host's installed programs, and one started there and shown alone (the Programs extension).
+    if (v.get("apps").is_some() || v.get("launch").is_some()) && !crate::ext::programs_enabled() {
+        return None;
+    }
     if v.get("apps").is_some() {
         return Some(Ask::Agent(ToAgent::Apps));
     }
@@ -984,7 +987,8 @@ fn client(
         Agent::Up(sess, _) => serde_json::json!([sess.desk.0, sess.desk.1]),
         _ => serde_json::Value::Null,
     };
-    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk } }))?;
+    // What extensions this gateway has bring their menus to the page (Programs: the host's programs).
+    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk, "programs": crate::ext::programs_enabled() } }))?;
     send_json(&w, serde_json::json!({ "qualities": quality_list(), "quality": quality_state(&ctl) }))?;
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
@@ -1875,8 +1879,13 @@ Host: x
         assert!(matches!(a(r#"{"snapshot":1}"#), Some(Ask::Agent(ToAgent::Snapshot))));
         use crate::shared::Share;
         assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
-        assert!(matches!(a(r#"{"apps":1}"#), Some(Ask::Agent(ToAgent::Apps))));
-        assert!(matches!(a(r#"{"launch":{"kind":1,"text":"xterm"}}"#), Some(Ask::Agent(ToAgent::Launch { kind: 1, .. }))));
+        // The host's programs, with the Programs extension where the gateway runs.
+        if crate::ext::programs_enabled() {
+            assert!(matches!(a(r#"{"apps":1}"#), Some(Ask::Agent(ToAgent::Apps))));
+            assert!(matches!(a(r#"{"launch":{"kind":1,"text":"xterm"}}"#), Some(Ask::Agent(ToAgent::Launch { kind: 1, .. }))));
+        } else {
+            assert!(a(r#"{"apps":1}"#).is_none());
+        }
         assert!(a(r#"{"launch":{"kind":9,"text":"x"}}"#).is_none());
         assert!(matches!(a(r#"{"sound":true}"#), Some(Ask::Agent(ToAgent::Audio(true)))));
         assert!(matches!(a(r#"{"call":true}"#), Some(Ask::Agent(ToAgent::Call(true)))));

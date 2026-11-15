@@ -48,6 +48,17 @@ struct Server {
 }
 
 fn tools() -> Value {
+    let mut all = all_tools();
+    // Programs come with the Programs extension.
+    if !crate::ext::programs_enabled()
+        && let Some(list) = all.as_array_mut()
+    {
+        list.retain(|t| !matches!(t.get("name").and_then(Value::as_str), Some("apps" | "launch")));
+    }
+    all
+}
+
+fn all_tools() -> Value {
     let xy = json!({"x": {"type": "integer"}, "y": {"type": "integer"}});
     let props = |extra: Value| {
         let mut p = xy.clone();
@@ -528,6 +539,7 @@ impl Server {
                 }
                 Ok(done)
             }
+            "apps" | "launch" if !crate::ext::programs_enabled() => Ok(error_result("programs open with the Programs extension: sshremote ext install dev.sshremote.programs")),
             "apps" => {
                 self.apps = None;
                 self.send(ToAgent::Apps)?;

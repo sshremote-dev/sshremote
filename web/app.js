@@ -825,6 +825,9 @@ class Client {
       else this.keepTimer = setTimeout(() => this.remember(), 5000);
       if (this.view === "term") this.term.focus();
       if (this.t.monitor !== undefined) this.send({ monitor: this.t.monitor });
+      // The gateway's extensions: Programs brings the menu that opens the host's programs.
+      this.programs = !!v.ready.programs;
+      this.screenTools();
       // A window opened for one of the host's programs starts it, once.
       if (this.t.launch) { this.send({ launch: this.t.launch }); delete this.t.launch; }
     }
@@ -1540,8 +1543,7 @@ class Client {
       ["The window in front", () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
       ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
       ["One window or program…", () => this.send({ windows: 1 })],
-      null,
-      ["Open one of its programs…", () => this.programPick()],
+      ...(this.programs ? [null, ["Open one of its programs…", () => this.programPick()]] : []),
     ], at);
     const camera = m => m.name.startsWith("Camera: ");
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
