@@ -699,7 +699,17 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args(["-fsSL", "--max-time", "120", "--proto", "=https,http", url]);
     crate::sys::quiet(&mut cmd);
-    let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    let out = match cmd.output() {
+        Ok(out) => out,
+        // A system without curl (some Linux desktops): wget, if it has that.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut w = std::process::Command::new("wget");
+            w.args(["-q", "-O", "-", "--timeout=120", url]);
+            crate::sys::quiet(&mut w);
+            w.output().map_err(|_| "neither curl nor wget is installed to fetch with".to_string())?
+        }
+        Err(e) => return Err(format!("curl: {e}")),
+    };
     if !out.status.success() {
         return Err(format!("could not fetch {url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
