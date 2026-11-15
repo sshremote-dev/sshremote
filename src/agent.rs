@@ -801,9 +801,12 @@ fn serve_with(
             let late = l.since.elapsed() > Duration::from_secs(20);
             if found.is_some() || late {
                 let l = launching.take().expect("checked");
-                let reply = match found.map(|w| cap.share(crate::shared::Share::App(w)).map(|t| (w, t))) {
-                    Some(Ok((w, text))) => {
-                        let kind = crate::shared::Share::App(w).to_wire().0;
+                // Its windows; File Explorer's own window alone (its program is the shell, with the
+                // person's other folders open).
+                let share = found.map(|(w, app)| if app.eq_ignore_ascii_case("explorer") { crate::shared::Share::Window(w) } else { crate::shared::Share::App(w) });
+                let reply = match share.map(|s| cap.share(s).map(|t| (s, t))) {
+                    Some(Ok((s, text))) => {
+                        let kind = s.to_wire().0;
                         send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
                         ui.pin(kind);
                         resized!();
@@ -1074,12 +1077,12 @@ impl Launching {
         Ok(Launching { before, name, what, since: Instant::now(), looked: Instant::now() })
     }
 
-    /// Its window: the first that is new, or (after a few seconds) the topmost of the program
-    /// started (a program already running brings its window forward instead of opening one).
-    fn window(&self, cap: &dyn capture::Capture) -> Option<u64> {
+    /// Its window and program: the first window that is new, or (after a few seconds) the
+    /// topmost of the program started (one already running brings its window forward instead).
+    fn window(&self, cap: &dyn capture::Capture) -> Option<(u64, String)> {
         let list = cap.windows().ok()?;
         if let Some(w) = list.iter().find(|w| !self.before.contains(&w.id)) {
-            return Some(w.id);
+            return Some((w.id, w.app.clone()));
         }
         let name = self.name.to_lowercase();
         if self.since.elapsed() < Duration::from_secs(3) || name.is_empty() {
@@ -1090,7 +1093,7 @@ impl Launching {
                 let app = w.app.to_lowercase();
                 !app.is_empty() && (app.contains(&name) || name.contains(&app))
             })
-            .map(|w| w.id)
+            .map(|w| (w.id, w.app.clone()))
     }
 }
 

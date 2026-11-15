@@ -126,8 +126,7 @@ pub fn shareable() -> Vec<WindowInfo> {
             continue;
         }
         let ex = unsafe { GetWindowLongW(w.hwnd, GWL_EXSTYLE) } as u32;
-        let cls = class(w.hwnd);
-        if ex & WS_EX_TOOLWINDOW != 0 || matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+        if ex & WS_EX_TOOLWINDOW != 0 || shell(w.hwnd) {
             continue;
         }
         let (width, height) = ((w.rect.r - w.rect.l) as u16, (w.rect.b - w.rect.t) as u16);
@@ -137,6 +136,11 @@ pub fn shareable() -> Vec<WindowInfo> {
         out.push(WindowInfo { id: w.hwnd as u64, title: w.title, app: app_name(&exe_of(w.pid)), w: width, h: height });
     }
     out
+}
+
+/// The shell's own windows (the desktop, the taskbars): Explorer's, never a program's to share.
+fn shell(hwnd: HWND) -> bool {
+    matches!(class(hwnd).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "NotifyIconOverflowWindow")
 }
 
 /// What is shared, resolved to window handles each frame.
@@ -169,6 +173,8 @@ fn processes_of(h: HWND) -> Vec<u32> {
 fn belongs(scope: &Scope, w: &Win, pids: &[u32], exe_cache: &mut Vec<(u32, String)>) -> bool {
     match scope {
         Scope::Screen => true,
+        // File Explorer's too, but the taskbar and the desktop are no window's or program's.
+        _ if shell(w.hwnd) => false,
         Scope::Window(h) => {
             w.hwnd == *h || unsafe { GetAncestor(w.hwnd, GA_ROOTOWNER) } == *h || (w.transient && pids.contains(&w.pid))
         }
