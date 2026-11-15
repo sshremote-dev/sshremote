@@ -117,7 +117,7 @@ fn item_of(p: &Pane) -> Option<super::project::Item> {
     let mode = match &p.state {
         State::Live(r) => r.mode(),
         State::Shell(_) => PaneMode::Terminal,
-        State::Down(_) => p.mode,
+        State::Down(_) | State::Held(_) => p.mode,
     };
     match &p.target {
         Target::Local { capture } if capture.starts_with("browser:") => Some(Item::Web { url: capture["browser:".len()..].to_string(), label: p.label.clone() }),
@@ -160,6 +160,8 @@ enum State {
     Shell(Box<crate::termwin::TermWindow>),
     Live(Box<Remote>),
     Down(Down),
+    /// A program of this computer's, its own window held over the pane.
+    Held(Box<super::held::Held>),
 }
 
 /// Connecting, or connecting again after the link was lost.
@@ -524,20 +526,18 @@ impl Workspace {
                 preset: self.opt.preset,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
-            Launch::Agent { target, label, ssh_cmd, mode } => Pane {
-                id,
-                label,
-                target,
-                ssh_cmd,
-                mode,
-                terms: None,
-                start,
-                prefs: None,
-                keep: None,
-                launch: None,
-                preset: self.opt.preset,
-                state: State::Down(Down::new(false, String::new())),
-            },
+            Launch::Agent { target, label, ssh_cmd, mode } => {
+                // A program here, on Windows: started, and its window held over the pane.
+                let held = match &target {
+                    Target::Local { capture } if super::held::HERE => capture.strip_prefix("app:").and_then(|r| r.split_once(':')),
+                    _ => None,
+                };
+                let state = match held {
+                    Some((kind, text)) => State::Held(Box::new(super::held::Held::start(kind.parse().unwrap_or(crate::apps::COMMAND), text))),
+                    None => State::Down(Down::new(false, String::new())),
+                };
+                Pane { id, label, target, ssh_cmd, mode, terms: None, start, prefs: None, keep: None, launch: None, preset: self.opt.preset, state }
+            }
         };
         self.panes.push(pane);
         Some(id)
@@ -591,6 +591,7 @@ impl Workspace {
                 State::Shell(t) => {
                     let _ = t.close_all();
                 }
+                State::Held(h) => h.close(),
                 State::Down(_) => {}
             }
         }
@@ -1161,12 +1162,19 @@ impl Workspace {
                     Some(DownAct::Retry) => *d = Down::new(d.again, String::new()),
                     None => {}
                 },
+                State::Held(h) => {
+                    h.show(&mut child, *rect);
+                    if h.ended() {
+                        closing.push(*id);
+                    }
+                }
             }
             // In a terminal, what the computer it runs on is doing (its SSH host's, or this one's).
             let terminal = match &pane.state {
                 State::Shell(_) => true,
                 State::Live(r) => r.mode() == PaneMode::Terminal,
                 State::Down(_) => pane.mode == PaneMode::Terminal,
+                State::Held(_) => false,
             };
             if terminal {
                 crate::gui::look::pane_overlay(ui, *rect, pane.ssh_cmd.as_deref(), &pane.label, is_active);
@@ -1198,6 +1206,7 @@ impl Workspace {
                         lost.push((i, e));
                     }
                 }
+                State::Held(h) => h.hide(),
                 State::Down(_) => {}
             }
         }
@@ -1390,13 +1399,18 @@ impl Workspace {
         match &self.panes[i].state {
             State::Live(r) => r.mode(),
             State::Shell(_) => PaneMode::Terminal,
-            State::Down(_) => self.panes[i].mode,
+            State::Down(_) | State::Held(_) => self.panes[i].mode,
         }
     }
 
     /// Whether a pane is a plain shell here (closing it ends the shell, not a connection).
     fn is_shell(&self, id: u64) -> bool {
         self.index(id).is_some_and(|i| matches!(self.panes[i].state, State::Shell(_)))
+    }
+
+    /// Whether a pane holds a program of this computer's (closing it closes the program).
+    fn is_held(&self, id: u64) -> bool {
+        self.index(id).is_some_and(|i| matches!(self.panes[i].state, State::Held(_)))
     }
 
     /// Whether a pane reaches another computer (closing it disconnects).
@@ -1449,7 +1463,9 @@ impl Workspace {
                 let n = self.order(t).len();
                 let name = self.name(self.tabs[t].active).0;
                 let body = if n > 1 {
-                    format!("Its {n} panes close, and their connections and shells end.")
+                    format!("Its {n} panes close, and their connections, shells and programs end.")
+                } else if self.is_held(id) {
+                    format!("{name} closes with the tab (it may ask to save first).")
                 } else if self.is_remote(id) || !self.is_shell(id) {
                     "The connection ends and the tab closes.".to_string()
                 } else {
@@ -1457,6 +1473,11 @@ impl Workspace {
                 };
                 (format!("Close the tab {name}?"), body, "Close tab")
             }
+            None if self.is_held(id) => (
+                format!("Close {name}?"),
+                format!("{name} closes with the pane (it may ask to save first); with the tab's last pane, the tab closes too."),
+                "Close",
+            ),
             None if self.is_remote(id) || !self.is_shell(id) => (
                 format!("Close {name}?"),
                 "The connection ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),

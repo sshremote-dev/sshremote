@@ -43,6 +43,7 @@ pub(crate) mod project;
 pub(crate) mod wl_drop;
 mod extui;
 mod dock;
+pub(crate) mod held;
 mod toast;
 #[cfg(feature = "drive")]
 pub(crate) mod drive;

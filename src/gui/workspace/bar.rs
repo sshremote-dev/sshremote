@@ -305,10 +305,10 @@ impl Workspace {
         let mode = match &p.state {
             State::Live(r) => r.mode(),
             State::Shell(_) => PaneMode::Terminal,
-            State::Down(_) => p.mode,
+            State::Down(_) | State::Held(_) => p.mode,
         };
-        // A web app's page, by its address: a window of its own, whatever its mode says.
-        let web = matches!(&p.target, Target::Local { capture } if capture.starts_with("browser:"));
+        // A web app's page, by its address, or a program: a window of its own, whatever its mode says.
+        let web = matches!(&p.target, Target::Local { capture } if capture.starts_with("browser:") || capture.starts_with("app:"));
         let glyph = match mode {
             _ if web => ic::APP_WINDOW,
             PaneMode::Terminal => ic::TERMINAL,
@@ -369,7 +369,7 @@ impl Workspace {
     pub(super) fn mode_menu(&mut self, ui: &mut egui::Ui, id: u64) {
         let Some(i) = self.index(id) else { return };
         // A web app's page has no terminal or files of its own to switch to.
-        if matches!(&self.panes[i].state, State::Live(r) if r.is_web()) {
+        if matches!(&self.panes[i].state, State::Live(r) if r.is_web()) || matches!(&self.panes[i].state, State::Held(_)) {
             return;
         }
         let start = ui.cursor().left();
@@ -421,10 +421,12 @@ impl Workspace {
             }
             // A plain shell: how it is shown and its settings.
             State::Shell(t) => t.controls(ui),
-            State::Down(_) => {}
+            State::Down(_) | State::Held(_) => {}
         }
         // Close last: the pane closes (and its connection ends), and with the tab's last pane the tab.
-        let (glyph, tip) = if self.is_remote(id) || !self.is_shell(id) {
+        let (glyph, tip) = if self.is_held(id) {
+            (ic::X, "Close: close this program and the pane (Ctrl+Shift+W)")
+        } else if self.is_remote(id) || !self.is_shell(id) {
             (ic::X, "Close: end this connection and close the pane (Ctrl+Shift+W)")
         } else {
             (ic::X, "Close this pane (Ctrl+Shift+W)")
