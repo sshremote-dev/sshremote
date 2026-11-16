@@ -1025,8 +1025,15 @@ impl eframe::App for App {
             self.sized_for = Some(open);
             if open {
                 if !first {
-                    ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                    ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+                    let (full, max) = ctx.input(|i| (i.viewport().fullscreen.unwrap_or(false), i.viewport().maximized.unwrap_or(false)));
+                    if full {
+                        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                    }
+                    // Hyprland takes either request about maximizing as one to toggle it, and tells
+                    // a tiled window it is maximized.
+                    if max && std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+                        ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+                    }
                     ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::from(OPEN_SIZE)));
                 }
                 ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::from(MIN_OPEN)));
