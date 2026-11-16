@@ -735,6 +735,10 @@ fn serve_with(
                         send(enc, &ToClient::Notice(e)).map_err(io_err)?;
                     }
                     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
+                    // Said at once, also to a viewer whose pictures are paused (one taking screenshots).
+                    if cap.desktop_size() != desk {
+                        resized!();
+                    }
                 }
                 ToAgent::ListWindows => {
                     let m = match cap.windows() {

@@ -33,6 +33,8 @@ struct Server {
     target: crate::transport::Target,
     link: Option<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>)>,
     screen: (u32, u32),
+    /// The host said its screen's size again since this was cleared.
+    resized: bool,
     view: View,
     clipboard: String,
     monitors: Vec<crate::proto::MonitorInfo>,
@@ -47,6 +49,11 @@ struct Server {
     ui: Option<ToClient>,
     /// Window ids of the latest listing, by the numbers shown for focus_window.
     ui_windows: Vec<u64>,
+}
+
+/// Full resolution in true colour, but no stream: screenshots are taken on request.
+fn full(desk: (u16, u16)) -> Settings {
+    Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5, formats: crate::proto::FORMATS }
 }
 
 fn tools() -> Value {
@@ -275,9 +282,7 @@ impl Server {
         if self.link.is_none() {
             let (mut sess, tx, rx) = Session::open(&self.target, true)?;
             let desk = sess.desk;
-            // Full resolution in true colour, but no stream: screenshots are taken on request.
-            let s = Settings { view_w: desk.0, view_h: desk.1, scale: 100, mode: Mode::True, fps: 5, formats: crate::proto::FORMATS };
-            sess.send(ToAgent::Settings(s)).map_err(|e| e.to_string())?;
+            sess.send(ToAgent::Settings(full(desk))).map_err(|e| e.to_string())?;
             sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
             self.screen = (desk.0 as u32, desk.1 as u32);
             self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
@@ -324,7 +329,12 @@ impl Server {
                 Ev::Net(ToClient::AppList { list, error }) => self.apps = Some(if list.is_empty() && !error.is_empty() { Err(error) } else { Ok(list) }),
                 Ev::Net(ToClient::Launched { ok, text }) => self.launched = Some((ok, text)),
                 Ev::Net(m @ (ToClient::UiTree { .. } | ToClient::UiDone { .. })) => self.ui = Some(m),
-                Ev::Net(ToClient::Hello { w, h, .. }) => self.screen = (w as u32, h as u32),
+                // The screen took another size (its resolution, another monitor): pictures follow it.
+                Ev::Net(ToClient::Hello { w, h, .. }) => {
+                    self.screen = (w as u32, h as u32);
+                    self.resized = true;
+                    self.send(ToAgent::Settings(full((w, h))))?;
+                }
                 Ev::Net(ToClient::Notice(t)) if until.is_some() => return Err(t),
                 Ev::Net(ToClient::Error(e)) | Ev::Closed(e) => {
                     self.link = None;
@@ -350,8 +360,16 @@ impl Server {
 
     fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         self.drain(None)?;
-        self.send(ToAgent::Snapshot)?;
-        let png = self.drain(Some(Instant::now() + Duration::from_secs(15)))?.ok_or("no screenshot within 15 s")?;
+        let mut png = Vec::new();
+        for _ in 0..2 {
+            self.resized = false;
+            self.send(ToAgent::Snapshot)?;
+            png = self.drain(Some(Instant::now() + Duration::from_secs(15)))?.ok_or("no screenshot within 15 s")?;
+            // Taken at the size the screen had before: once more at its new one.
+            if !self.resized {
+                break;
+            }
+        }
         let (w, h, rgb) = crate::shot::rgb_from_png(&png)?;
         self.screen = (w as u32, h as u32);
         // A region is given in the previous screenshot's coordinates.
@@ -676,6 +694,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         target: opt.target()?,
         link: None,
         screen: (0, 0),
+        resized: false,
         view: View { ox: 0.0, oy: 0.0, scale: 1.0 },
         clipboard: String::new(),
         monitors: Vec::new(),
