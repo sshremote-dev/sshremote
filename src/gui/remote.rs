@@ -95,12 +95,14 @@ pub(super) struct Remote {
     /// Every monitor of the host was asked for, each in a window of its own (taken by the
     /// workspace, which opens them).
     pub(super) spread_asked: bool,
-    /// The host's installed programs once asked for (`Apps`), and what is typed in the menu that
-    /// opens one: a name to find it by, or a command line, a file or an address.
+    /// The host's installed programs once asked for (`Apps`), and the menu that opens one: by its
+    /// name, a command line, or a file picked from the host's folders (a folder listing it asked
+    /// for comes to it, not to the file window).
     pub(super) apps: Option<Result<Vec<AppRow>, String>>,
     pub(super) apps_asked: bool,
-    pub(super) apps_find: String,
-    pub(super) apps_line: String,
+    pub(super) launcher: crate::gui::launcher::Launcher,
+    pub(super) launcher_dir: bool,
+    pub(super) launcher_seen: u64,
     /// A program to open in a pane beside this one, on the same host and shown alone (how it is
     /// named, the name, what the pane is called): taken by the workspace.
     pub(super) launch_asked: Option<(u8, String, String)>,
@@ -311,8 +313,9 @@ impl Remote {
             spread_asked: false,
             apps: None,
             apps_asked: false,
-            apps_find: String::new(),
-            apps_line: String::new(),
+            launcher: Default::default(),
+            launcher_dir: false,
+            launcher_seen: 0,
             launch_asked: None,
             allowed: crate::grant::ALL,
             host: None,
@@ -687,7 +690,9 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::DirList { path, entries, error })) => {
-                    if let Some(f) = self.files.as_mut() {
+                    if std::mem::take(&mut self.launcher_dir) {
+                        self.launcher.set_folder(path, entries, error);
+                    } else if let Some(f) = self.files.as_mut() {
                         f.remote.set_list(path, entries, error);
                     }
                 }

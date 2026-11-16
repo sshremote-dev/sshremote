@@ -44,6 +44,7 @@ pub(crate) mod wl_drop;
 mod extui;
 mod dock;
 pub(crate) mod held;
+pub(crate) mod launcher;
 mod toast;
 #[cfg(feature = "drive")]
 pub(crate) mod drive;
@@ -317,13 +318,13 @@ pub struct App {
     computers_at: Option<Instant>,
     /// The tag whose computers the list shows; None: all of them.
     tag: Option<String>,
-    /// This computer's installed programs once looked at, and what is typed in the menu that
-    /// opens one in a pane.
+    /// This computer's installed programs once looked at, and what opens one in a pane (laid out
+    /// under Tools in the way chosen, if one is).
     apps: Option<Vec<crate::apps::App>>,
     /// The list being read (Windows asks PowerShell: a second or two), off the window's thread.
     apps_coming: Option<std::sync::mpsc::Receiver<Vec<crate::apps::App>>>,
-    apps_find: String,
-    apps_line: String,
+    launcher: launcher::Launcher,
+    launcher_for: Option<launcher::Mode>,
     /// The row of the list the arrow keys are on, and whether they just moved it.
     picked: Option<usize>,
     picked_moved: bool,
@@ -744,8 +745,8 @@ impl App {
             tag: None,
             apps: None,
             apps_coming: None,
-            apps_find: String::new(),
-            apps_line: String::new(),
+            launcher: launcher::Launcher::here(),
+            launcher_for: None,
             picked: None,
             picked_moved: false,
             row_menu: None,
@@ -1745,6 +1746,48 @@ mod tests {
                 snap.save(&ctx, size, &dir.join(format!("{name}_{}.png", if dark { "dark" } else { "light" })));
             }
         }
+    }
+
+    /// The three ways to open a program come with the Programs extension: none without it; with
+    /// it, a way picked takes the computers' place, and Close puts them back.
+    #[test]
+    fn programs_open_three_ways_with_the_programs_extension() {
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let ctx = egui::Context::default();
+        let shown = |app: &mut App, clicks: Vec<egui::Event>| {
+            let mut snap = snapshot::Snap::default();
+            let size = Vec2::new(1100.0, 760.0);
+            let mut events = vec![clicks];
+            events.extend((0..3).map(|_| Vec::new()));
+            for e in events {
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), events: e, ..Default::default() };
+                snap.frame(&ctx, input, |ui| app.home(ui)).textures_delta.clear();
+            }
+            snap
+        };
+        crate::ext::install_for_test(&[]);
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        let snap = shown(&mut app, Vec::new());
+        assert!(snap.find("Search programs").is_empty() && snap.find("Run a command").is_empty() && snap.find("Open a file").is_empty());
+        crate::ext::install_for_test(&[r#"{"id":"x.programs","api":4,"contributes":{"programs":true},"permissions":["programs"]}"#]);
+        let mut app = App::new(Form::from(&opt), None, "", None);
+        let snap = shown(&mut app, Vec::new());
+        let run = snap.find("Run a command");
+        assert!(!snap.find("Search programs").is_empty() && !snap.find("Open a file").is_empty() && !run.is_empty());
+        let at = run[0].center();
+        let click = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        shown(&mut app, vec![egui::Event::PointerMoved(at), click(true)]);
+        let snap = shown(&mut app, vec![click(false)]);
+        let field = snap.find("A program, a folder, a file or an address");
+        assert!(field.first().is_some_and(|f| f.top() > at.y), "the command line under the row: {field:?}");
+        // In the computers' place: the one part or the other.
+        assert!(snap.find("Add a computer").is_empty() && !snap.find("PROGRAMS").is_empty());
+        let close = snap.find("Close")[0].center();
+        let click = |pressed| egui::Event::PointerButton { pos: close, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        shown(&mut app, vec![egui::Event::PointerMoved(close), click(true)]);
+        let snap = shown(&mut app, vec![click(false)]);
+        assert!(!snap.find("Add a computer").is_empty() && snap.find("A program, a folder, a file or an address").is_empty());
+        crate::ext::install_for_test(&[]);
     }
 
     /// A kept project opens each tab whole, divided as it was, each pane as it was opened.

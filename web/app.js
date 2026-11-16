@@ -95,6 +95,22 @@ function size(n) {
   do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
   return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
 }
+// How well a program answers what is typed, as the Start menu's search ranks it (lower first; null:
+// not found), as the app ranks it.
+function programRank(q, name, id, detail) {
+  q = q.trim().toLowerCase();
+  if (!q) return 9;
+  const n = name.toLowerCase(), words = n.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (n === q) return 0;
+  if (n.startsWith(q)) return 1;
+  if (q.split(/\s+/).every(t => words.some(w => w.startsWith(t)))) return 2;
+  if (q.length >= 2 && !q.includes(" ") && words.map(w => w[0]).join("").startsWith(q)) return 3;
+  const file = (id.split(/[\\/]/).pop() || "").toLowerCase().split("!")[0].replace(/\.(exe|desktop|lnk)$/, "");
+  if (file.startsWith(q) || file.split(/[.\-_ ]/).some(p => p.startsWith(q))) return 4;
+  if (n.includes(q)) return 5;
+  if (detail.toLowerCase().includes(q)) return 6;
+  return null;
+}
 function ago(ms) {
   const s = (Date.now() - ms) / 1000;
   if (s < 60) return "just now";
@@ -847,7 +863,7 @@ class Client {
         $("banner").hidden = false;
       }
     }
-    if (v.dir) this.dir(v.dir);
+    if (v.dir) { const f = this.pickDir; if (f) { this.pickDir = null; f(v.dir); } else this.dir(v.dir); }
     if (v.opDone) this.opDone(v.opDone);
     if (v.fetch) this.fetchStart(v.fetch);
     if (v.fetched) this.fetchEnd(v.fetched);
@@ -1346,50 +1362,138 @@ class Client {
       if (this.view === "screen") this.send({ view: this.want() });
     }, 0);
   }
-  // One of the host's programs, found among those installed or named by a command line, a file
-  // or an address, opened in a window of its own that shows it alone (as the app opens it in a
-  // pane beside).
-  programPick() {
+  // One of the host's programs in a window of its own that shows it alone (as the app opens it in a
+  // pane beside), three ways: found by its name as the Start menu finds it, a command line as Run
+  // takes it, or a file picked from the host's folders and opened with its program.
+  programPick(mode = "search") {
     const box = $("modal").firstElementChild;
     box.textContent = "";
-    const finish = () => { $("modal").hidden = true; removeEventListener("keydown", keys, true); this.appsShown = null; };
+    const finish = () => { $("modal").hidden = true; removeEventListener("keydown", keys, true); this.appsShown = null; this.pickDir = null; };
     const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(); } };
-    const open = (kind, text, name) => { finish(); this.openProgram(kind, text, name); };
-    const find = h("input", { type: "search", placeholder: "Find a program", autocomplete: "off" });
-    const list = h("div", { class: "picklist" });
-    const hits = () => {
-      const q = find.value.trim().toLowerCase();
-      return (this.apps?.list || []).filter(a => !q || a.name.toLowerCase().includes(q) || (a.detail || "").toLowerCase().includes(q)).slice(0, 300);
+    const recent = store.get("programsRecent", []), commands = store.get("programsCommands", []);
+    const open = (kind, text, name) => {
+      const list = kind === 0 ? recent : commands, key = kind === 0 ? "programsRecent" : "programsCommands";
+      store.set(key, [text, ...list.filter(t => t !== text)].slice(0, 12));
+      finish();
+      this.openProgram(kind, text, name);
     };
-    const show = this.appsShown = () => {
-      list.textContent = "";
-      if (!this.apps) { list.append(h("p", { text: "Looking at what is installed there…" })); return; }
-      if (this.apps.error && !this.apps.list.length) { list.append(h("p", { class: "bad", text: this.apps.error })); return; }
-      const found = hits();
-      if (!found.length) list.append(h("p", { text: "Nothing installed there by that name." }));
-      for (const a of found) {
-        list.append(h("div", { class: "pick" }, h("div", { class: "grow" }, h("b", { text: a.name }), a.detail ? h("small", { text: a.detail }) : ""),
-          h("button", { type: "button", class: "btn", text: "Open", onclick: () => open(0, a.id, a.name) })));
-      }
-    };
-    find.addEventListener("input", show);
-    find.addEventListener("keydown", e => { if (e.key === "Enter") { const a = hits()[0]; if (a) open(0, a.id, a.name); } });
-    const line = h("input", { type: "text", placeholder: "gedit notes.txt, ~/report.pdf, https://…", autocomplete: "off" });
-    const fileLike = t => /^([\/~]|[A-Za-z]:[\\/])/.test(t) || t.includes("://");
     const nameOf = t => t.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || t;
-    const run = () => { const t = line.value.trim(); if (t) open(1, t, nameOf(t.split(/\s+/)[0])); };
-    const opn = () => { const t = line.value.trim(); if (t) open(2, t, nameOf(t)); };
-    line.addEventListener("keydown", e => { if (e.key === "Enter") (fileLike(line.value.trim()) ? opn : run)(); });
-    box.append(h("h2", { text: "Open one of its programs" }),
-      h("p", { text: "It opens in a window of its own here, showing that program alone." }), find, list,
-      h("p", { text: "Or a command line, a file or an address:" }), line,
-      h("div", { class: "acts" }, h("button", { type: "button", class: "btn", text: "Run", onclick: run }), h("button", { type: "button", class: "btn", text: "Open", onclick: opn }),
-        h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: finish })));
-    show();
-    if (!this.apps) this.send({ apps: 1 });
+    const tabs = h("div", { class: "seg", role: "tablist" });
+    const body = h("div", { class: "launch" });
+    const row = (glyph, name, aside, act, tip) => h("button", { type: "button", class: "launchrow", title: tip || "", onclick: act },
+      icon(glyph), h("span", { class: "grow", text: name }), aside ? h("small", { text: aside }) : "");
+    const modes = {
+      search: () => {
+        const find = h("input", { type: "search", placeholder: "Type a program's name", autocomplete: "off" });
+        const list = h("div", { class: "launchlist" });
+        let sel = 0, rows = [];
+        const hits = () => {
+          const all = this.apps?.list || [], q = find.value.trim();
+          if (!q) {
+            const mine = recent.map(id => all.find(a => a.id === id)).filter(Boolean).slice(0, 5);
+            return [...mine.map((a, i) => [i ? null : "Recent", a]), ...[...all].sort((x, y) => x.name.localeCompare(y.name)).map((a, i) => [i ? null : "All programs", a])];
+          }
+          return all.map(a => [programRank(q, a.name, a.id, a.detail || ""), recent.indexOf(a.id) < 0 ? 1e9 : recent.indexOf(a.id), a])
+            .filter(x => x[0] !== null).sort((x, y) => x[0] - y[0] || x[1] - y[1] || x[2].name.localeCompare(y[2].name))
+            .map((x, i) => [i === 0 ? "Best match" : i === 1 ? "Programs" : null, x[2]]);
+        };
+        const paint = this.appsShown = () => {
+          list.textContent = "";
+          if (!this.apps) { list.append(h("p", { text: "Looking at what is installed there…" })); return; }
+          if (this.apps.error && !this.apps.list.length) { list.append(h("p", { class: "bad", text: this.apps.error })); return; }
+          rows = hits();
+          sel = Math.min(sel, Math.max(rows.length - 1, 0));
+          if (!rows.length) list.append(h("p", { text: this.apps.list.length ? "No program by that name: try Command to run it by its file." : "No programs were found there." }));
+          rows.forEach(([head, a], i) => {
+            if (head) list.append(h("div", { class: "launchhead", text: head }));
+            const r = row("window", a.name, i === 0 && find.value.trim() ? (a.detail || "Program") : "", () => open(0, a.id, a.name), a.detail);
+            if (i === sel) r.classList.add("on");
+            if (i === 0 && find.value.trim()) r.classList.add("best");
+            list.append(r);
+          });
+          list.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+        };
+        find.addEventListener("input", () => { sel = 0; paint(); });
+        find.addEventListener("keydown", e => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, Math.min(rows.length - 1, sel + (e.key === "ArrowDown" ? 1 : -1))); paint(); }
+          if (e.key === "Enter" && rows[sel]) open(0, rows[sel][1].id, rows[sel][1].name);
+        });
+        body.append(find, list);
+        paint();
+        if (!this.apps) this.send({ apps: 1 });
+        find.focus();
+      },
+      command: () => {
+        const line = h("input", { type: "text", placeholder: "A program, a folder, a file or an address", autocomplete: "off" });
+        const run = t => {
+          t = t.trim();
+          if (!t) return;
+          const quoted = /^"[^"]*"$/.test(t), p = quoted ? t.slice(1, -1) : t;
+          const fileLike = (quoted || !/\s/.test(p)) && (/^([\/~]|[A-Za-z]:[\\/])/.test(p) || p.includes("://"));
+          if (fileLike) open(2, p, nameOf(p)); else open(1, t, nameOf(t.split(/\s+/)[0]).replace(/\.exe$/i, ""));
+        };
+        line.addEventListener("keydown", e => { if (e.key === "Enter") run(line.value); });
+        const list = h("div", { class: "launchlist" });
+        if (commands.length) list.append(h("div", { class: "launchhead", text: "Run before" }));
+        for (const c of commands) list.append(row("terminal", c, "", () => run(c), "Run it again"));
+        body.append(h("div", { class: "launchline" }, line, h("button", { type: "button", class: "btn solid", text: "Run", onclick: () => run(line.value) })),
+          h("p", { class: "dim", text: "It opens in a window of its own, the program alone: \"notepad\", \"gedit notes.txt\", a folder, ~/report.pdf, https://…" }), list);
+        line.focus();
+      },
+      file: () => {
+        const path = h("input", { type: "text", placeholder: "A folder", autocomplete: "off" });
+        const list = h("div", { class: "launchlist" });
+        const foot = h("div", { class: "acts" });
+        let at = null, picked = null;
+        const parent = p => {
+          if (p === "::" || !p) return p;
+          const t = p.replace(/[\\/]+$/, "");
+          if (!t) return "/";
+          if (/^[A-Za-z]:$/.test(t)) return "::";
+          const i = Math.max(t.lastIndexOf("/"), t.lastIndexOf("\\"));
+          return i === 0 ? "/" : i === 2 && t[1] === ":" ? t.slice(0, 3) : i > 0 ? t.slice(0, i) : "::";
+        };
+        const join = (d, n) => d === "::" ? n : /[\\/]$/.test(d) ? d + n : d + (d.includes("\\") || d[1] === ":" ? "\\" : "/") + n;
+        const go = p => { this.pickDir = got; this.send({ list: p }); };
+        const got = d => {
+          at = d.path; picked = null;
+          path.value = at === "::" ? "" : at;
+          list.textContent = "";
+          if (d.error) list.append(h("p", { class: "bad", text: "It could not be read: " + d.error }));
+          const shown = (d.entries || []).filter(e => !e.name.startsWith("."));
+          if (!d.error && !shown.length) list.append(h("p", { text: "Nothing in this folder." }));
+          for (const e of shown) {
+            const r = row(at === "::" ? "server" : e.dir ? "folder" : "file", e.name, e.dir ? "" : size(e.size), () => {
+              if (e.dir) go(join(at, e.name));
+              else { picked = e.name; for (const x of list.children) x.classList.toggle("on", x === r); }
+            });
+            if (!e.dir) r.ondblclick = () => open(2, join(at, e.name), e.name);
+            list.append(r);
+          }
+          foot.textContent = "";
+          if (at !== "::") foot.append(h("button", { type: "button", class: "btn", text: "Open this folder", onclick: () => open(2, at, nameOf(at)) }));
+          foot.append(h("button", { type: "button", class: "btn solid", text: "Open", onclick: () => { if (picked) open(2, join(at, picked), picked); } }));
+        };
+        path.addEventListener("keydown", e => { if (e.key === "Enter" && path.value.trim()) go(path.value.trim()); });
+        body.append(h("div", { class: "launchline" },
+          button("up", "", { title: "The folder it is in", onclick: () => { if (at !== null && parent(at) !== at) go(parent(at)); } }),
+          button("home", "", { title: "The home folder", onclick: () => go("") }), path), list, foot);
+        list.append(h("p", { text: "Reading the folder…" }));
+        go("");
+      },
+    };
+    const show = m => {
+      this.appsShown = null; this.pickDir = null;
+      for (const b of tabs.children) b.classList.toggle("on", b.dataset.m === m);
+      body.textContent = "";
+      modes[m]();
+    };
+    for (const [m, label] of [["search", "Search"], ["command", "Command"], ["file", "File"]]) tabs.append(h("button", { type: "button", class: "btn", text: label, "data-m": m, onclick: () => show(m) }));
+    box.append(h("h2", { text: "Open one of its programs" }), tabs, body,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn", text: "Cancel", onclick: finish })));
     $("modal").hidden = false;
     addEventListener("keydown", keys, true);
-    find.focus();
+    show(mode);
   }
   // A window of its own for a program of the host's, reaching the host the same way.
   openProgram(kind, text, name) {
@@ -1543,7 +1647,7 @@ class Client {
       ["The window in front", () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
       ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
       ["One window or program…", () => this.send({ windows: 1 })],
-      ...(this.programs ? [null, ["Open one of its programs…", () => this.programPick()]] : []),
+      ...(this.programs ? [null, ["Search its programs…", () => this.programPick("search")], ["Run a command there…", () => this.programPick("command")], ["Open one of its files…", () => this.programPick("file")]] : []),
     ], at);
     const camera = m => m.name.startsWith("Camera: ");
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>

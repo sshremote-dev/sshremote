@@ -691,93 +691,42 @@ impl Remote {
 }
 
 impl Remote {
-    /// The menu that opens a program of the host's beside this pane: a search over what is
-    /// installed there, and a command line, a file or an address to open with its program.
+    /// The menu that opens a program of the host's beside this pane: by its name, a command line,
+    /// or a file picked from the host's folders.
     fn apps_menu(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
+        use crate::gui::launcher::{Ask, Programs, Prog};
         if !self.apps_asked {
             self.apps_asked = true;
             *action = Some(Box::new(|r, _| r.send(ToAgent::Apps)));
         }
-        let mut pick: Option<(u8, String, String)> = None;
-        ui.set_width(320.0);
+        // Opened again: its field takes the keyboard.
+        let pass = ui.ctx().cumulative_pass_nr();
+        if pass > self.launcher_seen + 2 {
+            let mode = self.launcher.mode;
+            self.launcher.start(mode);
+        }
+        self.launcher_seen = pass;
         ui.label(RichText::new("Open in a pane beside this one").strong());
-        let find = ui.add(egui::TextEdit::singleline(&mut self.apps_find).hint_text(format!("{}  Find a program", ic::SEARCH)).desired_width(f32::INFINITY));
-        if find.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            // Enter opens the first found.
-            if let Some(Ok(list)) = &self.apps {
-                let q = self.apps_find.to_lowercase();
-                if let Some((id, name, _)) = list.iter().find(|(_, n, d)| n.to_lowercase().contains(&q) || d.to_lowercase().contains(&q)) {
-                    pick = Some((crate::apps::APP, id.clone(), name.clone()));
-                }
+        let programs = match &self.apps {
+            None => Programs::Coming,
+            Some(Err(e)) => Programs::Failed(e),
+            Some(Ok(list)) => Programs::Listed(list.iter().map(|(id, name, detail)| Prog { id, name, detail }).collect()),
+        };
+        match self.launcher.ui(ui, programs, false) {
+            Some(Ask::Open(p)) => {
+                ui.close();
+                *action = Some(Box::new(move |r, _| {
+                    r.launch_asked = Some(p);
+                    Ok(())
+                }));
             }
-        }
-        // The list's room is the same from the start (a menu keeps the size it opened with, and
-        // the list comes a moment later) and while the search narrows it.
-        const SHOWN: usize = 12;
-        let gap = ui.spacing().item_spacing.y;
-        let row_h = ui.spacing().interact_size.y.max(24.0) + gap;
-        let more_h = ui.text_style_height(&egui::TextStyle::Small) + gap;
-        let mut list_ui = ui.new_child(egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)));
-        list_ui.set_min_height(SHOWN as f32 * row_h + more_h + 8.0);
-        let ui_outer = &mut *ui;
-        let ui = &mut list_ui;
-        match &self.apps {
-            None => {
-                ui.label(RichText::new("Looking at what is installed there\u{2026}").weak());
+            Some(Ask::List(path)) => {
+                *action = Some(Box::new(move |r, _| {
+                    r.launcher_dir = true;
+                    r.send(ToAgent::ListDir { path })
+                }));
             }
-            Some(Err(e)) => {
-                ui.label(RichText::new(e).weak());
-            }
-            Some(Ok(list)) => {
-                // The first few found; the search narrows the rest (the menu itself scrolls, so a
-                // list of its own inside would be squeezed).
-                let q = self.apps_find.to_lowercase();
-                let found: Vec<&(String, String, String)> = list.iter().filter(|(_, n, d)| q.is_empty() || n.to_lowercase().contains(&q) || d.to_lowercase().contains(&q)).collect();
-                if found.is_empty() {
-                    ui.label(RichText::new("Nothing installed there by that name").weak());
-                }
-                for (id, name, detail) in found.iter().take(SHOWN) {
-                    let r = ui.add(egui::Button::new(format!("{}  {name}", ic::APP_WINDOW)).frame(false).min_size(egui::Vec2::new(ui.available_width(), 24.0)));
-                    let r = if detail.is_empty() { r } else { r.on_hover_text(detail) };
-                    if r.clicked() {
-                        pick = Some((crate::apps::APP, id.clone(), name.clone()));
-                    }
-                }
-                if found.len() > SHOWN {
-                    ui.label(RichText::new(format!("{} more: type to find them", found.len() - SHOWN)).weak().small());
-                }
-            }
-        }
-        let used = list_ui.min_rect();
-        let ui = ui_outer;
-        ui.advance_cursor_after_rect(used);
-        ui.separator();
-        ui.label(RichText::new("Or a command line, a file or an address").weak());
-        let line = ui.add(egui::TextEdit::singleline(&mut self.apps_line).hint_text("gedit notes.txt, ~/report.pdf, https://\u{2026}").desired_width(f32::INFINITY));
-        let typed = self.apps_line.trim().to_string();
-        let file_like = looks_like_file(&typed);
-        let enter = line.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.horizontal(|ui| {
-            let ready = !typed.is_empty();
-            if ui.add_enabled(ready, egui::Button::new(format!("{}  Run", ic::TERMINAL))).on_hover_text("Run it there as a command line").clicked() || (enter && ready && !file_like) {
-                pick = Some((crate::apps::COMMAND, typed.clone(), crate::apps::program_of(&typed)));
-            }
-            if ui.add_enabled(ready, egui::Button::new(format!("{}  Open", ic::FOLDER_OPEN))).on_hover_text("Open the file or address there with its own program").clicked() || (enter && ready && file_like) {
-                let name = typed.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(&typed).to_string();
-                pick = Some((crate::apps::OPEN, typed.clone(), name));
-            }
-        });
-        if let Some(p) = pick {
-            ui.close();
-            *action = Some(Box::new(move |r, _| {
-                r.launch_asked = Some(p);
-                Ok(())
-            }));
+            None => {}
         }
     }
-}
-
-/// A file or an address rather than a command: a path from the root or home, a drive, or a scheme.
-fn looks_like_file(s: &str) -> bool {
-    s.starts_with('/') || s.starts_with('~') || s.contains("://") || s.get(1..3) == Some(":\\") || s.get(1..3) == Some(":/")
 }

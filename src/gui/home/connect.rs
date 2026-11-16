@@ -223,8 +223,17 @@ impl App {
         if what == Typed::Empty {
             self.projects(ui);
             self.tools(ui, go);
+        } else {
+            // Typing finds computers: the computers come back.
+            self.launcher_for = None;
         }
-        self.computer_list(ui, &what, &entries, picked, go);
+        // One part or the other in the same place: the computers, or the way of opening a program
+        // chosen under Tools.
+        if self.launcher_for.is_some() && crate::ext::programs_enabled() {
+            self.programs_part(ui, go);
+        } else {
+            self.computer_list(ui, &what, &entries, picked, go);
+        }
     }
 
     /// The lines of the list for what is typed: this computer, then the computers found.
@@ -478,14 +487,27 @@ impl App {
         kit::heading(ui, "Tools");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            // Three ways, each a button that puts its part in the computers' place (covering
+            // nothing): find it by name, run a command line, pick a file. Pressed again, the
+            // computers come back.
             if programs {
-                let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                let button = kit::secondary(format!("{}  Open a program\u{2026}", ic::APP_WINDOW)).min_size(Vec2::new(0.0, kit::CONTROL_H));
-                let (r, _) = egui::containers::menu::MenuButton::from_button(button).config(config).ui(ui, |ui| {
-                    crate::gui::menu_look(ui);
-                    self.programs_menu(ui, go);
-                });
-                r.on_hover_text("One of this computer's programs, found among those installed or named by a command line or a file, in a pane of its own (the Programs extension)");
+                for mode in crate::gui::launcher::Mode::ALL {
+                    let on = self.launcher_for == Some(mode);
+                    let button = kit::secondary(mode.button()).min_size(Vec2::new(0.0, kit::CONTROL_H)).selected(on);
+                    let tip = match mode {
+                        crate::gui::launcher::Mode::Search => "Find one of this computer's programs by its name, as the Start menu does, and open it in a pane of its own (the Programs extension)",
+                        crate::gui::launcher::Mode::Command => "Run a command line, or open a folder, a file or an address, in a pane of its own (the Programs extension)",
+                        crate::gui::launcher::Mode::File => "Pick a file or a folder of this computer's and open it with its program in a pane of its own (the Programs extension)",
+                    };
+                    if ui.add(button).on_hover_text(tip).clicked() {
+                        if on {
+                            self.launcher_for = None;
+                        } else {
+                            self.launcher.start(mode);
+                            self.launcher_for = Some(mode);
+                        }
+                    }
+                }
             }
             for (ext, t) in tools {
                 // What it opens: a site, or which program of this computer's.
@@ -520,60 +542,45 @@ impl App {
         ui.add_space(10.0);
     }
 
-    /// The menu that opens a program of this computer's in a pane: a search over what is
-    /// installed, and a command line, a file or an address to open with its program.
-    fn programs_menu(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
-        let mut pick: Option<(u8, String, String)> = None;
-        ui.set_width(320.0);
-        let find = ui.add(egui::TextEdit::singleline(&mut self.apps_find).hint_text(format!("{}  Find a program", ic::SEARCH)).desired_width(f32::INFINITY));
-        // The list's room is the same before it comes (a menu keeps the size it opened with).
-        let mut list_ui = ui.new_child(egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)));
-        list_ui.set_min_height(300.0);
-        match &self.apps {
-            None => {
-                list_ui.label(RichText::new("Looking at what is installed\u{2026}").weak());
-            }
-            Some(list) => {
-                let q = self.apps_find.to_lowercase();
-                let hits: Vec<&crate::apps::App> = list.iter().filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q) || a.detail.to_lowercase().contains(&q)).take(300).collect();
-                if find.lost_focus() && list_ui.input(|i| i.key_pressed(egui::Key::Enter)) && let Some(a) = hits.first() {
-                    pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
-                }
-                if hits.is_empty() {
-                    list_ui.label(RichText::new(if list.is_empty() { "No programs were found here" } else { "Nothing installed by that name" }).weak());
-                }
-                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(&mut list_ui, |ui| {
-                    for a in hits {
-                        let r = ui.add(egui::Button::new(format!("{}  {}", ic::APP_WINDOW, a.name)).frame(false).min_size(Vec2::new(ui.available_width(), 24.0)));
-                        let r = if a.detail.is_empty() { r } else { r.on_hover_text(&a.detail) };
-                        if r.clicked() {
-                            pick = Some((crate::apps::APP, a.id.clone(), a.name.clone()));
-                        }
-                    }
-                });
-            }
-        }
-        let used = list_ui.min_rect();
-        ui.advance_cursor_after_rect(used);
-        ui.separator();
-        ui.label(RichText::new("Or a command line, a file or an address").weak());
-        let line = ui.add(egui::TextEdit::singleline(&mut self.apps_line).hint_text("gedit notes.txt, ~/report.pdf, https://\u{2026}").desired_width(f32::INFINITY));
-        let typed = self.apps_line.trim().to_string();
-        let file_like = typed.starts_with('/') || typed.starts_with('~') || typed.contains("://") || typed.get(1..3) == Some(":\\") || typed.get(1..3) == Some(":/");
-        let enter = line.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    /// In the computers' place, as their part of the page (the same box, the same margins): the
+    /// way chosen under Tools to open a program, the Programs extension's own part. Back to the
+    /// computers with Close, Esc, or the way's button again.
+    fn programs_part(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         ui.horizontal(|ui| {
-            let ready = !typed.is_empty();
-            if ui.add_enabled(ready, egui::Button::new(format!("{}  Run", ic::TERMINAL))).on_hover_text("Run it as a command line").clicked() || (enter && ready && !file_like) {
-                pick = Some((crate::apps::COMMAND, typed.clone(), crate::apps::program_of(&typed)));
-            }
-            if ui.add_enabled(ready, egui::Button::new(format!("{}  Open", ic::FOLDER_OPEN))).on_hover_text("Open the file or address with its own program").clicked() || (enter && ready && file_like) {
-                let name = typed.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(&typed).to_string();
-                pick = Some((crate::apps::OPEN, typed.clone(), name));
-            }
+            kit::heading(ui, "Programs");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(kit::ghost(format!("{}  Close", ic::X))).on_hover_text("Back to the computers (Esc)").clicked() {
+                    self.launcher_for = None;
+                }
+            });
         });
-        if let Some((kind, text, name)) = pick {
-            ui.close();
-            *go = Some((String::new(), String::new(), How::App(kind, text, name)));
+        kit::list(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| self.launch_menu(ui, go));
+        });
+        // Esc goes back, as it closes a menu.
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            self.launcher_for = None;
+        }
+    }
+
+    /// What opens a program of this computer's in a pane: by its name, a command line, or a file
+    /// picked from its folders.
+    fn launch_menu(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
+        use crate::gui::launcher::{Ask, Programs, Prog};
+        let programs = match &self.apps {
+            None => Programs::Coming,
+            Some(list) => Programs::Listed(list.iter().map(|a| Prog { id: &a.id, name: &a.name, detail: &a.detail }).collect()),
+        };
+        match self.launcher.ui(ui, programs, true) {
+            Some(Ask::Open((kind, text, name))) => {
+                self.launcher_for = None;
+                *go = Some((String::new(), String::new(), How::App(kind, text, name)));
+            }
+            Some(Ask::List(path)) => {
+                let (path, entries, error) = crate::gui::launcher::list_here(&path);
+                self.launcher.set_folder(path, entries, error);
+            }
+            None => {}
         }
     }
 
@@ -616,19 +623,31 @@ impl App {
 
     /// The computers: a heading with a way to add one, then a row each.
     fn computer_list(&mut self, ui: &mut egui::Ui, what: &Typed, entries: &[Entry], picked: Option<usize>, go: &mut Option<Choice>) {
-        ui.horizontal(|ui| {
-            let count = entries.iter().filter(|e| matches!(e, Entry::Computer(_))).count();
-            kit::heading(ui, &format!("Computers  {count}"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(kit::ghost(format!("{}  Add a computer", ic::PLUS))).on_hover_text("By SSH or by its ID, with a name, a key, a password and tunnels").clicked() {
-                    self.sheet = Some(Sheet::new(what));
-                }
-                let busy = self.lan.coming.is_some();
-                if ui.add_enabled(!busy, kit::ghost(format!("{}  On this network", ic::SEARCH))).on_hover_text("Computers nearby with remote access on, found without typing their ID").clicked() {
-                    self.look_on_network(ui.ctx());
-                }
+        let count = entries.iter().filter(|e| matches!(e, Entry::Computer(_))).count();
+        let mut add = false;
+        let mut look = false;
+        let busy = self.lan.coming.is_some();
+        let buttons = |ui: &mut egui::Ui, add: &mut bool, look: &mut bool| {
+            *add |= ui.add(kit::ghost(format!("{}  Add a computer", ic::PLUS))).on_hover_text("By SSH or by its ID, with a name, a key, a password and tunnels").clicked();
+            *look |= ui.add_enabled(!busy, kit::ghost(format!("{}  On this network", ic::SEARCH))).on_hover_text("Computers nearby with remote access on, found without typing their ID").clicked();
+        };
+        // The heading with its buttons on the right; in a narrow window the buttons under it, not
+        // over it.
+        if ui.available_width() >= 470.0 {
+            ui.horizontal(|ui| {
+                kit::heading(ui, &format!("Computers  {count}"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| buttons(ui, &mut add, &mut look));
             });
-        });
+        } else {
+            kit::heading(ui, &format!("Computers  {count}"));
+            ui.horizontal(|ui| buttons(ui, &mut add, &mut look));
+        }
+        if add {
+            self.sheet = Some(Sheet::new(what));
+        }
+        if look {
+            self.look_on_network(ui.ctx());
+        }
         self.network_card(ui);
         self.tag_chips(ui);
         let searching = !matches!(what, Typed::Empty) || self.tag.is_some();
