@@ -232,13 +232,34 @@ impl Remote {
                     }
                 });
                 let mut scale = self.ctl.s.scale;
-                ui.add(egui::Slider::new(&mut scale, 20..=100).text("Resolution %"));
+                ui.add(egui::Slider::new(&mut scale, 20..=100).text("Picture size %"))
+                    .on_hover_text("A smaller picture than the screen is sent (less to send); the screen's own resolution stays as it is");
                 let mut fps = self.ctl.s.fps;
                 ui.add(egui::Slider::new(&mut fps, 1..=60).text("Frames per second"));
                 if (mode, scale, fps) != (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) {
                     *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
                 }
             });
+            // The screen's own resolution (its display mode), not the picture's size.
+            let (list, current, own) = &self.modes;
+            if !list.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Resolution of its screen").strong())
+                    .on_hover_text("The screen itself is set to it, as in its display settings; it is set back when you disconnect");
+                let name = |&(w, h): &(u16, u16)| if (w, h) == *own { format!("{w} \u{d7} {h}  (its own)") } else { format!("{w} \u{d7} {h}") };
+                egui::ScrollArea::vertical().id_salt("host-modes").max_height(170.0).show(ui, |ui| {
+                    for &m in list {
+                        if ui.selectable_label(m == *current, name(&m)).clicked() && m != *current {
+                            *action = Some(Box::new(move |r, _| r.send(ToAgent::SetMode { w: m.0, h: m.1 })));
+                            ui.close();
+                        }
+                    }
+                });
+                if current != own && ui.button(format!("Back to its own, {}", name(own).replace("  (its own)", ""))).clicked() {
+                    *action = Some(Box::new(|r, _| r.send(ToAgent::SetMode { w: 0, h: 0 })));
+                    ui.close();
+                }
+            }
             ui.separator();
             ui.label(RichText::new("View").strong());
             let mut pick = |ui: &mut egui::Ui, fit: Fit, text: &str| {

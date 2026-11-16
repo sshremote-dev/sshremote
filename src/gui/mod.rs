@@ -665,7 +665,7 @@ fn menu_open(ctx: &egui::Context) -> bool {
 
 /// A preset's real settings, e.g. "256 colours, 100%, 20 fps".
 fn preset_text(p: &crate::proto::Preset) -> String {
-    format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps)
+    format!("{}, {}% size, {} fps", p.mode.label(), p.scale, p.fps)
 }
 
 /// The cause of a failed connection in plain words, with what to try.

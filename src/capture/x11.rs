@@ -395,6 +395,33 @@ impl Capture for X11 {
         self.current
     }
 
+    fn screen_id(&self) -> Option<String> {
+        self.screens.get(self.current).map(|(m, ..)| m.name.clone())
+    }
+
+    fn screen_changed(&mut self) {
+        // The X screen's new size and its monitors' new places, the same monitor found by name,
+        // and memory shared with the server as large as the screen is now.
+        let name = self.screens.get(self.current).map(|(m, ..)| m.name.clone());
+        if let Some(g) = self.conn.get_geometry(self.root).ok().and_then(|c| c.reply().ok()) {
+            self.root_size = (g.width as usize, g.height as usize);
+        }
+        if let Ok(list) = self.read_monitors()
+            && !list.is_empty()
+        {
+            self.screens = list;
+        }
+        self.current = name.and_then(|n| self.screens.iter().position(|(m, ..)| m.name == n)).unwrap_or(0);
+        let need = self.root_size.0 * self.root_size.1 * 4;
+        if self.shm.as_ref().is_some_and(|s| s.size < need) {
+            if let Some(old) = self.shm.take() {
+                let _ = self.conn.shm_detach(old.seg);
+            }
+            self.shm = self.attach_shm(need).ok();
+        }
+        (self.dirty, self.clean) = (true, None);
+    }
+
     fn select(&mut self, index: usize) -> Result<(), String> {
         if index >= self.screens.len() {
             return Err("no such monitor".into());

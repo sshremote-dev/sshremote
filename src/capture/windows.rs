@@ -470,6 +470,15 @@ impl Capture for Gdi {
         self.current
     }
 
+    fn screen_id(&self) -> Option<String> {
+        self.screens.get(self.current).map(|s| s.info.name.clone())
+    }
+
+    fn screen_changed(&mut self) {
+        // Its new size is read now, not within the second the monitors are next looked at.
+        self.layout_at = None;
+    }
+
     fn select(&mut self, index: usize) -> Result<(), String> {
         self.screens = screens();
         let s = self.screens.get(index).ok_or("no such monitor")?;

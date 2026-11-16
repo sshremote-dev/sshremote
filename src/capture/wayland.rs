@@ -10,11 +10,19 @@ use super::gnome::{Pipe, pipeline, to_image};
 use super::portal::Portal;
 use super::{Capture, Image, Input, scale_nearest};
 
-pub struct Wayland {
+/// The portal's session and the stream it gives (the stream ends first).
+struct Live {
+    pipe: Pipe,
     portal: Portal,
+}
+
+pub struct Wayland {
+    /// Closed while the screen is set to another resolution (a portal may fail on a stream whose
+    /// size changes), then opened again.
+    live: Option<Live>,
+    controls: bool,
     /// Input of its own where the portal takes none (wlroots desktops).
     wl: Option<super::wlinput::WlInput>,
-    pipe: Pipe,
     desk: (usize, usize),
     target: (usize, usize),
     /// The newest picture, and whether it is to be given again (the first look, a new size): a
@@ -47,12 +55,12 @@ impl Wayland {
         // Keys through a virtual keyboard where the compositor offers one (it types any character;
         // COSMIC's portal may not pass keys on), the rest through the portal.
         let wl = super::wlinput::WlInput::open().ok().filter(|w| w.has_pointer() || portal.controls());
-        Ok(Wayland { portal, wl, pipe, desk: (img.w, img.h), target: (img.w, img.h), last: img, again: true })
+        Ok(Wayland { controls: portal.controls(), live: Some(Live { pipe, portal }), wl, desk: (img.w, img.h), target: (img.w, img.h), last: img, again: true })
     }
 
     /// Whether input reaches the desktop (it has the remote-desktop portal).
     pub fn controls(&self) -> bool {
-        self.portal.controls() || self.wl.is_some()
+        self.controls || self.wl.is_some()
     }
 }
 
@@ -71,8 +79,21 @@ impl Capture for Wayland {
         Ok(())
     }
 
+    fn screen_changing(&mut self) {
+        self.live = None;
+    }
+
+    fn screen_changed(&mut self) {
+        if self.live.is_none()
+            && let Ok(again) = Wayland::open()
+        {
+            *self = again;
+        }
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
-        match self.pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
+        let live = self.live.as_ref().ok_or("the screen sharing did not come back after its resolution changed")?;
+        match live.pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
             Some(sample) => {
                 self.last = to_image(&sample)?;
                 // The screen turned or its resolution changed: the viewer hears the new size.
@@ -80,7 +101,7 @@ impl Capture for Wayland {
             }
             None if std::mem::take(&mut self.again) => {}
             None => {
-                if !self.portal.alive() {
+                if !live.portal.alive() {
                     return Err("the screen sharing was stopped on that computer".into());
                 }
                 return Ok(None);
@@ -100,9 +121,9 @@ impl Capture for Wayland {
         if let Some(wl) = self.wl.as_mut().filter(|w| key || w.has_pointer()) {
             return wl.input(ev, self.desk);
         }
-        if !self.portal.controls() {
-            return Ok(());
+        match &self.live {
+            Some(live) if live.portal.controls() => live.portal.input(ev, self.desk),
+            _ => Ok(()),
         }
-        self.portal.input(ev, self.desk)
     }
 }

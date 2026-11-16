@@ -36,6 +36,8 @@ struct Server {
     view: View,
     clipboard: String,
     monitors: Vec<crate::proto::MonitorInfo>,
+    /// The shown screen's resolutions, the one it has and its own (`Modes`).
+    modes: crate::proto::ScreenModes,
     windows: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
     /// The host's installed programs, and what the last `launch` did.
     apps: Option<Result<Vec<(String, String, String)>, String>>,
@@ -113,6 +115,8 @@ fn all_tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "select_monitor", "description": "Show another monitor (index from monitors).",
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
+        {"name": "resolution", "description": "The shown screen's own resolution (its display mode, not the picture's size): without arguments, the ones it can be set to; with width and height, set it to one (0 and 0: back to the one it had). It is set back when the connection ends.",
+         "inputSchema": {"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}}},
         {"name": "windows", "description": "List the remote windows that can be shared on their own (id, program, title, size).",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "apps", "description": "List the programs installed on the remote computer (id, name, about), optionally only those whose name has `search`, to start one with launch.",
@@ -312,6 +316,7 @@ impl Server {
                 Ev::Net(ToClient::Snapshot(png)) => return Ok(Some(png)),
                 Ev::Net(ToClient::Clipboard(t)) => self.clipboard = t,
                 Ev::Net(ToClient::Monitors { list, .. }) => self.monitors = list,
+                Ev::Net(ToClient::Modes { list, current, own }) => self.modes = (list, current, own),
                 Ev::Net(ToClient::WindowList { list, error }) => {
                     self.windows = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                 }
@@ -487,6 +492,23 @@ impl Server {
                     .collect();
                 Ok(text_result(if list.is_empty() { "one screen".to_string() } else { list.join("\n") }))
             }
+            "resolution" => {
+                let num = |k: &str| args.get(k).and_then(Value::as_u64).map(|v| v.min(u16::MAX as u64) as u16);
+                if let (Some(w), Some(h)) = (num("width"), num("height")) {
+                    // Why it was not set comes as a notice, which ends the wait as an error.
+                    self.send(ToAgent::SetMode { w, h })?;
+                    self.drain(Some(Instant::now() + Duration::from_millis(2500)))?;
+                    self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
+                } else {
+                    self.drain(None)?;
+                }
+                let (list, current, own) = &self.modes;
+                if list.is_empty() {
+                    return Ok(text_result("the resolution of this screen cannot be set from here".to_string()));
+                }
+                let all: Vec<String> = list.iter().map(|&(w, h)| format!("{w}x{h}{}", if (w, h) == *own { " (its own)" } else { "" })).collect();
+                Ok(text_result(format!("now {}x{}; it can be set to: {}", current.0, current.1, all.join(", "))))
+            }
             "select_monitor" => {
                 let i = args.get("index").and_then(Value::as_u64).ok_or("missing index")?;
                 self.send(ToAgent::SelectMonitor(i as u8))?;
@@ -657,6 +679,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         view: View { ox: 0.0, oy: 0.0, scale: 1.0 },
         clipboard: String::new(),
         monitors: Vec::new(),
+        modes: (Vec::new(), (0, 0), (0, 0)),
         windows: None,
         apps: None,
         launched: None,

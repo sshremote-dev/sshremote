@@ -18,6 +18,9 @@ pub struct Settings {
     pub formats: u8,
 }
 
+/// What `Modes` tells: the resolutions the shown screen can be set to, the one it has, its own.
+pub type ScreenModes = (Vec<(u16, u16)>, (u16, u16), (u16, u16));
+
 /// True colour frames whose text and drawings index a palette kept for the session (`color::Palette`).
 pub const FORMAT_PALETTE: u8 = 1;
 /// Every form this program reads.
@@ -214,6 +217,11 @@ pub enum ToAgent {
     Launch {
         kind: u8,
         text: String,
+    },
+    /// Sets the shown screen's resolution to one of `Modes`, or (0x0) back to its own.
+    SetMode {
+        w: u16,
+        h: u16,
     },
 }
 
@@ -431,6 +439,13 @@ pub enum ToClient {
     Launched {
         ok: bool,
         text: String,
+    },
+    /// The resolutions the shown screen can be set to (largest first), the one it has, and its
+    /// own (as it was before a viewer set another); no list where it cannot be set from here.
+    Modes {
+        list: Vec<(u16, u16)>,
+        current: (u16, u16),
+        own: (u16, u16),
     },
     /// The window in front: its title, the other windows (id, title), its elements, how many more
     /// there were, and any problem.
@@ -742,6 +757,11 @@ impl ToAgent {
                 b.extend_from_slice(text.as_bytes());
                 48
             }
+            ToAgent::SetMode { w, h } => {
+                b.extend_from_slice(&w.to_le_bytes());
+                b.extend_from_slice(&h.to_le_bytes());
+                49
+            }
             ToAgent::Host { act, on } => {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
@@ -810,6 +830,7 @@ impl ToAgent {
             11 => ToAgent::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
             47 => ToAgent::Apps,
             48 => ToAgent::Launch { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            49 => ToAgent::SetMode { w: c.u16()?, h: c.u16()? },
             45 => ToAgent::ClipImage(c.rest().to_vec()),
             46 => ToAgent::Density(c.u16()?),
             12 => ToAgent::SecureAttention,
@@ -1062,6 +1083,13 @@ impl ToClient {
                 b.extend_from_slice(text.as_bytes());
                 137
             }
+            ToClient::Modes { list, current, own } => {
+                for (w, h) in [current, own].into_iter().chain(list) {
+                    b.extend_from_slice(&w.to_le_bytes());
+                    b.extend_from_slice(&h.to_le_bytes());
+                }
+                138
+            }
             ToClient::UiTree { title, windows, elems, more, note } => {
                 put_str(&mut b, title);
                 put_str(&mut b, note);
@@ -1272,6 +1300,15 @@ impl ToClient {
                 ToClient::AppList { list, error }
             }
             137 => ToClient::Launched { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
+            138 => {
+                let current = (c.u16()?, c.u16()?);
+                let own = (c.u16()?, c.u16()?);
+                let mut list = Vec::new();
+                while c.p < c.d.len() {
+                    list.push((c.u16()?, c.u16()?));
+                }
+                ToClient::Modes { list, current, own }
+            }
             123 => {
                 let (title, note, more) = (c.str()?, c.str()?, c.u32()?);
                 let n = c.u32()? as usize;
@@ -1391,6 +1428,7 @@ mod tests {
             ToAgent::UiAct { target: 3, act: UiAction::SetText, text: "hello".into() },
             ToAgent::Apps,
             ToAgent::Launch { kind: 1, text: "gnome-calculator".into() },
+            ToAgent::SetMode { w: 1280, h: 720 },
             ToAgent::Host { act: 4, on: true },
             ToAgent::Call(true),
             ToAgent::Voice(vec![7, 8]),
@@ -1455,6 +1493,8 @@ mod tests {
                 list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
                 current: 0,
             },
+            ToClient::Modes { list: vec![(2560, 1440), (1920, 1080)], current: (1920, 1080), own: (2560, 1440) },
+            ToClient::Modes { list: vec![], current: (800, 600), own: (800, 600) },
         ] {
             let (k, p) = m.encode();
             assert_eq!(ToClient::decode(k, &p).unwrap(), m);

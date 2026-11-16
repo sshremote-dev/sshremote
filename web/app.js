@@ -877,6 +877,7 @@ class Client {
     if (v.launched) toast(v.launched.text, { bad: !v.launched.ok });
     if (v.sharing) { this.sharing = v.sharing; toast("Sharing " + v.sharing.text + "."); this.screenTools(); }
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
+    if (v.modes) this.modes = v.modes;
     if (v.qualities) {
       this.qualities = v.qualities;
       // The quality chosen last time, asked for again.
@@ -1297,7 +1298,7 @@ class Client {
     store.set("picture", v);
     this.send(v);
   }
-  // Colours, resolution and frame rate of one's own: from black and white at a tenth of the
+  // Colours, picture size and frame rate of one's own: from black and white at a tenth of the
   // size and one picture a second, the least traffic, to full colour at full size and 60.
   customQuality() {
     const Q = this.quality || { mode: "true", scale: 100, fps: 30 };
@@ -1311,7 +1312,8 @@ class Client {
       r.oninput = () => { out.textContent = r.value + unit; };
       return [h("label", { class: "range" }, h("span", { text: label }), r, out), r];
     };
-    const [scaleRow, scale] = slider("Resolution", 10, 100, 5, Q.scale || 100, "%");
+    // The picture sent, not the screen: its resolution is set in the quality menu.
+    const [scaleRow, scale] = slider("Picture size", 10, 100, 5, Q.scale || 100, "%");
     const [fpsRow, fps] = slider("Frame rate", 1, 60, 1, Q.fps || 30, " fps");
     const finish = ok => {
       $("modal").hidden = true;
@@ -1626,11 +1628,17 @@ class Client {
       ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
       ["Copy the host's picture here", () => this.copyHostImage(), { disabled: !this.hostImage }],
     ], at);
+    // The screen's own resolution (its display mode), set back when this connection ends.
+    const modesMenu = at => { const M = this.modes, same = (a, b) => a[0] === b[0] && a[1] === b[1]; menu(["Resolution of its screen",
+      ...M.list.map(m => [m.join("×") + (same(m, M.own) ? " (its own)" : ""), () => this.send({ mode: m }), { on: same(m, M.current) }]),
+      ...(same(M.current, M.own) ? [] : [null, ["Back to its own, " + M.own.join("×"), () => this.send({ mode: [0, 0] })]]),
+    ], at); };
     // Read when opened: the quality changes after the bar is made (auto, the host's answer).
     const qualityMenu = at => { const Q = this.quality || {}; menu(["Picture quality",
       ["Auto (adapts to the connection)", () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
       ...(this.qualities || []).map((p, i) => [p.text, () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
-      ["Custom: colours, resolution, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
+      ["Custom: colours, picture size, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
+      ...(this.modes?.list.length ? [null, ["Resolution of its screen: " + this.modes.current.join("×") + "…", () => modesMenu(at)]] : []),
       null,
       "View",
       ["Fit to the window", () => this.setFit("fit"), { on: this.viewFit === "fit" }],

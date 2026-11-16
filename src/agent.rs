@@ -243,9 +243,14 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         cap = Box::new(capture::camera::WithCameras::new(cap, cams));
     }
     let mut held = Held::default();
-    let result = serve_with(enc, input, &mut cap, &mut held, chat, allowed);
+    // The resolutions this session sets, set back as they were when it ends.
+    let mut screens = crate::display::Session::new(cap.name());
+    let result = serve_with(enc, input, &mut cap, &mut held, &mut screens, chat, allowed);
     // What the viewer still held down at the host is let go, however the session ended.
     held.release(cap.as_mut());
+    // The picture stops before the screens are set back (a stream may not take the change).
+    drop(cap);
+    drop(screens);
     result
 }
 
@@ -289,6 +294,7 @@ fn serve_with(
     input: Box<dyn Read + Send>,
     cap: &mut Box<dyn capture::Capture>,
     held: &mut Held,
+    screens: &mut crate::display::Session,
     mut chat: crate::chat::Window,
     mut allowed: u8,
 ) -> Result<(), String> {
@@ -296,6 +302,7 @@ fn serve_with(
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
+    send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
     if cap.name() == "none"
         && let Err(why) = cap.windows()
     {
@@ -706,7 +713,25 @@ fn serve_with(
                     {
                         send(enc, &ToClient::Sharing { kind: 0, text }).map_err(io_err)?;
                     }
+                    send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
                     resized!();
+                }
+                ToAgent::SetMode { w, h } => {
+                    let id = if cap.name() == "camera" { None } else { screens.screen(cap.screen_id()) };
+                    let done = match id {
+                        Some(id) => {
+                            cap.screen_changing();
+                            let done = screens.set(&id, w, h);
+                            // The capture finds the screen at its new size; the viewer then hears it.
+                            cap.screen_changed();
+                            done
+                        }
+                        None => Err("The resolution of that screen cannot be set from here.".to_string()),
+                    };
+                    if let Err(e) = done {
+                        send(enc, &ToClient::Notice(e)).map_err(io_err)?;
+                    }
+                    send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
                 }
                 ToAgent::ListWindows => {
                     let m = match cap.windows() {
@@ -1121,6 +1146,16 @@ fn paste(pending: &mut String, clip: &mut crate::clip::Clip, cap: &mut dyn captu
     }
     // Applications fetch pasted text asynchronously; let it land before the next keys.
     thread::sleep(Duration::from_millis(150));
+}
+
+/// The shown screen's resolutions, for the viewer to set it to one (none where it cannot).
+fn modes(cap: &dyn capture::Capture, screens: &crate::display::Session) -> ToClient {
+    let id = if cap.name() == "camera" { None } else { screens.screen(cap.screen_id()) };
+    match id.and_then(|id| screens.modes(&id)) {
+        // One resolution only (a virtual screen): nothing to choose.
+        Some((m, own)) if m.list.len() > 1 => ToClient::Modes { list: m.list, current: m.current, own },
+        _ => ToClient::Modes { list: Vec::new(), current: (0, 0), own: (0, 0) },
+    }
 }
 
 fn monitors(cap: &dyn capture::Capture) -> ToClient {

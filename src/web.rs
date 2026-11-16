@@ -681,6 +681,10 @@ fn ask(frame: Frame) -> Option<Ask> {
     if let Some(m) = n("monitor") {
         return Some(Ask::Agent(ToAgent::SelectMonitor(m.min(255) as u8)));
     }
+    // The screen's resolution: {"mode": [w, h]}, [0, 0] for its own.
+    if let Some([w, h]) = v.get("mode").and_then(|m| m.as_array()).and_then(|a| <[_; 2]>::try_from(a.iter().map(|x| x.as_u64().unwrap_or(0).min(u16::MAX as u64) as u16).collect::<Vec<_>>()).ok()) {
+        return Some(Ask::Agent(ToAgent::SetMode { w, h }));
+    }
     if v.get("refresh").is_some() {
         return Some(Ask::Agent(ToAgent::Refresh));
     }
@@ -919,7 +923,7 @@ fn quality_state(ctl: &crate::session::Control) -> serde_json::Value {
 fn quality_list() -> serde_json::Value {
     crate::proto::PRESETS
         .iter()
-        .map(|p| serde_json::json!({ "name": p.name, "text": format!("{}, {}%, {} fps", p.mode.label(), p.scale, p.fps) }))
+        .map(|p| serde_json::json!({ "name": p.name, "text": format!("{}, {}% size, {} fps", p.mode.label(), p.scale, p.fps) }))
         .collect()
 }
 
@@ -1165,6 +1169,11 @@ fn client(
                 ToClient::Monitors { list, current } => {
                     let list: Vec<_> = list.iter().map(|m| serde_json::json!({ "name": m.name, "w": m.w, "h": m.h, "primary": m.primary })).collect();
                     let _ = send_json(&w, serde_json::json!({ "monitors": { "list": list, "current": current } }));
+                }
+                ToClient::Modes { list, current, own } => {
+                    let pair = |(a, b): (u16, u16)| [a, b];
+                    let list: Vec<_> = list.iter().map(|m| pair(*m)).collect();
+                    let _ = send_json(&w, serde_json::json!({ "modes": { "list": list, "current": pair(current), "own": pair(own) } }));
                 }
                 ToClient::Notice(t) => {
                     let _ = send_json(&w, serde_json::json!({ "notice": t }));

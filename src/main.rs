@@ -15,6 +15,8 @@ mod capture;
 #[cfg(feature = "remote")]
 mod chat;
 #[cfg(feature = "remote")]
+mod display;
+#[cfg(feature = "remote")]
 mod client;
 #[cfg(feature = "remote")]
 mod clip;

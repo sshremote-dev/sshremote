@@ -803,6 +803,21 @@ impl Capture for Gnome {
         self.current
     }
 
+    fn screen_id(&self) -> Option<String> {
+        self.monitors.get(self.current).map(|m| m.0.clone())
+    }
+
+    fn screen_changed(&mut self) {
+        // The monitor recorded again at its new size (a window shared is recorded as it was).
+        if self.src == Src::Monitor
+            && let Ok(again) = Gnome::open_on(Some(self.current), Src::Monitor)
+        {
+            *self = again;
+        } else {
+            self.monitors = monitors(&self.conn);
+        }
+    }
+
     fn select(&mut self, index: usize) -> Result<(), String> {
         if index >= self.monitors.len() {
             return Err("no such monitor".into());

@@ -172,6 +172,15 @@ impl Capture for WithCameras {
     fn shared_window(&self) -> Option<u64> {
         if self.cam.is_some() { None } else { self.screen.shared_window() }
     }
+    fn screen_id(&self) -> Option<String> {
+        if self.cam.is_some() { None } else { self.screen.screen_id() }
+    }
+    fn screen_changing(&mut self) {
+        self.screen.screen_changing()
+    }
+    fn screen_changed(&mut self) {
+        self.screen.screen_changed()
+    }
     fn shared_app(&self) -> Option<String> {
         if self.cam.is_some() { None } else { self.screen.shared_app() }
     }

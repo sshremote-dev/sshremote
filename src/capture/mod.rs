@@ -94,6 +94,15 @@ pub trait Capture {
     fn select(&mut self, _index: usize) -> Result<(), String> {
         Err("this capture backend has one screen".into())
     }
+    /// The system's name for the monitor shown (`DISPLAY1`, an output such as `DP-1`), by which
+    /// its resolution is set (`display`); None where the backend cannot tell.
+    fn screen_id(&self) -> Option<String> {
+        None
+    }
+    /// The monitor shown is about to get another resolution (`screen_changed` follows).
+    fn screen_changing(&mut self) {}
+    /// The monitor shown was given another resolution (or was not after all): it is looked at again.
+    fn screen_changed(&mut self) {}
     fn desktop_size(&self) -> (usize, usize);
     /// Whether the screen takes the size it is shown at (a web page, laid out again), rather
     /// than being scaled to it.
