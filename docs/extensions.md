@@ -27,7 +27,7 @@ an app that must stay safe on machines that hold SSH keys:
 | Host extension | `programs`, `"activation": "startup"`, `contributes.commands` | Runs beside the app for as long as it is open: status bar items, panels, commands, terminals, events |
 | Tools (API 3) | `contributes.panes` | Web apps listed under Tools on the home and in Quick open (`+`); each opens in a pane of its own as a page of Chrome, Edge or Chromium run with no window, its sign-ins kept in a profile of its own per site |
 | Programs (API 4) | `contributes.panes` with `app`, `command` or `open` | Tools that each open one of this computer's programs (by name, a command line or a file) in a pane of its own |
-| Menus of the app (API 4) | `contributes.programs`, `contributes.sites` | What the app shows only with such an extension installed: `programs` (with the `programs` permission) the menus that open programs three ways, Search, Command and File (Home and Quick open, a screen's menu, the web page where its gateway has it, the MCP server's `apps` and `launch`); `sites` any typed `https://` address opening in a pane |
+| Menus of the app (API 4) | `contributes.programs`, `contributes.sites` | What the app shows only with such an extension installed: `programs` (with the `programs` permission) the Tools that open programs three ways, Search, Command and File (Home and Quick open only), and the MCP server's `apps` and `launch`; `sites` any typed `https://` address opening in a pane |
 
 Each of these comes with an extension, not with the app: with none installed there are no Tools,
 no menus that open programs and no web pages in panes. The Programs extension declares
@@ -70,9 +70,8 @@ The program starts on this computer's desktop, as the person using it; on Window
 sessions, and under Wayland on GNOME (its sshremote helper), KDE Plasma (KWin scripts), Sway and
 Hyprland (their IPC) its own window is then held in the pane, elsewhere its pane shows its windows alone (with
 their menus and dialogs) and takes clicks and keys for it, as sharing one program does. The
-Programs extension itself brings no such tools: it brings the menus that open any program, by
-Search, Command or File, on this computer and, from a screen's menu, on a computer reached by SSH or
-by its ID; the web page offers them too.
+Programs extension itself brings no such tools: it brings the Tools that open any program of this
+computer's, by Search, Command or File, in the new-open view (Home and Quick open) only.
 
 ## The manifest
 

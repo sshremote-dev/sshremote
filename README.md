@@ -38,10 +38,8 @@ through the sshremote helper extension (GNOME loads a new version at the next lo
 Plasma through KWin scripts, and on Sway and Hyprland through their IPC (the program opens on a
 workspace out of sight, then floats over its pane without a border). On other Wayland desktops
 (COSMIC) and tiling window managers the pane shows it as it would another computer's, or leaves it a
-window of its own. A screen's menu opens that computer's programs beside it,
-and the web page offers it where its gateway has the extension. Programs are shown alone on Windows,
-GNOME (with its helper) and X11 desktops; elsewhere the pane shows the screen. Without the extension
-none of these menus are there.
+window of its own. Programs are opened there only, in the new-open view (Home and Quick open): a
+screen's toolbar and the web page offer none. Without the extension the Tools are not there.
 
 ## Build
 
