@@ -25,14 +25,24 @@ pub fn list() -> Vec<App> {
 
 /// Starts `text` as `kind` says; the name to look for its window by (empty when unknown).
 pub fn launch(kind: u8, text: &str) -> Result<String, String> {
+    launch_as(kind, text, false)
+}
+
+/// As `launch`, the program asked to start minimized where a program can be (Windows): one held in
+/// a pane is put there before it is seen, not first shown where it puts itself.
+pub fn launch_minimized(kind: u8, text: &str) -> Result<String, String> {
+    launch_as(kind, text, true)
+}
+
+fn launch_as(kind: u8, text: &str, min: bool) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("nothing to start".into());
     }
     match kind {
-        APP => imp::start_app(text),
-        COMMAND => imp::run(text).map(|_| program_of(text)),
-        OPEN => imp::open(text).map(|_| String::new()),
+        APP => imp::start_app(text, min),
+        COMMAND => imp::run(text, min).map(|_| program_of(text)),
+        OPEN => imp::open(text, min).map(|_| String::new()),
         _ => Err("unknown way to start a program".into()),
     }
 }
@@ -169,7 +179,7 @@ mod imp {
         out.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    pub fn start_app(id: &str) -> Result<String, String> {
+    pub fn start_app(id: &str, _min: bool) -> Result<String, String> {
         let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| format!("{id} is not installed here"))?;
         let e = entry(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?);
         let name = e.get("Name").cloned().unwrap_or_default();
@@ -187,13 +197,13 @@ mod imp {
         Ok(name)
     }
 
-    pub fn run(command: &str) -> Result<(), String> {
+    pub fn run(command: &str, _min: bool) -> Result<(), String> {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", command]);
         detached(cmd)
     }
 
-    pub fn open(what: &str) -> Result<(), String> {
+    pub fn open(what: &str, _min: bool) -> Result<(), String> {
         let what = match what.strip_prefix("~/") {
             Some(rest) => std::env::var("HOME").map(|h| format!("{h}/{rest}")).unwrap_or_else(|_| what.to_string()),
             None => what.to_string(),
@@ -316,7 +326,8 @@ mod imp {
 
     /// `cmd /c start "" LINE`, hidden, as the person at the screen: the shell opens a shortcut,
     /// a document or an address with its program, and a command in a window of its own.
-    fn start(line: &str) -> Result<(), String> {
+    fn start(line: &str, min: bool) -> Result<(), String> {
+        let line = if min { format!("/min {line}") } else { line.to_string() };
         let command = format!("cmd.exe /d /c start \"\" {line}");
         match crate::console_user::acting() {
             crate::console_user::Acting::User(u) => crate::console_user::spawn_piped(&u, &command).map(drop),
@@ -341,28 +352,28 @@ mod imp {
         format!("\"{}\"", s.replace('"', ""))
     }
 
-    pub fn start_app(id: &str) -> Result<String, String> {
+    pub fn start_app(id: &str, min: bool) -> Result<String, String> {
         // What the Start menu lists (Get-StartApps), started as Explorer starts it.
         if id.starts_with("shell:AppsFolder\\") {
             let name = start_apps().into_iter().find(|a| a.id == id).map(|a| a.name).ok_or_else(|| format!("{id} is not in the Start menu"))?;
-            start(&quoted(id))?;
+            start(&quoted(id), min)?;
             return Ok(name);
         }
         // Only a shortcut the list gave: a viewer cannot name any file this way.
         let (_, p) = shortcuts().into_iter().find(|(_, p)| p.display().to_string() == id).ok_or_else(|| format!("{id} is not in the Start menu"))?;
-        start(&quoted(&p.display().to_string()))?;
+        start(&quoted(&p.display().to_string()), min)?;
         Ok(p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
     }
 
-    pub fn run(command: &str) -> Result<(), String> {
-        start(command)
+    pub fn run(command: &str, min: bool) -> Result<(), String> {
+        start(command, min)
     }
 
-    pub fn open(what: &str) -> Result<(), String> {
+    pub fn open(what: &str, min: bool) -> Result<(), String> {
         if !what.contains("://") && !Path::new(what).exists() {
             return Err(format!("{what} is not there"));
         }
-        start(&quoted(what))
+        start(&quoted(what), min)
     }
 }
 
@@ -372,13 +383,13 @@ mod imp {
     pub fn list() -> Vec<App> {
         Vec::new()
     }
-    pub fn start_app(_: &str) -> Result<String, String> {
+    pub fn start_app(_: &str, _: bool) -> Result<String, String> {
         Err("programs are not started here on this system".into())
     }
-    pub fn run(_: &str) -> Result<(), String> {
+    pub fn run(_: &str, _: bool) -> Result<(), String> {
         Err("programs are not started here on this system".into())
     }
-    pub fn open(_: &str) -> Result<(), String> {
+    pub fn open(_: &str, _: bool) -> Result<(), String> {
         Err("programs are not started here on this system".into())
     }
 }

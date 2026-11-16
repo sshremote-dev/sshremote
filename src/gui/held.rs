@@ -1,24 +1,52 @@
-//! A program of this computer in a pane: on Windows its own window, held over the pane (sized
-//! and moved with it, above this window and hidden with it), so it is used as it is, not through
-//! a picture of it. Elsewhere a program here is shown as one of another computer is.
+//! A program of this computer in a pane: its own window, held over the pane (sized and moved
+//! with it, above this window and hidden with it), so it is used as it is, not through a picture of
+//! it. On Windows and in X11 sessions; elsewhere (Wayland lets no program place another's windows)
+//! a program here is shown as one of another computer is.
 
-#[cfg(all(windows, feature = "remote"))]
+use eframe::egui::{self, Order, Rect};
+
+#[cfg(all(feature = "remote", any(windows, target_os = "linux")))]
 pub(super) use imp::Held;
-#[cfg(all(windows, feature = "remote"))]
+#[cfg(all(feature = "remote", any(windows, target_os = "linux")))]
 pub(crate) use imp::bring_back;
 
-/// Whether this computer's programs are held in their panes (else a pane shows a picture of them).
-pub(super) const HERE: bool = cfg!(all(windows, feature = "remote"));
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod x11;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+use x11 as imp;
 
-#[cfg(not(all(windows, feature = "remote")))]
+/// Whether this computer's programs are held in their panes (else a pane shows a picture of them).
+pub(super) fn here() -> bool {
+    #[cfg(all(windows, feature = "remote"))]
+    return true;
+    #[cfg(all(target_os = "linux", feature = "remote"))]
+    return x11::here();
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Whether a menu, a dialog or a window of this one's is over the pane: the program is kept out of
+/// their way (a window held over this one would cover them).
+#[allow(dead_code)]
+fn covered(ctx: &egui::Context, rect: Rect) -> bool {
+    ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| matches!(l.order, Order::Middle | Order::Foreground))
+            .any(|l| m.area_rect(l.id).is_some_and(|r| r.intersects(rect)))
+    })
+}
+
+#[cfg(not(all(feature = "remote", any(windows, target_os = "linux"))))]
 pub(super) struct Held(std::convert::Infallible);
 
-#[cfg(not(all(windows, feature = "remote")))]
+#[cfg(not(all(feature = "remote", any(windows, target_os = "linux"))))]
 impl Held {
     pub(super) fn start(_: u8, _: &str) -> Held {
-        unreachable!("programs are held in panes only on Windows")
+        unreachable!("programs are held in panes only on Windows and in X11 sessions")
     }
-    pub(super) fn show(&mut self, _: &mut eframe::egui::Ui, _: eframe::egui::Rect) {
+    pub(super) fn show(&mut self, _: &mut egui::Ui, _: Rect) {
         match self.0 {}
     }
     pub(super) fn hide(&mut self) {
@@ -36,15 +64,15 @@ impl Held {
 mod imp {
     use std::time::{Duration, Instant};
 
-    use eframe::egui::{self, Align2, FontId, Order, Rect};
+    use eframe::egui::{self, Align2, FontId, Rect};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
-    use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED, DwmGetWindowAttribute, DwmSetWindowAttribute};
     use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GW_HWNDPREV, GW_OWNER, GWLP_HWNDPARENT, GetClientRect, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, SWP_NOMOVE, SWP_NOSIZE,
+        GetWindowThreadProcessId, IsIconic, SWP_NOMOVE, SWP_NOSIZE, GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, WS_EX_LAYERED,
         IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
-        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, WM_CLOSE,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, WM_CLOSE,
     };
 
     use crate::capture::winlist;
@@ -58,15 +86,269 @@ mod imp {
         list.extend(add);
     }
 
-    /// A crash: the windows held out of sight are shown, not left hidden with nothing to bring them
-    /// back.
+    /// A crash: the windows held out of sight are shown, not left hidden (or see-through) with
+    /// nothing to bring them back.
     pub(crate) fn bring_back() {
         let list = HELD.lock().unwrap_or_else(|e| e.into_inner());
         for h in list.iter() {
+            let h = *h as HWND;
             unsafe {
-                SetWindowLongPtrW(*h as HWND, GWLP_HWNDPARENT, 0);
-                ShowWindowAsync(*h as HWND, SW_SHOWNOACTIVATE);
+                SetWindowLongPtrW(h, GWLP_HWNDPARENT, 0);
+                SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+                ShowWindowAsync(h, SW_SHOWNOACTIVATE);
             }
+        }
+    }
+
+    /// Made see-through until it is on its pane: its style before, to put back (None: it is
+    /// see-through of its own, and is left so). Its opening animation is left on: a window that
+    /// shows before it takes the change fades in rather than shows at once.
+    fn hush(h: HWND) -> Option<isize> {
+        unsafe {
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            if ex & WS_EX_LAYERED as isize != 0 {
+                return None;
+            }
+            // Its program is sent the change and takes it when it next looks at its messages: a
+            // thread of its own waits for that, not this window's.
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+            if SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA) == 0 {
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+                return None;
+            }
+            Some(ex)
+        }
+    }
+
+    /// Seen again, as it was.
+    fn unhush(h: HWND, ex: isize) {
+        unsafe {
+            SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+        }
+    }
+
+    /// Off this window's thread: the program may be slow to take the change.
+    fn later(f: impl FnOnce() + Send + 'static) {
+        let _ = std::thread::Builder::new().name("held-window".into()).spawn(f);
+    }
+
+    /// Windows opened for panes are caught as they are made, by a thread that hears of every new
+    /// window (a WinEvent hook): made see-through and put on their pane before they first show,
+    /// then shown once there. Looked for every so often instead, a window would show where its
+    /// program puts it and then jump into the pane.
+    mod catch {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, GA_PARENT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT,
+            GetAncestor, GetClassNameW, GetDesktopWindow, GetMessageW, GetWindow, GetWindowLongW, GetWindowRect, IsWindowVisible, MSG, OBJID_WINDOW, SWP_NOACTIVATE,
+            SWP_NOOWNERZORDER, SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_TIMER, WS_CAPTION, WS_CHILD,
+            WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+
+        /// A window caught: its handle, and its style before it was made see-through.
+        #[derive(Clone, Copy)]
+        pub(super) struct Caught {
+            pub hwnd: isize,
+            pub style: Option<isize>,
+            /// Being made see-through and put on its pane (by a thread of its own): not yet.
+            pub ready: bool,
+        }
+
+        struct Wait {
+            key: u64,
+            before: Vec<isize>,
+            to: Option<RECT>,
+            owner: isize,
+            caught: Option<Caught>,
+            since: Instant,
+        }
+
+        struct Watch {
+            waits: Vec<Wait>,
+            running: bool,
+            next: u64,
+        }
+
+        static WATCH: Mutex<Watch> = Mutex::new(Watch { waits: Vec::new(), running: false, next: 1 });
+
+        fn watch() -> std::sync::MutexGuard<'static, Watch> {
+            WATCH.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// Starts looking out for a new window (not one of `before`), before its program starts.
+        pub(super) fn wait(before: Vec<isize>) -> u64 {
+            let mut w = watch();
+            let key = w.next;
+            w.next += 1;
+            w.waits.push(Wait { key, before, to: None, owner: 0, caught: None, since: Instant::now() });
+            if !w.running {
+                w.running = true;
+                drop(w);
+                let (tx, rx) = std::sync::mpsc::channel();
+                if std::thread::Builder::new().name("held-catch".into()).spawn(move || run(tx)).is_err() {
+                    watch().running = false;
+                } else {
+                    // Its hook is in place before the program starts.
+                    let _ = rx.recv_timeout(Duration::from_millis(500));
+                }
+            }
+            key
+        }
+
+        /// Where the window goes: the pane on the screen, and this program's window over which it is.
+        pub(super) fn aim(key: u64, to: RECT, owner: isize) {
+            if let Some(x) = watch().waits.iter_mut().find(|x| x.key == key) {
+                x.to = Some(to);
+                x.owner = owner;
+            }
+        }
+
+        /// The window caught, once made ready; the wait ends with it.
+        pub(super) fn take(key: u64) -> Option<Caught> {
+            let mut w = watch();
+            let i = w.waits.iter().position(|x| x.key == key && x.caught.is_some_and(|c| c.ready))?;
+            w.waits.remove(i).caught
+        }
+
+        /// No longer looked out for; what was caught for it, if anything.
+        pub(super) fn forget(key: u64) -> Option<Caught> {
+            let mut w = watch();
+            let i = w.waits.iter().position(|x| x.key == key)?;
+            w.waits.remove(i).caught
+        }
+
+        fn run(ready: std::sync::mpsc::Sender<()>) {
+            let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+            let hook = unsafe { SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, std::ptr::null_mut(), Some(event), 0, 0, flags) };
+            let _ = ready.send(());
+            if hook.is_null() {
+                watch().running = false;
+                return;
+            }
+            unsafe { SetTimer(std::ptr::null_mut(), 0, 500, None) };
+            let mut msg: MSG = unsafe { std::mem::zeroed() };
+            while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+                if msg.message == WM_TIMER {
+                    let mut w = watch();
+                    // A pane gone without saying so is not waited for long.
+                    w.waits.retain(|x| x.since.elapsed() < Duration::from_secs(60));
+                    if w.waits.is_empty() {
+                        w.running = false;
+                        break;
+                    }
+                }
+                unsafe { DispatchMessageW(&msg) };
+            }
+            unsafe { UnhookWinEvent(hook) };
+        }
+
+        fn class(h: HWND) -> String {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), buf.len() as i32) };
+            String::from_utf16_lossy(&buf[..n.max(0) as usize])
+        }
+
+        /// A program's window of its own: on the desktop, not a part of another (owned, a tool
+        /// window), framed with a title bar or a Store app's frame, or a large pop-up once shown.
+        fn main_window(h: HWND, shown: bool) -> bool {
+            unsafe {
+                if GetAncestor(h, GA_PARENT) != GetDesktopWindow() || !GetWindow(h, GW_OWNER).is_null() {
+                    return false;
+                }
+                let style = GetWindowLongW(h, GWL_STYLE) as u32;
+                let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+                if style & WS_CHILD != 0 || ex & WS_EX_TOOLWINDOW != 0 || (shown && IsWindowVisible(h) == 0) {
+                    return false;
+                }
+                let class = class(h);
+                if matches!(class.as_str(), "Windows.UI.Core.CoreWindow" | "IME" | "MSCTFIME UI" | "tooltips_class32" | "#32768" | "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+                    return false;
+                }
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(h, &mut r);
+                let big = r.right - r.left >= 200 && r.bottom - r.top >= 120;
+                style & WS_CAPTION == WS_CAPTION || class == "ApplicationFrameWindow" || (shown && style & WS_POPUP != 0 && big)
+            }
+        }
+
+        unsafe extern "system" fn event(_: HWINEVENTHOOK, ev: u32, h: HWND, obj: i32, child: i32, _: u32, _: u32) {
+            if obj != OBJID_WINDOW || child != CHILDID_SELF as i32 || h.is_null() {
+                return;
+            }
+            let hw = h as isize;
+            if ev == EVENT_OBJECT_DESTROY {
+                for x in watch().waits.iter_mut() {
+                    if x.caught.is_some_and(|c| c.hwnd == hw) {
+                        x.caught = None;
+                    }
+                }
+                return;
+            }
+            let shown = ev == EVENT_OBJECT_SHOW;
+            if !main_window(h, shown) {
+                return;
+            }
+            // The first wait with nothing caught, or with a window caught that is still hidden
+            // while this one shows (a hidden window of its program's, made first).
+            let (key, to, owner, old) = {
+                let mut w = watch();
+                if w.waits.iter().any(|x| x.caught.is_some_and(|c| c.hwnd == hw)) {
+                    return;
+                }
+                let Some(x) = w.waits.iter_mut().find(|x| {
+                    !x.before.contains(&hw)
+                        && match x.caught {
+                            None => true,
+                            Some(c) => c.ready && shown && unsafe { IsWindowVisible(c.hwnd as HWND) } == 0,
+                        }
+                }) else {
+                    return;
+                };
+                let old = x.caught.replace(Caught { hwnd: hw, style: None, ready: false });
+                (x.key, x.to, x.owner, old)
+            };
+            let h = hw;
+            super::later(move || {
+                if let Some(o) = old {
+                    super::let_go(o.hwnd as HWND, o.style);
+                }
+                let h = h as HWND;
+                let style = super::hush(h);
+                unsafe {
+                    if owner != 0 {
+                        SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner);
+                    }
+                    if let Some(to) = to {
+                        SetWindowPos(h, std::ptr::null_mut(), to.left, to.top, to.right - to.left, to.bottom - to.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+                    }
+                }
+                let mut w = watch();
+                match w.waits.iter_mut().find(|x| x.key == key && x.caught.is_some_and(|c| c.hwnd == hw)) {
+                    Some(x) => x.caught = Some(Caught { hwnd: hw, style, ready: true }),
+                    // Its pane went meanwhile.
+                    None => {
+                        drop(w);
+                        super::let_go(h, style);
+                    }
+                }
+            });
+        }
+    }
+
+    /// A window caught for a pane and not kept: seen again, its own.
+    fn let_go(h: HWND, style: Option<isize>) {
+        unsafe {
+            SetWindowLongPtrW(h, GWLP_HWNDPARENT, 0);
+            let on: i32 = 0;
+            DwmSetWindowAttribute(h, DWMWA_TRANSITIONS_FORCEDISABLED as u32, (&on as *const i32).cast(), 4);
+        }
+        if let Some(ex) = style {
+            unhush(h, ex);
         }
     }
 
@@ -75,6 +357,8 @@ mod imp {
     const GIVE_UP: Duration = Duration::from_secs(20);
 
     pub(in crate::gui) struct Held {
+        /// The new window looked out for (`catch`), until one is held.
+        key: Option<u64>,
         /// What was started, as the pane tells of it.
         what: String,
         /// Its program, to know a window it already had open by (one running brings it forward).
@@ -103,17 +387,37 @@ mod imp {
         /// Since when it is asked to move and stays put: a program running as administrator, which
         /// this one may not move.
         stuck: Option<Instant>,
+        /// See-through until it is on the pane (its style before), and since when it is there.
+        hushed: Option<isize>,
+        placed: Option<Instant>,
+        since: Instant,
     }
 
     impl Held {
         pub(in crate::gui) fn start(kind: u8, text: &str) -> Held {
-            let before = winlist::shareable().into_iter().map(|w| w.id).collect();
-            let (name, said) = match crate::apps::launch(kind, text) {
+            let before: Vec<u64> = winlist::shareable().into_iter().map(|w| w.id).collect();
+            let key = catch::wait(before.iter().map(|id| *id as isize).collect());
+            let (name, said) = match crate::apps::launch_minimized(kind, text) {
                 Ok(n) => (n, None),
                 Err(e) => (String::new(), Some(format!("It could not be started: {e}."))),
             };
-            let what = if name.is_empty() { text.trim().to_string() } else { name.clone() };
-            Held { what, name, before, since: Instant::now(), looked: Instant::now() - LOOK, win: None, said, ended: false }
+            if said.is_some() {
+                catch::forget(key);
+            }
+            let what = if name.is_empty() { text.trim().trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(text).to_string() } else { name.clone() };
+            Held { key: said.is_none().then_some(key), what, name, before, since: Instant::now(), looked: Instant::now() - LOOK, win: None, said, ended: false }
+        }
+
+        fn hold(&mut self, hwnd: isize, new: bool, hushed: Option<isize>) {
+            let mut was = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            // Hidden and shown with its tab without the system's animations.
+            let off: i32 = 1;
+            unsafe {
+                GetWindowRect(hwnd as HWND, &mut was);
+                DwmSetWindowAttribute(hwnd as HWND, DWMWA_TRANSITIONS_FORCEDISABLED as u32, (&off as *const i32).cast(), 4);
+            }
+            self.win = Some(Win { hwnd, new, owner: 0, owned: false, was, shown: false, stuck: None, hushed, placed: None, since: Instant::now() });
+            held(Some(hwnd), None);
         }
 
         pub(in crate::gui) fn ended(&self) -> bool {
@@ -126,6 +430,10 @@ mod imp {
             let list = winlist::shareable();
             let mine = std::process::id();
             let theirs = |id: u64| winlist::pid_of(id as HWND) != mine;
+            // Not while the hook has one: it is shown when ready.
+            if self.since.elapsed() < Duration::from_secs(2) && self.key.is_some() {
+                return None;
+            }
             if let Some(w) = list.iter().find(|w| !self.before.contains(&w.id) && theirs(w.id)) {
                 return Some((w.id as isize, true));
             }
@@ -144,16 +452,31 @@ mod imp {
         /// One frame of the pane at `rect`: the window put over it, or why there is none.
         pub(in crate::gui) fn show(&mut self, ui: &mut egui::Ui, rect: Rect) {
             let ctx = ui.ctx().clone();
+            if let Some(key) = self.key {
+                if let Some((to, owner)) = place(&ctx, rect) {
+                    catch::aim(key, to, owner);
+                }
+                if let Some(c) = catch::take(key) {
+                    self.key = None;
+                    self.hold(c.hwnd, true, c.style);
+                }
+            }
+            // Looked for as well, should the hook miss it (or it was open already).
             if self.win.is_none() && self.said.is_none() && self.looked.elapsed() >= LOOK {
                 self.looked = Instant::now();
                 match self.find() {
                     Some((hwnd, new)) => {
-                        let mut was = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                        unsafe { GetWindowRect(hwnd as HWND, &mut was) };
-                        self.win = Some(Win { hwnd, new, owner: 0, owned: false, was, shown: false, stuck: None });
-                        held(Some(hwnd), None);
+                        if let Some(c) = self.key.take().and_then(catch::forget) {
+                            let_go(c.hwnd as HWND, c.style);
+                        }
+                        self.hold(hwnd, new, None);
                     }
-                    None if self.since.elapsed() > GIVE_UP => self.said = Some(format!("{} opened no window of its own to show here.", self.what)),
+                    None if self.since.elapsed() > GIVE_UP => {
+                        if let Some(c) = self.key.take().and_then(catch::forget) {
+                            let_go(c.hwnd as HWND, c.style);
+                        }
+                        self.said = Some(format!("{} opened no window of its own to show here.", self.what));
+                    }
                     None => {}
                 }
             }
@@ -174,18 +497,16 @@ mod imp {
             }
             let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
             match place(&ctx, rect) {
-                Some(_) if covered(&ctx, rect) => w.give_way(),
+                Some(_) if super::covered(&ctx, rect) => w.give_way(),
                 Some((to, owner)) if !minimized => w.put(to, owner),
                 _ => w.hide(),
             }
             if w.stuck.is_some_and(|t| t.elapsed() > Duration::from_secs(3)) {
-                let h = w.hwnd as HWND;
+                let (h, style) = (w.hwnd, w.hushed.take());
                 held(None, Some(w.hwnd));
                 self.win = None;
-                unsafe {
-                    SetWindowLongPtrW(h, GWLP_HWNDPARENT, 0);
-                    ShowWindowAsync(h, SW_SHOWNOACTIVATE);
-                }
+                later(move || let_go(h as HWND, style));
+                unsafe { ShowWindowAsync(h as HWND, SW_SHOWNOACTIVATE) };
                 self.said = Some(format!("{} runs with more rights than this app, so it stays a window of its own.", self.what));
             }
         }
@@ -200,6 +521,14 @@ mod imp {
         /// The pane closes: its program with it (it may ask to save first), or a window it already
         /// had open back where it was.
         pub(in crate::gui) fn close(&mut self) {
+            // Caught and not yet held: it was opened for the pane, so it closes with it.
+            if let Some(c) = self.key.take().and_then(catch::forget) {
+                let h = c.hwnd;
+                later(move || {
+                    let_go(h as HWND, c.style);
+                    unsafe { PostMessageW(h as HWND, WM_CLOSE, 0, 0) };
+                });
+            }
             let Some(w) = self.win.take() else { return };
             held(None, Some(w.hwnd));
             let h = w.hwnd as HWND;
@@ -207,7 +536,8 @@ mod imp {
                 if IsWindow(h) == 0 {
                     return;
                 }
-                SetWindowLongPtrW(h, GWLP_HWNDPARENT, 0);
+                let (hw, style) = (w.hwnd, w.hushed);
+                later(move || let_go(hw as HWND, style));
                 if w.new {
                     ShowWindowAsync(h, SW_SHOWNOACTIVATE);
                     PostMessageW(h, WM_CLOSE, 0, 0);
@@ -270,10 +600,26 @@ mod imp {
                     SetWindowPos(h, std::ptr::null_mut(), want.left, want.top, want.right - want.left, want.bottom - want.top, flags);
                 }
                 // Its size may stop at its smallest; where it is may not.
-                if (want.left, want.top) == (now.left, now.top) {
+                let there = (want.left, want.top) == (now.left, now.top);
+                if there {
                     self.stuck = None;
                 } else {
                     self.stuck.get_or_insert_with(Instant::now);
+                }
+                // Seen once it is on the pane and has drawn itself there (or after a while anyway).
+                if self.hushed.is_some() {
+                    let mut cloaked = 0u32;
+                    DwmGetWindowAttribute(h, DWMWA_CLOAKED as u32, (&mut cloaked as *mut u32).cast(), 4);
+                    let ready = there && IsWindowVisible(h) != 0 && cloaked == 0;
+                    let placed = if ready { *self.placed.get_or_insert_with(Instant::now) } else { Instant::now() };
+                    if (ready && placed.elapsed() >= Duration::from_millis(80)) || self.since.elapsed() > Duration::from_secs(3) {
+                        let (hw, ex) = (self.hwnd, self.hushed.take().unwrap_or(0));
+                        later(move || unhush(hw as HWND, ex));
+                        // Started minimized for the pane: it takes the keyboard, as one just opened does.
+                        if self.new {
+                            SetForegroundWindow(h);
+                        }
+                    }
                 }
             }
         }
@@ -309,18 +655,6 @@ mod imp {
         let thread = unsafe { GetWindowThreadProcessId(h, std::ptr::null_mut()) };
         let got = unsafe { GetGUIThreadInfo(thread, &mut info) };
         got != 0 && info.flags & GUI_INMOVESIZE != 0
-    }
-
-    /// Whether a menu, a dialog or a window of this one's is over the pane: the program is kept
-    /// out of their way (a window held over this one would cover them).
-    fn covered(ctx: &egui::Context, rect: Rect) -> bool {
-        ctx.memory(|m| {
-            m.areas()
-                .visible_layer_ids()
-                .into_iter()
-                .filter(|l| matches!(l.order, Order::Middle | Order::Foreground))
-                .any(|l| m.area_rect(l.id).is_some_and(|r| r.intersects(rect)))
-        })
     }
 
     /// The pane on the screen, in pixels, and the window of this program it is in.

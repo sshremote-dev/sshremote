@@ -527,9 +527,10 @@ impl Workspace {
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
             },
             Launch::Agent { target, label, ssh_cmd, mode } => {
-                // A program here, on Windows: started, and its window held over the pane.
+                // A program here, on Windows or in an X11 session: started, and its window held
+                // over the pane.
                 let held = match &target {
-                    Target::Local { capture } if super::held::HERE => capture.strip_prefix("app:").and_then(|r| r.split_once(':')),
+                    Target::Local { capture } if super::held::here() => capture.strip_prefix("app:").and_then(|r| r.split_once(':')),
                     _ => None,
                 };
                 let state = match held {

@@ -357,7 +357,7 @@ fn saved_login(host: &str, argv: &[String]) -> i32 {
 fn note_crashes() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        #[cfg(all(windows, feature = "gui", feature = "remote"))]
+        #[cfg(all(any(windows, target_os = "linux"), feature = "gui", feature = "remote"))]
         gui::held::bring_back();
         if let Some(dir) = hosts::config_dir() {
             let _ = std::fs::create_dir_all(&dir);
