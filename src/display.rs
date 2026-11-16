@@ -2,7 +2,7 @@
 //! not the picture's size) and set back as it was when the session ends. On Windows through the
 //! display settings, without saving them (signing out puts the saved ones back too); in X11
 //! sessions through RandR; under Wayland through the desktop: GNOME's display configuration, KDE
-//! Plasma's kscreen-doctor, Sway's swaymsg and Hyprland's hyprctl.
+//! Plasma's kscreen-doctor, Sway's swaymsg, Hyprland's hyprctl and COSMIC's cosmic-randr.
 
 /// A screen's resolutions, largest first, and the one it has.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +36,8 @@ enum Way {
     Hypr(String),
     #[cfg(target_os = "linux")]
     KScreen,
+    #[cfg(target_os = "linux")]
+    Cosmic,
 }
 
 impl Way {
@@ -69,6 +71,8 @@ impl Way {
             Way::Hypr(sig) => linux::hypr_monitors(sig).into_iter().map(|o| o.name).collect(),
             #[cfg(target_os = "linux")]
             Way::KScreen => linux::kscreen_outputs().into_iter().map(|o| o.name).collect(),
+            #[cfg(target_os = "linux")]
+            Way::Cosmic => linux::cosmic_outputs().into_iter().map(|o| o.name).collect(),
         }
     }
 
@@ -86,6 +90,8 @@ impl Way {
             Way::Hypr(sig) => linux::hypr_monitors(sig).into_iter().find(|o| o.name == id && !linux::virtual_gpu(&o.name)).map(|o| o.modes()),
             #[cfg(target_os = "linux")]
             Way::KScreen => linux::kscreen_outputs().into_iter().find(|o| o.name == id).map(|o| o.modes()),
+            #[cfg(target_os = "linux")]
+            Way::Cosmic => linux::cosmic_outputs().into_iter().find(|o| o.name == id).map(|o| o.modes()),
         }?;
         Some(Modes { list: tidy(m.list), current: m.current })
     }
@@ -104,6 +110,8 @@ impl Way {
             Way::Hypr(sig) => linux::hypr_set(sig, id, w, h),
             #[cfg(target_os = "linux")]
             Way::KScreen => linux::kscreen_set(id, w, h),
+            #[cfg(target_os = "linux")]
+            Way::Cosmic => linux::cosmic_set(id, w, h),
         }
     }
 }
@@ -267,6 +275,9 @@ mod linux {
             if !hypr_monitors(&sig).is_empty() {
                 return Some(Way::Hypr(sig));
             }
+        }
+        if !cosmic_outputs().is_empty() {
+            return Some(Way::Cosmic);
         }
         (!kscreen_outputs().is_empty()).then_some(Way::KScreen)
     }
@@ -479,6 +490,40 @@ mod linux {
         if done.status.success() { Ok(()) } else { Err(format!("KDE did not set {w}x{h}")) }
     }
 
+    /// COSMIC's outputs as `cosmic-randr list --kdl` tells them: each `output "NAME" enabled=...`
+    /// block, its `mode W H RATE_MHZ` lines, the one in use marked `current=#true`.
+    pub(super) fn cosmic_outputs() -> Vec<Output> {
+        run(Command::new("cosmic-randr").args(["list", "--kdl"])).ok().filter(|o| o.status.success()).map_or_else(Vec::new, |o| cosmic_parse(&String::from_utf8_lossy(&o.stdout)))
+    }
+
+    pub(super) fn cosmic_parse(text: &str) -> Vec<Output> {
+        let mut out: Vec<(Output, bool)> = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("output \"") {
+                let name = rest.split('"').next().unwrap_or("").to_string();
+                out.push((Output { name, current: (0, 0), modes: Vec::new() }, rest.contains("enabled=#true")));
+            } else if let Some(rest) = line.strip_prefix("mode ")
+                && let Some((o, _)) = out.last_mut()
+            {
+                let mut f = rest.split_whitespace();
+                let (Some(w), Some(h), Some(r)) = (f.next().and_then(|v| v.parse().ok()), f.next().and_then(|v| v.parse().ok()), f.next().and_then(|v| v.parse::<f64>().ok())) else { continue };
+                let rate = r / 1000.0;
+                if rest.contains("current=#true") {
+                    o.current = (w, h);
+                }
+                o.modes.push(((w, h), rate, format!("{rate:.3}")));
+            }
+        }
+        out.into_iter().filter(|(o, on)| *on && o.current != (0, 0)).map(|(o, _)| o).collect()
+    }
+
+    pub(super) fn cosmic_set(id: &str, w: u16, h: u16) -> Result<(), String> {
+        let out = cosmic_outputs().into_iter().find(|o| o.name == id).ok_or("that screen is gone")?;
+        let rate = &out.pick(w, h)?.2;
+        let done = run(Command::new("cosmic-randr").args(["mode", id, &w.to_string(), &h.to_string(), "--refresh", rate]))?;
+        if done.status.success() { Ok(()) } else { Err(format!("COSMIC did not set {w}x{h}")) }
+    }
+
     fn x() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
         let (conn, screen) = x11rb::connect(None).ok()?;
         let root = conn.setup().roots[screen].root;
@@ -686,6 +731,12 @@ mod tests {
         let kde = linux::kscreen_parse(&json!({"outputs": [{"name": "Virtual-0", "enabled": true, "currentModeId": "2", "size": {"width": 1280, "height": 800},
             "modes": [{"id": "1", "refreshRate": 60, "size": {"width": 1920, "height": 1080}}, {"id": "2", "refreshRate": 60, "size": {"width": 1280, "height": 800}}]}]}));
         assert_eq!((kde[0].current, kde[0].modes().list.len()), ((1280, 800), 2));
+        let cosmic = linux::cosmic_parse(
+            "output \"Virtual-1\" enabled=#true {\n  description make=\"RHT\" model=\"QEMU Monitor\"\n  modes {\n    mode 1920 1080 60000\n    mode 1280 800 74989 current=#true preferred=#true\n    mode 1024 768 60004\n  }\n}\noutput \"HDMI-A-1\" enabled=#false {\n  modes {\n    mode 1920 1080 60000\n  }\n}\n",
+        );
+        assert_eq!(cosmic.len(), 1, "a display that is off is left out");
+        assert_eq!((cosmic[0].name.as_str(), cosmic[0].current, cosmic[0].modes().list.len()), ("Virtual-1", (1280, 800), 3));
+        assert_eq!(cosmic[0].modes[1].2, "74.989");
     }
 
     #[cfg(target_os = "linux")]
