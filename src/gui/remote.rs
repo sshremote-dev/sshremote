@@ -97,17 +97,6 @@ pub(super) struct Remote {
     /// Every monitor of the host was asked for, each in a window of its own (taken by the
     /// workspace, which opens them).
     pub(super) spread_asked: bool,
-    /// The host's installed programs once asked for (`Apps`), and the menu that opens one: by its
-    /// name, a command line, or a file picked from the host's folders (a folder listing it asked
-    /// for comes to it, not to the file window).
-    pub(super) apps: Option<Result<Vec<AppRow>, String>>,
-    pub(super) apps_asked: bool,
-    pub(super) launcher: crate::gui::launcher::Launcher,
-    pub(super) launcher_dir: bool,
-    pub(super) launcher_seen: u64,
-    /// A program to open in a pane beside this one, on the same host and shown alone (how it is
-    /// named, the name, what the pane is called): taken by the workspace.
-    pub(super) launch_asked: Option<(u8, String, String)>,
     /// What the person at a computer reached by its ID lets this viewer do (`grant`).
     pub(super) allowed: u8,
     /// What can be done to the computer itself and what is on (`hostctl` bits), once asked.
@@ -214,8 +203,6 @@ const UPLOAD_CHUNK: usize = 64 << 10;
 /// How long one frame may spend on network messages before the window is drawn.
 const PUMP_BUDGET: Duration = Duration::from_millis(12);
 
-/// One of the host's programs as `AppList` gives it: id, name, a line about it.
-pub(super) type AppRow = (String, String, String);
 
 /// What the user chose for a connection, carried over when it is made again after a drop: a
 /// host set to view only stays view only.
@@ -314,12 +301,6 @@ impl Remote {
             modes: (Vec::new(), (0, 0), (0, 0)),
             chosen_monitor: None,
             spread_asked: false,
-            apps: None,
-            apps_asked: false,
-            launcher: Default::default(),
-            launcher_dir: false,
-            launcher_seen: 0,
-            launch_asked: None,
             allowed: crate::grant::ALL,
             host: None,
             host_asked: false,
@@ -694,9 +675,7 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::DirList { path, entries, error })) => {
-                    if std::mem::take(&mut self.launcher_dir) {
-                        self.launcher.set_folder(path, entries, error);
-                    } else if let Some(f) = self.files.as_mut() {
+                    if let Some(f) = self.files.as_mut() {
                         f.remote.set_list(path, entries, error);
                     }
                 }
@@ -704,9 +683,6 @@ impl Remote {
                     if let Some(p) = self.picker.as_mut() {
                         p.0 = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                     }
-                }
-                Ok(Ev::Net(ToClient::AppList { list, error })) => {
-                    self.apps = Some(if list.is_empty() && !error.is_empty() { Err(error) } else { Ok(list) });
                 }
                 Ok(Ev::Net(ToClient::Launched { text, .. })) => self.notify(&text),
                 // The chooser shows what happened; a helper in place may list the windows already.
@@ -1093,13 +1069,6 @@ impl Remote {
     pub(super) fn prefs_on(&self, m: u8) -> Prefs {
         let mut p = self.prefs();
         p.monitor = Some(m);
-        p
-    }
-
-    /// What the user chose here, for a pane beside it that shows one program of the host's.
-    pub(super) fn prefs_for_app(&self) -> Prefs {
-        let mut p = self.prefs();
-        (p.monitor, p.paused) = (None, false);
         p
     }
 

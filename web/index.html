@@ -166,18 +166,6 @@
   .pick small { color: var(--dim); }
   .pick .grow { min-width: 0; }
   /* Opening one of the host's programs: by its name, a command line, or a file. */
-  .launch { width: min(440px, 80vw); margin-top: 10px; }
-  .launch > input, .launchline input { width: 100%; }
-  .launchline { display: flex; gap: 6px; align-items: center; }
-  .launchline input { flex: 1; min-width: 0; }
-  .launchlist { height: min(320px, 50vh); overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 10px 0; }
-  .launchhead { color: var(--dim); font-size: 12px; margin: 8px 0 2px; }
-  .launchrow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; min-height: 30px; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); text-align: left; cursor: pointer; font: inherit; }
-  .launchrow .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .launchrow small { color: var(--dim); white-space: nowrap; }
-  .launchrow:hover, .launchrow.on { background: var(--raised); }
-  .launchrow.best { min-height: 48px; font-size: 15px; }
-  .launch .dim { color: var(--dim); font-size: 13px; }
   /* A setting with its name before it and its value after it, in a dialog. */
   label.range { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 10px; margin: 12px 0; }
   label.range span { color: var(--dim); }

@@ -20,7 +20,6 @@ pub(super) struct Remote {
     pub(super) grab_wanted: bool,
     pub(super) pane_closed: bool,
     pub(super) spread_asked: bool,
-    pub(super) launch_asked: Option<(u8, String, String)>,
     never: Session,
 }
 

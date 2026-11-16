@@ -290,15 +290,6 @@ impl Remote {
         });
         display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
 
-        // A program of the host's, found among those installed or named by a command line or a
-        // file, opened in a pane beside this one that shows it alone.
-        // With the Programs extension.
-        if !self.view_only && self.allowed & crate::grant::CONTROL != 0 && crate::ext::programs_enabled() {
-            let host = self.label.split("  ").next().unwrap_or("it").to_string();
-            let apps = icon_menu(ui, ic::ARROW_SQUARE_OUT, |ui| self.apps_menu(ui, action));
-            apps.on_hover_text(format!("Open a program of {host} in a pane beside this one, shown alone"));
-        }
-
         // The host's screens, when it has several: which one shows here, or all, a window each.
         if self.monitors.len() > 1 {
             let screens = icon_menu(ui, ic::SQUARES_FOUR, |ui| {
@@ -708,46 +699,5 @@ impl Remote {
             }
         });
         menu.on_hover_text("This computer: lock, restart, keep its keyboard out, hide its screen");
-    }
-}
-
-impl Remote {
-    /// The menu that opens a program of the host's beside this pane: by its name, a command line,
-    /// or a file picked from the host's folders.
-    fn apps_menu(&mut self, ui: &mut egui::Ui, action: &mut Option<Deferred>) {
-        use crate::gui::launcher::{Ask, Programs, Prog};
-        if !self.apps_asked {
-            self.apps_asked = true;
-            *action = Some(Box::new(|r, _| r.send(ToAgent::Apps)));
-        }
-        // Opened again: its field takes the keyboard.
-        let pass = ui.ctx().cumulative_pass_nr();
-        if pass > self.launcher_seen + 2 {
-            let mode = self.launcher.mode;
-            self.launcher.start(mode);
-        }
-        self.launcher_seen = pass;
-        ui.label(RichText::new("Open in a pane beside this one").strong());
-        let programs = match &self.apps {
-            None => Programs::Coming,
-            Some(Err(e)) => Programs::Failed(e),
-            Some(Ok(list)) => Programs::Listed(list.iter().map(|(id, name, detail)| Prog { id, name, detail }).collect()),
-        };
-        match self.launcher.ui(ui, programs, false) {
-            Some(Ask::Open(p)) => {
-                ui.close();
-                *action = Some(Box::new(move |r, _| {
-                    r.launch_asked = Some(p);
-                    Ok(())
-                }));
-            }
-            Some(Ask::List(path)) => {
-                *action = Some(Box::new(move |r, _| {
-                    r.launcher_dir = true;
-                    r.send(ToAgent::ListDir { path })
-                }));
-            }
-            None => {}
-        }
     }
 }

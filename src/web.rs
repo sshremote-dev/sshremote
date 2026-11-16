@@ -729,18 +729,6 @@ fn ask(frame: Frame) -> Option<Ask> {
     if v.get("windows").is_some() {
         return Some(Ask::Agent(ToAgent::ListWindows));
     }
-    // The host's installed programs, and one started there and shown alone (the Programs extension).
-    if (v.get("apps").is_some() || v.get("launch").is_some()) && !crate::ext::programs_enabled() {
-        return None;
-    }
-    if v.get("apps").is_some() {
-        return Some(Ask::Agent(ToAgent::Apps));
-    }
-    if let Some(l) = v.get("launch") {
-        let kind = l.get("kind").and_then(|x| x.as_u64()).filter(|k| *k <= crate::apps::OPEN as u64)? as u8;
-        let text = l.get("text").and_then(|x| x.as_str())?.to_string();
-        return Some(Ask::Agent(ToAgent::Launch { kind, text }));
-    }
     if let Some(sh) = v.get("share") {
         use crate::shared::Share;
         // Window ids go as text: they can be larger than a browser's numbers hold exactly.
@@ -992,7 +980,7 @@ fn client(
         _ => serde_json::Value::Null,
     };
     // What extensions this gateway has bring their menus to the page (Programs: the host's programs).
-    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk, "programs": crate::ext::programs_enabled() } }))?;
+    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk } }))?;
     send_json(&w, serde_json::json!({ "qualities": quality_list(), "quality": quality_state(&ctl) }))?;
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
@@ -1193,13 +1181,6 @@ fn client(
                 }
                 ToClient::Sharing { kind, text } => {
                     let _ = send_json(&w, serde_json::json!({ "sharing": { "kind": kind, "text": text } }));
-                }
-                ToClient::AppList { list, error } => {
-                    let list: Vec<_> = list.iter().map(|(id, name, detail)| serde_json::json!({ "id": id, "name": name, "detail": detail })).collect();
-                    let _ = send_json(&w, serde_json::json!({ "apps": { "list": list, "error": error } }));
-                }
-                ToClient::Launched { ok, text } => {
-                    let _ = send_json(&w, serde_json::json!({ "launched": { "ok": ok, "text": text } }));
                 }
                 ToClient::Audio(packet) => {
                     if send(&w, 0x2, &[&[6u8][..], &packet].concat()).is_err() {
@@ -1888,14 +1869,8 @@ Host: x
         assert!(matches!(a(r#"{"snapshot":1}"#), Some(Ask::Agent(ToAgent::Snapshot))));
         use crate::shared::Share;
         assert!(matches!(a(r#"{"windows":1}"#), Some(Ask::Agent(ToAgent::ListWindows))));
-        // The host's programs, with the Programs extension where the gateway runs.
-        if crate::ext::programs_enabled() {
-            assert!(matches!(a(r#"{"apps":1}"#), Some(Ask::Agent(ToAgent::Apps))));
-            assert!(matches!(a(r#"{"launch":{"kind":1,"text":"xterm"}}"#), Some(Ask::Agent(ToAgent::Launch { kind: 1, .. }))));
-        } else {
-            assert!(a(r#"{"apps":1}"#).is_none());
-        }
-        assert!(a(r#"{"launch":{"kind":9,"text":"x"}}"#).is_none());
+        // Programs are opened in the app's new-open view only, never from the web page.
+        assert!(a(r#"{"apps":1}"#).is_none() && a(r#"{"launch":{"kind":1,"text":"xterm"}}"#).is_none());
         assert!(matches!(a(r#"{"sound":true}"#), Some(Ask::Agent(ToAgent::Audio(true)))));
         assert!(matches!(a(r#"{"call":true}"#), Some(Ask::Agent(ToAgent::Call(true)))));
         assert!(matches!(a(r#"{"pasteFiles":{"batch":"web-1","names":["a.txt"]}}"#), Some(Ask::Agent(ToAgent::PasteFiles { names, .. })) if names == ["a.txt"]));

@@ -57,14 +57,6 @@ impl Mode {
             Mode::File => format!("{}  Open a file", ic::FOLDER_OPEN),
         }
     }
-
-    fn tab(self) -> &'static str {
-        match self {
-            Mode::Search => "Search",
-            Mode::Command => "Command",
-            Mode::File => "File",
-        }
-    }
 }
 
 /// A program to open: how it is named (`apps::APP`, `COMMAND` or `OPEN`), that name, and what its
@@ -88,7 +80,6 @@ pub(crate) struct Prog<'a> {
 /// The computer's programs as far as they are known.
 pub(crate) enum Programs<'a> {
     Coming,
-    Failed(&'a str),
     Listed(Vec<Prog<'a>>),
 }
 
@@ -100,8 +91,6 @@ struct Folder {
 
 /// How tall the part under the mode's field is, the same in each mode: a menu keeps the size it
 /// opened with.
-const BODY_H: f32 = 250.0;
-const WIDTH: f32 = 380.0;
 
 #[derive(Default)]
 pub(crate) struct Launcher {
@@ -123,8 +112,6 @@ pub(crate) struct Launcher {
     /// A path typed and listed: opened with its program when it is no folder (a file's path).
     typed: Option<String>,
     focus: bool,
-    /// Laid out as a part of a page (filling its room) rather than in a menu of its own.
-    page: bool,
 }
 
 const RECENT: &str = "programs_recent";
@@ -156,21 +143,10 @@ impl Launcher {
         self.folder = Some(Folder { path, entries, error });
     }
 
-    /// The mode chosen and its part; what it asks for, if anything. In a menu of its own the
-    /// modes are tabs at its top; laid in a page (`inline`), the page's buttons choose them and it
-    /// takes the page's width.
-    pub(crate) fn ui(&mut self, ui: &mut egui::Ui, programs: Programs<'_>, inline: bool) -> Option<Ask> {
-        self.page = inline;
-        if inline {
-            ui.set_width(ui.available_width());
-        } else {
-            ui.set_width(WIDTH);
-            let mut chosen = Mode::ALL.iter().position(|m| *m == self.mode).unwrap_or(0);
-            if crate::gui::kit::segmented(ui, &mut chosen, &Mode::ALL.map(Mode::tab)) {
-                self.start(Mode::ALL[chosen]);
-            }
-            ui.add_space(4.0);
-        }
+    /// The mode chosen and its part, as wide as the page it is laid in (the page's buttons choose
+    /// the mode); what it asks for, if anything.
+    pub(crate) fn ui(&mut self, ui: &mut egui::Ui, programs: Programs<'_>) -> Option<Ask> {
+        ui.set_width(ui.available_width());
         let ask = match self.mode {
             Mode::Search => self.search(ui, programs),
             Mode::Command => self.command(ui),
@@ -182,9 +158,9 @@ impl Launcher {
         ask
     }
 
-    /// How tall the part under the field is: a menu's, or all the room left in a page.
+    /// How tall the part under the field is: all the room left in the page.
     fn room(&self, ui: &egui::Ui) -> f32 {
-        if self.page { (ui.available_height() - 1.0).max(140.0) } else { BODY_H }
+        (ui.available_height() - 1.0).max(140.0)
     }
 
     fn remember(&mut self, kind: u8, text: &str) {
@@ -241,7 +217,6 @@ impl Launcher {
         let h = self.room(ui);
         let list = match programs {
             Programs::Coming => return body(ui, h, |ui| note(ui, "Looking at what is installed\u{2026}")),
-            Programs::Failed(e) => return body(ui, h, |ui| note(ui, e)),
             Programs::Listed(l) => l,
         };
         let q = self.find.trim();
@@ -634,7 +609,7 @@ mod ui_tests {
 
     fn frame(ctx: &egui::Context, l: &mut Launcher, events: Vec<egui::Event>) -> Option<Ask> {
         let mut ask = None;
-        ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| ask = l.ui(ui, Programs::Coming, false)).textures_delta.clear();
+        ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| ask = l.ui(ui, Programs::Coming)).textures_delta.clear();
         ask
     }
 

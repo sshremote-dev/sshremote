@@ -571,7 +571,7 @@ impl App {
             None => Programs::Coming,
             Some(list) => Programs::Listed(list.iter().map(|a| Prog { id: &a.id, name: &a.name, detail: &a.detail }).collect()),
         };
-        match self.launcher.ui(ui, programs, true) {
+        match self.launcher.ui(ui, programs) {
             Some(Ask::Open((kind, text, name))) => {
                 self.launcher_for = None;
                 *go = Some((String::new(), String::new(), How::App(kind, text, name)));

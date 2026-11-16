@@ -1231,36 +1231,6 @@ impl Workspace {
                 self.spread_from = Some(shown);
             }
         }
-        // A program of a host's asked for in a pane: a pane beside it, on the same host, opens
-        // showing that program alone (on this computer, the pane says what it starts, so a
-        // project opens it again).
-        let mut beside = Vec::new();
-        for p in &mut self.panes {
-            if let State::Live(r) = &mut p.state
-                && let Some((kind, text, name)) = r.launch_asked.take()
-            {
-                let (target, start) = match &p.target {
-                    Target::Local { .. } => (Target::Local { capture: format!("app:{kind}:{text}") }, None),
-                    t => (t.clone(), Some((kind, text))),
-                };
-                let launch = Launch::Agent { target, label: name, ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
-                beside.push((p.id, launch, r.prefs_for_app(), start));
-            }
-        }
-        for (from, launch, prefs, start) in beside {
-            if let Some(t) = self.tabs.iter().position(|t| {
-                let mut ids = Vec::new();
-                t.root.leaves(&mut ids);
-                ids.contains(&from)
-            }) {
-                self.current = t;
-                self.tabs[t].active = from;
-            }
-            self.add(launch, Place::Split { below: false }, PaneStart::default());
-            if let Some(p) = self.panes.last_mut() {
-                (p.prefs, p.launch) = (Some(prefs), start);
-            }
-        }
         if let Some(n) = self.full_later.as_mut() {
             if *n == 0 {
                 self.full_later = None;
