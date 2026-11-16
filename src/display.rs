@@ -668,10 +668,15 @@ mod tests {
     }
 
     /// The first screen set to another resolution for a few seconds, then set back as the
-    /// session ends: cargo test -- --ignored --nocapture screen_here_is_set
+    /// session ends: SSHREMOTE_TEST_SET_SCREEN=1 cargo test -- --ignored --nocapture screen_here_is_set
     #[test]
     #[ignore]
     fn screen_here_is_set_and_set_back() {
+        // It changes the screen of whoever runs it: only when asked by name, never in a run of all.
+        if std::env::var_os("SSHREMOTE_TEST_SET_SCREEN").is_none() {
+            eprintln!("skipped: set SSHREMOTE_TEST_SET_SCREEN=1 to let it change this computer's screen");
+            return;
+        }
         #[cfg(windows)]
         let mut s = Session::new("windows");
         #[cfg(target_os = "linux")]
