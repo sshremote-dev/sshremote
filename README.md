@@ -34,9 +34,11 @@ splitting a pane) open this computer's programs, the program's own window held i
 and sized with it, out of the way of the app's menus, hidden with its tab and closed with the pane;
 it is unseen as it opens and shown once it is in place, so it never shows outside first): on
 Windows, in X11 sessions, and under Wayland, which lets no program place another's windows, on GNOME
-through the sshremote helper extension (GNOME loads a new version at the next login) and on KDE
-Plasma through KWin scripts. On other Wayland desktops (Sway, Hyprland, COSMIC) and tiling window
-managers the pane shows it as it would another computer's, or leaves it a window of its own. A screen's menu opens that computer's programs beside it,
+through the sshremote helper extension (GNOME loads a new version at the next login), on KDE
+Plasma through KWin scripts, and on Sway and Hyprland through their IPC (the program opens on a
+workspace out of sight, then floats over its pane without a border). On other Wayland desktops
+(COSMIC) and tiling window managers the pane shows it as it would another computer's, or leaves it a
+window of its own. A screen's menu opens that computer's programs beside it,
 and the web page offers it where its gateway has the extension. Programs are shown alone on Windows,
 GNOME (with its helper) and X11 desktops; elsewhere the pane shows the screen. Without the extension
 none of these menus are there.
