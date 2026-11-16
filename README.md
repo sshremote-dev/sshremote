@@ -30,11 +30,13 @@ Linux, the Start menu on Windows, Store apps too), **Command** runs a command li
 folder, a file or an address opens with its program), and **File** opens a file or a folder picked
 from the computer's folders. What it starts opens in a pane, showing that program alone (with its
 menus and dialogs) and taking clicks and keys for it. Home's Tools and Quick open (also when
-splitting a pane) open this computer's programs: on Windows and in X11 sessions the program's own
-window is held in the pane (moved and sized with it, out of the way of the app's menus, hidden with
-its tab and closed with the pane; it is made see-through as it opens and shown once it is in place,
-so it never shows outside first); on Wayland, which lets no program place another's windows, the pane
-shows it as it would another computer's. A screen's menu opens that computer's programs beside it,
+splitting a pane) open this computer's programs, the program's own window held in the pane (moved
+and sized with it, out of the way of the app's menus, hidden with its tab and closed with the pane;
+it is unseen as it opens and shown once it is in place, so it never shows outside first): on
+Windows, in X11 sessions, and under Wayland, which lets no program place another's windows, on GNOME
+through the sshremote helper extension (GNOME loads a new version at the next login) and on KDE
+Plasma through KWin scripts. On other Wayland desktops (Sway, Hyprland, COSMIC) and tiling window
+managers the pane shows it as it would another computer's, or leaves it a window of its own. A screen's menu opens that computer's programs beside it,
 and the web page offers it where its gateway has the extension. Programs are shown alone on Windows,
 GNOME (with its helper) and X11 desktops; elsewhere the pane shows the screen. Without the extension
 none of these menus are there.

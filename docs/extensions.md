@@ -66,8 +66,9 @@ A program of this computer's in a pane (API 4) gives, instead of `url`, one of:
 }
 ```
 
-The program starts on this computer's desktop, as the person using it; on Windows and in X11
-sessions its own window is then held in the pane, elsewhere its pane shows its windows alone (with
+The program starts on this computer's desktop, as the person using it; on Windows, in X11
+sessions, on GNOME (its sshremote helper) and on KDE Plasma (KWin scripts) under Wayland its own
+window is then held in the pane, elsewhere its pane shows its windows alone (with
 their menus and dialogs) and takes clicks and keys for it, as sharing one program does. The
 Programs extension itself brings no such tools: it brings the menus that open any program, by
 Search, Command or File, on this computer and, from a screen's menu, on a computer reached by SSH or
