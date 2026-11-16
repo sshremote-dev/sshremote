@@ -261,8 +261,34 @@ mod linux {
         (!kscreen_outputs().is_empty()).then_some(Way::KScreen)
     }
 
+    /// What a desktop's tool says, given a few seconds (a tool that hangs does not hold the
+    /// session).
+    fn run(cmd: &mut Command) -> Result<std::process::Output, String> {
+        use std::io::Read;
+        let mut child = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        let mut stdout = child.stdout.take().ok_or("no output")?;
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = stdout.read_to_end(&mut out);
+            out
+        });
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let status = loop {
+            if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
+                break s;
+            }
+            if std::time::Instant::now() > until {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the desktop's tool did not answer".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        Ok(std::process::Output { status, stdout: reader.join().unwrap_or_default(), stderr: Vec::new() })
+    }
+
     fn json(cmd: &mut Command) -> Option<Value> {
-        let out = cmd.output().ok().filter(|o| o.status.success())?;
+        let out = run(cmd).ok().filter(|o| o.status.success())?;
         serde_json::from_slice(&out.stdout).ok()
     }
 
@@ -335,7 +361,7 @@ mod linux {
     pub(super) fn sway_set(sock: &Path, id: &str, w: u16, h: u16) -> Result<(), String> {
         let out = sway_outputs(sock).into_iter().find(|o| o.name == id).ok_or("that screen is gone")?;
         let mode = &out.pick(w, h)?.2;
-        let done = Command::new("swaymsg").arg("-s").arg(sock).arg(format!("output \"{id}\" mode {mode}")).output().map_err(|e| e.to_string())?;
+        let done = run(Command::new("swaymsg").arg("-s").arg(sock).arg(format!("output \"{id}\" mode {mode}")))?;
         if done.status.success() { Ok(()) } else { Err(format!("Sway did not set {w}x{h}")) }
     }
 
@@ -384,12 +410,20 @@ mod linux {
         let all = hypr_raw(sig);
         let (out, place) = all.iter().find(|(o, _)| o.name == id).ok_or("that screen is gone")?;
         let mode = &out.pick(w, h)?.2;
-        let done = hyprctl(sig).args(["keyword", "monitor", &format!("{id},{mode},{place}")]).output().map_err(|e| e.to_string())?;
+        let done = run(hyprctl(sig).args(["keyword", "monitor", &format!("{id},{mode},{place}")]))?;
         if done.status.success() && String::from_utf8_lossy(&done.stdout).trim() == "ok" { Ok(()) } else { Err(format!("Hyprland did not set {w}x{h}")) }
     }
 
+    /// KDE's tool, which reaches KWin through the session's Wayland display (Qt's other ways to
+    /// draw find no screens, or hang).
+    fn kscreen_doctor() -> Command {
+        let mut c = Command::new("kscreen-doctor");
+        c.env("QT_QPA_PLATFORM", "wayland");
+        c
+    }
+
     pub(super) fn kscreen_outputs() -> Vec<Output> {
-        json(Command::new("kscreen-doctor").arg("-j")).map_or_else(Vec::new, |all| kscreen_parse(&all))
+        json(kscreen_doctor().arg("-j")).map_or_else(Vec::new, |all| kscreen_parse(&all))
     }
 
     pub(super) fn kscreen_parse(all: &Value) -> Vec<Output> {
@@ -416,7 +450,7 @@ mod linux {
     pub(super) fn kscreen_set(id: &str, w: u16, h: u16) -> Result<(), String> {
         let out = kscreen_outputs().into_iter().find(|o| o.name == id).ok_or("that screen is gone")?;
         let mode = &out.pick(w, h)?.2;
-        let done = Command::new("kscreen-doctor").arg(format!("output.{id}.mode.{mode}")).output().map_err(|e| e.to_string())?;
+        let done = run(kscreen_doctor().arg(format!("output.{id}.mode.{mode}")))?;
         if done.status.success() { Ok(()) } else { Err(format!("KDE did not set {w}x{h}")) }
     }
 
