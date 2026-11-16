@@ -129,7 +129,11 @@ What is opened goes into the workspace:
 - Every window draws its own title bar and keeps the system's behaviour: drag and snap,
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
 - **Screen sharing**: quality (auto, five presets from black and white at half size and 5 fps to
-  full colour at 60, or colours, resolution and frame rate of one's own), fit, zoom, monitors (or
+  full colour at 60, or colours, picture size and frame rate of one's own), the resolution of the
+  host's screen itself (its display mode, as RustDesk's: set from the Display menu and set back
+  when the connection ends; on Windows, X11, GNOME, KDE Plasma with kscreen-doctor, Sway and
+  Hyprland, a virtual screen there taking common sizes), fit, zoom (below 100% the host sends a
+  smaller picture), monitors (or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
   monitors"), sharing one window or application with its menus and dialogs, special keys, chat,
   a voice call (the person there answers in their window), screenshot, recording to MP4, pause,
@@ -236,7 +240,8 @@ The agent starts a helper in the logged-on user's console session. `sshremote --
 ## MCP
 
 `sshremote mcp HOST` (or `mcp --here` for this computer) lets an AI agent read the window in front
-as text (accessibility tree) and act on its controls, with screenshots only when needed.
+as text (accessibility tree) and act on its controls, with screenshots only when needed. Its
+`resolution` tool lists the shown screen's resolutions or sets one (set back when it disconnects).
 
 ```json
 {"mcpServers": {"remote-pc": {"command": "sshremote", "args": ["mcp", "user@host"]}}}
