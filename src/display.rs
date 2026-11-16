@@ -83,7 +83,7 @@ impl Way {
             #[cfg(target_os = "linux")]
             Way::Sway(sock) => linux::sway_outputs(sock).into_iter().find(|o| o.name == id).map(|o| o.modes()),
             #[cfg(target_os = "linux")]
-            Way::Hypr(sig) => linux::hypr_monitors(sig).into_iter().find(|o| o.name == id).map(|o| o.modes()),
+            Way::Hypr(sig) => linux::hypr_monitors(sig).into_iter().find(|o| o.name == id && !linux::virtual_gpu(&o.name)).map(|o| o.modes()),
             #[cfg(target_os = "linux")]
             Way::KScreen => linux::kscreen_outputs().into_iter().find(|o| o.name == id).map(|o| o.modes()),
         }?;
@@ -136,18 +136,28 @@ impl Session {
         Some((m, own))
     }
 
-    /// Sets screen `id` to `w`x`h`, one of its resolutions (0x0: its own again).
-    pub fn set(&mut self, id: &str, w: u16, h: u16) -> Result<(), String> {
+    /// What setting screen `id` to `w`x`h` (0x0: its own again) would change it to: none when it
+    /// has that already, an error when it cannot have it. Nothing is changed.
+    pub fn plan(&self, id: &str, w: u16, h: u16) -> Result<Option<(u16, u16)>, String> {
         let way = self.way.as_ref().ok_or("the resolution of this computer's screen cannot be set from here")?;
         let m = way.modes(id).ok_or("that screen's resolutions are not known")?;
         let own = self.own.iter().find(|(s, _)| s == id).map(|(_, o)| *o);
         let (w, h) = if (w, h) == (0, 0) { own.unwrap_or(m.current) } else { (w, h) };
         if (w, h) == m.current {
-            return Ok(());
+            return Ok(None);
         }
         if !m.list.contains(&(w, h)) && Some((w, h)) != own {
             return Err(format!("that screen has no {w}x{h}"));
         }
+        Ok(Some((w, h)))
+    }
+
+    /// Sets screen `id` to `w`x`h`, one of its resolutions (0x0: its own again).
+    pub fn set(&mut self, id: &str, w: u16, h: u16) -> Result<(), String> {
+        let Some((w, h)) = self.plan(id, w, h)? else { return Ok(()) };
+        let way = self.way.as_ref().ok_or("the resolution of this computer's screen cannot be set from here")?;
+        let m = way.modes(id).ok_or("that screen's resolutions are not known")?;
+        let own = self.own.iter().find(|(s, _)| s == id).map(|(_, o)| *o);
         way.set(id, w, h)?;
         // A screen may say yes and keep its size (one in a window of another desktop): what it
         // has a moment later is what counts.
@@ -397,13 +407,28 @@ mod linux {
                         Some(((w.parse().ok()?, h.parse().ok()?), rate.trim_end_matches("Hz").parse().unwrap_or(60.0), s.trim_end_matches("Hz").to_string()))
                     })
                     .collect();
-                if modes.is_empty() {
+                // A screen of no make or model (a headless one, whose one listed mode is not its
+                // own) or with no modes takes any size.
+                let virtual_screen = m["make"].as_str().unwrap_or("").is_empty() && m["model"].as_str().unwrap_or("").is_empty();
+                if modes.is_empty() || virtual_screen {
                     modes = any_size(current, |w, h| format!("{w}x{h}"));
                 }
                 let place = format!("{}x{},{}", m["x"].as_i64().unwrap_or(0), m["y"].as_i64().unwrap_or(0), m["scale"].as_f64().unwrap_or(1.0));
                 (Output { name: m["name"].as_str().unwrap_or("").to_string(), current, modes }, place)
             })
             .collect()
+    }
+
+    /// Whether output `name` is a screen of a virtual machine's graphics: once Hyprland has made
+    /// one smaller it cannot make it larger again (it tests the new mode with the old, smaller
+    /// picture, which such a driver refuses), so a screen there would stay small.
+    pub(super) fn virtual_gpu(name: &str) -> bool {
+        let Ok(all) = std::fs::read_dir("/sys/class/drm") else { return false };
+        let suffix = format!("-{name}");
+        all.flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(&suffix).map(str::to_string))
+            .filter_map(|card| std::fs::read_link(format!("/sys/class/drm/{card}/device/driver")).ok())
+            .any(|d| matches!(d.file_name().and_then(|f| f.to_str()), Some("virtio-pci" | "virtio_gpu" | "vmwgfx" | "qxl" | "bochs-drm" | "cirrus" | "cirrus-qemu" | "vboxvideo" | "hyperv_drm" | "simpledrm")))
     }
 
     pub(super) fn hypr_set(sig: &str, id: &str, w: u16, h: u16) -> Result<(), String> {
@@ -653,7 +678,9 @@ mod tests {
         assert_eq!(sway.len(), 2);
         assert_eq!((sway[0].name.as_str(), sway[0].current, sway[0].modes().list.len()), ("DP-1", (2560, 1440), 3));
         assert!(sway[1].modes.iter().any(|m| m.2 == "--custom 1920x1080"), "a virtual screen takes any size");
-        let hypr = linux::hypr_parse(&json!([{"name": "eDP-1", "width": 1920, "height": 1200, "x": 0, "y": 0, "scale": 1.25, "availableModes": ["1920x1200@60.00Hz", "1920x1200@48.00Hz", "1280x800@60.00Hz"]}]));
+        let hypr = linux::hypr_parse(&json!([{"name": "eDP-1", "make": "BOE", "model": "0x0BCA", "width": 1920, "height": 1200, "x": 0, "y": 0, "scale": 1.25, "availableModes": ["1920x1200@60.00Hz", "1920x1200@48.00Hz", "1280x800@60.00Hz"]},
+            {"name": "HEADLESS-2", "make": "", "model": "", "width": 1280, "height": 800, "x": 1920, "y": 0, "scale": 1.0, "availableModes": ["1920x1080@0.06Hz"]}]));
+        assert!(hypr[1].0.modes.iter().any(|m| m.2 == "1024x768") && !hypr[1].0.modes.iter().any(|m| m.1 < 1.0), "a headless screen takes any size");
         assert_eq!(hypr[0].1, "0x0,1.25");
         assert_eq!(hypr[0].0.modes().list, vec![(1920, 1200), (1920, 1200), (1280, 800)]);
         let kde = linux::kscreen_parse(&json!({"outputs": [{"name": "Virtual-0", "enabled": true, "currentModeId": "2", "size": {"width": 1280, "height": 800},

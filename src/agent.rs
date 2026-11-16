@@ -718,14 +718,17 @@ fn serve_with(
                 }
                 ToAgent::SetMode { w, h } => {
                     let id = if cap.name() == "camera" { None } else { screens.screen(cap.screen_id()) };
-                    let done = match id {
-                        Some(id) => {
+                    // The picture stops only for a change that is going to be made.
+                    let done = match id.map(|id| screens.plan(&id, w, h).map(|p| (id, p))) {
+                        Some(Ok((id, Some((w, h))))) => {
                             cap.screen_changing();
                             let done = screens.set(&id, w, h);
                             // The capture finds the screen at its new size; the viewer then hears it.
                             cap.screen_changed();
                             done
                         }
+                        Some(Ok((_, None))) => Ok(()),
+                        Some(Err(e)) => Err(e),
                         None => Err("The resolution of that screen cannot be set from here.".to_string()),
                     };
                     if let Err(e) = done {
