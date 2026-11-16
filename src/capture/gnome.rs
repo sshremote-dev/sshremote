@@ -694,7 +694,7 @@ const HELPER_FILES: [(&str, &str); 2] = [
 
 /// A helper installed by an older sshremote is brought up to date, once per agent; GNOME loads
 /// the new files at the next login.
-fn update_helper() {
+pub(super) fn update_helper() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let dir = helper_dir();

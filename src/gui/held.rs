@@ -1,7 +1,8 @@
 //! A program of this computer in a pane: its own window, held over the pane (sized and moved
 //! with it, above this window and hidden with it), so it is used as it is, not through a picture of
-//! it. On Windows and in X11 sessions; elsewhere (Wayland lets no program place another's windows)
-//! a program here is shown as one of another computer is.
+//! it. On Windows, in X11 sessions, and on GNOME under Wayland through its sshremote helper;
+//! elsewhere (Wayland lets no program place another's windows) a program here is shown as one of
+//! another computer is.
 
 use eframe::egui::{self, Order, Rect};
 
@@ -11,18 +12,78 @@ pub(super) use imp::Held;
 pub(crate) use imp::bring_back;
 
 #[cfg(all(target_os = "linux", feature = "remote"))]
-mod x11;
+mod gnome;
 #[cfg(all(target_os = "linux", feature = "remote"))]
-use x11 as imp;
+mod kwin;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod x11;
 
 /// Whether this computer's programs are held in their panes (else a pane shows a picture of them).
 pub(super) fn here() -> bool {
     #[cfg(all(windows, feature = "remote"))]
     return true;
     #[cfg(all(target_os = "linux", feature = "remote"))]
-    return x11::here();
+    return x11::here() || gnome::here() || kwin::here();
     #[allow(unreachable_code)]
     false
+}
+
+/// On Linux the way the session allows: in X11 by asking the window manager; under Wayland on
+/// GNOME through its sshremote helper, on KDE Plasma through KWin scripts.
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod imp {
+    use eframe::egui;
+
+    pub(in crate::gui) enum Held {
+        X11(super::x11::Held),
+        Gnome(super::gnome::Held),
+        Kwin(super::kwin::Held),
+    }
+
+    pub(crate) fn bring_back() {
+        // GNOME's helper and KWin's scripts let go of the windows themselves when this window goes.
+        super::x11::bring_back();
+    }
+
+    impl Held {
+        pub(in crate::gui) fn start(kind: u8, text: &str) -> Held {
+            if super::x11::here() {
+                Held::X11(super::x11::Held::start(kind, text))
+            } else if super::gnome::here() {
+                Held::Gnome(super::gnome::Held::start(kind, text))
+            } else {
+                Held::Kwin(super::kwin::Held::start(kind, text))
+            }
+        }
+        pub(in crate::gui) fn show(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+            match self {
+                Held::X11(h) => h.show(ui, rect),
+                Held::Gnome(h) => h.show(ui, rect),
+                Held::Kwin(h) => h.show(ui, rect),
+            }
+        }
+        pub(in crate::gui) fn hide(&mut self) {
+            match self {
+                Held::X11(h) => h.hide(),
+                Held::Gnome(h) => h.hide(),
+                Held::Kwin(h) => h.hide(),
+            }
+        }
+        pub(in crate::gui) fn close(&mut self) {
+            match self {
+                Held::X11(h) => h.close(),
+                Held::Gnome(h) => h.close(),
+                Held::Kwin(h) => h.close(),
+            }
+        }
+        pub(in crate::gui) fn ended(&self) -> bool {
+            match self {
+                Held::X11(h) => h.ended(),
+                Held::Gnome(h) => h.ended(),
+                Held::Kwin(h) => h.ended(),
+            }
+        }
+    }
 }
 
 /// Whether a menu, a dialog or a window of this one's is over the pane: the program is kept out of

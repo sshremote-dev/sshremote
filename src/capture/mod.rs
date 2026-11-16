@@ -4,6 +4,13 @@ pub mod camera;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod gnome;
+
+/// The GNOME helper extension brought up to date where it is installed (GNOME loads it at the
+/// next login).
+#[cfg(target_os = "linux")]
+pub(crate) fn gnome_helper_update() {
+    gnome::update_helper();
+}
 #[cfg(target_os = "linux")]
 mod portal;
 #[cfg(target_os = "linux")]
