@@ -1,8 +1,8 @@
 //! A program of this computer in a pane: its own window, held over the pane (sized and moved
 //! with it, above this window and hidden with it), so it is used as it is, not through a picture of
-//! it. On Windows, in X11 sessions, and on GNOME under Wayland through its sshremote helper;
-//! elsewhere (Wayland lets no program place another's windows) a program here is shown as one of
-//! another computer is.
+//! it. On Windows, in X11 sessions, and under Wayland on GNOME (through its sshremote helper), KDE
+//! Plasma (KWin scripts), Sway and Hyprland (their IPC); elsewhere (Wayland lets no program place
+//! another's windows) a program here is shown as one of another computer is.
 
 use eframe::egui::{self, Order, Rect};
 
@@ -14,7 +14,13 @@ pub(crate) use imp::bring_back;
 #[cfg(all(target_os = "linux", feature = "remote"))]
 mod gnome;
 #[cfg(all(target_os = "linux", feature = "remote"))]
+mod hypr;
+#[cfg(all(target_os = "linux", feature = "remote"))]
 mod kwin;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod sway;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod tiled;
 #[cfg(all(target_os = "linux", feature = "remote"))]
 mod x11;
 
@@ -23,13 +29,14 @@ pub(super) fn here() -> bool {
     #[cfg(all(windows, feature = "remote"))]
     return true;
     #[cfg(all(target_os = "linux", feature = "remote"))]
-    return x11::here() || gnome::here() || kwin::here();
+    return x11::here() || tiled::here() || gnome::here() || kwin::here();
     #[allow(unreachable_code)]
     false
 }
 
 /// On Linux the way the session allows: in X11 by asking the window manager; under Wayland on
-/// GNOME through its sshremote helper, on KDE Plasma through KWin scripts.
+/// GNOME through its sshremote helper, on KDE Plasma through KWin scripts, on Sway and Hyprland
+/// through their IPC.
 #[cfg(all(target_os = "linux", feature = "remote"))]
 mod imp {
     use eframe::egui;
@@ -38,17 +45,23 @@ mod imp {
         X11(super::x11::Held),
         Gnome(super::gnome::Held),
         Kwin(super::kwin::Held),
+        Tiled(super::tiled::Held),
     }
 
     pub(crate) fn bring_back() {
         // GNOME's helper and KWin's scripts let go of the windows themselves when this window goes.
         super::x11::bring_back();
+        super::tiled::bring_back();
     }
 
     impl Held {
         pub(in crate::gui) fn start(kind: u8, text: &str) -> Held {
+            // The compositor this window is on first: another may answer on the session bus too
+            // (one this session runs in a window of its own).
             if super::x11::here() {
                 Held::X11(super::x11::Held::start(kind, text))
+            } else if super::tiled::here() {
+                Held::Tiled(super::tiled::Held::start(kind, text))
             } else if super::gnome::here() {
                 Held::Gnome(super::gnome::Held::start(kind, text))
             } else {
@@ -60,6 +73,7 @@ mod imp {
                 Held::X11(h) => h.show(ui, rect),
                 Held::Gnome(h) => h.show(ui, rect),
                 Held::Kwin(h) => h.show(ui, rect),
+                Held::Tiled(h) => h.show(ui, rect),
             }
         }
         pub(in crate::gui) fn hide(&mut self) {
@@ -67,6 +81,7 @@ mod imp {
                 Held::X11(h) => h.hide(),
                 Held::Gnome(h) => h.hide(),
                 Held::Kwin(h) => h.hide(),
+                Held::Tiled(h) => h.hide(),
             }
         }
         pub(in crate::gui) fn close(&mut self) {
@@ -74,6 +89,7 @@ mod imp {
                 Held::X11(h) => h.close(),
                 Held::Gnome(h) => h.close(),
                 Held::Kwin(h) => h.close(),
+                Held::Tiled(h) => h.close(),
             }
         }
         pub(in crate::gui) fn ended(&self) -> bool {
@@ -81,6 +97,7 @@ mod imp {
                 Held::X11(h) => h.ended(),
                 Held::Gnome(h) => h.ended(),
                 Held::Kwin(h) => h.ended(),
+                Held::Tiled(h) => h.ended(),
             }
         }
     }

@@ -47,6 +47,22 @@ fn launch_as(kind: u8, text: &str, min: bool) -> Result<String, String> {
     }
 }
 
+/// The shell line that starts `text` as `kind` says, and the name to look for its window by, for a
+/// desktop that is to start it itself (Sway and Hyprland, so its window opens out of sight).
+#[cfg(target_os = "linux")]
+pub fn shell_line(kind: u8, text: &str) -> Result<(String, String), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("nothing to start".into());
+    }
+    match kind {
+        APP => imp::app_line(text),
+        COMMAND => Ok((text.to_string(), program_of(text))),
+        OPEN => imp::open_line(text).map(|l| (l, String::new())),
+        _ => Err("unknown way to start a program".into()),
+    }
+}
+
 /// The program a command line starts, by its file name without the folder or extension.
 pub fn program_of(command: &str) -> String {
     let first = command.trim().strip_prefix('"').map_or_else(|| command.split_whitespace().next().unwrap_or(""), |r| r.split('"').next().unwrap_or(""));
@@ -203,7 +219,8 @@ mod imp {
         detached(cmd)
     }
 
-    pub fn open(what: &str, _min: bool) -> Result<(), String> {
+    /// `what` with `~/` made the home folder: a file that is there, or an address.
+    fn openable(what: &str) -> Result<String, String> {
         let what = match what.strip_prefix("~/") {
             Some(rest) => std::env::var("HOME").map(|h| format!("{h}/{rest}")).unwrap_or_else(|_| what.to_string()),
             None => what.to_string(),
@@ -212,6 +229,11 @@ mod imp {
         if !looks_like_address && !Path::new(&what).exists() {
             return Err(format!("{what} is not there"));
         }
+        Ok(what)
+    }
+
+    pub fn open(what: &str, _min: bool) -> Result<(), String> {
+        let what = openable(what)?;
         let mut cmd = if on_path("gio") {
             let mut c = Command::new("gio");
             c.arg("open");
@@ -221,6 +243,37 @@ mod imp {
         };
         cmd.arg(&what);
         detached(cmd)
+    }
+
+    fn quoted(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    /// The shell line that starts program `id`, and its name: its own command (a program started
+    /// that way opens its window as a child of the line), or the desktop's launcher for one that
+    /// runs in a terminal.
+    pub(super) fn app_line(id: &str) -> Result<(String, String), String> {
+        let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| format!("{id} is not installed here"))?;
+        let e = entry(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?);
+        let name = e.get("Name").cloned().unwrap_or_default();
+        let exec = e.get("Exec").filter(|x| !x.is_empty());
+        let line = match exec {
+            Some(x) if !e.get("Terminal").is_some_and(|t| t == "true") => {
+                let line = exec_line(x);
+                match e.get("Path").filter(|p| !p.is_empty()) {
+                    Some(dir) => format!("cd {} && {line}", quoted(dir)),
+                    None => line,
+                }
+            }
+            _ if on_path("gio") => format!("gio launch {}", quoted(&path.display().to_string())),
+            _ => return Err("it has no command".into()),
+        };
+        Ok((line, name))
+    }
+
+    pub(super) fn open_line(what: &str) -> Result<String, String> {
+        let what = openable(what)?;
+        Ok(format!("{} {}", if on_path("gio") { "gio open" } else { "xdg-open" }, quoted(&what)))
     }
 }
 
