@@ -40,6 +40,8 @@ struct Server {
     monitors: Vec<crate::proto::MonitorInfo>,
     /// The shown screen's resolutions, the one it has and its own (`Modes`).
     modes: crate::proto::ScreenModes,
+    /// The host has said its monitors and resolutions on this link (just after its hello).
+    heard: bool,
     windows: Option<Result<Vec<crate::capture::WindowInfo>, String>>,
     /// The host's installed programs, and what the last `launch` did.
     apps: Option<Result<Vec<(String, String, String)>, String>>,
@@ -286,6 +288,7 @@ impl Server {
             sess.send(ToAgent::Pause(true)).map_err(|e| e.to_string())?;
             self.screen = (desk.0 as u32, desk.1 as u32);
             self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
+            self.heard = false;
             self.link = Some((sess, tx, rx));
         }
         Ok(self.link.as_mut().expect("made above"))
@@ -321,7 +324,10 @@ impl Server {
                 Ev::Net(ToClient::Snapshot(png)) => return Ok(Some(png)),
                 Ev::Net(ToClient::Clipboard(t)) => self.clipboard = t,
                 Ev::Net(ToClient::Monitors { list, .. }) => self.monitors = list,
-                Ev::Net(ToClient::Modes { list, current, own }) => self.modes = (list, current, own),
+                Ev::Net(ToClient::Modes { list, current, own }) => {
+                    self.modes = (list, current, own);
+                    self.heard = true;
+                }
                 Ev::Net(ToClient::WindowList { list, error }) => {
                     self.windows = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                 }
@@ -342,6 +348,19 @@ impl Server {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// What came so far; just after the link is made, also what the host says after its hello
+    /// (its monitors, then their resolutions), which a slow link brings a moment later.
+    fn settle(&mut self) -> Result<(), String> {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            self.drain(None)?;
+            if self.heard || Instant::now() >= until {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -501,7 +520,7 @@ impl Server {
                 Ok(text_result(format!("waited {ms} ms")))
             }
             "monitors" => {
-                self.drain(None)?;
+                self.settle()?;
                 let list: Vec<String> = self
                     .monitors
                     .iter()
@@ -518,7 +537,7 @@ impl Server {
                     self.drain(Some(Instant::now() + Duration::from_millis(2500)))?;
                     self.view = View { ox: 0.0, oy: 0.0, scale: 1.0 };
                 } else {
-                    self.drain(None)?;
+                    self.settle()?;
                 }
                 let (list, current, own) = &self.modes;
                 if list.is_empty() {
@@ -699,6 +718,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         clipboard: String::new(),
         monitors: Vec::new(),
         modes: (Vec::new(), (0, 0), (0, 0)),
+        heard: false,
         windows: None,
         apps: None,
         launched: None,
