@@ -139,6 +139,8 @@ struct Entry {
     asking: bool,
     /// Raised over this window while it is full screen, since it was last put out of sight.
     lifted: bool,
+    /// Its program's other windows when it was found (the ones after are its own: a question).
+    before: Vec<String>,
 }
 
 #[derive(Default)]
@@ -201,10 +203,16 @@ impl Keep {
         self.dead.retain(|(_, t)| t.elapsed() < Duration::from_secs(60));
         self.closing.retain(|(_, t)| t.elapsed() < Duration::from_secs(10));
         let held: Vec<String> = self.entries.iter().filter_map(|e| e.id.clone()).collect();
+        let held_pids: Vec<u32> = wins.iter().filter(|w| held.contains(&w.id)).map(|w| w.pid).collect();
+        let catches: Vec<String> = self.entries.iter().map(|e| e.catch.clone()).collect();
+        let catching = |w: &Win| catches.contains(&w.space);
+        // A held program's other window out of sight with it (Hyprland opens a question where the
+        // window it asks for is): it goes where that one is, below.
+        let stray = |w: &Win| w.tag == Some(me) && wm.out_of_sight(w) && !held.contains(&w.id) && held_pids.contains(&w.pid) && !catching(w);
         // Windows no pane waits for: of panes closed before they came, or of a program that ended.
         for w in wins {
             let late = self.dead.iter().any(|(s, _)| *s == w.space);
-            let orphan = w.tag.is_some_and(|p| p != me && !alive(p)) || (w.tag == Some(me) && !held.contains(&w.id) && !self.entries.iter().any(|e| e.catch == w.space));
+            let orphan = w.tag.is_some_and(|p| p != me && !alive(p)) || (w.tag == Some(me) && !held.contains(&w.id) && !stray(w) && !catching(w));
             let closing = self.closing.iter().any(|(id, _)| *id == w.id);
             if (late || orphan) && !closing && let Some(front) = wm.focused_space() {
                 wm.free(w, &front, None);
@@ -222,12 +230,14 @@ impl Keep {
                 };
                 if let Some(w) = wins.iter().find(|w| w.space == e.catch) {
                     (e.id, e.new, e.preparing) = (Some(w.id.clone()), true, true);
+                    e.before = wins.iter().filter(|o| o.pid == w.pid && o.id != w.id).map(|o| o.id.clone()).collect();
                     wm.ready(w);
                 } else if e.since.elapsed() >= BY_NAME
                     && !e.first.is_empty()
                     && let Some(w) = by_name()
                 {
                     (e.id, e.new, e.preparing, e.was) = (Some(w.id.clone()), false, true, Some(w.clone()));
+                    e.before = wins.iter().filter(|o| o.pid == w.pid && o.id != w.id).map(|o| o.id.clone()).collect();
                     wm.ready(w);
                 }
                 continue;
@@ -239,6 +249,7 @@ impl Keep {
             if let Some(open) = &e.asked {
                 e.asking = wins.iter().any(|o| o.pid == w.pid && o.id != id && !open.contains(&o.id));
             }
+            let strays: Vec<&Win> = wins.iter().filter(|o| o.pid == w.pid && o.id != id && stray(o)).collect();
             let Some(rel) = e.rel else { continue };
             if e.preparing {
                 // Asked again until it has the size (a program may yet answer an older request, and
@@ -278,12 +289,28 @@ impl Keep {
                         // This window was brought up over it.
                         wm.raise(w, &o.space, aim);
                     }
+                    for x in &strays {
+                        wm.put(x, &o.space, x.rect);
+                    }
                     // This window full screen, which is drawn over the rest: raised and focused once
-                    // where the compositor then shows it over it (Hyprland).
-                    if o.full && !e.lifted && wm.over_full() {
-                        wm.raise(w, &o.space, aim);
-                        wm.focus(&id);
-                        e.lifted = true;
+                    // where the compositor then shows it over it (Hyprland). Its program's floating
+                    // windows opened since (the question it asks) stay over it and have the focus (a
+                    // tiled one focused would end full screen there).
+                    let lift = o.full && !e.lifted && wm.over_full();
+                    if lift || !strays.is_empty() {
+                        if lift {
+                            wm.raise(w, &o.space, aim);
+                        }
+                        let over: Vec<&Win> = wins
+                            .iter()
+                            .filter(|x| x.pid == w.pid && x.id != id && x.floating && x.space == o.space && !held.contains(&x.id) && !e.before.contains(&x.id))
+                            .chain(strays.iter().copied())
+                            .collect();
+                        for x in &over {
+                            wm.raise(x, &o.space, x.rect);
+                        }
+                        wm.focus(over.last().map_or(&id, |x| &x.id));
+                        e.lifted |= lift;
                     }
                     if !o.full {
                         e.lifted = false;
@@ -292,6 +319,15 @@ impl Keep {
                 None => {
                     if !wm.out_of_sight(w) {
                         wm.hide(w);
+                    }
+                    // Its question is not kept out of sight with it.
+                    if let Some(front) = strays.first().and_then(|_| wm.focused_space()) {
+                        for x in &strays {
+                            wm.put(x, &front, x.rect);
+                        }
+                        if let Some(x) = strays.last() {
+                            wm.focus(&x.id);
+                        }
                     }
                     e.aim = None;
                     e.lifted = false;
@@ -488,6 +524,7 @@ impl Held {
                     asked: None,
                     asking: false,
                     lifted: false,
+                    before: Vec::new(),
                 });
                 let ok = script(token, &line).is_some_and(|path| wm.launch(&catch, &path));
                 if ok {
@@ -639,7 +676,8 @@ mod tests {
         }
         fn put(&self, w: &Win, space: &str, rect: [i32; 4]) {
             self.say(format!("put {} {space} {rect:?}", w.id));
-            self.with(&w.id, |w| (w.space, w.rect) = (space.into(), rect));
+            // Its tag is its workspace's (Hyprland).
+            self.with(&w.id, |w| (w.space, w.rect, w.tag) = (space.into(), rect, None));
         }
         fn hide(&self, w: &Win) {
             self.say(format!("hide {}", w.id));
@@ -684,6 +722,7 @@ mod tests {
             asked: None,
             asking: false,
             lifted: false,
+            before: Vec::new(),
         }
     }
 
@@ -788,6 +827,42 @@ mod tests {
         k.mind(&wm, &wm.windows().unwrap());
         assert_eq!(raised(&wm), 2);
         assert_eq!(wm.said.lock().unwrap().last().unwrap(), "focus ed");
+    }
+
+    #[test]
+    fn a_question_opened_out_of_sight_with_its_window_comes_over_it_and_is_not_let_go() {
+        let me = std::process::id();
+        let wm = Fake::default();
+        wm.wins.lock().unwrap().push(Win { id: "ours".into(), pid: me, space: "1".into(), rect: [0, 0, 1280, 800], visible: true, full: true, ..Default::default() });
+        // A window of its program open before, floating where this window is.
+        wm.wins.lock().unwrap().push(Win { id: "old".into(), pid: 500, space: "1".into(), floating: true, ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "ed".into(), pid: 500, space: "catch-6".into(), rect: [0, 0, 1280, 800], ..Default::default() });
+        let mut k = Keep::default();
+        k.entries.push(entry(6, "catch-6"));
+        k.entries[0].rel = Some([1280, 800, 0, 0, 1280, 800]);
+        k.entries[0].shown = true;
+        for _ in 0..3 {
+            k.mind(&wm, &wm.windows().unwrap());
+        }
+        // Out of sight a while, its program asks: the question opens where its window is.
+        k.entries[0].shown = false;
+        k.mind(&wm, &wm.windows().unwrap());
+        let question = Win { id: "q".into(), pid: 500, space: "hidden".into(), rect: [473, 323, 333, 153], floating: true, tag: Some(me), ..Default::default() };
+        wm.wins.lock().unwrap().push(question.clone());
+        wm.said.lock().unwrap().clear();
+        k.entries[0].shown = true;
+        k.mind(&wm, &wm.windows().unwrap());
+        let said = wm.said.lock().unwrap().clone();
+        assert_eq!(said, ["put ed 1 [0, 0, 1280, 800]", "put q 1 [473, 323, 333, 153]", "raise ed", "raise q", "focus q"]);
+        k.mind(&wm, &wm.windows().unwrap());
+        assert_eq!(wm.said.lock().unwrap().clone(), said, "once");
+        // With its pane not shown, its question comes to the workspace in front.
+        k.entries[0].shown = false;
+        k.mind(&wm, &wm.windows().unwrap());
+        wm.with("q", |w| (w.space, w.tag) = ("hidden".into(), Some(me)));
+        wm.said.lock().unwrap().clear();
+        k.mind(&wm, &wm.windows().unwrap());
+        assert_eq!(wm.said.lock().unwrap().clone(), ["put q 1 [473, 323, 333, 153]", "focus q"]);
     }
 
     #[test]
