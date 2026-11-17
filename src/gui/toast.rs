@@ -115,6 +115,11 @@ impl Toasts {
         }
     }
 
+    /// Whether one is still to be seen.
+    pub(super) fn due(&self) -> bool {
+        self.list.iter().any(|t| t.2.elapsed() < STAY)
+    }
+
     #[cfg(test)]
     pub(super) fn texts(&self) -> Vec<&str> {
         self.list.iter().map(|t| t.0.as_str()).collect()

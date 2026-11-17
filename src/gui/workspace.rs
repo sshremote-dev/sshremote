@@ -821,6 +821,23 @@ impl Workspace {
         }
     }
 
+    /// While the window gets no frames (eframe's logic runs alone: it is wholly under a program
+    /// held full screen over it, under Wayland): programs asked to close are followed, and a notice
+    /// due has the programs over the panes step aside, so the window shows again and draws it.
+    pub(super) fn unseen(&mut self, ctx: &egui::Context) {
+        self.follow_asked(ctx);
+        if self.toasts.due() {
+            for p in &mut self.panes {
+                if let State::Held(h) = &mut p.state {
+                    h.hide();
+                }
+            }
+        }
+        if self.toasts.due() || !self.asked.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
     /// Connections being made: started, finished, or tried again later.
     fn tick(&mut self, ctx: &egui::Context) {
         let now = Instant::now();

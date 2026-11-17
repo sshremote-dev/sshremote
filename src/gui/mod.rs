@@ -367,6 +367,10 @@ pub struct App {
     quitting: bool,
     /// Quitting once the other windows have closed (their programs asked first).
     quit_waits: bool,
+    /// Logic passes since the last frame, and when that was: two in a row and a while since, the
+    /// window gets no frames (wholly under a program held full screen over it, under Wayland).
+    unseen: u8,
+    drawn: std::time::Instant,
     /// Hosts being reached for the screen or files, with their ports: recent once reached.
     pending_ports: std::collections::HashMap<String, String>,
     /// Passwords to keep in the password store once their connection works, by host.
@@ -791,6 +795,8 @@ impl App {
             quit_asked: false,
             quitting: false,
             quit_waits: false,
+            unseen: 0,
+            drawn: std::time::Instant::now(),
             pending_ports: Default::default(),
             pending_passwords: Default::default(),
             grab_window: None,
@@ -908,7 +914,18 @@ impl eframe::App for App {
         drive::hook(ctx, raw);
     }
 
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.unseen = self.unseen.saturating_add(1);
+        if self.unseen >= 2
+            && self.drawn.elapsed() > std::time::Duration::from_secs(1)
+            && let Screen::Work(w) = &mut self.screen
+        {
+            w.unseen(ctx);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        (self.unseen, self.drawn) = (0, std::time::Instant::now());
         lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
         // Files dropped under Wayland, which winit does not take.
