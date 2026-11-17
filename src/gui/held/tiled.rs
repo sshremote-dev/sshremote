@@ -276,6 +276,8 @@ impl Keep {
                         || !near(w.rect[1], aim[1], 1)
                         || !near(w.rect[2], aim[2], SLACK)
                         || !near(w.rect[3], aim[3], SLACK);
+                    // Put back from out of sight, it comes over the rest (Sway).
+                    let back = e.aim.is_none();
                     if e.aim.as_ref() != Some(&wanted) || (off && e.put_at.elapsed() >= AGAIN) {
                         wm.put(w, &o.space, aim);
                         e.put_at = Instant::now();
@@ -295,9 +297,9 @@ impl Keep {
                     // This window full screen, which is drawn over the rest: raised and focused once
                     // where the compositor then shows it over it (Hyprland). Its program's floating
                     // windows opened since (the question it asks) stay over it and have the focus (a
-                    // tiled one focused would end full screen there).
+                    // tiled one focused would end full screen there), as they do when it comes back.
                     let lift = o.full && !e.lifted && wm.over_full();
-                    if lift || !strays.is_empty() {
+                    if lift || back || !strays.is_empty() {
                         if lift {
                             wm.raise(w, &o.space, aim);
                         }
@@ -309,7 +311,11 @@ impl Keep {
                         for x in &over {
                             wm.raise(x, &o.space, x.rect);
                         }
-                        wm.focus(over.last().map_or(&id, |x| &x.id));
+                        match over.last() {
+                            Some(x) => wm.focus(&x.id),
+                            None if lift => wm.focus(&id),
+                            None => {}
+                        }
                         e.lifted |= lift;
                     }
                     if !o.full {
@@ -863,6 +869,40 @@ mod tests {
         wm.said.lock().unwrap().clear();
         k.mind(&wm, &wm.windows().unwrap());
         assert_eq!(wm.said.lock().unwrap().clone(), ["put q 1 [473, 323, 333, 153]", "focus q"]);
+    }
+
+    #[test]
+    fn its_question_stays_over_it_as_it_comes_back() {
+        let me = std::process::id();
+        let wm = Fake::default();
+        wm.wins.lock().unwrap().push(Win { id: "ours".into(), pid: me, space: "1".into(), rect: [640, 25, 640, 775], visible: true, ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "old".into(), pid: 500, space: "1".into(), floating: true, ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "ed".into(), pid: 500, space: "catch-6".into(), rect: [0, 0, 636, 733], ..Default::default() });
+        let mut k = Keep::default();
+        k.entries.push(entry(6, "catch-6"));
+        k.entries[0].rel = Some([640, 775, 2, 40, 636, 733]);
+        k.entries[0].shown = true;
+        for _ in 0..3 {
+            k.mind(&wm, &wm.windows().unwrap());
+        }
+        // A menu over its pane puts it out of sight; meanwhile its program asks where this window is (Sway).
+        k.entries[0].shown = false;
+        k.mind(&wm, &wm.windows().unwrap());
+        wm.wins.lock().unwrap().push(Win { id: "q".into(), pid: 500, space: "1".into(), rect: [473, 323, 333, 153], floating: true, ..Default::default() });
+        k.mind(&wm, &wm.windows().unwrap());
+        wm.said.lock().unwrap().clear();
+        k.entries[0].shown = true;
+        k.mind(&wm, &wm.windows().unwrap());
+        k.mind(&wm, &wm.windows().unwrap());
+        assert_eq!(wm.said.lock().unwrap().clone(), ["put ed 1 [642, 65, 636, 733]", "raise q", "focus q"], "back under its question, once");
+        // With no question it comes back as it was, the focus left where it is.
+        wm.wins.lock().unwrap().retain(|w| w.id != "q");
+        k.entries[0].shown = false;
+        k.mind(&wm, &wm.windows().unwrap());
+        wm.said.lock().unwrap().clear();
+        k.entries[0].shown = true;
+        k.mind(&wm, &wm.windows().unwrap());
+        assert_eq!(wm.said.lock().unwrap().clone(), ["put ed 1 [642, 65, 636, 733]"]);
     }
 
     #[test]
