@@ -218,6 +218,7 @@ export default class DeskHelper extends Extension {
             }
         }
         held.rel = {x, y, w, h};
+        held.size = {width, height};
         held.shown = shown;
         this._place(held);
         if (this._hushed(win))
@@ -231,6 +232,7 @@ export default class DeskHelper extends Extension {
             return;
         const actor = win.get_compositor_private();
         if (!held.shown || ours.minimized) {
+            held.whole = false;
             if (!win.minimized) {
                 if (win.has_focus())
                     ours.activate(global.get_current_time());
@@ -245,6 +247,20 @@ export default class DeskHelper extends Extension {
                 Main.wm.skipNextEffect(actor);
             win.unminimize();
         }
+        // The app's window full screen and the pane all of it: the program full screen too (over
+        // the top bar), and made the active one as it comes there while the app's is in use, as
+        // Mutter keeps a focused full screen window over the rest.
+        const size = held.size;
+        if (ours.is_fullscreen() && size && rel.x <= 0 && rel.y <= 0 && rel.w >= size.width - 1 && rel.h >= size.height - 1) {
+            if (!win.is_fullscreen())
+                win.make_fullscreen();
+            this._unhush(win);
+            if (!held.whole && ours.has_focus())
+                win.activate(global.get_current_time());
+            held.whole = true;
+            return;
+        }
+        held.whole = false;
         const maximized = win.is_maximized ? win.is_maximized() : win.get_maximized() !== 0;
         if (maximized) {
             if (win.set_unmaximize_flags)
@@ -275,7 +291,9 @@ export default class DeskHelper extends Extension {
     _keepOver() {
         const focus = global.display.get_focus_window();
         for (const held of this._held.values()) {
-            if (!held.ours || held.ours !== focus || !held.shown || held.win.minimized)
+            // Full screen over the app's, it is not raised for it: brought up by hand, the app's
+            // window stays in front.
+            if (!held.ours || held.ours !== focus || !held.shown || held.win.minimized || held.whole)
                 continue;
             const [, top] = global.display.sort_windows_by_stacking([held.win, held.ours]);
             if (top === held.ours)

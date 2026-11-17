@@ -140,6 +140,8 @@ const ours = () => {{
     return mine.find(w => near(w.clientGeometry.width, size.w) && near(w.clientGeometry.height, size.h)) || (mine.length === 1 ? mine[0] : null);
 }};
 const me = ours();
+// This window full screen and the pane all of it: the program full screen too (over the panels).
+const whole = m => m.fullScreen && rel.x <= 0 && rel.y <= 0 && rel.w >= size.w - 1 && rel.h >= size.h - 1;
 let gone = false;
 function place() {{
     const h = held(), m = ours();
@@ -153,6 +155,12 @@ function place() {{
         return;
     }}
     h.minimized = false;
+    if (whole(m)) {{
+        if (!h.fullScreen)
+            h.fullScreen = true;
+        h.opacity = 1;
+        return;
+    }}
     if (h.fullScreen)
         h.fullScreen = false;
     h.setMaximize(false, false);
@@ -176,6 +184,10 @@ if (me) {{
 }}
 if (h0)
     h0.frameGeometryChanged.connect(place);
+// Made the active one as this window is full screen and in use, which KWin keeps over the rest:
+// this script comes again with each change made here (put over it again, full screen or not).
+if (shown && h0 && me && me.fullScreen && workspace.activeWindow === me)
+    workspace.activeWindow = h0;
 workspace.windowActivated.connect(w => {{
     const h = held();
     if (!gone && shown && h && !h.minimized && w === ours())
