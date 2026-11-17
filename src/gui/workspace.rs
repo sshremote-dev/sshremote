@@ -160,6 +160,15 @@ const GIVE_UP: f64 = 30.0;
 const ASKED_WAIT: Duration = Duration::from_secs(3);
 const ASKED_MAX: Duration = Duration::from_secs(300);
 
+/// A program held in a pane, asked to close with it: since when, when it was last seen asking
+/// something, and whether it was then.
+struct Asked {
+    id: u64,
+    since: Instant,
+    heard: Instant,
+    asking: bool,
+}
+
 enum State {
     Shell(Box<crate::termwin::TermWindow>),
     Live(Box<Remote>),
@@ -312,10 +321,9 @@ pub(super) struct Workspace {
     panes_area: Rect,
     /// The window is closing for good (told yes): nothing else is shown in it meanwhile.
     pub(super) closing_window: bool,
-    /// Programs held in panes asked to close, since when, and when last seen asking something: a
-    /// pane stays until its program has closed it, as it may ask first (to save, to close its
-    /// tabs), answered there.
-    asked: Vec<(u64, Instant, Instant)>,
+    /// Programs held in panes asked to close: a pane stays until its program has closed it, as it
+    /// may ask first (to save, to close its tabs), answered there.
+    asked: Vec<Asked>,
     /// Told yes to closing while programs were asked to: it closes once they have.
     window_waits: bool,
     /// The app quits and asks this window to close as if told yes (its programs first).
@@ -704,8 +712,9 @@ impl Workspace {
             && let State::Held(h) = &mut self.panes[i].state
             && !h.ask_close()
         {
-            if !self.asked.iter().any(|(a, ..)| *a == id) {
-                self.asked.push((id, Instant::now(), Instant::now()));
+            if !self.asked.iter().any(|a| a.id == id) {
+                let now = Instant::now();
+                self.asked.push(Asked { id, since: now, heard: now, asking: false });
             }
             return false;
         }
@@ -756,7 +765,7 @@ impl Workspace {
         }
         if waits {
             self.window_waits = true;
-            if let Some(&(id, ..)) = self.asked.first() {
+            if let Some(id) = self.asked.first().map(|a| a.id) {
                 self.reveal(id);
             }
             return;
@@ -768,20 +777,33 @@ impl Workspace {
 
     /// Programs asked to close: their panes went with them. One still open a while after it last
     /// asked something (its question was turned down, or it stays open) is said, and the window
-    /// waits for it no longer. Its window goes a moment after its question when told yes.
+    /// waits for it no longer. Its window goes a moment after its question when told yes. One that
+    /// starts asking, or asks on once another went, is brought into view (its tab may not be).
     fn follow_asked(&mut self, ctx: &egui::Context) {
         let panes = &self.panes;
-        self.asked.retain_mut(|(id, _, quiet)| {
-            let Some(p) = panes.iter().find(|p| p.id == *id) else { return false };
-            if matches!(&p.state, State::Held(h) if h.asking()) {
-                *quiet = Instant::now();
+        let before = self.asked.len();
+        let mut show = None;
+        self.asked.retain_mut(|a| {
+            let Some(p) = panes.iter().find(|p| p.id == a.id) else { return false };
+            let asking = matches!(&p.state, State::Held(h) if h.asking());
+            if asking {
+                a.heard = Instant::now();
+                if !a.asking {
+                    show.get_or_insert(a.id);
+                }
             }
+            a.asking = asking;
             true
         });
-        let late: Vec<u64> =
-            self.asked.iter().filter(|(_, since, quiet)| since.elapsed() > ASKED_MAX || quiet.elapsed() > ASKED_WAIT).map(|(id, ..)| *id).collect();
+        if self.asked.len() < before {
+            show = show.or_else(|| self.asked.iter().find(|a| a.asking).map(|a| a.id));
+        }
+        if let Some(id) = show {
+            self.reveal(id);
+        }
+        let late: Vec<u64> = self.asked.iter().filter(|a| a.since.elapsed() > ASKED_MAX || a.heard.elapsed() > ASKED_WAIT).map(|a| a.id).collect();
         if !late.is_empty() {
-            self.asked.retain(|(id, ..)| !late.contains(id));
+            self.asked.retain(|a| !late.contains(&a.id));
             let window = std::mem::take(&mut self.window_waits);
             for id in late {
                 let name = self.name(id).0;
