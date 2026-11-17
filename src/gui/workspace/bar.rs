@@ -7,7 +7,18 @@ impl Workspace {
     /// +, the mode, the pane's controls as measured last frame, the layout and full-screen buttons.
     pub(super) fn bar_width(&self) -> f32 {
         let tabs = self.tabs.len().clamp(1, 4) as f32 * TAB_MAX + PLUS_W + 12.0;
-        tabs + self.mode_w + 8.0 + self.controls_w + LAYOUT_W + 46.0 + 16.0
+        tabs + self.active_mode_w() + 8.0 + self.controls_w + LAYOUT_W + 46.0 + 16.0
+    }
+
+    /// Whether pane `id` has the mode drop-down (a web page or a program held here has not).
+    fn has_mode(&self, id: u64) -> bool {
+        self.index(id).is_some_and(|i| !matches!(&self.panes[i].state, State::Live(r) if r.is_web()) && !matches!(&self.panes[i].state, State::Held(_)))
+    }
+
+    /// The room the active pane's mode drop-down takes in the bar: none without one, so its
+    /// controls stay beside the layout buttons.
+    fn active_mode_w(&self) -> f32 {
+        if self.active_id().is_some_and(|id| self.has_mode(id)) { self.mode_w } else { 0.0 }
     }
 
     /// The title bar's content: tabs and + on the left; on the right the active pane's mode and
@@ -18,7 +29,7 @@ impl Workspace {
         // Widths: the mode drop-down and the pane's controls (as measured last frame), the "more"
         // menu; the layout buttons' is `LAYOUT_W`.
         const MORE_W: f32 = 36.0;
-        let mode_w = self.mode_w + 8.0;
+        let mode_w = self.active_mode_w() + 8.0;
         let now_for = self.active_id().and_then(|id| self.index(id).map(|i| (id, self.mode_of_pane(i))));
         if now_for != self.measured_for {
             self.measured_for = now_for;
@@ -73,7 +84,7 @@ impl Workspace {
                 self.mode_menu(ui, active);
             } else {
                 // The mode then its controls, left to right, at the width they took last time.
-                let w = self.controls_w + self.mode_w + 4.0;
+                let w = self.controls_w + self.active_mode_w() + 4.0;
                 ui.allocate_ui_with_layout(Vec2::new(w, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.mode_menu(ui, active);
                     let start = ui.cursor().left();
@@ -369,7 +380,7 @@ impl Workspace {
     pub(super) fn mode_menu(&mut self, ui: &mut egui::Ui, id: u64) {
         let Some(i) = self.index(id) else { return };
         // A web app's page has no terminal or files of its own to switch to.
-        if matches!(&self.panes[i].state, State::Live(r) if r.is_web()) || matches!(&self.panes[i].state, State::Held(_)) {
+        if !self.has_mode(id) {
             return;
         }
         let start = ui.cursor().left();
