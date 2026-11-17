@@ -73,25 +73,52 @@ pub(in crate::gui) fn here() -> bool {
     *HERE.get_or_init(|| std::env::var_os("WAYLAND_DISPLAY").is_some() && scripting().is_some_and(|p| p.call::<_, _, bool>("isScriptLoaded", &("sshremote-none",)).is_ok()))
 }
 
+fn script_file(name: &str) -> std::path::PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("{name}.js"))
+}
+
 /// Runs `body` in KWin as script `name` (one of that name loaded before is unloaded first).
 fn run(name: &str, body: &str) -> bool {
     let Some(p) = scripting() else { return false };
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let file = dir.join(format!("{name}.js"));
-    if std::fs::write(&file, body).is_err() {
+    ONCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(file, at)| {
+        let old = at.elapsed() >= Duration::from_secs(10);
+        if old {
+            let _ = std::fs::remove_file(file);
+        }
+        !old
+    });
+    // Scripting's start reads the file later, in a thread of its own, so it stays until the script
+    // is unloaded (removed at once, it was at times gone by then: the script never ran, and a window
+    // was not shown or hidden as asked); and it is whole whenever it is read.
+    let file = script_file(name);
+    let part = file.with_extension("part");
+    if std::fs::write(&part, body).is_err() || std::fs::rename(&part, &file).is_err() {
         return false;
     }
     let _: Result<bool, _> = p.call("unloadScript", &(name,));
     let loaded: Result<i32, _> = p.call("loadScript", &(file.display().to_string(), name));
     let started: Result<(), _> = p.call("start", &());
-    let _ = std::fs::remove_file(&file);
     loaded.is_ok_and(|n| n >= 0) && started.is_ok()
+}
+
+/// Files of scripts that unload themselves once run, removed a while after.
+static ONCE: Mutex<Vec<(std::path::PathBuf, Instant)>> = Mutex::new(Vec::new());
+
+/// Runs `body` once as script `name`, which unloads itself when done (unloaded from here at once,
+/// it could go before KWin has read and run it).
+fn run_once(name: &str, body: &str) -> bool {
+    let body = format!("{body}\ncallDBus({kwin}, \"/Scripting\", \"org.kde.kwin.Scripting\", \"unloadScript\", {name});\n", kwin = js(KWIN), name = js(name));
+    let ran = run(name, &body);
+    ONCE.lock().unwrap_or_else(|e| e.into_inner()).push((script_file(name), Instant::now()));
+    ran
 }
 
 fn unload(name: &str) {
     if let Some(p) = scripting() {
         let _: Result<bool, _> = p.call("unloadScript", &(name,));
     }
+    let _ = std::fs::remove_file(script_file(name));
 }
 
 /// Whether KWin still has the window, and where its frame is (x, y, width, height).
@@ -418,15 +445,13 @@ impl Held {
             unload(&s);
             // Caught meanwhile: it was opened for the pane, so it closes with it.
             if let Some(id) = self.take_caught() {
-                run(&format!("{}-go", self.script), &letgo(&id, true, None));
-                unload(&format!("{}-go", self.script));
+                run_once(&format!("{}-go", self.script), &letgo(&id, true, None));
             }
         }
         self.stop_asking();
         let Some(id) = self.id.take() else { return };
         unload(&self.script);
-        run(&format!("{}-go", self.script), &letgo(&id, self.new, self.was));
-        unload(&format!("{}-go", self.script));
+        run_once(&format!("{}-go", self.script), &letgo(&id, self.new, self.was));
     }
 }
 
