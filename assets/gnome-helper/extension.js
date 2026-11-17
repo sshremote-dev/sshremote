@@ -54,6 +54,10 @@ const IFACE = `
       <arg type="t" direction="in" name="id"/>
       <arg type="b" direction="in" name="close"/>
     </method>
+    <method name="Close">
+      <arg type="t" direction="in" name="id"/>
+      <arg type="b" direction="out" name="open"/>
+    </method>
   </interface>
 </node>`;
 
@@ -315,6 +319,14 @@ export default class DeskHelper extends Extension {
             win.delete(global.get_current_time());
         else if (held?.was)
             win.move_resize_frame(false, held.was.x, held.was.y, held.was.width, held.was.height);
+    }
+
+    // Window `id` asked to close and still held, as its program may ask first (to save, to close
+    // its tabs) over it; false if it is gone.
+    Close(id) {
+        const win = this._window(id);
+        win?.delete(global.get_current_time());
+        return !!win;
     }
 
     // Text into the focused text field through the input method; false when none takes text so.

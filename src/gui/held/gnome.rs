@@ -41,12 +41,22 @@ pub(in crate::gui) fn here() -> bool {
         let Some(p) = proxy() else { return false };
         let introspect = zbus::blocking::fdo::IntrospectableProxy::builder(p.connection()).destination(DEST).and_then(|b| b.path(PATH)).and_then(|b| b.build());
         let Some(xml) = introspect.ok().and_then(|i| i.introspect().ok()) else { return false };
-        let holds = xml.contains("\"Catch\"");
-        if !holds {
+        // One from before asking held windows to close is brought up to date too.
+        if !xml.contains("\"Close\"") {
             crate::capture::gnome_helper_update();
         }
-        holds
+        xml.contains("\"Catch\"")
     })
+}
+
+/// A window as the helper lists it: id, title, program, frame (x, y, width, height), hidden,
+/// shareable, focused, and the window it belongs to (over which it opened).
+type Row = (u64, String, String, i32, i32, i32, i32, bool, bool, bool, u64);
+
+/// The windows open over window `id` (a question its program asks, say).
+fn over(id: u64) -> Vec<u64> {
+    let list: Vec<Row> = call("List", &()).unwrap_or_default();
+    list.into_iter().filter(|w| w.10 == id && w.0 != id).map(|w| w.0).collect()
 }
 
 const LOOK: Duration = Duration::from_millis(150);
@@ -68,6 +78,8 @@ pub(in crate::gui) struct Held {
     /// What the helper was last told, and when it was last asked how the window is.
     told: Option<([i32; 6], bool)>,
     polled: Instant,
+    /// Asked to close with its pane: the windows it had open over it then.
+    asked: Option<Vec<u64>>,
 }
 
 impl Held {
@@ -82,7 +94,7 @@ impl Held {
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name.clone() };
         let now = Instant::now();
-        Held { token, id: 0, new: false, what, name, since: now, looked: now, said, ended: false, told: None, polled: now - POLL }
+        Held { token, id: 0, new: false, what, name, since: now, looked: now, said, ended: false, told: None, polled: now - POLL, asked: None }
     }
 
     pub(in crate::gui) fn ended(&self) -> bool {
@@ -103,7 +115,6 @@ impl Held {
         if self.since.elapsed() < Duration::from_secs(3) || first.is_empty() {
             return;
         }
-        type Row = (u64, String, String, i32, i32, i32, i32, bool, bool, bool, u64);
         let list: Vec<Row> = call("List", &()).unwrap_or_default();
         if let Some(w) = list.iter().find(|w| w.8 && w.2.to_lowercase().contains(&first) && !w.2.to_lowercase().contains("ssh remote")) {
             self.id = w.0;
@@ -157,14 +168,41 @@ impl Held {
         }
     }
 
+    /// Not drawn this frame: out of sight, and asked every so often whether it is still there.
     pub(in crate::gui) fn hide(&mut self) {
-        if self.id == 0 {
+        let Some((at, shown)) = self.told.filter(|_| self.id != 0) else { return };
+        if !shown && self.polled.elapsed() < POLL {
             return;
         }
-        if let Some((at, true)) = self.told {
-            self.told = Some((at, false));
-            let _: Option<String> = call("Hold", &(self.id, std::process::id(), at[0], at[1], at[2], at[3], at[4], at[5], false));
+        self.told = Some((at, false));
+        self.polled = Instant::now();
+        let state: Option<String> = call("Hold", &(self.id, std::process::id(), at[0], at[1], at[2], at[3], at[4], at[5], false));
+        if state.as_deref() == Some("gone") {
+            self.id = 0;
+            self.ended = true;
         }
+    }
+
+    /// The pane is to close: a window opened for it is asked to close and stays on the pane
+    /// meanwhile, as its program may ask first (to save, to close its tabs), answered there;
+    /// false while it is open. Else (or with a helper from before this) it goes now: true.
+    pub(in crate::gui) fn ask_close(&mut self) -> bool {
+        if self.id != 0 && self.new {
+            let open = over(self.id);
+            if call::<_, bool>("Close", &(self.id,)) == Some(true) {
+                self.asked = Some(open);
+                return false;
+            }
+        }
+        self.close();
+        true
+    }
+
+    /// Its program, asked to close, has opened a window over its window since: the question it
+    /// asks first.
+    pub(in crate::gui) fn asking(&self) -> bool {
+        let Some(open) = self.asked.as_ref().filter(|_| self.id != 0) else { return false };
+        over(self.id).iter().any(|o| !open.contains(o))
     }
 
     /// The pane closes: its program with it (it may ask to save first), or a window that was
@@ -177,6 +215,7 @@ impl Held {
             }
             let _: Option<()> = call("Forget", &(t,));
         }
+        self.asked = None;
         if self.id != 0 {
             let _: Option<()> = call("Release", &(self.id, self.new));
             self.id = 0;

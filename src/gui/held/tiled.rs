@@ -123,6 +123,10 @@ struct Entry {
     last: Option<(String, [i32; 4])>,
     put_at: Instant,
     gone: bool,
+    /// Asked to close with its pane: its program's other windows then; and whether it has opened
+    /// one since (the question it asks first, to save or to close its tabs).
+    asked: Option<Vec<String>>,
+    asking: bool,
 }
 
 #[derive(Default)]
@@ -220,6 +224,9 @@ impl Keep {
                 e.gone = true;
                 continue;
             };
+            if let Some(open) = &e.asked {
+                e.asking = wins.iter().any(|o| o.pid == w.pid && o.id != id && !open.contains(&o.id));
+            }
             let Some(rel) = e.rel else { continue };
             if e.preparing {
                 // Asked again until it has the size (a program may yet answer an older request, and
@@ -268,6 +275,19 @@ impl Keep {
                 }
             }
         }
+    }
+
+    /// The pane of `token` is to close: a window opened for it is asked to close and stays held
+    /// meanwhile, as its program may ask first; false if there is none.
+    fn ask(&mut self, wm: &dyn Wm, token: u32) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.token == token && e.new) else { return false };
+        let Some(id) = e.id.clone() else { return false };
+        let wins = wm.windows().unwrap_or_default();
+        let Some(w) = wins.iter().find(|w| w.id == id) else { return false };
+        e.asked = Some(wins.iter().filter(|o| o.pid == w.pid && o.id != id).map(|o| o.id.clone()).collect());
+        e.asking = false;
+        wm.close(&id);
+        true
     }
 
     /// The pane of `token` closes: its window closed with it (it may ask to save first, seen where
@@ -442,6 +462,8 @@ impl Held {
                     last: None,
                     put_at: Instant::now(),
                     gone: false,
+                    asked: None,
+                    asking: false,
                 });
                 let ok = script(token, &line).is_some_and(|path| wm.launch(&catch, &path));
                 if ok {
@@ -504,6 +526,23 @@ impl Held {
         if let Some((at, true)) = self.told {
             self.tell(at, false);
         }
+    }
+
+    /// The pane is to close: a window opened for it is asked to close and stays on the pane
+    /// meanwhile, as its program may ask first (to save, to close its tabs), answered there;
+    /// false while it is open. Else it goes now (one already open back where it was): true.
+    pub(in crate::gui) fn ask_close(&mut self) -> bool {
+        if wm().is_some_and(|wm| keep().ask(wm, self.token)) {
+            poke();
+            return false;
+        }
+        self.close();
+        true
+    }
+
+    /// Its program, asked to close, has opened another window since: the question it asks first.
+    pub(in crate::gui) fn asking(&self) -> bool {
+        keep().entries.iter().any(|e| e.token == self.token && e.asking)
     }
 
     pub(in crate::gui) fn close(&mut self) {
@@ -615,6 +654,8 @@ mod tests {
             last: None,
             put_at: Instant::now(),
             gone: false,
+            asked: None,
+            asking: false,
         }
     }
 
@@ -662,6 +703,38 @@ mod tests {
         let said = wm.said.lock().unwrap().clone();
         assert_eq!(&said[said.len() - 2..], ["put calc 1 [310, 90, 500, 400]", "close calc"]);
         assert!(k.entries.is_empty());
+    }
+
+    #[test]
+    fn a_window_asked_to_close_stays_held_while_its_program_asks() {
+        let me = std::process::id();
+        let wm = Fake::default();
+        wm.wins.lock().unwrap().push(Win { id: "ours".into(), pid: me, space: "1".into(), rect: [0, 0, 800, 600], visible: true, ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "other".into(), pid: 500, space: "2".into(), ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "ed".into(), pid: 500, space: "catch-5".into(), rect: [0, 0, 400, 300], ..Default::default() });
+        let mut k = Keep::default();
+        k.entries.push(entry(5, "catch-5"));
+        k.entries[0].rel = Some([800, 600, 0, 30, 400, 300]);
+        k.entries[0].shown = true;
+        for _ in 0..3 {
+            k.mind(&wm, &wm.windows().unwrap());
+        }
+        assert!(k.ask(&wm, 5));
+        assert_eq!(wm.said.lock().unwrap().last().unwrap(), "close ed");
+        k.mind(&wm, &wm.windows().unwrap());
+        assert!(!k.entries[0].asking, "a window it had open before is no question");
+        // It asks to save in a window of its own: held still, and asking.
+        wm.wins.lock().unwrap().push(Win { id: "save?".into(), pid: 500, space: "1".into(), ..Default::default() });
+        k.mind(&wm, &wm.windows().unwrap());
+        assert!(k.entries[0].asking);
+        assert_eq!(wm.win("ed").space, "1", "still over its pane");
+        // Told yes: both go, and the pane ends with its window.
+        wm.wins.lock().unwrap().retain(|w| w.id != "save?" && w.id != "ed");
+        k.mind(&wm, &wm.windows().unwrap());
+        assert!(k.entries[0].gone);
+        // One already open is not asked: it is let go as it was.
+        k.entries[0].new = false;
+        assert!(!k.ask(&wm, 5));
     }
 
     #[test]

@@ -23,6 +23,9 @@ fn conn() -> Option<&'static Connection> {
 
 /// Windows caught by token, as the catching scripts call `Caught`.
 static CAUGHT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Held windows asked to close whose program asks something over them, by token, as their
+/// scripts call `Asking`.
+static ASKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// This program's own name on the bus, answering the scripts' calls on a thread of its own.
 fn inbox() -> Option<String> {
@@ -39,10 +42,17 @@ fn inbox() -> Option<String> {
                         continue;
                     }
                     let header = msg.header();
-                    if header.member().is_some_and(|m| m.as_str() == "Caught")
-                        && let Ok((token, id)) = msg.body().deserialize::<(String, String)>()
-                    {
-                        CAUGHT.lock().unwrap_or_else(|e| e.into_inner()).push((token, id));
+                    let said = msg.body().deserialize::<(String, String)>();
+                    match (header.member().map(|m| m.as_str()), said) {
+                        (Some("Caught"), Ok((token, id))) => CAUGHT.lock().unwrap_or_else(|e| e.into_inner()).push((token, id)),
+                        (Some("Asking"), Ok((token, yes))) => {
+                            let mut asking = ASKING.lock().unwrap_or_else(|e| e.into_inner());
+                            asking.retain(|t| *t != token);
+                            if yes == "yes" {
+                                asking.push(token);
+                            }
+                        }
+                        _ => {}
                     }
                     let _ = conn.reply(&header, &());
                 }
@@ -216,6 +226,35 @@ if (h) {{
     )
 }
 
+/// The script that asks window `id` to close, held still, and says whether its program has opened
+/// a window over it since (the question it asks first, to save or to close its tabs).
+fn asker(id: &str, token: u32, inbox: &str) -> String {
+    format!(
+        r#"// sshremote: a held window asked to close.
+const h = workspace.windowList().find(w => w.internalId.toString() === {id});
+const over = w => w !== h && w.transientFor === h;
+const before = new Set(workspace.windowList().filter(over).map(w => w.internalId.toString()));
+let said = null;
+function tell(going) {{
+    const asks = !!h && workspace.windowList().some(w => w !== going && over(w) && !before.has(w.internalId.toString()));
+    if (asks === said)
+        return;
+    said = asks;
+    callDBus({inbox}, "/held", {iface}, "Asking", "{token}", asks ? "yes" : "no");
+}}
+workspace.windowAdded.connect(() => tell(null));
+workspace.windowActivated.connect(() => tell(null));
+workspace.windowRemoved.connect(w => tell(w));
+if (h)
+    h.closeWindow();
+tell(null);
+"#,
+        id = js(id),
+        inbox = js(inbox),
+        iface = js(INBOX),
+    )
+}
+
 const LOOK: Duration = Duration::from_millis(150);
 const POLL: Duration = Duration::from_millis(500);
 const GIVE_UP: Duration = Duration::from_secs(20);
@@ -238,6 +277,8 @@ pub(in crate::gui) struct Held {
     ended: bool,
     told: Option<([i32; 6], bool)>,
     polled: Instant,
+    /// Asked to close with its pane, by a script of its own.
+    asked: bool,
 }
 
 impl Held {
@@ -254,7 +295,7 @@ impl Held {
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name };
         let now = Instant::now();
-        Held { token, catching, id: None, script: format!("sshremote-held-{pid}-{token}"), new: false, was: None, what, since: now, looked: now, said, ended: false, told: None, polled: now }
+        Held { token, catching, id: None, script: format!("sshremote-held-{pid}-{token}"), new: false, was: None, what, since: now, looked: now, said, ended: false, told: None, polled: now, asked: false }
     }
 
     pub(in crate::gui) fn ended(&self) -> bool {
@@ -302,22 +343,62 @@ impl Held {
             self.told = Some((at, shown));
             run(&self.script, &holder(&id, at, shown));
         }
-        if self.polled.elapsed() >= POLL {
-            self.polled = Instant::now();
-            if info(&id).is_none() {
-                unload(&self.script);
-                self.id = None;
-                self.ended = true;
-            }
+        self.look_gone(&id);
+    }
+
+    /// Whether the window is still there, asked every so often: its pane ends with it.
+    fn look_gone(&mut self, id: &str) {
+        if self.polled.elapsed() < POLL {
+            return;
+        }
+        self.polled = Instant::now();
+        if info(id).is_none() {
+            unload(&self.script);
+            self.stop_asking();
+            self.id = None;
+            self.ended = true;
         }
     }
 
+    fn stop_asking(&mut self) {
+        if self.asked {
+            self.asked = false;
+            unload(&format!("{}-ask", self.script));
+            ASKING.lock().unwrap_or_else(|e| e.into_inner()).retain(|t| *t != self.token.to_string());
+        }
+    }
+
+    /// Not drawn this frame: out of sight.
     pub(in crate::gui) fn hide(&mut self) {
         let Some(id) = self.id.clone() else { return };
         if let Some((at, true)) = self.told {
             self.told = Some((at, false));
             run(&self.script, &holder(&id, at, false));
         }
+        self.look_gone(&id);
+    }
+
+    /// The pane is to close: a window opened for it is asked to close and stays on the pane
+    /// meanwhile, as its program may ask first (to save, to close its tabs), answered there;
+    /// false while it is open. Else it goes now (one already open back where it was): true.
+    pub(in crate::gui) fn ask_close(&mut self) -> bool {
+        if let (Some(id), true, Some(inbox)) = (self.id.clone(), self.new, inbox())
+            && info(&id).is_some()
+        {
+            self.stop_asking();
+            if run(&format!("{}-ask", self.script), &asker(&id, self.token, &inbox)) {
+                self.asked = true;
+                return false;
+            }
+        }
+        self.close();
+        true
+    }
+
+    /// Its program, asked to close, has opened a window over its window since: the question it
+    /// asks first.
+    pub(in crate::gui) fn asking(&self) -> bool {
+        self.asked && ASKING.lock().unwrap_or_else(|e| e.into_inner()).contains(&self.token.to_string())
     }
 
     pub(in crate::gui) fn close(&mut self) {
@@ -329,6 +410,7 @@ impl Held {
                 unload(&format!("{}-go", self.script));
             }
         }
+        self.stop_asking();
         let Some(id) = self.id.take() else { return };
         unload(&self.script);
         run(&format!("{}-go", self.script), &letgo(&id, self.new, self.was));

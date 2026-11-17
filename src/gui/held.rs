@@ -92,13 +92,21 @@ mod imp {
                 Held::Tiled(h) => h.close(),
             }
         }
-        /// Closed as its pane goes: true, nothing is waited for here.
         pub(in crate::gui) fn ask_close(&mut self) -> bool {
-            self.close();
-            true
+            match self {
+                Held::X11(h) => h.ask_close(),
+                Held::Gnome(h) => h.ask_close(),
+                Held::Kwin(h) => h.ask_close(),
+                Held::Tiled(h) => h.ask_close(),
+            }
         }
         pub(in crate::gui) fn asking(&self) -> bool {
-            false
+            match self {
+                Held::X11(h) => h.asking(),
+                Held::Gnome(h) => h.asking(),
+                Held::Kwin(h) => h.asking(),
+                Held::Tiled(h) => h.asking(),
+            }
         }
         pub(in crate::gui) fn ended(&self) -> bool {
             match self {

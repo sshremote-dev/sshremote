@@ -76,6 +76,11 @@ impl X {
         self.conn.get_window_attributes(w).ok().and_then(|c| c.reply().ok()).is_some_and(|a| a.map_state == xproto::MapState::VIEWABLE)
     }
 
+    /// The windows it has open over it (WM_TRANSIENT_FOR): a question its program asks, say.
+    fn over(&self, w: u32) -> Vec<u32> {
+        self.clients().into_iter().filter(|c| self.cards(*c, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW).first() == Some(&w)).collect()
+    }
+
     fn iconic(&self, w: u32) -> bool {
         self.cards(w, self.a.WM_STATE, self.a.WM_STATE).first() == Some(&3)
     }
@@ -363,6 +368,10 @@ pub(in crate::gui) struct Held {
     ended: bool,
     /// This program's window, once found.
     owner: u32,
+    /// Asked to close with its pane: the windows it had open over it then.
+    asked: Option<Vec<u32>>,
+    /// When it was last seen to be there while its pane is not shown.
+    checked: Instant,
 }
 
 struct Win {
@@ -397,7 +406,8 @@ impl Held {
             catch::forget(key);
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name.clone() };
-        Held { key: said.is_none().then_some(key), what, name, before, since: Instant::now(), looked: Instant::now() - LOOK, win: None, said, ended: false, owner: 0 }
+        let now = Instant::now();
+        Held { key: said.is_none().then_some(key), what, name, before, since: now, looked: now - LOOK, win: None, said, ended: false, owner: 0, asked: None, checked: now }
     }
 
     pub(in crate::gui) fn ended(&self) -> bool {
@@ -515,10 +525,50 @@ impl Held {
         (owner != 0).then_some((to, owner))
     }
 
+    /// Not drawn this frame (another tab, the home): out of sight.
     pub(in crate::gui) fn hide(&mut self) {
+        let Some(id) = self.win.as_ref().map(|w| w.id) else { return };
+        if self.checked.elapsed() >= LOOK {
+            self.checked = Instant::now();
+            if !with(|x| x.alive(id)).unwrap_or(false) {
+                held(None, Some(id));
+                self.win = None;
+                self.ended = true;
+                return;
+            }
+        }
         if let Some(w) = self.win.as_mut() {
             w.hide();
         }
+    }
+
+    /// The pane is to close: a window opened for it is asked to close and stays on the pane
+    /// meanwhile, as its program may ask first (to save, to close its tabs), answered there;
+    /// false while it is open. Else it goes now (one already open back where it was): true.
+    pub(in crate::gui) fn ask_close(&mut self) -> bool {
+        if let Some(id) = self.win.as_ref().filter(|w| w.new).map(|w| w.id) {
+            let asked = with(|x| {
+                x.alive(id).then(|| {
+                    let open = x.over(id);
+                    x.message(id, x.a._NET_CLOSE_WINDOW, [0, 2, 0, 0, 0]);
+                    open
+                })
+            })
+            .flatten();
+            if asked.is_some() {
+                self.asked = asked;
+                return false;
+            }
+        }
+        self.close();
+        true
+    }
+
+    /// Its program, asked to close, has opened a window over its window since: the question it
+    /// asks first.
+    pub(in crate::gui) fn asking(&self) -> bool {
+        let (Some(w), Some(open)) = (&self.win, &self.asked) else { return false };
+        with(|x| x.over(w.id).iter().any(|o| !open.contains(o))).unwrap_or(false)
     }
 
     pub(in crate::gui) fn close(&mut self) {
@@ -529,6 +579,7 @@ impl Held {
                 x.message(c.win, x.a._NET_CLOSE_WINDOW, [0, 2, 0, 0, 0]);
             });
         }
+        self.asked = None;
         let Some(w) = self.win.take() else { return };
         held(None, Some(w.id));
         let _ = with(|x| {
