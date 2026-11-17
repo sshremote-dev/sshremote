@@ -92,6 +92,8 @@ pub(super) struct Remote {
     monitor: usize,
     /// The resolutions the shown screen can be set to, the one it has and its own (`Modes`).
     modes: crate::proto::ScreenModes,
+    /// The host said them at all (one older than 0.21.0 never does).
+    modes_heard: bool,
     /// The monitor the user picked, if any, to pick again after a reconnect.
     chosen_monitor: Option<u8>,
     /// Every monitor of the host was asked for, each in a window of its own (taken by the
@@ -299,6 +301,7 @@ impl Remote {
             monitors: Vec::new(),
             monitor: 0,
             modes: (Vec::new(), (0, 0), (0, 0)),
+            modes_heard: false,
             chosen_monitor: None,
             spread_asked: false,
             allowed: crate::grant::ALL,
@@ -644,7 +647,10 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Monitors { list, current })) => {
                     (self.monitors, self.monitor) = (list, current as usize)
                 }
-                Ok(Ev::Net(ToClient::Modes { list, current, own })) => self.modes = (list, current, own),
+                Ok(Ev::Net(ToClient::Modes { list, current, own })) => {
+                    self.modes = (list, current, own);
+                    self.modes_heard = true;
+                }
                 Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
                     // Another monitor: new size, and the capture must be fitted again.
                     self.sess.hello(w, h, backend.clone());

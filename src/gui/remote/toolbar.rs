@@ -259,6 +259,15 @@ impl Remote {
                     *action = Some(Box::new(|r, _| r.send(ToAgent::SetMode { w: 0, h: 0 })));
                     ui.close();
                 }
+            } else if !matches!(self.sess.backend.as_str(), "camera" | "browser") {
+                // Where it would be, and why it is not: looked for here.
+                ui.separator();
+                let why = if self.modes_heard {
+                    "Resolution of its screen: it cannot be set there"
+                } else {
+                    "Resolution of its screen: SSH Remote there is too old for it (0.21 or later sets it)"
+                };
+                ui.label(RichText::new(why).weak());
             }
             ui.separator();
             ui.label(RichText::new("View").strong());
@@ -288,7 +297,12 @@ impl Remote {
                 ui.close();
             }
         });
-        display.on_hover_text(format!("Display: {}; view {}", self.ctl.describe(), self.fit.label()));
+        // Its screen's own resolution is set here too, when it can be: said, as it is easy to miss.
+        let resolution = match &self.modes {
+            (list, (w, h), _) if !list.is_empty() => format!("; its screen {w} \u{d7} {h}, its resolution can be set here"),
+            _ => String::new(),
+        };
+        display.on_hover_text(format!("Display: {}{resolution}; view {}", self.ctl.describe(), self.fit.label()));
 
         // The host's screens, when it has several: which one shows here, or all, a window each.
         if self.monitors.len() > 1 {

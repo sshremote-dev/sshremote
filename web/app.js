@@ -855,7 +855,7 @@ class Client {
     if (v.windows) this.windowPick(v.windows);
     if (v.sharing) { this.sharing = v.sharing; toast("Sharing " + v.sharing.text + "."); this.screenTools(); }
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
-    if (v.modes) this.modes = v.modes;
+    if (v.modes) { this.modes = v.modes; this.screenTools(); }
     if (v.qualities) {
       this.qualities = v.qualities;
       // The quality chosen last time, asked for again.
@@ -1566,7 +1566,8 @@ class Client {
     computer.onclick = () => computerMenu(computer);
     const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
     clip.onclick = () => clipMenu(clip);
-    const quality = button("sliders", null, { title: "Picture quality" });
+    // Its screen's own resolution is set from here too, when it can be.
+    const quality = button("sliders", null, { title: this.modes?.list.length ? "Picture quality and the resolution of its screen" : "Picture quality" });
     quality.onclick = () => qualityMenu(quality);
     const chat = button("chat", null, { title: "Chat with the person at the host" });
     chat.classList.toggle("on", !$("chat").hidden);
