@@ -392,6 +392,8 @@ struct Win {
     lowered: Option<Instant>,
     /// The pane it was last asked onto.
     aimed: Option<[i32; 4]>,
+    /// Since when it is asked out of being minimized.
+    restored: Option<Instant>,
 }
 
 impl Held {
@@ -416,7 +418,7 @@ impl Held {
 
     fn hold(&mut self, id: u32, new: bool, hushed: bool) {
         let was = if new { None } else { with(|x| x.rects(id).map(|r| r.1)).flatten() };
-        self.win = Some(Win { id, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None });
+        self.win = Some(Win { id, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None, restored: None });
         held(Some(id), None);
     }
 
@@ -619,7 +621,19 @@ impl Win {
             }
             if self.iconic || x.iconic(self.id) {
                 let _ = x.conn.map_window(self.id);
+                // Still minimized a moment after: a window manager that keeps minimized windows
+                // mapped (Cinnamon's) brings one back only as the active window.
+                match self.restored {
+                    Some(t) if !self.iconic && t.elapsed() > Duration::from_millis(300) => {
+                        x.message(self.id, x.a._NET_ACTIVE_WINDOW, [2, 0, owner, 0, 0]);
+                        self.restored = None;
+                    }
+                    Some(_) => {}
+                    None => self.restored = Some(Instant::now()),
+                }
                 self.iconic = false;
+            } else {
+                self.restored = None;
             }
             let Some((_, seen)) = x.rects(self.id) else { return };
             // Where it is; its size may stop short of the pane's (a terminal sized by its cells).
@@ -649,13 +663,20 @@ impl Win {
         });
     }
 
-    /// Minimized, as its tab is not shown (or this window is).
+    /// Minimized, as its tab is not shown (or this window is); let go of first, as a window
+    /// manager may minimize the window it is kept above with it (Openbox does).
     fn hide(&mut self) {
         self.stuck = None;
         if self.iconic {
             return;
         }
-        let _ = with(|x| x.message(self.id, x.a.WM_CHANGE_STATE, [3, 0, 0, 0, 0]));
+        let _ = with(|x| {
+            if self.owned {
+                x.own(self.id, 0);
+                self.owned = false;
+            }
+            x.message(self.id, x.a.WM_CHANGE_STATE, [3, 0, 0, 0, 0]);
+        });
         self.iconic = true;
     }
 
