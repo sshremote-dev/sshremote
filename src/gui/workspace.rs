@@ -1141,6 +1141,11 @@ impl Workspace {
             self.dock.greet(ctx.input(|i| i.time));
             self.full_zoom();
         } else {
+            for p in &mut self.panes {
+                if let State::Held(h) = &mut p.state {
+                    h.leaving_full();
+                }
+            }
             self.left_full();
         }
     }

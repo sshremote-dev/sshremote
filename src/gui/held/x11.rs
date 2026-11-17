@@ -90,6 +90,15 @@ impl X {
         self.clients().into_iter().filter(|c| self.cards(*c, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW).first() == Some(&w)).collect()
     }
 
+    /// Made the active window, then the newest window it has open over it, a question its program
+    /// asks (it has the keys, and stays over it).
+    fn activate(&self, w: u32, owner: u32) {
+        self.message(w, self.a._NET_ACTIVE_WINDOW, [2, 0, owner, 0, 0]);
+        if let Some(q) = self.over(w).pop() {
+            self.message(q, self.a._NET_ACTIVE_WINDOW, [2, 0, w, 0, 0]);
+        }
+    }
+
     fn iconic(&self, w: u32) -> bool {
         self.cards(w, self.a.WM_STATE, self.a.WM_STATE).first() == Some(&3)
     }
@@ -381,8 +390,11 @@ pub(in crate::gui) struct Held {
     asked: Option<Vec<u32>>,
     /// When it was last seen to be there while its pane is not shown.
     checked: Instant,
-    /// This window was full screen last time.
+    /// This window was full screen last time, and the pane all of it (the whole monitor).
     full: bool,
+    whole: bool,
+    /// Since when it is out of sight until this window is out of full screen (`leaving_full`).
+    leaving: Option<Instant>,
 }
 
 struct Win {
@@ -416,6 +428,9 @@ struct Win {
     sunk: Option<Instant>,
     /// Full screen, and the pane the whole monitor, last time.
     last: (bool, bool),
+    /// Since when it is back from minimized or from under this window: a question its program
+    /// asked meanwhile comes back with it (a window manager may keep it minimized, or under it).
+    back: Option<Instant>,
 }
 
 impl Held {
@@ -431,7 +446,7 @@ impl Held {
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name.clone() };
         let now = Instant::now();
-        Held { key: said.is_none().then_some(key), what, name, before, since: now, looked: now - LOOK, win: None, said, ended: false, owner: 0, asked: None, checked: now, full: false }
+        Held { key: said.is_none().then_some(key), what, name, before, since: now, looked: now - LOOK, win: None, said, ended: false, owner: 0, asked: None, checked: now, full: false, whole: false, leaving: None }
     }
 
     pub(in crate::gui) fn ended(&self) -> bool {
@@ -440,7 +455,7 @@ impl Held {
 
     fn hold(&mut self, id: u32, new: bool, hushed: bool) {
         let was = if new { None } else { with(|x| x.rects(id).map(|r| r.1)).flatten() };
-        self.win = Some(Win { id, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None, restored: None, full_asked: None, refused: false, loose: false, lift: None, sunk: None, last: (false, false) });
+        self.win = Some(Win { id, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None, restored: None, full_asked: None, refused: false, loose: false, lift: None, sunk: None, last: (false, false), back: None });
         held(Some(id), None);
     }
 
@@ -521,7 +536,12 @@ impl Held {
             self.full = full;
             w.stuck = None;
         }
+        self.whole = whole;
+        if self.leaving.is_some_and(|t| !full || t.elapsed() > Duration::from_secs(2)) {
+            self.leaving = None;
+        }
         match place {
+            _ if self.leaving.is_some() => w.hide(),
             Some(_) if super::covered(&ctx, rect) => w.give_way(self.owner),
             Some((to, owner)) if !minimized => w.put(to, owner, whole),
             _ => w.hide(),
@@ -558,6 +578,20 @@ impl Held {
         })?;
         self.owner = owner;
         (owner != 0).then_some((to, owner))
+    }
+
+    /// This window is to leave full screen. Without a compositing manager, one wholly under the
+    /// program over the whole monitor (as it is once its size is back) is told it is unseen and
+    /// draws nothing more, so the program could not be put back on its pane: out of sight until
+    /// then.
+    pub(in crate::gui) fn leaving_full(&mut self) {
+        if self.whole
+            && let Some(w) = self.win.as_mut()
+            && with(|x| !x.composited()).unwrap_or(false)
+        {
+            w.hide();
+            self.leaving = Some(Instant::now());
+        }
     }
 
     /// Not drawn this frame (another tab, the home): out of sight.
@@ -651,6 +685,7 @@ impl Win {
             // Without a compositing manager it leaves this window the monitor's top row instead:
             // wholly covered, this window would run no frames (and the dock is there).
             let bare = whole && !x.composited();
+            let monitor = whole;
             let whole = whole && !bare;
             let to = if bare { [to[0], to[1] + 1, to[2], to[3] - 1] } else { to };
             let full = x.cards(self.id, x.a._NET_WM_STATE, AtomEnum::ATOM).contains(&x.a._NET_WM_STATE_FULLSCREEN);
@@ -665,8 +700,9 @@ impl Win {
             // Back from under this window: up again (one let go of is kept above by being active).
             if self.lowered.take().is_some() && self.loose {
                 let _ = x.conn.configure_window(self.id, &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE));
-                x.message(self.id, x.a._NET_ACTIVE_WINDOW, [2, 0, owner, 0, 0]);
+                x.activate(self.id, owner);
                 self.lift = Some(Instant::now());
+                self.back = Some(Instant::now());
             }
             let raised = !self.owned && !self.loose;
             if raised || self.last != (full, whole) {
@@ -676,6 +712,7 @@ impl Win {
             if raised {
                 x.own(self.id, owner);
                 self.owned = true;
+                self.back = Some(Instant::now());
                 // Over this window again, after being let under it: restacked where the window
                 // manager knows how, else raised.
                 x.message(self.id, x.a._NET_RESTACK_WINDOW, [2, owner, 0, 0, 0]);
@@ -683,11 +720,12 @@ impl Win {
             }
             if self.iconic || x.iconic(self.id) {
                 let _ = x.conn.map_window(self.id);
+                self.back = Some(Instant::now());
                 // Still minimized a moment after: a window manager that keeps minimized windows
                 // mapped (Cinnamon's) brings one back only as the active window.
                 match self.restored {
                     Some(t) if !self.iconic && t.elapsed() > Duration::from_millis(300) => {
-                        x.message(self.id, x.a._NET_ACTIVE_WINDOW, [2, 0, owner, 0, 0]);
+                        x.activate(self.id, owner);
                         self.restored = None;
                     }
                     Some(_) => {}
@@ -696,6 +734,27 @@ impl Win {
                 self.iconic = false;
             } else {
                 self.restored = None;
+            }
+            // A moment after it is back (shown by then): its questions over it again, out of being
+            // minimized; over the whole monitor, the newest made the active one as well.
+            if let Some(t) = self.back
+                && t.elapsed() > Duration::from_millis(150)
+            {
+                if x.viewable(self.id) && !x.iconic(self.id) {
+                    let asks = x.over(self.id);
+                    for q in &asks {
+                        if x.iconic(*q) {
+                            let _ = x.conn.map_window(*q);
+                        }
+                        let _ = x.conn.configure_window(*q, &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE));
+                    }
+                    if monitor && let Some(q) = asks.last() {
+                        x.message(*q, x.a._NET_ACTIVE_WINDOW, [2, 0, self.id, 0, 0]);
+                    }
+                    self.back = None;
+                } else if t.elapsed() > Duration::from_secs(2) {
+                    self.back = None;
+                }
             }
             let Some((_, seen)) = x.rects(self.id) else { return };
             // The pane is the whole monitor: full screen too, as a window manager keeps any other
@@ -745,7 +804,7 @@ impl Win {
             if under && self.lift.is_some() && !raised && !self.hushed {
                 match self.sunk {
                     Some(t) if t.elapsed() > Duration::from_millis(300) => {
-                        x.message(self.id, x.a._NET_ACTIVE_WINDOW, [2, 0, owner, 0, 0]);
+                        x.activate(self.id, owner);
                         (self.sunk, self.lift) = (None, None);
                     }
                     Some(_) => {}

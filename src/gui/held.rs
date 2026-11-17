@@ -93,6 +93,12 @@ mod imp {
                 Held::Tiled(h) => h.hide(),
             }
         }
+        /// This window is to leave full screen.
+        pub(in crate::gui) fn leaving_full(&mut self) {
+            if let Held::X11(h) = self {
+                h.leaving_full();
+            }
+        }
         pub(in crate::gui) fn close(&mut self) {
             match self {
                 Held::X11(h) => h.close(),
@@ -153,6 +159,9 @@ impl Held {
         match self.0 {}
     }
     pub(super) fn hide(&mut self) {
+        match self.0 {}
+    }
+    pub(super) fn leaving_full(&mut self) {
         match self.0 {}
     }
     pub(super) fn close(&mut self) {
@@ -636,6 +645,9 @@ mod imp {
                 self.said = Some(format!("{} runs with more rights than this app, so it stays a window of its own.", self.what));
             }
         }
+
+        /// This window is to leave full screen (Windows draws a covered window all the same).
+        pub(in crate::gui) fn leaving_full(&mut self) {}
 
         /// Not drawn this frame (another tab, the home): out of sight.
         pub(in crate::gui) fn hide(&mut self) {
