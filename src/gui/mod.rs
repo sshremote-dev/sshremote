@@ -365,6 +365,8 @@ pub struct App {
     close_clicked: bool,
     quit_asked: bool,
     quitting: bool,
+    /// Quitting once the other windows have closed (their programs asked first).
+    quit_waits: bool,
     /// Hosts being reached for the screen or files, with their ports: recent once reached.
     pending_ports: std::collections::HashMap<String, String>,
     /// Passwords to keep in the password store once their connection works, by host.
@@ -788,6 +790,7 @@ impl App {
             close_clicked: false,
             quit_asked: false,
             quitting: false,
+            quit_waits: false,
             pending_ports: Default::default(),
             pending_passwords: Default::default(),
             grab_window: None,
@@ -1002,6 +1005,11 @@ impl eframe::App for App {
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
+        // The main window closing (told yes) ends the app: other windows' programs are asked first.
+        if closing && !self.quit_waits && !self.quitting && !self.ask_programs() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        }
+        self.follow_quit(&ctx);
         self.tab_drags(&ctx);
         // The hook catches the keys while any active pane wants them, for that window.
         self.grab_window = if main_grab { None } else { window_grab };
@@ -1158,8 +1166,44 @@ impl App {
             self.quit_asked = false;
             if yes {
                 self.quit_session();
-                self.quitting = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+                if self.ask_programs() {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    /// The app quits: other windows whose panes hold programs close first, each as told yes (its
+    /// programs asked to close, which may ask something there). True when none is waited for.
+    fn ask_programs(&mut self) -> bool {
+        if !self.windows.iter().any(|(_, w, _)| w.holds_programs()) {
+            return true;
+        }
+        for (_, w, _) in &mut self.windows {
+            w.close_asked = true;
+        }
+        self.quit_waits = true;
+        false
+    }
+
+    /// Quitting once the other windows have closed; when one stays (its program did not close),
+    /// the app does too.
+    fn follow_quit(&mut self, ctx: &egui::Context) {
+        if !self.quit_waits {
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        }
+        if self.windows.is_empty() {
+            self.quit_waits = false;
+            self.quitting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else if !self.windows.iter().any(|(_, w, _)| w.close_asked || w.closing()) {
+            self.quit_waits = false;
+            if let Screen::Work(w) = &mut self.screen {
+                w.closing_window = false;
             }
         }
     }

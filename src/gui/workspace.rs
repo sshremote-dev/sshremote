@@ -318,6 +318,8 @@ pub(super) struct Workspace {
     asked: Vec<(u64, Instant, Instant)>,
     /// Told yes to closing while programs were asked to: it closes once they have.
     window_waits: bool,
+    /// The app quits and asks this window to close as if told yes (its programs first).
+    pub(super) close_asked: bool,
     /// A project asked to be opened from the Projects menu, for the app to open here.
     pub(super) open_project: Option<String>,
     /// The tabs as they were when the window was told to close, before they closed: the last session.
@@ -377,6 +379,7 @@ impl Workspace {
             closing_window: false,
             asked: Vec::new(),
             window_waits: false,
+            close_asked: false,
             open_project: None,
             last_tabs: None,
             naming: None,
@@ -731,6 +734,16 @@ impl Workspace {
         if self.zoom.is_some_and(|z| z != id) {
             self.zoom = None;
         }
+    }
+
+    /// Whether a program of this computer is held in one of its panes.
+    pub(super) fn holds_programs(&self) -> bool {
+        self.panes.iter().any(|p| matches!(p.state, State::Held(_)))
+    }
+
+    /// Closing (told yes), or waiting for its programs to close first.
+    pub(super) fn closing(&self) -> bool {
+        self.window_waits || self.closing_window
     }
 
     /// Closes the window (told yes): programs held in its panes are asked to close first, and it
@@ -1152,6 +1165,9 @@ impl Workspace {
         self.tick(&ctx);
         if self.tabs.is_empty() {
             return Out { empty: true, grab: false };
+        }
+        if std::mem::take(&mut self.close_asked) {
+            self.close_window(&ctx);
         }
         // Alt+F4 or the system's close: the window and its connections go only once confirmed.
         if ctx.input(|i| i.viewport().close_requested()) {
