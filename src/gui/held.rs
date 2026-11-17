@@ -206,7 +206,9 @@ mod imp {
     fn hush(h: HWND) -> Option<isize> {
         unsafe {
             let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-            if ex & WS_EX_LAYERED as isize != 0 {
+            // Seen already (caught as it shows): left so, as made see-through it would vanish a
+            // moment before it shows again.
+            if ex & WS_EX_LAYERED as isize != 0 || (IsWindowVisible(h) != 0 && IsIconic(h) == 0) {
                 return None;
             }
             // Its program is sent the change and takes it when it next looks at its messages: a
