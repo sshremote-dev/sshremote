@@ -155,6 +155,10 @@ static NEXT_PANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 
 /// Seconds a lost connection is tried again before the pane asks.
 const GIVE_UP: f64 = 30.0;
+/// How long a program asked to close (with its pane) is waited for while it asks nothing; and at
+/// most, while it asks something (answered in its pane).
+const ASKED_WAIT: Duration = Duration::from_secs(3);
+const ASKED_MAX: Duration = Duration::from_secs(300);
 
 enum State {
     Shell(Box<crate::termwin::TermWindow>),
@@ -308,6 +312,12 @@ pub(super) struct Workspace {
     panes_area: Rect,
     /// The window is closing for good (told yes): nothing else is shown in it meanwhile.
     pub(super) closing_window: bool,
+    /// Programs held in panes asked to close, since when, and when last seen asking something: a
+    /// pane stays until its program has closed it, as it may ask first (to save, to close its
+    /// tabs), answered there.
+    asked: Vec<(u64, Instant, Instant)>,
+    /// Told yes to closing while programs were asked to: it closes once they have.
+    window_waits: bool,
     /// A project asked to be opened from the Projects menu, for the app to open here.
     pub(super) open_project: Option<String>,
     /// The tabs as they were when the window was told to close, before they closed: the last session.
@@ -365,6 +375,8 @@ impl Workspace {
             confirm: None,
             panes_area: Rect::NOTHING,
             closing_window: false,
+            asked: Vec::new(),
+            window_waits: false,
             open_project: None,
             last_tabs: None,
             naming: None,
@@ -679,6 +691,98 @@ impl Workspace {
     fn close_tab(&mut self, tab: usize) {
         for id in self.order(tab) {
             self.close_pane(id);
+        }
+    }
+
+    /// Closes pane `id`; a program held in it is asked to close first, and its pane stays until it
+    /// has (false).
+    fn close_or_ask(&mut self, id: u64) -> bool {
+        if let Some(i) = self.index(id)
+            && let State::Held(h) = &mut self.panes[i].state
+            && !h.ask_close()
+        {
+            if !self.asked.iter().any(|(a, ..)| *a == id) {
+                self.asked.push((id, Instant::now(), Instant::now()));
+            }
+            return false;
+        }
+        self.close_pane(id);
+        true
+    }
+
+    /// Closes the tab's panes, or asks their programs to close (`close_or_ask`).
+    fn ask_tab(&mut self, tab: usize) {
+        for id in self.order(tab) {
+            self.close_or_ask(id);
+        }
+    }
+
+    /// Brings pane `id` into view: its tab in front, itself the active one.
+    fn reveal(&mut self, id: u64) {
+        let Some(t) = self.tabs.iter().position(|t| {
+            let mut l = Vec::new();
+            t.root.leaves(&mut l);
+            l.contains(&id)
+        }) else {
+            return;
+        };
+        self.current = t;
+        self.tabs[t].active = id;
+        if self.zoom.is_some_and(|z| z != id) {
+            self.zoom = None;
+        }
+    }
+
+    /// Closes the window (told yes): programs held in its panes are asked to close first, and it
+    /// closes once they have; one that asks something keeps it open until answered there.
+    fn close_window(&mut self, ctx: &egui::Context) {
+        let held: Vec<u64> = self.panes.iter().filter(|p| matches!(p.state, State::Held(_))).map(|p| p.id).collect();
+        let mut waits = false;
+        for id in held {
+            waits |= !self.close_or_ask(id);
+        }
+        if waits {
+            self.window_waits = true;
+            if let Some(&(id, ..)) = self.asked.first() {
+                self.reveal(id);
+            }
+            return;
+        }
+        self.close_all();
+        self.closing_window = true;
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    /// Programs asked to close: their panes went with them. One still open a while after it last
+    /// asked something (its question was turned down, or it stays open) is said, and the window
+    /// waits for it no longer. Its window goes a moment after its question when told yes.
+    fn follow_asked(&mut self, ctx: &egui::Context) {
+        let panes = &self.panes;
+        self.asked.retain_mut(|(id, _, quiet)| {
+            let Some(p) = panes.iter().find(|p| p.id == *id) else { return false };
+            if matches!(&p.state, State::Held(h) if h.asking()) {
+                *quiet = Instant::now();
+            }
+            true
+        });
+        let late: Vec<u64> =
+            self.asked.iter().filter(|(_, since, quiet)| since.elapsed() > ASKED_MAX || quiet.elapsed() > ASKED_WAIT).map(|(id, ..)| *id).collect();
+        if !late.is_empty() {
+            self.asked.retain(|(id, ..)| !late.contains(id));
+            let window = std::mem::take(&mut self.window_waits);
+            for id in late {
+                let name = self.name(id).0;
+                self.toasts.push(&if window { format!("{name} did not close, so this window stays open.") } else { format!("{name} did not close.") });
+            }
+        }
+        if self.window_waits && self.asked.is_empty() {
+            self.window_waits = false;
+            self.close_all();
+            self.closing_window = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if !self.asked.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
     }
 
@@ -1207,7 +1311,12 @@ impl Workspace {
                         lost.push((i, e));
                     }
                 }
-                State::Held(h) => h.hide(),
+                State::Held(h) => {
+                    h.hide();
+                    if h.ended() {
+                        closing.push(id);
+                    }
+                }
                 State::Down(_) => {}
             }
         }
@@ -1252,6 +1361,7 @@ impl Workspace {
         for id in closing {
             self.close_pane(id);
         }
+        self.follow_asked(&ctx);
         // Shown here while tabs are open; with none left the open window shows it.
         if !self.tabs.is_empty()
             && let Some(e) = self.failed.take()
@@ -1408,9 +1518,7 @@ impl Workspace {
                 self.confirm = None;
                 if yes {
                     self.last_tabs = Some(self.snapshot());
-                    self.close_all();
-                    self.closing_window = true;
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    self.close_window(ctx);
                 }
             }
             return;
@@ -1465,8 +1573,10 @@ impl Workspace {
             Some(true) => {
                 self.confirm = None;
                 match tab {
-                    Some(t) => self.close_tab(t),
-                    None => self.close_pane(id),
+                    Some(t) => self.ask_tab(t),
+                    None => {
+                        self.close_or_ask(id);
+                    }
                 }
             }
             Some(false) => self.confirm = None,

@@ -92,6 +92,14 @@ mod imp {
                 Held::Tiled(h) => h.close(),
             }
         }
+        /// Closed as its pane goes: true, nothing is waited for here.
+        pub(in crate::gui) fn ask_close(&mut self) -> bool {
+            self.close();
+            true
+        }
+        pub(in crate::gui) fn asking(&self) -> bool {
+            false
+        }
         pub(in crate::gui) fn ended(&self) -> bool {
             match self {
                 Held::X11(h) => h.ended(),
@@ -131,6 +139,12 @@ impl Held {
         match self.0 {}
     }
     pub(super) fn close(&mut self) {
+        match self.0 {}
+    }
+    pub(super) fn ask_close(&mut self) -> bool {
+        match self.0 {}
+    }
+    pub(super) fn asking(&self) -> bool {
         match self.0 {}
     }
     pub(super) fn ended(&self) -> bool {
@@ -179,8 +193,8 @@ mod imp {
     }
 
     /// Made see-through until it is on its pane: its style before, to put back (None: it is
-    /// see-through of its own, and is left so). Its opening animation is left on: a window that
-    /// shows before it takes the change fades in rather than shows at once.
+    /// see-through of its own, and is left so, or it was seen already). Its opening animation is
+    /// left on: a window that shows before it takes the change fades in rather than shows at once.
     fn hush(h: HWND) -> Option<isize> {
         unsafe {
             let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
@@ -607,8 +621,51 @@ mod imp {
         /// Not drawn this frame (another tab, the home): out of sight.
         pub(in crate::gui) fn hide(&mut self) {
             if let Some(w) = self.win.as_mut() {
+                if unsafe { IsWindow(w.hwnd as HWND) } == 0 {
+                    held(None, Some(w.hwnd));
+                    self.win = None;
+                    self.ended = true;
+                    return;
+                }
                 w.hide();
             }
+        }
+
+        /// The pane is to close: a window opened for it is asked to close and stays on the pane
+        /// meanwhile, as its program may ask first (to save, to close its tabs), answered there;
+        /// false while it is open. Else it goes now (one already open back where it was): true.
+        pub(in crate::gui) fn ask_close(&mut self) -> bool {
+            match &self.win {
+                Some(w) if w.new && unsafe { IsWindow(w.hwnd as HWND) } != 0 => {
+                    unsafe { PostMessageW(w.hwnd as HWND, WM_CLOSE, 0, 0) };
+                    false
+                }
+                _ => {
+                    self.close();
+                    true
+                }
+            }
+        }
+
+        /// Its program shows a window of its own over its window: the question it asks before it
+        /// closes (to save, to close its tabs), say.
+        pub(in crate::gui) fn asking(&self) -> bool {
+            struct Look {
+                owner: isize,
+                found: bool,
+            }
+            unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows_sys::core::BOOL {
+                let look = unsafe { &mut *(l as *mut Look) };
+                if unsafe { IsWindowVisible(h) } != 0 && unsafe { GetWindow(h, GW_OWNER) } as isize == look.owner {
+                    look.found = true;
+                    return 0;
+                }
+                1
+            }
+            let Some(w) = &self.win else { return false };
+            let mut look = Look { owner: w.hwnd, found: false };
+            unsafe { EnumWindows(Some(each), &mut look as *mut Look as LPARAM) };
+            look.found
         }
 
         /// The pane closes: its program with it (it may ask to save first), or a window it already
