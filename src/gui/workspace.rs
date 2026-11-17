@@ -1201,8 +1201,10 @@ impl Workspace {
             self.left_full();
         }
         // In a window, the title bar; in full screen the dock stands in for it, drawn over the panes.
+        let mut bar_rect = None;
         if !self.full.on {
             let bar = super::chrome::title_bar(ui, |ui| self.bar(ui, &mut remote_action));
+            bar_rect = bar.rect;
             if bar.close {
                 self.confirm = Some(Confirm::Window);
             }
@@ -1406,7 +1408,9 @@ impl Workspace {
         {
             self.toasts.push(&e);
         }
-        self.toasts.draw(&ctx, area);
+        // Not under a program's own window held over its pane, which would hide them.
+        let held: Vec<Rect> = rects.iter().filter(|(id, _)| self.is_held(*id)).map(|(_, r)| *r).collect();
+        self.toasts.draw(&ctx, area, &held, bar_rect);
         self.confirm_dialog(&ctx);
         self.naming_dialog(&ctx);
         // The window's title follows the active pane.

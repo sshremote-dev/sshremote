@@ -91,6 +91,8 @@ pub struct BarResponse {
     pub close: bool,
     /// In full screen the middle button leaves it; the window decides how (its own state).
     pub leave_full: bool,
+    /// Where it is.
+    pub rect: Option<Rect>,
 }
 
 /// A title bar across the top of `ui`: the app's icon, then `content` (tabs, a title, a toolbar)
@@ -102,6 +104,7 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
     let frame = egui::Frame::new().fill(fill).inner_margin(egui::Margin::ZERO);
     egui::Panel::top("chrome-title-bar").exact_size(HEIGHT).frame(frame).show_separator_line(false).show(ui, |ui| {
         let bar = ui.max_rect();
+        out.rect = Some(bar);
         // The bar itself first, so the widgets on it take their own clicks.
         let back = ui.interact(bar, ui.scope_id().with("chrome-drag"), Sense::click_and_drag());
         if back.drag_started_by(egui::PointerButton::Primary) {

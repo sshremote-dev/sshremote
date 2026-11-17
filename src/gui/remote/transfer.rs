@@ -18,7 +18,7 @@ impl Remote {
         }
         self.tell_settled();
         let ctx = ui.ctx().clone();
-        self.toasts.draw(&ctx, ui.max_rect());
+        self.toasts.draw(&ctx, ui.max_rect(), &[], None);
         ctx.request_repaint_after(Duration::from_millis(500));
         Ok(())
     }

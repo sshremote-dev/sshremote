@@ -499,7 +499,7 @@ impl Remote {
         let chat_rect = chat_rect.or(term_area);
         self.upload_overlay(&ctx, screen);
         self.tell_settled();
-        self.toasts.draw(&ctx, screen);
+        self.toasts.draw(&ctx, screen, &[], None);
         self.term_window(&ctx)?;
         self.share_picker(&ctx)?;
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
