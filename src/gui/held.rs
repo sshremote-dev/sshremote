@@ -286,10 +286,11 @@ mod imp {
             }
         }
 
-        /// The window caught, once made ready; the wait ends with it.
+        /// The window caught, once made ready and shown by its program (one never shown is a
+        /// helper's, and another that shows takes its place); the wait ends with it.
         pub(super) fn take(key: u64) -> Option<Caught> {
             let mut w = watch();
-            let i = w.waits.iter().position(|x| x.key == key && x.caught.is_some_and(|c| c.ready))?;
+            let i = w.waits.iter().position(|x| x.key == key && x.caught.is_some_and(|c| c.ready && unsafe { IsWindowVisible(c.hwnd as HWND) } != 0))?;
             w.waits.remove(i).caught
         }
 
@@ -344,7 +345,12 @@ mod imp {
                     return false;
                 }
                 let class = class(h);
-                if matches!(class.as_str(), "Windows.UI.Core.CoreWindow" | "IME" | "MSCTFIME UI" | "tooltips_class32" | "#32768" | "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+                // Crashpad's hidden window (Chrome, Edge, Electron apps) comes first from a launcher
+                // process that hands over to the running browser and ends.
+                if matches!(
+                    class.as_str(),
+                    "Windows.UI.Core.CoreWindow" | "IME" | "MSCTFIME UI" | "tooltips_class32" | "#32768" | "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "crashpad_SessionEndWatcher"
+                ) {
                     return false;
                 }
                 let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -372,7 +378,8 @@ mod imp {
                 return;
             }
             // The first wait with nothing caught, or with a window caught that is still hidden
-            // while this one shows (a hidden window of its program's, made first).
+            // while this one shows (a hidden window of its program's, made first; also while it is
+            // being made ready, which waits on its program and may wait long for a helper's).
             let (key, to, owner, old) = {
                 let mut w = watch();
                 if w.waits.iter().any(|x| x.caught.is_some_and(|c| c.hwnd == hw)) {
@@ -382,7 +389,7 @@ mod imp {
                     !x.before.contains(&hw)
                         && match x.caught {
                             None => true,
-                            Some(c) => c.ready && shown && unsafe { IsWindowVisible(c.hwnd as HWND) } == 0,
+                            Some(c) => shown && unsafe { IsWindowVisible(c.hwnd as HWND) } == 0,
                         }
                 }) else {
                     return;
@@ -408,7 +415,7 @@ mod imp {
                 let mut w = watch();
                 match w.waits.iter_mut().find(|x| x.key == key && x.caught.is_some_and(|c| c.hwnd == hw)) {
                     Some(x) => x.caught = Some(Caught { hwnd: hw, style, ready: true }),
-                    // Its pane went meanwhile.
+                    // Its pane went meanwhile, or a window that showed took its place.
                     None => {
                         drop(w);
                         super::let_go(h, style);
