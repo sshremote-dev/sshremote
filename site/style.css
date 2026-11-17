@@ -160,7 +160,7 @@ button.copy.done { color: var(--ok); }
 .file:hover { background: var(--sunk); }
 .file svg { width: 20px; height: 20px; color: var(--dim); }
 .file b { font-weight: 500; display: block; }
-.file .meta { font: 12px var(--mono); color: var(--faint); word-break: break-all; }
+.file .meta { font: 12px var(--mono); color: var(--faint); overflow-wrap: anywhere; }
 .file .size { font: 13px var(--mono); color: var(--dim); white-space: nowrap; }
 .file .go { font-size: 14px; color: var(--dim); display: inline-flex; gap: 6px; align-items: center; }
 .file:hover .go { color: var(--fg); }

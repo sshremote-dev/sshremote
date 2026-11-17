@@ -144,16 +144,18 @@
   </div>
   <div class="files">
     <a class="file" href="download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 · .exe</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
-    <a class="file" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · GNOME on Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
+    <a class="file" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · X11 and Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
   </div>
-  <p class="dim small" style="margin-top:20px">Nothing to install where you are? Reach a computer by its ID <a href="https://web.sshremote.dev/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
+  <p class="dim small" style="margin-top:20px">The Windows file is not signed yet, so Windows may hold it back the first time it runs: <b>More info</b>, then <b>Run anyway</b>.</p>
+  <p class="dim small">Nothing to install where you are? Reach a computer by its ID <a href="https://web.sshremote.dev/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
 </div></section>
 
 <section id="start"><div class="wrap">
   <div class="section-head"><span class="eyebrow">Quick start</span><h2>Running in a minute</h2></div>
   <div class="steps">
     <div><h3>Put it on both ends</h3><p>The same file on this computer and on the host.</p>
-      <pre class="cmd"><code>chmod +x sshremote-linux-x86_64
+      <pre class="cmd"><code>mkdir -p ~/.local/bin
+chmod +x sshremote-linux-x86_64
 mv sshremote-linux-x86_64 ~/.local/bin/sshremote</code></pre></div>
     <div><h3>Open it</h3><p>Pick a host from <code>~/.ssh/config</code>, or type one.</p>
       <pre class="cmd"><code>sshremote</code></pre></div>
