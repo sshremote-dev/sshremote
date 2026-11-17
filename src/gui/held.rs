@@ -24,6 +24,15 @@ mod tiled;
 #[cfg(all(target_os = "linux", feature = "remote"))]
 mod x11;
 
+/// Whether full screen would hide the programs held in panes, as the compositor shows nothing over
+/// a full screen window (Sway).
+pub(super) fn full_hides() -> bool {
+    #[cfg(all(target_os = "linux", feature = "remote"))]
+    return tiled::full_hides();
+    #[allow(unreachable_code)]
+    false
+}
+
 /// Whether this computer's programs are held in their panes (else a pane shows a picture of them).
 pub(super) fn here() -> bool {
     #[cfg(all(windows, feature = "remote"))]

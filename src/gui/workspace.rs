@@ -745,6 +745,15 @@ impl Workspace {
         }
     }
 
+    /// Whether a program of this computer is held in a pane of the tab shown.
+    fn shown_holds_program(&self) -> bool {
+        self.tabs.get(self.current).is_some_and(|t| {
+            let mut l = Vec::new();
+            t.root.leaves(&mut l);
+            l.iter().any(|id| self.is_held(*id))
+        })
+    }
+
     /// Whether a program of this computer is held in one of its panes.
     pub(super) fn holds_programs(&self) -> bool {
         self.panes.iter().any(|p| matches!(p.state, State::Held(_)))
@@ -1120,6 +1129,11 @@ impl Workspace {
     /// The window on the whole monitor, or back. A screen in a split tab takes the monitor alone,
     /// as Remote Desktop and RustDesk show one computer; that zoom goes again on the way out.
     fn set_full(&mut self, ctx: &egui::Context, on: bool) {
+        if on && super::held::full_hides() && self.shown_holds_program() {
+            // Shown with the program held: short, so it fits on the title bar.
+            self.toasts.push("Not full screen: Sway shows no program over a full screen window.");
+            return;
+        }
         if !self.full.set(ctx, on) {
             return;
         }

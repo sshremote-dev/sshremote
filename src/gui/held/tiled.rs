@@ -24,6 +24,8 @@ pub(super) struct Win {
     /// Where its contents are (x, y, width, height), in the layout's logical pixels.
     pub rect: [i32; 4],
     pub floating: bool,
+    /// Full screen in its compositor.
+    pub full: bool,
     pub visible: bool,
     pub focused: bool,
     /// Its program's id and its title, to find a program's window by name.
@@ -59,6 +61,9 @@ pub(super) trait Wm: Send + Sync {
     /// Put over the rest of its workspace's floating windows.
     fn raise(&self, w: &Win, space: &str, rect: [i32; 4]);
     fn focus(&self, id: &str);
+    /// Whether a window can be over a full screen one (Hyprland: raised and focused; Sway shows
+    /// nothing over one).
+    fn over_full(&self) -> bool;
     fn close(&self, id: &str);
     /// Let go of: a window of its own on `space`, as it was before it was held (else tiled).
     fn free(&self, w: &Win, space: &str, was: Option<&Win>);
@@ -86,6 +91,11 @@ fn wm() -> Option<&'static dyn Wm> {
 /// A Sway or Hyprland session.
 pub(in crate::gui) fn here() -> bool {
     wm().is_some()
+}
+
+/// A compositor that shows nothing over a full screen window (Sway).
+pub(in crate::gui) fn full_hides() -> bool {
+    wm().is_some_and(|wm| !wm.over_full())
 }
 
 /// How long a window may take to take the pane's size before it is shown anyway, and how often
@@ -127,6 +137,8 @@ struct Entry {
     /// one since (the question it asks first, to save or to close its tabs).
     asked: Option<Vec<String>>,
     asking: bool,
+    /// Raised over this window while it is full screen, since it was last put out of sight.
+    lifted: bool,
 }
 
 #[derive(Default)]
@@ -266,12 +278,23 @@ impl Keep {
                         // This window was brought up over it.
                         wm.raise(w, &o.space, aim);
                     }
+                    // This window full screen, which is drawn over the rest: raised and focused once
+                    // where the compositor then shows it over it (Hyprland).
+                    if o.full && !e.lifted && wm.over_full() {
+                        wm.raise(w, &o.space, aim);
+                        wm.focus(&id);
+                        e.lifted = true;
+                    }
+                    if !o.full {
+                        e.lifted = false;
+                    }
                 }
                 None => {
                     if !wm.out_of_sight(w) {
                         wm.hide(w);
                     }
                     e.aim = None;
+                    e.lifted = false;
                 }
             }
         }
@@ -464,6 +487,7 @@ impl Held {
                     gone: false,
                     asked: None,
                     asking: false,
+                    lifted: false,
                 });
                 let ok = script(token, &line).is_some_and(|path| wm.launch(&catch, &path));
                 if ok {
@@ -627,6 +651,9 @@ mod tests {
         fn focus(&self, id: &str) {
             self.say(format!("focus {id}"));
         }
+        fn over_full(&self) -> bool {
+            true
+        }
         fn close(&self, id: &str) {
             self.say(format!("close {id}"));
         }
@@ -656,6 +683,7 @@ mod tests {
             gone: false,
             asked: None,
             asking: false,
+            lifted: false,
         }
     }
 
@@ -735,6 +763,31 @@ mod tests {
         // One already open is not asked: it is let go as it was.
         k.entries[0].new = false;
         assert!(!k.ask(&wm, 5));
+    }
+
+    #[test]
+    fn over_this_window_full_screen_it_is_raised_and_focused_once_each_time_it_is_shown() {
+        let me = std::process::id();
+        let wm = Fake::default();
+        wm.wins.lock().unwrap().push(Win { id: "ours".into(), pid: me, space: "1".into(), rect: [0, 0, 1280, 800], visible: true, full: true, ..Default::default() });
+        wm.wins.lock().unwrap().push(Win { id: "ed".into(), pid: 500, space: "catch-6".into(), rect: [0, 0, 1280, 800], ..Default::default() });
+        let mut k = Keep::default();
+        k.entries.push(entry(6, "catch-6"));
+        k.entries[0].rel = Some([1280, 800, 0, 0, 1280, 800]);
+        k.entries[0].shown = true;
+        for _ in 0..4 {
+            k.mind(&wm, &wm.windows().unwrap());
+        }
+        let raised = |wm: &Fake| wm.said.lock().unwrap().iter().filter(|s| *s == "raise ed").count();
+        assert_eq!(raised(&wm), 1, "once");
+        // Out of sight (a notice over it) and back: once more.
+        k.entries[0].shown = false;
+        k.mind(&wm, &wm.windows().unwrap());
+        k.entries[0].shown = true;
+        k.mind(&wm, &wm.windows().unwrap());
+        k.mind(&wm, &wm.windows().unwrap());
+        assert_eq!(raised(&wm), 2);
+        assert_eq!(wm.said.lock().unwrap().last().unwrap(), "focus ed");
     }
 
     #[test]

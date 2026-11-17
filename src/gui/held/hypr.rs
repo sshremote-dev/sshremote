@@ -87,6 +87,7 @@ pub(super) fn windows_in(clients: &Value, monitors: &Value) -> Vec<Win> {
                 space: if id > 0 { id.to_string() } else { name.to_string() },
                 rect: [num(&c["at"], 0), num(&c["at"], 1), num(&c["size"], 0), num(&c["size"], 1)],
                 floating: c["floating"].as_bool().unwrap_or(false),
+                full: c["fullscreen"].as_i64().unwrap_or(0) > 0,
                 visible: shown.contains(&id) && !c["hidden"].as_bool().unwrap_or(false),
                 focused: c["focusHistoryID"].as_i64() == Some(0),
                 name: format!("{} {}", c["class"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or("")),
@@ -169,6 +170,10 @@ impl Wm for Hypr {
 
     fn focus(&self, id: &str) {
         self.batch(&[format!("focuswindow address:{id}")]);
+    }
+
+    fn over_full(&self) -> bool {
+        true
     }
 
     fn close(&self, id: &str) {

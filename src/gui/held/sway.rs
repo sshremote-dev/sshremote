@@ -104,6 +104,7 @@ pub(super) fn windows_in(tree: &Value) -> Vec<Win> {
                 space: space.to_string(),
                 rect: [num(r, "x") + num(w, "x"), num(r, "y") + num(w, "y"), num(w, "width"), num(w, "height")],
                 floating: n["type"] == "floating_con",
+                full: n["fullscreen_mode"].as_i64().unwrap_or(0) > 0,
                 visible: n["visible"].as_bool().unwrap_or(false),
                 focused: n["focused"].as_bool().unwrap_or(false),
                 name: format!("{app} {}", n["name"].as_str().unwrap_or("")),
@@ -204,6 +205,10 @@ impl Wm for Sway {
 
     fn focus(&self, id: &str) {
         self.on(id, "focus");
+    }
+
+    fn over_full(&self) -> bool {
+        false
     }
 
     fn close(&self, id: &str) {
