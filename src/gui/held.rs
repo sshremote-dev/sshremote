@@ -190,6 +190,14 @@ mod imp {
             // Its program is sent the change and takes it when it next looks at its messages: a
             // thread of its own waits for that, not this window's.
             SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+            // Shown meanwhile where its program put it, before it took the change (a program
+            // already running, as Chrome or Edge, opens a window and shows it at once): hidden now
+            // and shown again on the pane it would blink, so it stays seen and just moves there.
+            if IsWindowVisible(h) != 0 && IsIconic(h) == 0 {
+                SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+                return None;
+            }
             if SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA) == 0 {
                 SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
                 return None;
