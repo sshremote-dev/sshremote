@@ -134,8 +134,9 @@ What is opened goes into the workspace:
   graphics, which cannot make a screen larger again once it made it smaller), fit, zoom (the host sends its own pixels, which
   its lossless coding and scrolls keep exact; a smaller pane or zoom makes them smaller here, each
   pixel the mean of those it covers, so text keeps every stroke), the host's
-  pointer drawn here right where this mouse is (its shape comes apart from the picture on Windows
-  and X11 hosts, so moving it costs no pictures and lags no round trip; in the browser it is the
+  pointer drawn here right where this mouse is (its shape comes apart from the picture on Windows,
+  X11 and GNOME hosts, so moving it costs no pictures and lags no round trip; GNOME sends it beside
+  its PipeWire frames, which the agent reads itself through libpipewire; in the browser it is the
   page's own pointer), system keys (Win or Super, Alt+Tab, Alt+Esc, Ctrl+Esc, Print Screen) going
   to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my

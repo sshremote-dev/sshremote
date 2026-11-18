@@ -1153,6 +1153,78 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         sess.close();
     }
 
+    /// GNOME's pointer comes apart to a viewer that draws it: its picture and where it is, and
+    /// moving it alone sends no pictures; to one that does not, it is drawn into them. Needs
+    /// SSHREMOTE_GNOME_HOST (and SSHREMOTE_GNOME_ENV, SSHREMOTE_GNOME_AGENT as above).
+    #[test]
+    #[ignore]
+    fn a_gnome_pointer_comes_apart_to_the_viewer() {
+        use crate::proto::{FORMAT_POINTER, FORMATS, Settings, ToAgent};
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let target = Target::Ssh {
+            host,
+            port: None,
+            args: Vec::new(),
+            remote: format!("env {env} {agent} --agent"),
+            capture: "gnome".into(),
+            password: None,
+            unattended: true,
+        };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let (w, h) = sess.desk;
+        let settings = |formats| Settings { view_w: w, view_h: h, scale: 100, mode: crate::color::Mode::True, fps: 30, formats };
+        // What comes within `ms`: the parts frames changed (acknowledged), the pointer's pictures
+        // and places.
+        let gather = |sess: &mut Session, ms: u64| {
+            let (mut frames, mut shapes, mut places) = (Vec::new(), Vec::new(), Vec::new());
+            let until = Instant::now() + Duration::from_millis(ms);
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        let parts = f.tiles.iter().chain(&f.video).map(|t| (t.x, t.y, t.x + t.w, t.y + t.h));
+                        frames.push(parts.reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))));
+                    }
+                    Ok(Ev::Net(ToClient::PointerShape { w, h, .. })) => shapes.push((w, h)),
+                    Ok(Ev::Net(ToClient::PointerAt(at))) => places.push(at),
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            (frames, shapes, places)
+        };
+        // Somewhere first, so the pointer is on the screen and in sight.
+        sess.send(ToAgent::Pointer { x: w / 3, y: h / 3 }).unwrap();
+        sess.send(ToAgent::Settings(settings(FORMATS | FORMAT_POINTER))).unwrap();
+        let (frames, shapes, places) = gather(&mut sess, 3000);
+        assert!(!frames.is_empty(), "the screen comes");
+        assert!(shapes.iter().any(|&(w, h)| w > 0 && h > 0), "the pointer's picture comes: {shapes:?}");
+        assert!(places.iter().any(|p| p.is_some()), "and where it is: {places:?}");
+        let wander = |sess: &mut Session| {
+            for i in 0..20u16 {
+                sess.send(ToAgent::Pointer { x: w / 3 + i * 9, y: h / 3 + i * 5 }).unwrap();
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            gather(sess, 800)
+        };
+        // Frames that changed where the pointer went (a text caret may blink elsewhere).
+        let path = (w / 3 - 32, h / 3 - 32, w / 3 + 19 * 9 + 32, h / 3 + 19 * 5 + 32);
+        let on_path = |frames: &[Option<(u16, u16, u16, u16)>]| {
+            frames.iter().flatten().filter(|f| f.0 < path.2 && f.2 > path.0 && f.1 < path.3 && f.3 > path.1).count()
+        };
+        // (Its picture may come again where it changes, over a text field say.)
+        let (apart, ..) = wander(&mut sess);
+        assert_eq!(on_path(&apart), 0, "moving the pointer alone sends no pictures of it: {apart:?}");
+        // A viewer that does not draw it gets it in the pictures, which follow its moves.
+        sess.send(ToAgent::Settings(settings(FORMATS))).unwrap();
+        gather(&mut sess, 1000);
+        let (drawn, ..) = wander(&mut sess);
+        assert!(on_path(&drawn) >= 5, "the pictures show the pointer moving: {drawn:?}");
+        sess.close();
+    }
+
     /// A window shared alone shows the menus it opens: Shift+F10 in it opens its context menu, and
     /// the shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
     /// window with a context menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,

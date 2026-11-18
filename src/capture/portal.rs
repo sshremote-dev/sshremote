@@ -4,7 +4,7 @@
 //! the person picked in its dialog, and with remote interaction allowed, input to it.
 
 use std::collections::HashMap;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{ObjectPath, OwnedFd, OwnedObjectPath, OwnedValue, Value};
@@ -27,6 +27,8 @@ pub struct Portal {
     rd: Option<Proxy<'static>>,
     /// What lets the next session start without the dialog, where the desktop gives it.
     pub restore: Option<String>,
+    /// The pointer comes beside the frames, as their metadata, rather than in them.
+    pub apart: bool,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -65,7 +67,7 @@ fn options(token: &str) -> HashMap<&'static str, Value<'_>> {
 
 /// Shows the dialog on the remote screen and waits until someone picks a window or a screen there.
 pub fn pick() -> Result<Portal, String> {
-    start(1 | 2, None, true)
+    start(1 | 2, None, true, super::pw::usable())
 }
 
 /// The whole of one monitor, with keyboard and pointer: the way in to a Wayland desktop other
@@ -73,16 +75,17 @@ pub fn pick() -> Result<Portal, String> {
 /// it start without the dialog where the desktop allows that; a desktop with no remote-desktop
 /// portal (wlroots ones) shares the screen alone.
 pub fn screen(restore: Option<&str>) -> Result<Portal, String> {
-    match start(1, restore, true) {
+    match start(1, restore, true, false) {
         Err(e) if e.contains("RemoteDesktop") || e.contains("UnknownMethod") || e.contains("ServiceUnknown") || e.contains("not provided") => {
-            start(1, restore, false).map_err(|e2| format!("{e2} (and with input: {e})"))
+            start(1, restore, false, false).map_err(|e2| format!("{e2} (and with input: {e})"))
         }
         r => r,
     }
 }
 
-/// A portal session sharing `types` (1 a monitor, 2 a window), with input unless `screen_only`.
-fn start(types: u32, restore: Option<&str>, input: bool) -> Result<Portal, String> {
+/// A portal session sharing `types` (1 a monitor, 2 a window), with input unless `screen_only`,
+/// and the pointer as metadata when `apart` and the desktop sends it so.
+fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<Portal, String> {
     let conn = Connection::session().map_err(err("connection"))?;
     let tag = std::process::id();
     let t = |n: u32| format!("sshremote{tag}_{n}{}", if input { "" } else { "v" });
@@ -118,10 +121,12 @@ fn start(types: u32, restore: Option<&str>, input: bool) -> Result<Portal, Strin
 
     let t3 = t(3);
     let mut o = options(&t3);
-    // What to share, one of it, with the pointer drawn into the picture.
+    // What to share, one of it, with the pointer drawn into the picture (2) or beside it (4).
+    let apart = apart
+        && Proxy::new(&conn, DEST, PATH, SC).ok().and_then(|p| p.get_property::<u32>("AvailableCursorModes").ok()).is_some_and(|m| m & 4 != 0);
     o.insert("types", Value::U32(types));
     o.insert("multiple", Value::Bool(false));
-    o.insert("cursor_mode", Value::U32(2));
+    o.insert("cursor_mode", Value::U32(if apart { 4 } else { 2 }));
     if !input {
         keep(&mut o);
     }
@@ -156,7 +161,7 @@ fn start(types: u32, restore: Option<&str>, input: bool) -> Result<Portal, Strin
     } else {
         None
     };
-    Ok(Portal { conn, session, node, monitor, fd, rd, restore })
+    Ok(Portal { conn, session, node, monitor, fd, rd, restore, apart })
 }
 
 impl Portal {
@@ -175,6 +180,11 @@ impl Portal {
     /// What GStreamer's pipewiresrc needs to read the stream.
     pub fn source(&self) -> String {
         format!("fd={} path={}", self.fd.as_raw_fd(), self.node)
+    }
+
+    /// The PipeWire connection the stream is read on.
+    pub fn fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 
     fn notify<B>(&self, method: &str, body: &B) -> Result<(), String>

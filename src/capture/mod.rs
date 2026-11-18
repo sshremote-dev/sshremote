@@ -14,6 +14,8 @@ pub(crate) fn gnome_helper_update() {
 #[cfg(target_os = "linux")]
 mod portal;
 #[cfg(target_os = "linux")]
+mod pw;
+#[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
 mod wayland;

@@ -77,6 +77,17 @@ pub struct Gnome {
     /// The picture made smaller for the viewer, by area averaging.
     shrink: super::Shrink,
     pipe: Option<Pipe>,
+    /// The stream read here, with the pointer beside its frames (`pipe` reads it otherwise).
+    pw: Option<super::pw::Stream>,
+    /// Its newest frame as it came, for pictures made again without a new one.
+    clean: Option<super::pw::Frame>,
+    /// A picture is due from `clean`: the viewer's size, or the pointer drawn in, changed.
+    dirty: bool,
+    /// The viewer draws the pointer; the number of its picture last sent.
+    apart: bool,
+    sent_shape: u64,
+    /// Where the picture starts on the stream's frames.
+    origin: (i32, i32),
     src: Src,
     app: Option<AppShare>,
     /// The stream chosen in GNOME's own sharing dialog, and its input session.
@@ -255,6 +266,12 @@ impl Drop for Pipe {
     }
 }
 
+/// A stream's first frame, from the reader that will read the rest.
+enum First {
+    Own(super::pw::Stream, super::pw::Frame),
+    Gst(Pipe, Image),
+}
+
 /// `source` is what pipewiresrc reads: "path=NODE", or "fd=FD path=NODE" for a portal stream.
 pub(super) fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pipe, String> {
     let caps = match size {
@@ -352,8 +369,20 @@ impl Gnome {
         Gnome::open_on(None, Src::Monitor)
     }
 
-    /// Records the monitor at `index` in the monitor list (or the primary one), or a window.
+    /// Records the monitor at `index` in the monitor list (or the primary one), or a window:
+    /// read here with the pointer beside the frames where PipeWire can be, by GStreamer otherwise.
     fn open_on(index: Option<usize>, src: Src) -> Result<Gnome, String> {
+        let mut reader_failed = false;
+        if super::pw::usable() {
+            match Gnome::record(index, src, true, &mut reader_failed) {
+                Err(_) if reader_failed => super::pw::give_up(),
+                r => return r,
+            }
+        }
+        Gnome::record(index, src, false, &mut reader_failed)
+    }
+
+    fn record(index: Option<usize>, src: Src, own: bool, reader_failed: &mut bool) -> Result<Gnome, String> {
         ensure_env();
         gst::init().map_err(|e| format!("GStreamer init: {e}"))?;
         let conn = Connection::session().map_err(err("session bus"))?;
@@ -368,8 +397,9 @@ impl Gnome {
         let cpath: OwnedObjectPath = sc.call("CreateSession", &(props,)).map_err(err("ScreenCast session"))?;
         let cast = Proxy::new(&conn, SC, cpath, "org.gnome.Mutter.ScreenCast.Session").map_err(err("cast"))?;
         let mut sprops: HashMap<&str, Value> = HashMap::new();
-        // Cursor embedded in frames, so the remote pointer is visible.
-        sprops.insert("cursor-mode", Value::U32(1));
+        // The pointer as metadata beside the frames (2), for the viewer to draw or drawn in here;
+        // in the frames (1) where GStreamer reads them.
+        sprops.insert("cursor-mode", Value::U32(if own { 2 } else { 1 }));
         let list = monitors(&conn);
         let current = index.unwrap_or(0).min(list.len().saturating_sub(1));
         let connector = list.get(current).map_or(String::new(), |m| m.0.clone());
@@ -388,21 +418,31 @@ impl Gnome {
         // nothing (a key no key makes, a move by nothing).
         let _ = session.call_noreply("NotifyKeyboardKeysym", &(0u32, true));
         let _ = session.call_noreply("NotifyPointerMotionRelative", &(0f64, 0f64));
+        const NO_FRAME: &str = "no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)";
         let started = (|| {
             let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
             let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
+            if own {
+                let s = super::pw::Stream::open(None, node, std::time::Duration::from_secs(5)).map_err(|(e, ours)| {
+                    *reader_failed = ours;
+                    if ours { e } else { NO_FRAME.to_string() }
+                })?;
+                let first = s.take().0.ok_or(NO_FRAME)?;
+                return Ok::<_, String>((node, First::Own(s, first)));
+            }
             let pipe = pipeline(&format!("path={node}"), None)?;
-            let first = pipe
-                .sink
-                .try_pull_sample(gst::ClockTime::from_seconds(5))
-                .ok_or("no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)")?;
-            Ok::<_, String>((node, pipe, to_image(&first)?))
+            let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(5)).ok_or(NO_FRAME)?;
+            let img = to_image(&first)?;
+            Ok((node, First::Gst(pipe, img)))
         })();
         // A session that started and failed is stopped, not left recording.
-        let (node, pipe, img) = started.inspect_err(|_| {
+        let (node, first) = started.inspect_err(|_| {
             let _ = session.call_noreply("Stop", &());
         })?;
-        let desk = (img.w, img.h);
+        let (desk, pipe, pw, clean) = match first {
+            First::Own(s, f) => ((f.w, f.h), None, Some(s), Some(f)),
+            First::Gst(p, img) => ((img.w, img.h), Some(p), None, None),
+        };
         let screen = match (src, list.get(current)) {
             (Src::Monitor, _) | (_, None) => desk,
             (_, Some(m)) => (m.1.w, m.1.h),
@@ -418,7 +458,13 @@ impl Gnome {
             screen,
             target: desk,
             shrink: super::Shrink::default(),
-            pipe: Some(pipe),
+            pipe,
+            pw,
+            clean,
+            dirty: true,
+            apart: false,
+            sent_shape: 0,
+            origin: (0, 0),
             src,
             app: None,
             portal: None,
@@ -431,8 +477,20 @@ impl Gnome {
         })
     }
 
-    /// A new pipeline on the same stream, for when cutting or scaling changes; the old one is stopped first.
+    /// Takes over from a new recording, keeping whether the viewer draws the pointer.
+    fn take_over(&mut self, next: Gnome) {
+        let apart = self.apart;
+        *self = next;
+        self.apart = apart && self.pw.is_some();
+    }
+
+    /// A new pipeline on the same stream, for when cutting or scaling changes; the old one is
+    /// stopped first. A stream read here makes its next picture from its last frame.
     fn restart_pipe(&mut self) -> Result<(), String> {
+        if self.pw.is_some() {
+            (self.target, self.dirty) = (self.desk, true);
+            return Ok(());
+        }
         self.pipe = None;
         self.target = self.desk;
         self.set_target(self.desk.0, self.desk.1)
@@ -449,6 +507,22 @@ impl Gnome {
     /// Starts reading the stream chosen in the portal dialog; its first frame gives the size. What
     /// was shown goes on until that works, and stays if it does not.
     fn use_portal(&mut self, portal: super::portal::Portal) -> Result<(), String> {
+        if portal.apart {
+            match super::pw::Stream::open(Some(portal.fd()), portal.node, std::time::Duration::from_secs(5)) {
+                Ok(s) => {
+                    let f = s.take().0.ok_or("no picture from the chosen window")?;
+                    self.app = None;
+                    (self.desk, self.target) = ((f.w, f.h), (f.w, f.h));
+                    (self.pipe, self.pw, self.clean, self.dirty) = (None, Some(s), Some(f), true);
+                    self.portal = Some(portal);
+                    self.src = Src::Portal;
+                    return Ok(());
+                }
+                Err((e, false)) => return Err(format!("no picture from the chosen window within 5 s ({e})")),
+                // Read by GStreamer, which leaves the pointer out of this stream's frames.
+                Err(_) => super::pw::give_up(),
+            }
+        }
         let pipe = pipeline(&portal.source(), None)?;
         let first = pipe
             .sink
@@ -457,7 +531,7 @@ impl Gnome {
         let img = to_image(&first)?;
         self.app = None;
         (self.desk, self.target) = ((img.w, img.h), (img.w, img.h));
-        self.pipe = Some(pipe);
+        (self.pipe, self.pw, self.clean, self.apart) = (Some(pipe), None, None, false);
         self.portal = Some(portal);
         self.src = Src::Portal;
         Ok(())
@@ -558,7 +632,7 @@ impl Gnome {
     /// viewer asked for when its size has not changed: the agent asks again only when it has.
     fn reopen(&mut self, src: Src) -> Result<(), String> {
         let (desk, target) = (self.desk, self.target);
-        *self = Gnome::open_on(Some(self.current), src)?;
+        self.take_over(Gnome::open_on(Some(self.current), src)?);
         if self.desk == desk && target != desk {
             self.set_target(target.0, target.1)?;
         }
@@ -571,7 +645,7 @@ impl Gnome {
     fn record_again(&mut self) -> Result<(), String> {
         let cut = self.app.as_ref().map(|a| a.of.clone());
         let (desk, target) = (self.desk, self.target);
-        *self = Gnome::open_on(Some(self.current), Src::Monitor)?;
+        self.take_over(Gnome::open_on(Some(self.current), Src::Monitor)?);
         if let Some(cut) = cut {
             self.cut_out(cut)?;
         }
@@ -659,6 +733,100 @@ impl Gnome {
             .map(|r| R { l: r.l - area.l, t: r.t - area.t, r: r.r - area.l, b: r.b - area.t })
             .collect();
     }
+
+    /// A picture from the stream read here: its newest frame, or its last one again when the
+    /// viewer's size or the pointer drawn in changed.
+    fn grab_own(&mut self) -> Result<Option<Image>, String> {
+        let window = !matches!(self.src, Src::Monitor);
+        let Some(pw) = &self.pw else { return Ok(None) };
+        // The shared window closed and took its stream with it, or Mutter ended the monitor's.
+        let mut gone = pw.stopped().is_some();
+        if !gone {
+            let (frame, moved) = pw.take();
+            if let Some(f) = frame {
+                self.last_frame = std::time::Instant::now();
+                if let Some(old) = self.clean.replace(f) {
+                    pw.recycle(old.data);
+                }
+            } else if !(self.dirty || moved && !self.apart) {
+                // Nothing comes while the screen is still, nor once the stream went without a
+                // word: after a second, check it exists.
+                let second = std::time::Duration::from_secs(1);
+                if self.last_frame.elapsed() < second || self.checked_alive.elapsed() < second {
+                    return Ok(None);
+                }
+                self.checked_alive = std::time::Instant::now();
+                if self.stream_alive() {
+                    return Ok(None);
+                }
+                gone = true;
+            }
+        }
+        if gone {
+            if window { self.back_to_screen()? } else { self.record_again()? }
+            return Ok(None);
+        }
+        self.dirty = false;
+        if let Some(f) = &self.clean
+            && self.src == Src::Monitor
+            && (f.w, f.h) != self.screen
+        {
+            // The host's resolution or rotation changed under the monitor stream.
+            self.screen = (f.w, f.h);
+            self.monitors = monitors(&self.conn);
+            if self.app.is_none() {
+                // The agent tells the viewer the new size and asks for a new target.
+                (self.desk, self.target, self.dirty) = (self.screen, self.screen, true);
+                return Ok(None);
+            }
+            self.refresh_app(true);
+        }
+        if self.app.is_some() {
+            // Its last window closed: the whole monitor comes instead.
+            self.refresh_app(false);
+        }
+        let Some(clean) = &self.clean else { return Ok(None) };
+        let frame = clean.pixels();
+        let (mut img, origin) = match &self.app {
+            Some(a) => (region::crop_masked(&frame, a.area, &a.shown), (a.area.l, a.area.t)),
+            None => {
+                // A window stream's buffers can be larger than the window; the window is the crop
+                // area. Mutter marks a monitor's frames with an empty crop.
+                let monitor = self.src == Src::Monitor || self.portal.as_ref().is_some_and(|p| p.monitor);
+                let (mut cx, mut cy, mut cw, mut ch) = match clean.crop {
+                    Some(c) => c,
+                    None if !monitor => content_box(&frame),
+                    None => (0, 0, frame.w, frame.h),
+                };
+                if cx + cw > frame.w || cy + ch > frame.h {
+                    (cx, cy, cw, ch) = (0, 0, frame.w, frame.h);
+                }
+                let mut data = Vec::with_capacity(cw * ch * 4);
+                for y in cy..cy + ch {
+                    data.extend_from_slice(&frame.data[y * frame.stride + cx * 4..][..cw * 4]);
+                }
+                (Image { w: cw, h: ch, stride: cw * 4, data }, (cx as i32, cy as i32))
+            }
+        };
+        if (img.w, img.h) != self.desk {
+            // A window was resized, or the shared program's windows moved: the agent sees the
+            // new size and asks for a new target.
+            self.desk = (img.w, img.h);
+            self.target = self.desk;
+        }
+        self.origin = origin;
+        if !self.apart
+            && let Some(pw) = &self.pw
+            && let p = pw.pointer()
+            && let (Some((x, y)), Some(shape)) = (p.at, &p.shape)
+        {
+            super::pw::draw(&mut img.data, img.w, img.h, img.stride, shape, (x - origin.0, y - origin.1));
+        }
+        if self.target == self.desk {
+            return Ok(Some(img));
+        }
+        Ok(Some(self.shrink.image(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
+    }
 }
 
 /// A gsettings string list (as `gsettings get` prints it) with the helper added.
@@ -686,6 +854,54 @@ mod tests {
             with_helper("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com']"),
             format!("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', '{HELPER_UUID}']")
         );
+    }
+
+    /// GNOME's pointer kept apart: it comes beside the frames, its picture once with where it
+    /// is, pictures leave it out, and put back it is drawn in again. In a private session:
+    /// SSHREMOTE_GNOME_TEST=1 scripts/gnome-session.sh run TESTS --ignored the_gnome_pointer_comes_apart
+    #[test]
+    #[ignore]
+    fn the_gnome_pointer_comes_apart() {
+        if std::env::var_os("SSHREMOTE_GNOME_TEST").is_none() {
+            return;
+        }
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let next = |g: &mut Gnome| (0..150).find_map(|_| g.grab().unwrap().or_else(|| (pause(), None).1));
+        // The pixels around a point, to tell whether the pointer is drawn there.
+        let around = |img: &Image, (x, y): (usize, usize)| -> Vec<u8> {
+            (y..y + 24).flat_map(|r| img.data[r * img.stride + x * 4..][..24 * 4].to_vec()).collect()
+        };
+        let mut g = Gnome::open().expect("a GNOME session");
+        assert!(g.pw.is_some(), "the stream is read here");
+        // A new session's first move can leave the pointer in its corner's column.
+        g.input(Input::Move { x: 250.0, y: 150.0 }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        g.input(Input::Move { x: 300.0, y: 200.0 }).unwrap();
+        assert!(g.pointer_apart(true));
+        let without = next(&mut g).expect("a picture");
+        let (mut shape, mut at) = (None, None);
+        for _ in 0..150 {
+            let (s, a) = g.pointer();
+            shape = shape.or(s);
+            at = a;
+            if shape.is_some() && at == Some((300, 200)) {
+                break;
+            }
+            pause();
+        }
+        let shape = shape.expect("the pointer's picture");
+        assert!(shape.w > 0 && shape.rgba.len() == shape.w * shape.h * 4, "{}x{}", shape.w, shape.h);
+        assert_eq!(at, Some((300, 200)));
+        assert!(g.pointer().0.is_none(), "the same picture is not sent again");
+        g.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
+        let still = next(&mut g).unwrap_or(without);
+        let bare = around(&still, (490, 390));
+        // Put back into the pictures, it is drawn where it is.
+        assert!(g.pointer_apart(false));
+        let with = next(&mut g).expect("a picture with the pointer");
+        assert_ne!(around(&with, (490, 390)), bare, "the pointer drawn in");
+        assert_eq!(around(&with, (100, 600)), around(&still, (100, 600)), "and nothing else changed");
     }
 }
 
@@ -815,7 +1031,7 @@ impl Capture for Gnome {
         if self.src == Src::Monitor
             && let Ok(again) = Gnome::open_on(Some(self.current), Src::Monitor)
         {
-            *self = again;
+            self.take_over(again);
         } else {
             self.monitors = monitors(&self.conn);
         }
@@ -826,7 +1042,7 @@ impl Capture for Gnome {
             return Err("no such monitor".into());
         }
         // A new remote-desktop session records the other monitor; dropping the old one stops it.
-        *self = Gnome::open_on(Some(index), Src::Monitor)?;
+        self.take_over(Gnome::open_on(Some(index), Src::Monitor)?);
         Ok(())
     }
 
@@ -842,7 +1058,7 @@ impl Capture for Gnome {
     fn share(&mut self, scope: Share) -> Result<String, String> {
         let monitor = |g: &mut Gnome| -> Result<(), String> {
             if g.src != Src::Monitor {
-                *g = Gnome::open_on(Some(g.current), Src::Monitor)?;
+                g.take_over(Gnome::open_on(Some(g.current), Src::Monitor)?);
             }
             Ok(())
         };
@@ -863,7 +1079,7 @@ impl Capture for Gnome {
                     monitor(self)?;
                     self.cut_out(Cut::Window(id))?;
                 } else {
-                    *self = Gnome::open_on(Some(self.current), Src::Focused)?;
+                    self.take_over(Gnome::open_on(Some(self.current), Src::Focused)?);
                 }
                 Ok("the active window".into())
             }
@@ -898,6 +1114,12 @@ impl Capture for Gnome {
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
+        if self.pw.is_some() {
+            // Frames come at their own size: made smaller here (a window's larger too).
+            self.target = if self.native() { (w.max(1), h.max(1)) } else { (w.min(self.desk.0).max(1), h.min(self.desk.1).max(1)) };
+            self.dirty = true;
+            return Ok(());
+        }
         if self.native() {
             // A window stream stays at its own size, which follows the window; it is scaled here,
             // up as well for a window smaller than the least the viewer asks for.
@@ -916,7 +1138,27 @@ impl Capture for Gnome {
         Ok(())
     }
 
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        if self.pw.is_none() {
+            return false;
+        }
+        (self.apart, self.sent_shape, self.dirty) = (on, 0, true);
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        let Some(pw) = &self.pw else { return (None, None) };
+        let p = pw.pointer();
+        let Some(shape) = p.shape.filter(|s| s.w > 0) else { return (None, None) };
+        let new = (p.serial != self.sent_shape).then(|| shape.to_pointer());
+        self.sent_shape = p.serial;
+        (new, p.at.map(|(x, y)| (x - self.origin.0, y - self.origin.1)))
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        if self.pw.is_some() {
+            return self.grab_own();
+        }
         let Some(pipe) = &self.pipe else {
             return Ok(None);
         };
@@ -1099,6 +1341,7 @@ impl Capture for Gnome {
 impl Drop for Gnome {
     fn drop(&mut self) {
         self.pipe = None;
+        self.pw = None;
         let _ = self.session.call_noreply("Stop", &());
     }
 }
