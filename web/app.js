@@ -1087,8 +1087,15 @@ class Client {
       canvas.style.objectFit = this.viewFit === "stretch" ? "fill" : "contain";
       canvas.style.width = z ? canvas.width * z + "px" : "";
       canvas.style.height = z ? canvas.height * z + "px" : "";
+      // A picture of another size sits elsewhere in the same box.
+      this.pointerLook();
     };
     this.layout();
+    // The host's pointer drawn where the mouse is away stays over its place as the picture
+    // moves or changes size (a notice above it, the window resized, a zoomed picture panned).
+    new ResizeObserver(() => this.pointerLook()).observe(canvas);
+    $("vscreen").addEventListener("scroll", () => this.pointerLook(), { passive: true });
+    window.addEventListener("resize", () => this.pointerLook());
     this.show = painter(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } }, seq => this.send({ drawn: seq }), () => this.layout());
     const send = v => { if (!this.viewOnly) this.send(v); };
     // Pointer positions in the picture's pixels: past the bars around a fitted picture, or
