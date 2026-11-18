@@ -1129,6 +1129,49 @@ fn closing_keeps_the_rest_in_order() {
     h.w.close_all();
 }
 
+/// A program of this computer that its pane only pictures (its window cannot be held over the
+/// pane, as on COSMIC) would be hidden by full screen, its questions with it: full screen is
+/// refused with its tab in front, and left when that tab comes in front.
+#[test]
+fn full_screen_never_hides_a_program_its_pane_pictures() {
+    let mut h = Harness::new();
+    let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+    h.w.add(Launch::Shell { label: "t".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
+    let app = Launch::Agent { target: Target::Local { capture: "app:1:true".into() }, label: "ed".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(app, Place::Tab, PaneStart::default());
+    if matches!(h.w.panes[1].state, State::Held(_)) {
+        // Held over its pane in this session.
+        h.w.close_all();
+        return;
+    }
+    h.frame(Vec::new());
+    let ctx = h.ctx.clone();
+    h.w.set_full(&ctx, true);
+    assert!(!h.w.full.on, "refused with its tab in front");
+    assert!(h.w.toasts.texts().contains(&"Not full screen: it would hide ed's own window."));
+    h.w.select_tab(0);
+    h.w.set_full(&ctx, true);
+    assert!(h.w.full.on, "full screen from the shell's tab");
+    h.w.select_tab(1);
+    h.frame(Vec::new());
+    assert!(!h.w.full.on, "left as its tab comes in front");
+    assert!(h.w.toasts.texts().contains(&"Out of full screen: it would hide ed's own window."));
+    h.w.close_all();
+}
+
+/// A program pane connecting anew does not start its program a second time.
+#[test]
+fn a_program_pane_connecting_again_does_not_start_its_program_again() {
+    let capture = |t: Target| match t {
+        Target::Local { capture } => capture,
+        _ => "other".into(),
+    };
+    let app = || Target::Local { capture: "app:1:python3 /work/asker.py".into() };
+    assert_eq!(capture(connect_target(app(), false)), "app:1:python3 /work/asker.py", "started the first time");
+    assert_eq!(capture(connect_target(app(), true)), "auto", "this computer's screen again");
+    assert_eq!(capture(connect_target(Target::Local { capture: "browser:https://a".into() }, true)), "browser:https://a");
+}
+
 /// A shell turned to the screen of a host without the agent, then back to Terminal, is the
 /// same shell again.
 #[test]

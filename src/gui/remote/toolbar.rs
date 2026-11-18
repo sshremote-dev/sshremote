@@ -184,7 +184,10 @@ impl Remote {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.spacing_mut().button_padding = Vec2::new(6.0, 4.0);
         // Input off: said here, one click turns it back on.
-        if self.view_only && ui.button(RichText::new(format!("{}  View only  {}", ic::EYE, ic::X)).small()).on_hover_text("Mouse and keyboard do not reach the host. Click to control it again").clicked() {
+        if self.mirror {
+            ui.label(RichText::new(format!("{}  View only", ic::EYE)).small())
+                .on_hover_text("This computer's own screen: keys and clicks would come back to this window. Use its windows directly");
+        } else if self.view_only && ui.button(RichText::new(format!("{}  View only  {}", ic::EYE, ic::X)).small()).on_hover_text("Mouse and keyboard do not reach the host. Click to control it again").clicked() {
             self.view_only = false;
         }
         if screen {
@@ -531,8 +534,11 @@ impl Remote {
         if screen {
             let more = icon_menu(ui, ic::GEAR, |ui| {
                 ui.label(RichText::new("This connection").strong());
-                ui.checkbox(&mut self.view_only, "View only")
-                    .on_hover_text("Watch without sending keys, clicks or the wheel");
+                if self.mirror {
+                    ui.add_enabled(false, egui::Checkbox::new(&mut true, "View only")).on_disabled_hover_text("This computer's own screen: keys and clicks would come back to this window");
+                } else {
+                    ui.checkbox(&mut self.view_only, "View only").on_hover_text("Watch without sending keys, clicks or the wheel");
+                }
                 ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
                 if crate::modules::on("sound") {
                     sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();

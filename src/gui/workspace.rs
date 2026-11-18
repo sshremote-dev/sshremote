@@ -98,6 +98,15 @@ pub(super) struct PaneStart {
     pub(super) fullscreen: bool,
 }
 
+/// What a pane connects to. Connecting anew, a pane that started a program of this computer (shown
+/// in a picture where it cannot be held) does not start it again: it shows the screen it is on.
+fn connect_target(target: Target, again: bool) -> Target {
+    match target {
+        Target::Local { capture } if again && capture.starts_with("app:") => Target::Local { capture: "auto".into() },
+        t => t,
+    }
+}
+
 /// A pane as extensions are told of it: its label, what it shows, and the host.
 fn pane_info(p: &Pane) -> serde_json::Value {
     let host = match &p.target {
@@ -745,12 +754,16 @@ impl Workspace {
         }
     }
 
-    /// Whether a program of this computer is held in a pane of the tab shown.
-    fn shown_holds_program(&self) -> bool {
-        self.tabs.get(self.current).is_some_and(|t| {
-            let mut l = Vec::new();
-            t.root.leaves(&mut l);
-            l.iter().any(|id| self.is_held(*id))
+    /// Why full screen would hide a program of this computer shown in the tab in front: held over
+    /// its pane where nothing shows over a full screen window (Sway), or open in its own window
+    /// that the pane only pictures (no way to hold it here, as on COSMIC), its questions with it.
+    fn full_hides_shown(&self) -> Option<String> {
+        let t = self.tabs.get(self.current)?;
+        let mut l = Vec::new();
+        t.root.leaves(&mut l);
+        l.iter().filter_map(|id| self.index(*id)).map(|i| &self.panes[i]).find_map(|p| match &p.state {
+            State::Held(_) => super::held::full_hides().then(|| "Sway shows no program over a full screen window.".to_string()),
+            _ => matches!(&p.target, Target::Local { capture } if capture.starts_with("app:")).then(|| format!("it would hide {}'s own window.", p.label)),
         })
     }
 
@@ -861,7 +874,7 @@ impl Workspace {
                 Some(Err(mpsc::TryRecvError::Disconnected)) => d.failed("the connection attempt ended".into()),
                 Some(Err(mpsc::TryRecvError::Empty)) => waiting = true,
                 None if !d.given_up && now >= d.next => {
-                    d.rx = Some(connect_in_background(target, ctx));
+                    d.rx = Some(connect_in_background(connect_target(target, d.again), ctx));
                     waiting = true;
                 }
                 None => waiting |= !d.given_up,
@@ -1015,6 +1028,11 @@ impl Workspace {
         let again = matches!(&p.state, State::Down(d) if d.again);
         let label = format!("{}  {}x{}  {}", p.label, sess.desk.0, sess.desk.1, sess.backend);
         let mut r = Remote::new(sess, rx, ctl, label, p.ssh_cmd.clone());
+        // This computer's own screen (not a test desktop or a web page): nothing typed or clicked
+        // in it is sent, as it would come back to this window.
+        if matches!(&p.target, Target::Local { capture } if !capture.starts_with("synthetic") && !capture.starts_with("browser:")) {
+            r.set_mirror();
+        }
         if let Some(t) = p.terms.take() {
             r.adopt_terms(t);
         }
@@ -1129,9 +1147,9 @@ impl Workspace {
     /// The window on the whole monitor, or back. A screen in a split tab takes the monitor alone,
     /// as Remote Desktop and RustDesk show one computer; that zoom goes again on the way out.
     fn set_full(&mut self, ctx: &egui::Context, on: bool) {
-        if on && super::held::full_hides() && self.shown_holds_program() {
-            // Shown with the program held: short, so it fits on the title bar.
-            self.toasts.push("Not full screen: Sway shows no program over a full screen window.");
+        if on && let Some(why) = self.full_hides_shown() {
+            // Short, so it fits on the title bar.
+            self.toasts.push(&format!("Not full screen: {why}"));
             return;
         }
         if !self.full.set(ctx, on) {
@@ -1235,6 +1253,13 @@ impl Workspace {
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
         if self.full.follow_system(&ctx) {
             self.left_full();
+        }
+        // A tab come to the front (or a program opened) in full screen that it would hide.
+        if self.full.on
+            && let Some(why) = self.full_hides_shown()
+        {
+            self.toasts.push(&format!("Out of full screen: {why}"));
+            self.set_full(&ctx, false);
         }
         // In a window, the title bar; in full screen the dock stands in for it, drawn over the panes.
         let mut bar_rect = None;
@@ -1460,9 +1485,10 @@ impl Workspace {
         Out { empty: self.tabs.is_empty(), grab }
     }
 
-    /// The active pane shows a remote screen, whose keys all go to its host.
+    /// The active pane shows a remote screen, whose keys all go to its host (not this computer's
+    /// own, whose keys stay this window's).
     fn screen_has_keys(&self) -> bool {
-        self.active_id().and_then(|id| self.index(id)).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen))
+        self.active_id().and_then(|id| self.index(id)).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen && !r.mirror()))
     }
 
     /// Windows Terminal's keys for tabs and panes. A pane sharing a screen keeps its keys for the

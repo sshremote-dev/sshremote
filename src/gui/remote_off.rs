@@ -67,6 +67,9 @@ impl Remote {
     pub(super) fn view_only(&self) -> bool {
         match self.never {}
     }
+    pub(super) fn mirror(&self) -> bool {
+        match self.never {}
+    }
     #[cfg(test)]
     pub(super) fn toast_texts(&self) -> Vec<&str> {
         match self.never {}

@@ -148,6 +148,23 @@ fn modifiers_go_with_clicks() {
     assert!(!h.r.mods.shift, "and let go with it");
 }
 
+/// This computer's own screen in its own window: a click or a key there would come back to this
+/// window, so neither is sent.
+#[test]
+#[ignore]
+fn this_computers_own_screen_sends_nothing() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    h.r.set_mirror();
+    h.frame(Vec::new()).unwrap();
+    let at = h.r.last_shown.expect("the picture").center();
+    let press = |pressed, modifiers| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers };
+    h.frame(vec![Event::PointerMoved(at)]).unwrap();
+    h.frame(vec![press(true, egui::Modifiers::SHIFT)]).unwrap();
+    assert!(!h.r.mods.shift && h.r.held.is_empty(), "nothing is down there");
+    h.frame(vec![press(false, egui::Modifiers::NONE)]).unwrap();
+    assert!(h.r.view_only(), "and it says it is only for looking");
+}
+
 /// Alt held alone reaches the host before the Tab the hook takes, and is let go there too.
 #[test]
 #[ignore]

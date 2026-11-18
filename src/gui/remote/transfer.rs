@@ -53,7 +53,7 @@ impl Remote {
     /// Files copied here pasted there: they go over into a folder of their own on the host, then
     /// onto its clipboard, and are pasted where its keyboard is.
     pub(in crate::gui) fn paste_files(&mut self, paths: Vec<std::path::PathBuf>) -> Result<(), String> {
-        if self.view_only || !self.share_clipboard {
+        if self.view_only || self.mirror || !self.share_clipboard {
             self.notify("Files are not pasted there while the clipboard is not shared or the view is only for looking");
             return Ok(());
         }

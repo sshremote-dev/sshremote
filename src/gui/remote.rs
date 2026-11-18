@@ -58,6 +58,9 @@ pub(super) struct Remote {
     pub(super) stale_picture: std::sync::Arc<std::sync::Mutex<Option<(usize, u64)>>>,
     /// Watching only: no key, click or wheel reaches the SSH host.
     view_only: bool,
+    /// This computer's own screen in its own window: what is typed or clicked here would come back
+    /// to this window, so none of it is sent (its windows are used directly).
+    mirror: bool,
     held: BTreeSet<u32>,
     mods: Modifiers,
     pointer: (u16, u16),
@@ -276,6 +279,7 @@ impl Remote {
             stale_picture: Default::default(),
             share_clipboard: true,
             view_only: false,
+            mirror: false,
             held: BTreeSet::new(),
             mods: Modifiers::NONE,
             pointer: (u16::MAX, u16::MAX),
@@ -342,13 +346,14 @@ impl Remote {
             // System keys go to the remote host while its screen is the active pane of the window
             // in front, as with RustDesk's focused window; the options menu turns this off.
             let shown = self.last_shown.is_some();
-            let want = self.grab_keys && !self.view_only && ctx.input(|i| i.focused) && shown;
+            let want = self.grab_keys && !self.view_only && !self.mirror && ctx.input(|i| i.focused) && shown;
             self.grab_wanted = want && self.active && self.mode() == super::workspace::PaneMode::Screen;
         }
         // Alt, Ctrl or Shift pressed alone make no key event: they reach the host as they change
         // (Alt+Tab is Alt from here, then Tab from the hook), and are let go there likewise.
         let mods = ctx.input(|i| i.modifiers);
         let here = !self.view_only
+            && !self.mirror
             && self.active
             && self.mode() == super::workspace::PaneMode::Screen
             && ctx.input(|i| i.focused)
@@ -522,7 +527,7 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = chat_rect.into_iter().collect();
-        if self.view_only || inline || !self.active {
+        if self.view_only || self.mirror || inline || !self.active {
             self.release_all()?;
         } else {
             self.input(&ctx, shown, &ui_rects)?;
@@ -919,7 +924,16 @@ impl Remote {
 
     /// Watching only: keys, clicks and the wheel do not reach the host.
     pub(super) fn view_only(&self) -> bool {
-        self.view_only
+        self.view_only || self.mirror
+    }
+
+    /// It shows this computer's own screen (`mirror`): its keys stay this window's.
+    pub(super) fn set_mirror(&mut self) {
+        self.mirror = true;
+    }
+
+    pub(super) fn mirror(&self) -> bool {
+        self.mirror
     }
 
     /// Where the picture was drawn last frame.
