@@ -355,7 +355,9 @@ mod catch {
         };
         let types = x.cards(win, x.a._NET_WM_WINDOW_TYPE, AtomEnum::ATOM);
         let transient = !x.cards(win, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW).is_empty();
-        if x.pid(win) == mine || transient || !(types.is_empty() || types.contains(&x.a._NET_WM_WINDOW_TYPE_NORMAL)) {
+        // A program's window names it (WM_CLASS) before it shows; one that does not is a part of the
+        // desktop made meanwhile.
+        if x.pid(win) == mine || transient || !(types.is_empty() || types.contains(&x.a._NET_WM_WINDOW_TYPE_NORMAL)) || x.class(win).is_empty() {
             return;
         }
         if owner != 0 {
@@ -373,6 +375,14 @@ mod catch {
 
 const LOOK: Duration = Duration::from_millis(300);
 const GIVE_UP: Duration = Duration::from_secs(20);
+/// How soon a caught window that goes is taken for another's.
+const MISTAKEN: Duration = Duration::from_secs(5);
+
+/// Whether process `pid` runs.
+fn running(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
 
 pub(in crate::gui) struct Held {
     key: Option<u64>,
@@ -399,6 +409,8 @@ pub(in crate::gui) struct Held {
 
 struct Win {
     id: u32,
+    /// The process that made it (0: not said).
+    pid: u32,
     new: bool,
     /// Where its visible part was, for one already open that is let go.
     was: Option<[i32; 4]>,
@@ -453,9 +465,16 @@ impl Held {
         self.ended
     }
 
+    /// Its window gone just after it was caught, unasked, while the process that made it runs on:
+    /// a window something else made meanwhile, so its program's own is looked for again.
+    fn mistaken(&self) -> bool {
+        self.asked.is_none() && self.win.as_ref().is_some_and(|w| w.new && w.since.elapsed() < MISTAKEN && w.pid != 0 && running(w.pid))
+    }
+
     fn hold(&mut self, id: u32, new: bool, hushed: bool) {
         let was = if new { None } else { with(|x| x.rects(id).map(|r| r.1)).flatten() };
-        self.win = Some(Win { id, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None, restored: None, full_asked: None, refused: false, loose: false, lift: None, sunk: None, last: (false, false), back: None });
+        let pid = with(|x| x.pid(id)).unwrap_or(0);
+        self.win = Some(Win { id, pid, new, was, owned: false, iconic: false, hushed, placed: None, stuck: None, since: Instant::now(), lowered: None, aimed: None, restored: None, full_asked: None, refused: false, loose: false, lift: None, sunk: None, last: (false, false), back: None });
         held(Some(id), None);
     }
 
@@ -468,7 +487,7 @@ impl Held {
         with(|x| {
             let mine = std::process::id();
             let list = x.clients();
-            let theirs = |w: u32| x.pid(w) != mine && x.viewable(w) && x.cards(w, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW).is_empty();
+            let theirs = |w: u32| x.pid(w) != mine && x.viewable(w) && x.cards(w, AtomEnum::WM_TRANSIENT_FOR.into(), AtomEnum::WINDOW).is_empty() && !x.class(w).is_empty();
             if let Some(w) = list.iter().find(|w| !self.before.contains(w) && theirs(**w)) {
                 return Some((*w, true));
             }
@@ -522,8 +541,8 @@ impl Held {
         let Some(w) = self.win.as_mut() else { return };
         if !with(|x| x.alive(w.id)).unwrap_or(false) {
             held(None, Some(w.id));
+            self.ended = !self.mistaken();
             self.win = None;
-            self.ended = true;
             return;
         }
         let (minimized, full) = ctx.input(|i| (i.viewport().minimized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
@@ -601,8 +620,8 @@ impl Held {
             self.checked = Instant::now();
             if !with(|x| x.alive(id)).unwrap_or(false) {
                 held(None, Some(id));
+                self.ended = !self.mistaken();
                 self.win = None;
-                self.ended = true;
                 return;
             }
         }
