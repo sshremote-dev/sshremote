@@ -75,9 +75,13 @@ pub fn pick() -> Result<Portal, String> {
 /// it start without the dialog where the desktop allows that; a desktop with no remote-desktop
 /// portal (wlroots ones) shares the screen alone.
 pub fn screen(restore: Option<&str>) -> Result<Portal, String> {
-    match start(1, restore, true, false) {
+    // The pointer apart where reading the stream that way was tried (KDE Plasma): a failure
+    // there would need the dialog again to go back.
+    let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")));
+    let apart = kde && super::pw::usable();
+    match start(1, restore, true, apart) {
         Err(e) if e.contains("RemoteDesktop") || e.contains("UnknownMethod") || e.contains("ServiceUnknown") || e.contains("not provided") => {
-            start(1, restore, false, false).map_err(|e2| format!("{e2} (and with input: {e})"))
+            start(1, restore, false, apart).map_err(|e2| format!("{e2} (and with input: {e})"))
         }
         r => r,
     }

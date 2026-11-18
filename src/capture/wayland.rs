@@ -10,9 +10,16 @@ use super::gnome::{Pipe, pipeline, to_image};
 use super::portal::Portal;
 use super::{Capture, Image, Input};
 
+/// What reads the portal's stream: this program, with the pointer beside the frames, where the
+/// desktop sends it so; GStreamer otherwise, the pointer in the frames.
+enum Feed {
+    Own(super::pw::Stream),
+    Gst(Pipe),
+}
+
 /// The portal's session and the stream it gives (the stream ends first).
 struct Live {
-    pipe: Pipe,
+    feed: Feed,
     portal: Portal,
 }
 
@@ -27,10 +34,13 @@ pub struct Wayland {
     target: (usize, usize),
     /// The picture made smaller for the viewer, by area averaging.
     shrink: super::Shrink,
-    /// The newest picture, and whether it is to be given again (the first look, a new size): a
-    /// desktop sends a frame only when its screen changes.
+    /// The newest picture, and whether it is to be given again (the first look, a new size, the
+    /// pointer drawn in or not): a desktop sends a frame only when its screen changes.
     last: Image,
     again: bool,
+    /// The viewer draws the pointer; the number of its picture last sent.
+    apart: bool,
+    sent_shape: u64,
 }
 
 // SAFETY: the pipeline and the portal's connection are used from the thread that holds them.
@@ -51,13 +61,34 @@ impl Wayland {
             let _ = f.parent().map(std::fs::create_dir_all);
             let _ = std::fs::write(f, t);
         }
-        let pipe = pipeline(&portal.source(), None)?;
-        let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the shared screen within 10 s")?;
-        let img = to_image(&first)?;
+        let own = portal.apart.then(|| super::pw::Stream::open(Some(portal.fd()), portal.node, std::time::Duration::from_secs(10)));
+        let (feed, img) = match own.map(|r| r.map(|s| (s.take().0, s))) {
+            Some(Ok((Some(f), s))) => (Feed::Own(s), Image { w: f.w, h: f.h, stride: f.w * 4, data: f.data }),
+            other => {
+                // Read by GStreamer instead: the picture without the pointer, rather than none.
+                if let Some(Err((_, true))) = other {
+                    super::pw::give_up();
+                }
+                let pipe = pipeline(&portal.source(), None)?;
+                let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the shared screen within 10 s")?;
+                (Feed::Gst(pipe), to_image(&first)?)
+            }
+        };
         // Keys through a virtual keyboard where the compositor offers one (it types any character;
         // COSMIC's portal may not pass keys on), the rest through the portal.
         let wl = super::wlinput::WlInput::open().ok().filter(|w| w.has_pointer() || portal.controls());
-        Ok(Wayland { controls: portal.controls(), live: Some(Live { pipe, portal }), wl, desk: (img.w, img.h), target: (img.w, img.h), shrink: super::Shrink::default(), last: img, again: true })
+        Ok(Wayland {
+            controls: portal.controls(),
+            live: Some(Live { feed, portal }),
+            wl,
+            desk: (img.w, img.h),
+            target: (img.w, img.h),
+            shrink: super::Shrink::default(),
+            last: img,
+            again: true,
+            apart: false,
+            sent_shape: 0,
+        })
     }
 
     /// Whether input reaches the desktop (it has the remote-desktop portal).
@@ -89,32 +120,79 @@ impl Capture for Wayland {
         if self.live.is_none()
             && let Ok(again) = Wayland::open()
         {
+            let apart = self.apart;
             *self = again;
+            self.apart = apart && self.pointer_apart(true);
         }
+    }
+
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        if !matches!(self.live.as_ref().map(|l| &l.feed), Some(Feed::Own(_))) {
+            return false;
+        }
+        (self.apart, self.sent_shape, self.again) = (on, 0, true);
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        let Some(Live { feed: Feed::Own(s), .. }) = &self.live else { return (None, None) };
+        let p = s.pointer();
+        let Some(shape) = p.shape.filter(|s| s.w > 0) else { return (None, None) };
+        let new = (p.serial != self.sent_shape).then(|| shape.to_pointer());
+        self.sent_shape = p.serial;
+        (new, p.at)
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
         let live = self.live.as_ref().ok_or("the screen sharing did not come back after its resolution changed")?;
-        match live.pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
-            Some(sample) => {
-                self.last = to_image(&sample)?;
-                // The screen turned or its resolution changed: the viewer hears the new size.
-                self.desk = (self.last.w, self.last.h);
-            }
-            None if std::mem::take(&mut self.again) => {}
-            None => {
-                if !live.portal.alive() {
-                    return Err("the screen sharing was stopped on that computer".into());
+        let fresh = match &live.feed {
+            Feed::Gst(pipe) => match pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
+                Some(sample) => {
+                    self.last = to_image(&sample)?;
+                    true
                 }
-                return Ok(None);
+                None => false,
+            },
+            Feed::Own(s) => {
+                if let Some(why) = s.stopped() {
+                    return Err(format!("the screen sharing stopped on that computer ({why})"));
+                }
+                let (frame, moved) = s.take();
+                // The pointer moved on a still screen: drawn in again where the viewer does not draw it.
+                self.again |= moved && !self.apart;
+                match frame {
+                    Some(f) => {
+                        let old = std::mem::replace(&mut self.last, Image { w: f.w, h: f.h, stride: f.w * 4, data: f.data });
+                        s.recycle(old.data);
+                        true
+                    }
+                    None => false,
+                }
             }
+        };
+        if fresh {
+            // The screen turned or its resolution changed: the viewer hears the new size.
+            self.desk = (self.last.w, self.last.h);
+        } else if !std::mem::take(&mut self.again) {
+            if !live.portal.alive() {
+                return Err("the screen sharing was stopped on that computer".into());
+            }
+            return Ok(None);
         }
         self.again = false;
         let img = &self.last;
-        if self.target == (img.w, img.h) {
-            return Ok(Some(Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() }));
+        let mut out = Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() };
+        if !self.apart
+            && let Some(Live { feed: Feed::Own(s), .. }) = &self.live
+            && let p = s.pointer()
+            && let (Some(at), Some(shape)) = (p.at, &p.shape)
+        {
+            super::pw::draw(&mut out.data, out.w, out.h, out.stride, shape, at);
         }
-        Ok(Some(self.shrink.image(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
+        if self.target == (out.w, out.h) {
+            return Ok(Some(out));
+        }
+        Ok(Some(self.shrink.image(&out.data, out.w, out.h, out.stride, self.target.0, self.target.1)))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
@@ -127,5 +205,56 @@ impl Capture for Wayland {
             Some(live) if live.portal.controls() => live.portal.input(ev, self.desk),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A portal's pointer kept apart (KDE Plasma sends it as metadata): its picture comes once
+    /// with where it is, pictures leave it out, and put back it is drawn in again. In the desktop's
+    /// session: SSHREMOTE_PORTAL_TEST=1 TESTS --ignored the_portal_pointer_comes_apart
+    #[test]
+    #[ignore]
+    fn the_portal_pointer_comes_apart() {
+        if std::env::var_os("SSHREMOTE_PORTAL_TEST").is_none() {
+            return;
+        }
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let next = |w: &mut Wayland| (0..150).find_map(|_| w.grab().unwrap().or_else(|| (pause(), None).1));
+        let around = |img: &Image, (x, y): (usize, usize)| -> Vec<u8> {
+            (y..y + 24).flat_map(|r| img.data[r * img.stride + x * 4..][..24 * 4].to_vec()).collect()
+        };
+        let mut w = Wayland::open().expect("a portal");
+        assert!(w.pointer_apart(true), "the portal sends the pointer apart");
+        let (mut shape, mut at) = (None, None);
+        for (x, y) in [(250.0, 150.0), (300.0, 200.0)] {
+            w.input(Input::Move { x, y }).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        for _ in 0..150 {
+            let _ = w.grab().unwrap();
+            let (s, a) = w.pointer();
+            shape = shape.or(s);
+            at = a;
+            if shape.is_some() && at == Some((300, 200)) {
+                break;
+            }
+            pause();
+        }
+        let shape = shape.expect("the pointer's picture");
+        assert!(shape.w > 0 && shape.rgba.len() == shape.w * shape.h * 4, "{}x{}", shape.w, shape.h);
+        assert_eq!(at, Some((300, 200)));
+        assert!(w.pointer().0.is_none(), "the same picture is not sent again");
+        w.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
+        assert!((0..150).any(|_| w.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
+        w.again = true;
+        let still = next(&mut w).expect("a picture");
+        let bare = around(&still, (490, 390));
+        assert!(w.pointer_apart(false));
+        let with = next(&mut w).expect("a picture with the pointer");
+        assert_ne!(around(&with, (490, 390)), bare, "the pointer drawn in");
+        assert_eq!(around(&with, (100, 600)), around(&still, (100, 600)), "and nothing else changed");
     }
 }
