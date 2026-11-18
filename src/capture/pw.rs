@@ -46,6 +46,7 @@ const META_CURSOR: u32 = 5;
 const DATA_MEM_PTR: u32 = 1;
 const DATA_MEM_FD: u32 = 2;
 const CHUNK_CORRUPTED: i32 = 1;
+const DATA_READABLE: u32 = 1;
 const DIRECTION_INPUT: u32 = 0;
 const FLAG_AUTOCONNECT: u32 = 1;
 const FLAG_MAP_BUFFERS: u32 = 1 << 2;
@@ -513,7 +514,7 @@ unsafe fn has_picture(sb: &SpaBuffer) -> bool {
         return false;
     }
     let d = unsafe { &*sb.datas };
-    !d.data.is_null() && !d.chunk.is_null() && {
+    (!d.data.is_null() || (d.kind == DATA_MEM_FD && d.fd >= 0)) && !d.chunk.is_null() && {
         let c = unsafe { &*d.chunk };
         c.size > 0 && c.flags & CHUNK_CORRUPTED == 0
     }
@@ -534,12 +535,33 @@ unsafe fn copy_frame(inner: &Inner, sb: &SpaBuffer) {
     if w == 0 || h == 0 || stride < w * 4 || offset + stride * (h - 1) + w * 4 > d.maxsize as usize {
         return;
     }
-    let src = unsafe { std::slice::from_raw_parts(d.data.add(offset), stride * (h - 1) + w * 4) };
+    // A buffer its maker did not mark readable (xdg-desktop-portal-wlr's) is mapped by PipeWire
+    // without the right to read it: mapped here for reading, for this copy.
+    let mut own = None;
+    let base = if d.flags & DATA_READABLE == 0 && d.kind == DATA_MEM_FD && d.fd >= 0 {
+        let len = d.mapoffset as usize + d.maxsize as usize;
+        // SAFETY: a shared read-only mapping of the buffer's file, unmapped below.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, d.fd as c_int, 0) };
+        if p == libc::MAP_FAILED {
+            return;
+        }
+        own = Some((p, len));
+        unsafe { (p as *const u8).add(d.mapoffset as usize) }
+    } else if d.data.is_null() {
+        return;
+    } else {
+        d.data as *const u8
+    };
+    let src = unsafe { std::slice::from_raw_parts(base.add(offset), stride * (h - 1) + w * 4) };
     let mut out = spare.unwrap_or_default();
     out.clear();
     out.reserve(w * h * 4);
     for y in 0..h {
         out.extend_from_slice(&src[y * stride..y * stride + w * 4]);
+    }
+    if let Some((p, len)) = own {
+        // SAFETY: the mapping made above, no longer read.
+        unsafe { libc::munmap(p, len) };
     }
     if matches!(format, RGBX | RGBA) {
         for px in out.as_chunks_mut::<4>().0 {

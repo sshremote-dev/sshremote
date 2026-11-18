@@ -61,7 +61,12 @@ impl Wayland {
             let _ = f.parent().map(std::fs::create_dir_all);
             let _ = std::fs::write(f, t);
         }
-        let own = portal.apart.then(|| super::pw::Stream::open(Some(portal.fd()), portal.node, std::time::Duration::from_secs(10)));
+        // Read here, buffers given back at once: GStreamer's reader keeps the few that
+        // wlroots' portals (Sway, Hyprland) have, and their screen copying then stops after the
+        // first picture. COSMIC's is left to GStreamer until tried.
+        let cosmic = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("COSMIC")));
+        let own = (portal.apart || (super::pw::usable() && !cosmic))
+            .then(|| super::pw::Stream::open(Some(portal.fd()), portal.node, std::time::Duration::from_secs(10)));
         let (feed, img) = match own.map(|r| r.map(|s| (s.take().0, s))) {
             Some(Ok((Some(f), s))) => (Feed::Own(s), Image { w: f.w, h: f.h, stride: f.w * 4, data: f.data }),
             other => {
@@ -127,7 +132,8 @@ impl Capture for Wayland {
     }
 
     fn pointer_apart(&mut self, on: bool) -> bool {
-        if !matches!(self.live.as_ref().map(|l| &l.feed), Some(Feed::Own(_))) {
+        // The pointer comes beside the frames only where it was asked for that way.
+        if !self.live.as_ref().is_some_and(|l| l.portal.apart && matches!(l.feed, Feed::Own(_))) {
             return false;
         }
         (self.apart, self.sent_shape, self.again) = (on, 0, true);
@@ -211,6 +217,34 @@ impl Capture for Wayland {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen keeps coming after its first picture: keys typed into the focused terminal
+    /// show in later ones (wlroots' portals stopped copying the screen once GStreamer held their
+    /// few buffers). In the desktop's session: SSHREMOTE_PORTAL_TEST=1 TESTS --ignored
+    /// the_portal_screen_keeps_coming
+    #[test]
+    #[ignore]
+    fn the_portal_screen_keeps_coming() {
+        if std::env::var_os("SSHREMOTE_PORTAL_TEST").is_none() {
+            return;
+        }
+        let mut w = Wayland::open().expect("a portal");
+        let first = (0..150).find_map(|_| w.grab().unwrap().or_else(|| (std::thread::sleep(std::time::Duration::from_millis(20)), None).1)).expect("a picture");
+        for c in "echo still-coming".chars() {
+            w.input(Input::Key { keysym: crate::xk::of_char(c), mods: 0 }).unwrap();
+        }
+        let mut later = 0;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < until {
+            if let Some(img) = w.grab().unwrap()
+                && img.data != first.data
+            {
+                later += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(later > 0, "pictures after the first");
+    }
 
     /// A portal's pointer kept apart (KDE Plasma sends it as metadata): its picture comes once
     /// with where it is, pictures leave it out, and put back it is drawn in again. In the desktop's
