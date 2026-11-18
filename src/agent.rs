@@ -1129,8 +1129,11 @@ fn serve_with(
             continue;
         }
         let plane = prev.as_ref().unwrap();
-        let (palette, data) = if plane.mode == Mode::True && s.formats & crate::proto::FORMAT_PALETTE != 0 {
-            let (fresh, changed, data) = colours.pack(plane, &rects, whole);
+        let palette = plane.mode == Mode::True && s.formats & crate::proto::FORMAT_PALETTE != 0;
+        let wide = s.formats & crate::proto::FORMAT_WIDE != 0;
+        let rects = crate::color::join_rows(plane, &rects, palette, wide);
+        let (palette, data) = if palette {
+            let (fresh, changed, data) = colours.pack(plane, &rects, whole, wide);
             (Some((fresh, changed)), data)
         } else {
             (None, rects.iter().map(|r| pack(plane, r.x, r.y, r.w, r.h)).collect())

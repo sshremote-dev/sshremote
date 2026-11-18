@@ -30,8 +30,10 @@ pub const FORMAT_POINTER: u8 = 2;
 /// Moves that shift sideways too (`scroll::Move::dx`): text moving along its line as a
 /// character is typed into it.
 pub const FORMAT_SIDEWAYS: u8 = 4;
+/// A palette of more than 256 colours (`color::WIDE`), for text smoothed in many shades.
+pub const FORMAT_WIDE: u8 = 8;
 /// Every form this program reads.
-pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS;
+pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE;
 
 pub struct Preset {
     pub name: &'static str,
@@ -322,7 +324,7 @@ pub struct Frame {
     pub moves: Vec<Move>,
     /// With a palette (whether the viewer forgets its own first, and the slots that changed),
     /// every tile's data starts with its form (`color::Palette`).
-    pub palette: Option<(bool, Vec<(u8, [u8; 3])>)>,
+    pub palette: Option<(bool, Vec<(u16, [u8; 3])>)>,
     pub tiles: Vec<Tile>,
     /// One H.264 access unit for the video region, which no tile covers.
     pub video: Option<Tile>,
@@ -942,7 +944,9 @@ impl ToClient {
                 b.extend_from_slice(&f.h.to_le_bytes());
                 // Moves carry their sideways shift only when one has any (FORMAT_SIDEWAYS).
                 let sideways = f.moves.iter().any(|m| m.dx != 0);
-                b.push(f.mode.to_u8() | if f.palette.is_some() { 0x80 } else { 0 } | if sideways { 0x40 } else { 0 });
+                // Slots past 255 go in two bytes (FORMAT_WIDE).
+                let wide = f.palette.as_ref().is_some_and(|(_, c)| c.iter().any(|(n, _)| *n > 255));
+                b.push(f.mode.to_u8() | if f.palette.is_some() { 0x80 } else { 0 } | if sideways { 0x40 } else { 0 } | if wide { 0x20 } else { 0 });
                 b.extend_from_slice(&(f.moves.len() as u16).to_le_bytes());
                 for m in &f.moves {
                     for v in [m.x as u16, m.y as u16, m.w as u16, m.h as u16, m.dy as i16 as u16] {
@@ -955,7 +959,11 @@ impl ToClient {
                 if let Some((fresh, changed)) = &f.palette {
                     b.extend_from_slice(&(changed.len() as u16 | if *fresh { 0x8000 } else { 0 }).to_le_bytes());
                     for (n, c) in changed {
-                        b.push(*n);
+                        if wide {
+                            b.extend_from_slice(&n.to_le_bytes());
+                        } else {
+                            b.push(*n as u8);
+                        }
                         b.extend_from_slice(c);
                     }
                 }
@@ -1224,7 +1232,7 @@ impl ToClient {
             }
             102 => {
                 let (id, w, h, form) = (c.u32()?, c.u16()?, c.u16()?, c.u8()?);
-                let mode = Mode::from_u8(form & 0x3f).ok_or_else(bad)?;
+                let mode = Mode::from_u8(form & 0x1f).ok_or_else(bad)?;
                 // The viewer keeps a picture this big: one no screen sends is refused, not allocated.
                 if w as usize > MAX_SIDE || h as usize > MAX_SIDE || w as usize * h as usize > MAX_PIXELS {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a {w}x{h} picture is too big")));
@@ -1246,10 +1254,15 @@ impl ToClient {
                 let palette = if form & 0x80 != 0 {
                     let n = c.u16()?;
                     let (fresh, n) = (n & 0x8000 != 0, (n & 0x7fff) as usize);
-                    if n > 256 {
+                    if n > crate::color::WIDE {
                         return Err(bad());
                     }
-                    Some((fresh, c.take(n * 4)?.chunks_exact(4).map(|p| (p[0], [p[1], p[2], p[3]])).collect()))
+                    let changed = if form & 0x20 != 0 {
+                        c.take(n * 5)?.as_chunks::<5>().0.iter().map(|p| (u16::from_le_bytes([p[0], p[1]]), [p[2], p[3], p[4]])).collect()
+                    } else {
+                        c.take(n * 4)?.as_chunks::<4>().0.iter().map(|p| (p[0] as u16, [p[1], p[2], p[3]])).collect()
+                    };
+                    Some((fresh, changed))
                 } else {
                     None
                 };
@@ -1610,6 +1623,10 @@ mod tests {
         });
         let (k, p) = f.encode();
         assert_eq!(ToClient::decode(k, &p).unwrap(), f);
+        // Slots past 255 in two bytes.
+        let wide = ToClient::Frame(Frame { id: 12, w: 8, h: 8, mode: Mode::True, moves: vec![], palette: Some((false, vec![(3, [1, 2, 3]), (4000, [9, 8, 7])])), tiles: vec![], video: None });
+        let (k, p) = wide.encode();
+        assert_eq!(ToClient::decode(k, &p).unwrap(), wide);
         // An older viewer's settings, without the forms it reads.
         let (k, mut p) = ToAgent::Settings(Settings { view_w: 9, view_h: 9, scale: 100, mode: Mode::True, fps: 5, formats: 0 }).encode();
         p.pop();

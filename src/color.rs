@@ -237,19 +237,23 @@ pub fn pack(p: &Plane, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
 
 /// The colours a session's true colour frames index, kept by agent and viewer alike for the
 /// whole session, so the same text has the same bytes from frame to frame (which the stream's
-/// compression finds again). Each frame says which of its 256 slots changed; a slot not used in
-/// the frame being made is taken over when a new colour needs room.
+/// compression finds again). Each frame says which of its slots changed; a slot not used in the
+/// frame being made is taken over when a new colour needs room. 256 slots, or `WIDE` for a viewer
+/// that reads them (`proto::FORMAT_WIDE`): text smoothed in grey shades, or in colour fringes,
+/// often has more than 256 colours on a screen.
 pub struct Palette {
     keys: Vec<u32>,
-    slot: Vec<u8>,
+    slot: Vec<u16>,
     colours: Vec<u32>,
     used: Vec<u32>,
     frame: u32,
 }
 
 const EMPTY: u32 = u32::MAX;
-/// Hash slots for the 256 colours: sparse enough for short probes.
-const SLOTS: usize = 1024;
+/// The most slots a palette has.
+pub const WIDE: usize = 4096;
+/// Hash places for the colours: sparse enough for short probes.
+const SLOTS: usize = 8192;
 
 fn key(px: &[u8]) -> u32 {
     (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
@@ -259,66 +263,106 @@ fn rgb(k: u32) -> [u8; 3] {
     [(k >> 16) as u8, (k >> 8) as u8, k as u8]
 }
 
+/// How many colours a rectangle of `area` pixels may have and still go as slots of the palette:
+/// text and drawings have few for their size (a band of smoothed text one in 150 pixels or so),
+/// photographs (better predicted) many.
+fn few(area: usize, wide: bool) -> usize {
+    if wide { (area / 64).clamp(256, WIDE) } else { 256 }
+}
+
 impl Default for Palette {
     fn default() -> Palette {
-        Palette { keys: vec![EMPTY; SLOTS], slot: vec![0; SLOTS], colours: Vec::with_capacity(256), used: vec![0; 256], frame: 0 }
+        Palette { keys: vec![EMPTY; SLOTS], slot: vec![0; SLOTS], colours: Vec::with_capacity(256), used: vec![0; WIDE], frame: 0 }
     }
 }
 
 impl Palette {
+    fn home(key: u32) -> usize {
+        (key.wrapping_mul(2_654_435_761) >> 19) as usize
+    }
+
     fn at(keys: &[u32], key: u32) -> usize {
-        let mut i = (key.wrapping_mul(2_654_435_761) >> 22) as usize;
+        let mut i = Palette::home(key);
         while keys[i] != EMPTY && keys[i] != key {
             i = (i + 1) & (SLOTS - 1);
         }
         i
     }
 
-    fn get(&self, key: u32) -> Option<u8> {
+    fn get(&self, key: u32) -> Option<u16> {
         let i = Palette::at(&self.keys, key);
         (self.keys[i] == key).then(|| self.slot[i])
     }
 
-    fn rehash(&mut self) {
-        self.keys.fill(EMPTY);
-        for (n, &k) in self.colours.iter().enumerate() {
-            let i = Palette::at(&self.keys, k);
-            self.keys[i] = k;
-            self.slot[i] = n as u8;
+    /// Takes `key` out of the table, moving back the ones probed past it.
+    fn remove(&mut self, key: u32) {
+        let mut i = Palette::at(&self.keys, key);
+        if self.keys[i] != key {
+            return;
+        }
+        self.keys[i] = EMPTY;
+        let mut j = i;
+        loop {
+            j = (j + 1) & (SLOTS - 1);
+            if self.keys[j] == EMPTY {
+                return;
+            }
+            let h = Palette::home(self.keys[j]);
+            // It stays where its probe would still reach it.
+            let reached = if i <= j { i < h && h <= j } else { i < h || h <= j };
+            if !reached {
+                (self.keys[i], self.slot[i]) = (self.keys[j], self.slot[j]);
+                self.keys[j] = EMPTY;
+                i = j;
+            }
         }
     }
 
     /// The slot for `key` in this frame, taking a free one or one this frame does not use;
-    /// None when all 256 are in use here.
-    fn take(&mut self, key: u32, changed: &mut Vec<(u8, [u8; 3])>) -> Option<u8> {
+    /// None when all `cap` are in use here.
+    fn take(&mut self, key: u32, cap: usize, changed: &mut Vec<(u16, [u8; 3])>) -> Option<u16> {
         if let Some(n) = self.get(key) {
             self.used[n as usize] = self.frame;
             return Some(n);
         }
-        let n = if self.colours.len() < 256 {
-            let i = Palette::at(&self.keys, key);
-            (self.keys[i], self.slot[i]) = (key, self.colours.len() as u8);
+        // Slots that take one byte (below 255 in a wide palette) go first, taken over from
+        // colours this frame does not use; the others only when this frame needs more.
+        let low = if cap > 256 { 255 } else { 256 };
+        let stale = |used: &[u32], frame: u32| used.iter().enumerate().filter(|(_, u)| **u != frame).min_by_key(|(_, u)| **u).map(|(n, _)| n);
+        let n = if self.colours.len() < low {
+            self.colours.push(key);
+            self.colours.len() - 1
+        } else if let Some(n) = stale(&self.used[..low], self.frame) {
+            self.remove(self.colours[n]);
+            self.colours[n] = key;
+            n
+        } else if self.colours.len() < cap {
             self.colours.push(key);
             self.colours.len() - 1
         } else {
-            let (n, _) = self.used.iter().enumerate().filter(|(_, u)| **u != self.frame).min_by_key(|(_, u)| **u)?;
+            let n = stale(&self.used[..cap], self.frame)?;
+            self.remove(self.colours[n]);
             self.colours[n] = key;
-            // A colour leaves the table: probes past its place would stop short, so all go in anew.
-            self.rehash();
             n
         };
+        let i = Palette::at(&self.keys, key);
+        (self.keys[i], self.slot[i]) = (key, n as u16);
         self.used[n] = self.frame;
         changed.retain(|(s, _)| *s as usize != n);
-        changed.push((n as u8, rgb(key)));
-        Some(n as u8)
+        changed.push((n as u16, rgb(key)));
+        Some(n as u16)
     }
 
     /// Packs true colour rectangles: each one's data starts with its form, 1 for slots of the
-    /// palette (when its colours fit) and 0 for `pack`'s lossless prediction (photographs).
-    /// Returns whether the viewer must forget its palette first (`fresh`, as for a whole new
-    /// picture), the slots that changed, and the data.
-    pub fn pack(&mut self, p: &Plane, rects: &[Rect], fresh: bool) -> (bool, Vec<(u8, [u8; 3])>, Vec<Vec<u8>>) {
+    /// palette (one byte each), 2 for slots of a wide palette (one byte below 255; else 255 and
+    /// two bytes), 0 for `pack`'s lossless prediction (photographs). Returns whether the viewer
+    /// must forget its palette first (`fresh`, as for a whole new picture), the slots that
+    /// changed, and the data.
+    pub fn pack(&mut self, p: &Plane, rects: &[Rect], fresh: bool, wide: bool) -> (bool, Vec<(u16, [u8; 3])>, Vec<Vec<u8>>) {
         debug_assert_eq!(p.mode, Mode::True);
+        let cap = if wide { WIDE } else { 256 };
+        // Back to 256 slots (another viewer's settings): the palette starts over.
+        let fresh = fresh || self.colours.len() > cap;
         if fresh {
             *self = Palette::default();
         }
@@ -328,36 +372,43 @@ impl Palette {
         let data = rects
             .iter()
             .map(|r| {
-                // A rectangle of more than 256 colours keeps the prediction, without touching the palette.
+                // A rectangle of too many colours keeps the prediction, without touching the palette.
                 seen.clear();
+                seen.limit = few(r.w * r.h, wide);
                 let mut last = EMPTY;
-                let few = (r.y..r.y + r.h).all(|row| {
+                let fits = (r.y..r.y + r.h).all(|row| {
                     let s = (row * p.w + r.x) * 3;
-                    p.data[s..s + r.w * 3].chunks_exact(3).all(|px| {
+                    p.data[s..s + r.w * 3].as_chunks::<3>().0.iter().all(|px| {
                         let k = key(px);
                         let fits = k == last || seen.add(k);
                         last = k;
                         fits
                     })
                 });
-                if !few || !seen.list.iter().all(|&k| self.take(k, &mut changed).is_some()) {
+                if !fits || !seen.list.iter().all(|&k| self.take(k, cap, &mut changed).is_some()) {
                     let mut d = vec![0];
                     d.extend(pack(p, r.x, r.y, r.w, r.h));
                     return d;
                 }
+                let high = seen.list.iter().any(|&k| self.get(k).is_some_and(|n| n > 255));
                 let mut d = Vec::with_capacity(1 + r.w * r.h);
-                d.push(1);
+                d.push(if high { 2 } else { 1 });
                 let (mut last, mut n) = (EMPTY, 0);
                 for row in r.y..r.y + r.h {
                     let s = (row * p.w + r.x) * 3;
-                    d.extend(p.data[s..s + r.w * 3].chunks_exact(3).map(|px| {
+                    for px in p.data[s..s + r.w * 3].as_chunks::<3>().0 {
                         let k = key(px);
                         if k != last {
                             last = k;
                             n = self.get(k).unwrap_or(0);
                         }
-                        n
-                    }));
+                        if !high || n < 255 {
+                            d.push(n as u8);
+                        } else {
+                            d.push(255);
+                            d.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
                 }
                 d
             })
@@ -366,39 +417,85 @@ impl Palette {
     }
 }
 
-/// The distinct colours of one rectangle, up to 256.
+/// The distinct colours of one rectangle, up to `limit`.
 struct Seen {
     keys: Vec<u32>,
     list: Vec<u32>,
+    limit: usize,
 }
 
 impl Default for Seen {
     fn default() -> Seen {
-        Seen { keys: vec![EMPTY; SLOTS], list: Vec::with_capacity(256) }
+        Seen { keys: vec![EMPTY; SLOTS], list: Vec::with_capacity(256), limit: 256 }
     }
 }
 
 impl Seen {
     fn clear(&mut self) {
-        if !self.list.is_empty() {
-            self.keys.fill(EMPTY);
-            self.list.clear();
+        // Only the places in use, found before any is emptied.
+        let places: Vec<usize> = self.list.iter().map(|&k| Palette::at(&self.keys, k)).collect();
+        for i in places {
+            self.keys[i] = EMPTY;
         }
+        self.list.clear();
     }
 
-    /// Notes `k`; false when it would be the 257th colour.
+    /// Notes `k`; false when it would be one colour over the limit.
     fn add(&mut self, k: u32) -> bool {
         let i = Palette::at(&self.keys, k);
         if self.keys[i] == k {
             return true;
         }
-        if self.list.len() == 256 {
+        if self.list.len() >= self.limit {
             return false;
         }
         self.keys[i] = k;
         self.list.push(k);
         true
     }
+}
+
+/// Changed areas side by side in one band of tile rows, joined into one rectangle each run, so
+/// that rows of text lie whole in a rectangle's data, where the stream's compression finds the
+/// words again (cut into tiles, every row of a glyph is cut short). A run ends at a gap wider than
+/// a tile, and in true colour with a palette where it would hold too many colours to use it.
+pub fn join_rows(p: &Plane, rects: &[Rect], palette: bool, wide: bool) -> Vec<Rect> {
+    let mut sorted = rects.to_vec();
+    sorted.sort_by_key(|r| (r.y / TILE, r.x));
+    let mut seen = Seen::default();
+    // Adds the colours of an area to `seen`; false past 256.
+    let colours = |seen: &mut Seen, x: usize, y: usize, w: usize, h: usize| {
+        (y..y + h).all(|row| p.data[(row * p.w + x) * 3..(row * p.w + x + w) * 3].as_chunks::<3>().0.iter().all(|px| seen.add(key(px))))
+    };
+    let mut out: Vec<Rect> = Vec::with_capacity(sorted.len());
+    for r in sorted {
+        if let Some(last) = out.last_mut()
+            && last.y / TILE == r.y / TILE
+            && r.x >= last.x + last.w
+            && r.x <= last.x + last.w + TILE
+        {
+            let (top, bottom) = (last.y.min(r.y), (last.y + last.h).max(r.y + r.h));
+            let joined = Rect { x: last.x, y: top, w: r.x + r.w - last.x, h: bottom - top };
+            seen.limit = few(joined.w * joined.h, wide);
+            // In true colour, the colours the joined rectangle adds: the new part, and the rows
+            // it grew by over the run so far.
+            let fits = !palette
+                || (colours(&mut seen, last.x + last.w, top, joined.x + joined.w - last.x - last.w, joined.h)
+                    && colours(&mut seen, last.x, top, last.w, last.y - top)
+                    && colours(&mut seen, last.x, last.y + last.h, last.w, bottom - last.y - last.h));
+            if fits {
+                *last = joined;
+                continue;
+            }
+        }
+        if palette {
+            seen.clear();
+            seen.limit = few(r.w * r.h, wide);
+            colours(&mut seen, r.x, r.y, r.w, r.h);
+        }
+        out.push(r);
+    }
+    out
 }
 
 /// Whether `r` of the captured picture looks like a photograph or a film rather than text and
@@ -439,17 +536,19 @@ pub struct Colours {
 
 impl Default for Colours {
     fn default() -> Colours {
-        Colours { rgb: vec![None; 256] }
+        Colours { rgb: vec![None; WIDE] }
     }
 }
 
 impl Colours {
-    pub fn update(&mut self, fresh: bool, changed: &[(u8, [u8; 3])]) {
+    pub fn update(&mut self, fresh: bool, changed: &[(u16, [u8; 3])]) {
         if fresh {
             self.rgb.fill(None);
         }
         for &(n, c) in changed {
-            self.rgb[n as usize] = Some(c);
+            if let Some(slot) = self.rgb.get_mut(n as usize) {
+                *slot = Some(c);
+            }
         }
     }
 
@@ -463,6 +562,20 @@ impl Colours {
                 let mut out = Vec::with_capacity(w * h * 3);
                 for &i in rest.get(..w * h)? {
                     out.extend_from_slice(self.rgb[i as usize].as_ref()?);
+                }
+                Some(out)
+            }
+            (2, rest) => {
+                let mut out = Vec::with_capacity(w * h * 3);
+                let mut at = 0;
+                for _ in 0..w * h {
+                    let mut n = *rest.get(at)? as usize;
+                    at += 1;
+                    if n == 255 {
+                        n = u16::from_le_bytes([*rest.get(at)?, *rest.get(at + 1)?]) as usize;
+                        at += 2;
+                    }
+                    out.extend_from_slice(self.rgb.get(n)?.as_ref()?);
                 }
                 Some(out)
             }
@@ -599,6 +712,20 @@ mod tests {
     }
 
     #[test]
+    fn changes_side_by_side_join_along_their_band() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        let gray = plane(Mode::Gray16, 256, 96, |_| 0);
+        // Two tiles touching, one a tile away, one further, one in the next band.
+        let rects = [r(0, 5, 32, 10), r(32, 2, 32, 20), r(96, 6, 10, 10), r(170, 6, 10, 10), r(0, 40, 32, 8)];
+        assert_eq!(join_rows(&gray, &rects, false, false), vec![r(0, 2, 106, 20), r(170, 6, 10, 10), r(0, 40, 32, 8)]);
+        // In true colour with a palette, a run stops where it would hold more than 256 colours.
+        let busy = plane(Mode::True, 256, 32, |i| if (i / 3) % 256 >= 64 { (i.wrapping_mul(2_654_435_761) >> 13) as u8 } else { 200 });
+        let joined = join_rows(&busy, &[r(0, 0, 32, 32), r(32, 0, 32, 32), r(64, 0, 32, 32), r(96, 0, 32, 32)], true, false);
+        assert_eq!(joined[0], r(0, 0, 64, 32), "the plain part joins: {joined:?}");
+        assert!(joined.len() > 1, "the busy part stays apart");
+    }
+
+    #[test]
     fn pack_roundtrip_all_modes() {
         for mode in Mode::ALL {
             let max = if mode == Mode::True { 255 } else { (mode.palette().len() - 1) as u8 };
@@ -630,7 +757,7 @@ mod tests {
         };
         let rects = [Rect { x: 0, y: 0, w: 32, h: 32 }, Rect { x: 32, y: 8, w: 32, h: 32 }, Rect { x: 64, y: 0, w: 32, h: 32 }];
         let (mut agent, mut viewer) = (Palette::default(), Colours::default());
-        let (fresh, changed, data) = agent.pack(&p, &rects, true);
+        let (fresh, changed, data) = agent.pack(&p, &rects, true, false);
         assert!(fresh);
         assert_eq!(changed.len(), 4);
         assert_eq!([data[0][0], data[1][0], data[2][0]], [1, 1, 0]);
@@ -643,7 +770,7 @@ mod tests {
             }
         }
         // The same text again: the same bytes, and no colour to send.
-        let (fresh, changed, again) = agent.pack(&p, &rects[..1], false);
+        let (fresh, changed, again) = agent.pack(&p, &rects[..1], false, false);
         assert!(!fresh && changed.is_empty());
         assert_eq!(again[0], data[0]);
         // A viewer that lost the palette cannot read it, rather than showing wrong colours.
@@ -660,9 +787,55 @@ mod tests {
         // 300 one-colour rectangles in turn, one frame each: the palette keeps the last 256.
         for c in 0..300u32 {
             let p = Plane { w: 4, h: 4, mode: Mode::True, data: [(c >> 8) as u8, c as u8, 7].repeat(16) };
-            let (fresh, changed, data) = agent.pack(&p, &[Rect { x: 0, y: 0, w: 4, h: 4 }], c == 0);
+            let (fresh, changed, data) = agent.pack(&p, &[Rect { x: 0, y: 0, w: 4, h: 4 }], c == 0, false);
             viewer.update(fresh, &changed);
             assert_eq!(viewer.unpack(&data[0], 4, 4).unwrap(), p.data);
+        }
+    }
+
+    #[test]
+    fn text_in_many_shades_takes_a_wide_palette() {
+        // Text smoothed in 600 grey-blue shades on white: few colours for its size.
+        let (w, h) = (1024, 64);
+        let p = Plane {
+            w,
+            h,
+            mode: Mode::True,
+            data: (0..w * h)
+                .flat_map(|i| if i % 7 < 4 { [255, 255, 255] } else { let s = (i * 37 % 600) as u16; [(s / 3) as u8, (s / 3) as u8, (s % 3 * 60) as u8] })
+                .collect(),
+        };
+        let rects = [Rect { x: 0, y: 0, w, h }];
+        // A viewer of 256 slots gets it predicted; one that reads more, as slots.
+        let (_, _, narrow) = Palette::default().pack(&p, &rects, true, false);
+        assert_eq!(narrow[0][0], 0);
+        let (mut agent, mut viewer) = (Palette::default(), Colours::default());
+        let (fresh, changed, data) = agent.pack(&p, &rects, true, true);
+        assert_eq!(data[0][0], 2);
+        assert!(changed.iter().any(|(n, _)| *n > 255) && changed.len() <= WIDE);
+        viewer.update(fresh, &changed);
+        assert_eq!(viewer.unpack(&data[0], w, h).unwrap(), p.data);
+        assert!(data[0].len() < w * h * 3 / 2, "{} bytes", data[0].len());
+        // A photograph's band, as many colours for its size as smoothed text has few: predicted.
+        let photo = Plane { w: 854, h: 32, mode: Mode::True, data: (0..854 * 32u32).flat_map(|i| { let c = i % 1500; [(c >> 4) as u8, (c * 7) as u8, (c * 13) as u8] }).collect() };
+        let (_, _, d) = Palette::default().pack(&photo, &[Rect { x: 0, y: 0, w: 854, h: 32 }], true, true);
+        assert_eq!(d[0][0], 0);
+        // Back to 256 slots: the palette starts over.
+        let (fresh, ..) = agent.pack(&p, &[Rect { x: 0, y: 0, w: 8, h: 8 }], false, false);
+        assert!(fresh);
+    }
+
+    #[test]
+    fn a_wide_palette_takes_over_unused_slots_without_losing_any() {
+        let mut agent = Palette::default();
+        let mut viewer = Colours::default();
+        // More colours than slots over a few frames (1000 new ones each): every picture reads back.
+        for f in 0..6u32 {
+            let p = Plane { w: 256, h: 256, mode: Mode::True, data: (0..256 * 256u32).flat_map(|i| { let c = f * 1000 + i % 1000; [(c >> 16) as u8, (c >> 8) as u8, c as u8] }).collect() };
+            let (fresh, changed, data) = agent.pack(&p, &[Rect { x: 0, y: 0, w: 256, h: 256 }], f == 0, true);
+            assert_eq!(data[0][0], 2, "frame {f} as slots");
+            viewer.update(fresh, &changed);
+            assert_eq!(viewer.unpack(&data[0], 256, 256).unwrap(), p.data, "frame {f}");
         }
     }
 

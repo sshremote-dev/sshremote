@@ -191,22 +191,25 @@ default quality) on a direct connection:
 
 | | sshremote auto (lossless text, 30 fps) | sshremote 256 colours | sshremote black and white | RustDesk |
 |---|---|---|---|---|
-| window opens | 25 KB | 23 KB | 14 KB | 51 KB |
+| window opens | 20 KB | 18 KB | 10 KB | 51 KB |
 | still | 0.1 KB | 0.1 KB | 0.1 KB | 0.2 KB |
-| typing | 11 KB | 10 KB | 10 KB | 45 KB |
-| scrolling | 416 KB | 418 KB | 330 KB | 1143 KB |
-| page after page | 193 KB | 166 KB | 108 KB | 396 KB |
-| film | 1576 KB | 1333 KB | 1074 KB | 2523 KB |
-| back to text | 32 KB | 6 KB | 13 KB | 39 KB |
-| **all** | **2254 KB** | **1957 KB** | **1550 KB** | **4197 KB** |
+| typing | 8 KB | 6 KB | 9 KB | 45 KB |
+| scrolling | 343 KB | 336 KB | 291 KB | 1143 KB |
+| page after page | 128 KB | 99 KB | 91 KB | 396 KB |
+| film | 1738 KB | 1347 KB | 1075 KB | 2523 KB |
+| back to text | 30 KB | 3 KB | 15 KB | 39 KB |
+| **all** | **2267 KB** | **1809 KB** | **1491 KB** | **4197 KB** |
 
-Moving the mouse over a still GNOME desktop for 20 s costs 0.1-0.3 KB of pictures, as with
-RustDesk. What makes the difference: text and drawings go through a palette kept for the session
-(their bytes repeat from frame to frame, which the stream's compression finds), scrolls are moves
-past the scroll bar, so is the rest of a line a character is typed into (where the program draws
-its glyphs on whole pixels, as GTK 3, terminals and most Windows programs do), small updates are
-compressed harder than whole new screens, only areas that look like photographs become H.264, and
-two paints a moment apart go as one.
+The same activity in a GTK 4 program, whose smoothed text has more shades and glyphs at fractions
+of a pixel: 2235-2326 KB against RustDesk's 4521-4560 KB, less in every part (typing 52 KB against
+215-244 KB). Moving the mouse over a still GNOME desktop for 20 s costs 0.1-0.3 KB of pictures, as
+with RustDesk. What makes the difference: text and drawings go through a palette kept for the
+session, of up to 4096 colours for text smoothed in many shades (their bytes repeat from frame to
+frame, which the stream's compression finds), changed areas side by side go as one along their rows
+(so rows of text stay whole), scrolls are moves past the scroll bar, so is the rest of a line a
+character is typed into (where the program draws its glyphs on whole pixels, as GTK 3, terminals
+and most Windows programs do), small updates are compressed harder than whole new screens, only
+areas that look like photographs become H.264, and two paints a moment apart go as one.
 
 ## Building
 
