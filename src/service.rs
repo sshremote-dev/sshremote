@@ -99,8 +99,17 @@ pub fn install() -> Result<(), String> {
     }
     let _ = run("sc", &["delete", NAME]);
     let same = std::fs::canonicalize(&here).ok().zip(std::fs::canonicalize(&exe).ok()).is_some_and(|(a, b)| a == b);
+    let mut failed = None;
     if !same {
-        std::fs::create_dir_all(exe.parent().ok_or("bad path")?).map_err(|e| format!("{}: {e}", exe.display()))?;
+        let dir = exe.parent().ok_or("bad path")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", exe.display()))?;
+        // Copies moved aside by earlier updates, now that their programs may have ended.
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("sshremote") && name.ends_with(".old.exe") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
         let mut copied = std::fs::copy(&here, &exe);
         for _ in 0..30 {
             if copied.is_ok() {
@@ -109,7 +118,23 @@ pub fn install() -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(200));
             copied = std::fs::copy(&here, &exe);
         }
-        copied.map_err(|e| format!("{}: {e}", exe.display()))?;
+        // Still in use (this app's own window started from there, say): a running program's
+        // file can be renamed though not overwritten, so it moves aside and the new one goes in.
+        if copied.is_err() {
+            let aside = (0..10).map(|n| dir.join(if n == 0 { "sshremote.old.exe".to_string() } else { format!("sshremote-{n}.old.exe") })).find(|p| !p.exists());
+            if let Some(aside) = aside
+                && std::fs::rename(&exe, &aside).is_ok()
+            {
+                copied = std::fs::copy(&here, &exe);
+            }
+        }
+        if let Err(e) = copied {
+            // The service comes back with the program it had rather than not at all.
+            if !exe.exists() {
+                return Err(format!("{}: {e}", exe.display()));
+            }
+            failed = Some(format!("{}: {e}; the service runs the version it had", exe.display()));
+        }
     }
     let bin = format!("\"{}\" --service", exe.display());
     run(
@@ -148,6 +173,9 @@ pub fn install() -> Result<(), String> {
     // The service shows its icon at each sign-in; the start at sign-in older versions set is gone.
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
     run("sc", &["start", NAME])?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
     println!("sshremote service installed and started ({bin})");
     Ok(())
 }
