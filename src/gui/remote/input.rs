@@ -226,6 +226,8 @@ impl Remote {
                         && p != self.pointer
                     {
                         self.pointer = p;
+                        // The host does not echo a move back: its pointer is where it was sent.
+                        self.host_pointer = Some((p.0 as i16, p.1 as i16));
                         self.send(ToAgent::Pointer { x: p.0, y: p.1 })?;
                     }
                 }
@@ -240,6 +242,7 @@ impl Remote {
                     let Some(p) = shown.and_then(|r| self.remote_point(r, pos)) else { continue };
                     if p != self.pointer {
                         self.pointer = p;
+                        self.host_pointer = Some((p.0 as i16, p.1 as i16));
                         self.send(ToAgent::Pointer { x: p.0, y: p.1 })?;
                     }
                     let b = match button {

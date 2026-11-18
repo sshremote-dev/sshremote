@@ -1171,7 +1171,8 @@ class Client {
     canvas.onpointermove = e => {
       if (!this.overCanvas) { this.overCanvas = true; this.pointerLook(); }
       if (e.pointerType === "touch") { touchMove(e); return; }
-      const p = point(e); if (p) send({ move: p });
+      // The host does not echo a move back: its pointer is where it was sent.
+      const p = point(e); if (p) { send({ move: p }); this.hostPtrAt = p; }
     };
     canvas.onpointerdown = e => {
       if (e.pointerType === "touch") { e.preventDefault(); touchDown(e); return; }
@@ -1179,6 +1180,7 @@ class Client {
       const p = point(e); if (!p) return;
       canvas.setPointerCapture(e.pointerId);
       down = BUTTON[e.button] || 1;
+      this.hostPtrAt = p;
       send({ move: p }); send({ button: [down, 1] });
       e.preventDefault();
     };

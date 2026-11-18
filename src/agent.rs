@@ -606,7 +606,7 @@ fn serve_with(
                     let sx = (x as f64 + 0.5) * desk.0 as f64 / img.0.max(1) as f64;
                     let sy = (y as f64 + 0.5) * desk.1 as f64 / img.1.max(1) as f64;
                     report(cap.input(Input::Move { x: sx, y: sy }));
-                    pointer.moved_to = Some((sx as i32, sy as i32));
+                    pointer.moved((sx as i32, sy as i32), Instant::now());
                 }
                 ToAgent::Button { button, pressed } => {
                     held.button(button, pressed);
@@ -1105,8 +1105,9 @@ struct PointerApart {
     apart: bool,
     /// What the viewer was told last.
     at: Option<Option<(i16, i16)>>,
-    /// Where the viewer moved it, in the host's pixels.
-    moved_to: Option<(i32, i32)>,
+    /// Where the viewer moved it lately, in the host's pixels: a host tells where its pointer is
+    /// a moment late, while the viewer has moved it on.
+    moved_to: std::collections::VecDeque<((i32, i32), Instant)>,
     due: Option<Instant>,
 }
 
@@ -1127,14 +1128,29 @@ impl PointerApart {
             send(enc, &ToClient::PointerShape { w, h, hot_x, hot_y, rgba: p.rgba })?;
         }
         let at = at.map(|(x, y)| (x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16));
-        if self.at != Some(at) {
-            let echo = matches!((at, self.moved_to), (Some((x, y)), Some((mx, my))) if (x as i32 - mx).abs() <= 1 && (y as i32 - my).abs() <= 1);
-            if !echo {
-                send(enc, &ToClient::PointerAt(at))?;
-            }
-            self.at = Some(at);
+        if let Some(at) = self.news(at) {
+            send(enc, &ToClient::PointerAt(at))?;
         }
         Ok(())
+    }
+
+    fn moved(&mut self, to: (i32, i32), now: Instant) {
+        while self.moved_to.front().is_some_and(|m| now.duration_since(m.1) > Duration::from_millis(300)) || self.moved_to.len() >= 32 {
+            self.moved_to.pop_front();
+        }
+        self.moved_to.push_back((to, now));
+    }
+
+    /// What the viewer is to hear of where the pointer is now, if anything: not where the viewer
+    /// itself put it lately, unless it last heard the pointer was hidden.
+    fn news(&mut self, at: Option<(i16, i16)>) -> Option<Option<(i16, i16)>> {
+        if self.at == Some(at) {
+            return None;
+        }
+        let told = self.at.replace(at);
+        let echo = at.is_some_and(|(x, y)| self.moved_to.iter().any(|((mx, my), _)| (x as i32 - mx).abs() <= 1 && (y as i32 - my).abs() <= 1))
+            && matches!(told, Some(Some(_)));
+        (!echo).then_some(at)
     }
 }
 
@@ -1281,5 +1297,27 @@ mod tests {
         // A web page takes the size it is shown at, whatever its shape was.
         assert_eq!(target((1280, 800), &view(1178, 696, 100), true), (1178, 696));
         assert_eq!(target((1280, 800), &view(1178, 696, 50), true), (589, 348));
+    }
+
+    /// The viewer hears where the host's pointer is, but not of its own moves, unless it last
+    /// heard the pointer was hidden.
+    #[test]
+    fn a_pointer_the_viewer_moved_is_told_only_after_it_was_hidden() {
+        let mut p = PointerApart::default();
+        let t = Instant::now();
+        assert_eq!(p.news(None), Some(None));
+        p.moved((10, 10), t);
+        assert_eq!(p.news(Some((10, 10))), Some(Some((10, 10))), "shown again, where the viewer put it");
+        p.moved((20, 20), t);
+        p.moved((30, 30), t);
+        assert_eq!(p.news(Some((20, 21))), None, "the viewer's own move, told late");
+        assert_eq!(p.news(Some((30, 30))), None, "and its last");
+        assert_eq!(p.news(Some((50, 60))), Some(Some((50, 60))), "moved there on the host");
+        assert_eq!(p.news(Some((50, 60))), None, "told once");
+        assert_eq!(p.news(None), Some(None), "hidden");
+        // Moves forgotten after a moment: the host moving it back there later is told.
+        p.moved((70, 70), t + Duration::from_secs(1));
+        assert_eq!(p.news(Some((50, 60))), Some(Some((50, 60))));
+        assert_eq!(p.news(Some((20, 20))), Some(Some((20, 20))));
     }
 }
