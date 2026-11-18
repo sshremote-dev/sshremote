@@ -2,8 +2,8 @@
 
 Remote control over the SSH login you already have: a terminal, the host's screen with keyboard and
 mouse, files, and an MCP server for AI agents. Over SSH there is no relay, ID server or open port:
-the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles sent
-in one zstd stream (H.264 only for areas that keep moving).
+the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles and
+moves sent in one zstd stream (H.264 only for areas that keep moving).
 
 Hosts: Windows (GDI capture, SendInput); GNOME on Wayland (Mutter RemoteDesktop, PipeWire); X11
 desktops such as Xfce, MATE, LXQt, Cinnamon, i3, and KDE or GNOME on Xorg (MIT-SHM, XDamage, XFixes,
@@ -189,21 +189,24 @@ Measured in one private GNOME session with the same scripted activity (a documen
 into, scrolled, paged and a moving photograph, 30 s each), against RustDesk 1.4.9 (AV1, its
 default quality) on a direct connection:
 
-| | sshremote auto (lossless text, 60 fps) | sshremote 256 colours | RustDesk |
-|---|---|---|---|
-| window opens | 30 KB | 27 KB | 51 KB |
-| still | 0.1 KB | 0.1 KB | 0.2 KB |
-| typing | 45 KB | 53 KB | 62 KB |
-| scrolling | 541 KB | 501 KB | 1052 KB |
-| page after page | 221 KB | 187 KB | 440 KB |
-| film | 1722 KB | 940 KB | 2492 KB |
-| back to text | 38 KB | 8 KB | 46 KB |
-| **all** | **2596 KB** | **1717 KB** | **4145 KB** |
+| | sshremote auto (lossless text, 30 fps) | sshremote 256 colours | sshremote black and white | RustDesk |
+|---|---|---|---|---|
+| window opens | 25 KB | 23 KB | 14 KB | 51 KB |
+| still | 0.1 KB | 0.1 KB | 0.1 KB | 0.2 KB |
+| typing | 11 KB | 10 KB | 10 KB | 45 KB |
+| scrolling | 416 KB | 418 KB | 330 KB | 1143 KB |
+| page after page | 193 KB | 166 KB | 108 KB | 396 KB |
+| film | 1576 KB | 1333 KB | 1074 KB | 2523 KB |
+| back to text | 32 KB | 6 KB | 13 KB | 39 KB |
+| **all** | **2254 KB** | **1957 KB** | **1550 KB** | **4197 KB** |
 
-The black-and-white preset at half size sends 520 KB for all of it. What makes the difference:
-text and drawings go through a palette kept for the session (their bytes repeat from frame to
-frame, which the stream's compression finds), scrolls are moves past the scroll bar, only areas
-that look like photographs become H.264, and two paints a moment apart go as one.
+Moving the mouse over a still GNOME desktop for 20 s costs 0.1-0.3 KB of pictures, as with
+RustDesk. What makes the difference: text and drawings go through a palette kept for the session
+(their bytes repeat from frame to frame, which the stream's compression finds), scrolls are moves
+past the scroll bar, so is the rest of a line a character is typed into (where the program draws
+its glyphs on whole pixels, as GTK 3, terminals and most Windows programs do), small updates are
+compressed harder than whole new screens, only areas that look like photographs become H.264, and
+two paints a moment apart go as one.
 
 ## Building
 

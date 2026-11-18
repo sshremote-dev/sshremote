@@ -21,7 +21,54 @@ const IN_FLIGHT_SMALL: u32 = 6;
 /// Bytes of frames in flight under which the small-frame allowance applies.
 const SMALL_BYTES: usize = 256 << 10;
 
-type Wire = zstd::stream::write::Encoder<'static, BufWriter<Box<dyn Write>>>;
+/// The stream to the viewer, zstd frames one after another: messages up to `BIG` bytes in long
+/// frames at a strong level, where pictures of typing or scrolling compress against those before
+/// them; a larger one (a whole new screen) in a frame of its own at a fast level, so it is not
+/// held up compressing. Viewers read the frames as one stream.
+struct Wire {
+    enc: Option<zstd::stream::write::Encoder<'static, BufWriter<Box<dyn Write>>>>,
+    raw: Option<BufWriter<Box<dyn Write>>>,
+}
+
+impl Wire {
+    const BIG: usize = 1 << 20;
+
+    fn new(output: Box<dyn Write>) -> Wire {
+        Wire { enc: None, raw: Some(BufWriter::with_capacity(1 << 16, output)) }
+    }
+
+    fn message(&mut self, kind: u8, payload: &[u8]) -> io::Result<()> {
+        if payload.len() + 5 > Self::BIG {
+            let mut out = match (self.enc.take(), self.raw.take()) {
+                (Some(enc), _) => enc.finish()?,
+                (None, Some(raw)) => raw,
+                (None, None) => return Err(io::Error::other("the stream to the viewer broke")),
+            };
+            let mut whole = Vec::with_capacity(payload.len() + 5);
+            write_msg(&mut whole, kind, payload)?;
+            out.write_all(&zstd::bulk::compress(&whole, 3)?)?;
+            self.raw = Some(out);
+            return Ok(());
+        }
+        if self.enc.is_none() {
+            let raw = self.raw.take().ok_or_else(|| io::Error::other("the stream to the viewer broke"))?;
+            let mut enc = zstd::stream::write::Encoder::new(raw, 7)?;
+            // A long window lets earlier screens act as a dictionary for repeats.
+            enc.window_log(24)?;
+            enc.long_distance_matching(true)?;
+            self.enc = Some(enc);
+        }
+        write_msg(self.enc.as_mut().expect("made above"), kind, payload)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match (&mut self.enc, &mut self.raw) {
+            (Some(enc), _) => enc.flush(),
+            (None, Some(raw)) => raw.flush(),
+            (None, None) => Ok(()),
+        }
+    }
+}
 
 /// Queues a message; the loop flushes once per turn, before it waits, so several messages share
 /// one compressed block.
@@ -32,7 +79,7 @@ fn send(w: &mut Wire, m: &ToClient) -> io::Result<()> {
 /// [`send`], returning the message's size before compression.
 fn send_sized(w: &mut Wire, m: &ToClient) -> io::Result<usize> {
     let (k, p) = m.encode();
-    write_msg(w, k, &p)?;
+    w.message(k, &p)?;
     Ok(p.len())
 }
 
@@ -197,11 +244,7 @@ impl Read for EndsWithViewer {
 /// Serves one viewer over any pair of streams (stdio, relay pipes, a sealed network link).
 pub fn run_on(backend: &str, input: Box<dyn Read + Send>, output: Box<dyn Write>) -> Result<(), String> {
     let backend = starting(backend);
-    let mut enc =
-        zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 16, output), 3).map_err(|e| e.to_string())?;
-    // A long window lets earlier screens act as a dictionary for repeats.
-    enc.window_log(24).map_err(|e| e.to_string())?;
-    enc.long_distance_matching(true).map_err(|e| e.to_string())?;
+    let mut enc = Wire::new(output);
     let result = serve(&mut enc, input, backend);
     // The viewer reads why in its own words: queued messages go out only when flushed.
     if let Err(e) = &result {
@@ -1027,6 +1070,24 @@ fn serve_with(
             scrolled = area(&after) * 2 <= area(&rects);
             rects = after;
             moves.push(m);
+        } else if s.formats & crate::proto::FORMAT_SIDEWAYS != 0
+            && let Some(p) = prev.as_ref()
+        {
+            // Text moving along its line as a character is typed into it (not in a film).
+            let text: Vec<_> = rects.iter().filter(|r| vid.region.is_none_or(|v| !video::overlaps(r, &v))).copied().collect();
+            let found = scroll::sideways(p, &plane, &text);
+            if !found.is_empty() {
+                let mut moved = p.clone();
+                for m in &found {
+                    scroll::apply(&mut moved.data, moved.w, moved.mode.bpp(), m);
+                }
+                let after = diff(Some(&moved), &plane);
+                let area = |rs: &[crate::color::Rect]| rs.iter().map(|r| r.w * r.h).sum::<usize>();
+                if area(&after) * 4 <= area(&rects) * 3 {
+                    rects = after;
+                    moves = found;
+                }
+            }
         }
         let mut video_part = None;
         // A film goes as one at every number of colours: frame after frame of it as tiles would
@@ -1297,6 +1358,39 @@ mod tests {
         // A web page takes the size it is shown at, whatever its shape was.
         assert_eq!(target((1280, 800), &view(1178, 696, 100), true), (1178, 696));
         assert_eq!(target((1280, 800), &view(1178, 696, 50), true), (589, 348));
+    }
+
+    /// Small and large messages go in frames of their own levels, and a viewer reads them back
+    /// in order as one stream.
+    #[test]
+    fn messages_read_back_across_the_streams_frames() {
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut w = Wire::new(Box::new(Shared(buf.clone())));
+        let big: Vec<u8> = (0..Wire::BIG + 10).map(|i| (i * 7 % 251) as u8).collect();
+        let sent: Vec<(u8, Vec<u8>)> = vec![(1, b"one".to_vec()), (2, b"two".to_vec()), (3, big.clone()), (4, b"four".to_vec()), (5, big), (6, Vec::new())];
+        for (i, (k, p)) in sent.iter().enumerate() {
+            w.message(*k, p).unwrap();
+            if i % 2 == 1 {
+                w.flush().unwrap();
+            }
+        }
+        w.flush().unwrap();
+        let bytes = buf.borrow().clone();
+        assert!(bytes.len() < 2 * Wire::BIG / 4, "compressed: {}", bytes.len());
+        let mut dec = zstd::stream::read::Decoder::new(&bytes[..]).unwrap();
+        // The last frame stays open, as the stream goes on.
+        let got: Vec<(u8, Vec<u8>)> = sent.iter().map(|_| read_msg(&mut dec).unwrap().expect("a message")).collect();
+        assert_eq!(got, sent);
     }
 
     /// The viewer hears where the host's pointer is, but not of its own moves, unless it last

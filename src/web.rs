@@ -1087,7 +1087,8 @@ fn client(
                     } else {
                         // A move goes as a move while nothing waits; after other changes, as the
                         // picture of where it landed.
-                        if damage.is_empty() {
+                        // The page moves areas up and down only: one moved sideways goes as a picture.
+                        if damage.is_empty() && f.moves.iter().all(|m| m.dx == 0) {
                             moves.extend(f.moves.iter().copied());
                         } else {
                             damage.extend(f.moves.iter().map(|m| (m.x, m.y, m.w, m.h)));
@@ -1813,7 +1814,7 @@ Host: x
                 px.copy_from_slice(&[(i * 37 % 251) as u8, (i * 91 % 241) as u8, (i * 53 % 239) as u8]);
             }
         }
-        let m = crate::scroll::Move { x: 0, y: 4, w: 64, h: 20, dy: -3 };
+        let m = crate::scroll::Move { x: 0, y: 4, w: 64, h: 20, dy: -3, dx: 0 };
         let b = picture_update(9, &fb, &[m], &[(0, 0, 32, 32), (32, 0, 32, 32)], false, 80).unwrap();
         assert_eq!(b[0], 4);
         assert_eq!(u32::from_le_bytes(b[1..5].try_into().unwrap()), 9);

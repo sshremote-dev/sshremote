@@ -27,8 +27,11 @@ pub const FORMAT_PALETTE: u8 = 1;
 /// `ToClient::PointerAt`), right where its own mouse is: the pictures leave it out, so moving
 /// it costs no pictures and shows no delay. Not in `FORMATS`: a terminal cannot draw it apart.
 pub const FORMAT_POINTER: u8 = 2;
+/// Moves that shift sideways too (`scroll::Move::dx`): text moving along its line as a
+/// character is typed into it.
+pub const FORMAT_SIDEWAYS: u8 = 4;
 /// Every form this program reads.
-pub const FORMATS: u8 = FORMAT_PALETTE;
+pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS;
 
 pub struct Preset {
     pub name: &'static str,
@@ -937,11 +940,16 @@ impl ToClient {
                 b.extend_from_slice(&f.id.to_le_bytes());
                 b.extend_from_slice(&f.w.to_le_bytes());
                 b.extend_from_slice(&f.h.to_le_bytes());
-                b.push(f.mode.to_u8() | if f.palette.is_some() { 0x80 } else { 0 });
+                // Moves carry their sideways shift only when one has any (FORMAT_SIDEWAYS).
+                let sideways = f.moves.iter().any(|m| m.dx != 0);
+                b.push(f.mode.to_u8() | if f.palette.is_some() { 0x80 } else { 0 } | if sideways { 0x40 } else { 0 });
                 b.extend_from_slice(&(f.moves.len() as u16).to_le_bytes());
                 for m in &f.moves {
                     for v in [m.x as u16, m.y as u16, m.w as u16, m.h as u16, m.dy as i16 as u16] {
                         b.extend_from_slice(&v.to_le_bytes());
+                    }
+                    if sideways {
+                        b.extend_from_slice(&(m.dx as i16).to_le_bytes());
                     }
                 }
                 if let Some((fresh, changed)) = &f.palette {
@@ -1216,7 +1224,7 @@ impl ToClient {
             }
             102 => {
                 let (id, w, h, form) = (c.u32()?, c.u16()?, c.u16()?, c.u8()?);
-                let mode = Mode::from_u8(form & 0x7f).ok_or_else(bad)?;
+                let mode = Mode::from_u8(form & 0x3f).ok_or_else(bad)?;
                 // The viewer keeps a picture this big: one no screen sends is refused, not allocated.
                 if w as usize > MAX_SIDE || h as usize > MAX_SIDE || w as usize * h as usize > MAX_PIXELS {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a {w}x{h} picture is too big")));
@@ -1225,11 +1233,15 @@ impl ToClient {
                 for _ in 0..c.u16()? {
                     let (x, y, mw, mh) = (c.u16()? as usize, c.u16()? as usize, c.u16()? as usize, c.u16()? as usize);
                     let dy = c.u16()? as i16 as isize;
-                    let src = y as isize - dy;
+                    let dx = if form & 0x40 != 0 { c.u16()? as i16 as isize } else { 0 };
+                    let (src, from) = (y as isize - dy, x as isize - dx);
                     if x + mw > w as usize || y + mh > h as usize || src < 0 || src as usize + mh > h as usize {
                         return Err(bad());
                     }
-                    moves.push(Move { x, y, w: mw, h: mh, dy });
+                    if from < 0 || from as usize + mw > w as usize {
+                        return Err(bad());
+                    }
+                    moves.push(Move { x, y, w: mw, h: mh, dy, dx });
                 }
                 let palette = if form & 0x80 != 0 {
                     let n = c.u16()?;
@@ -1555,7 +1567,7 @@ mod tests {
             w: 64,
             h: 32,
             mode: Mode::Mono,
-            moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3 }],
+            moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3, dx: 0 }],
             palette: None,
             tiles: vec![Tile { x: 1, y: 2, w: 3, h: 4, data: vec![1, 2] }],
             video: Some(Tile { x: 0, y: 0, w: 16, h: 16, data: vec![0, 0, 1] }),
@@ -1565,6 +1577,27 @@ mod tests {
         write_msg(&mut wire, k, &p).unwrap();
         let (k, p) = read_msg(&mut wire.as_slice()).unwrap().unwrap();
         assert_eq!(ToClient::decode(k, &p).unwrap(), f);
+        // Text moved along its line, beside a scroll; a source off the picture is refused.
+        let sideways = |dx| {
+            ToClient::Frame(Frame {
+                id: 11,
+                w: 64,
+                h: 32,
+                mode: Mode::Color256,
+                moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3, dx: 0 }, Move { x: 9, y: 2, w: 40, h: 6, dy: 0, dx }],
+                palette: None,
+                tiles: vec![],
+                video: None,
+            })
+        };
+        for dx in [9, -15] {
+            let (k, p) = sideways(dx).encode();
+            assert_eq!(ToClient::decode(k, &p).unwrap(), sideways(dx));
+        }
+        for dx in [10, -16] {
+            let (k, p) = sideways(dx).encode();
+            assert!(ToClient::decode(k, &p).is_err(), "{dx}");
+        }
         let f = ToClient::Frame(Frame {
             id: 10,
             w: 64,

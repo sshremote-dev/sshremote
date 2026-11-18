@@ -1225,6 +1225,81 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         sess.close();
     }
 
+    /// Text typed into the middle of a line (or taken out of it) comes as its rest moved along
+    /// plus the new characters, and the viewer's picture is the host's: a whole new picture asked
+    /// for at the end matches it. A GTK 3 text field (whole-pixel glyph places) is opened there
+    /// for 40 s; needs SSHREMOTE_GNOME_HOST with python3-gi (and SSHREMOTE_GNOME_ENV,
+    /// SSHREMOTE_GNOME_AGENT as above).
+    #[test]
+    #[ignore]
+    fn a_gnome_line_typed_into_moves_along_and_stays_exact() {
+        use crate::proto::{FORMATS, Settings, ToAgent};
+        let Ok(host) = std::env::var("SSHREMOTE_GNOME_HOST") else { return };
+        let env = std::env::var("SSHREMOTE_GNOME_ENV").unwrap_or_default();
+        let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
+        let field = "import gi; gi.require_version(\"Gtk\", \"3.0\"); from gi.repository import Gtk; \
+            w = Gtk.Window(title=\"sideways\"); w.set_default_size(800, 300); v = Gtk.TextView(); b = v.get_buffer(); \
+            b.set_text(\"the quick brown fox jumps over the lazy dog and on\"); b.place_cursor(b.get_start_iter()); \
+            w.add(v); w.connect(\"destroy\", Gtk.main_quit); w.show_all(); w.present(); v.grab_focus(); Gtk.main()";
+        let opened = std::process::Command::new("ssh")
+            .arg(&host)
+            .arg(format!("env {env} setsid timeout 40 python3 -c '{field}' > /dev/null 2>&1 < /dev/null &"))
+            .status();
+        assert!(opened.is_ok_and(|s| s.success()), "the text field opens");
+        std::thread::sleep(Duration::from_secs(3));
+        let target = Target::Ssh { host: host.clone(), port: None, args: Vec::new(), remote: format!("env {env} {agent} --agent"), capture: "gnome".into(), password: None, unattended: true };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let (w, h) = sess.desk;
+        sess.send(ToAgent::Settings(Settings { view_w: w, view_h: h, scale: 100, mode: crate::color::Mode::True, fps: 30, formats: FORMATS })).unwrap();
+        let mut fb = Framebuffer::default();
+        // Frames for `ms`, applied; how many moved something sideways.
+        let take = |sess: &mut Session, fb: &mut Framebuffer, ms: u64, last: bool| -> (usize, Option<Vec<u8>>) {
+            let (mut sideways, mut before_whole) = (0, None);
+            let until = Instant::now() + Duration::from_millis(ms);
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        sideways += f.moves.iter().filter(|m| m.dx != 0).count();
+                        if last && f.covered() == fb.w * fb.h && before_whole.is_none() {
+                            before_whole = Some(fb.rgb.clone());
+                        }
+                        fb.apply(&f).unwrap();
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            (sideways, before_whole)
+        };
+        take(&mut sess, &mut fb, 2000, false);
+        // A key, and the frames it brings.
+        let mut sideways = 0;
+        let mut key = |sess: &mut Session, fb: &mut Framebuffer, keysym: u32| {
+            sess.send(ToAgent::Key { keysym, mods: 0 }).unwrap();
+            sideways += take(sess, fb, 150, false).0;
+        };
+        for c in "and more ".chars() {
+            key(&mut sess, &mut fb, crate::xk::of_char(c));
+        }
+        // And taken out again: the rest moves back.
+        for _ in 0..3 {
+            key(&mut sess, &mut fb, crate::xk::BACKSPACE);
+        }
+        drop(key);
+        take(&mut sess, &mut fb, 1000, false);
+        assert!(sideways >= 8, "the line's rest moved along: {sideways} sideways moves");
+        // A whole new picture: the one the viewer has, but for a blinking caret.
+        sess.send(ToAgent::Refresh).unwrap();
+        let (_, before) = take(&mut sess, &mut fb, 3000, true);
+        let before = before.expect("a whole new picture");
+        let differ = before.as_chunks::<3>().0.iter().zip(fb.rgb.as_chunks::<3>().0).filter(|(a, b)| a != b).count();
+        sess.close();
+        // The text field closes (its timeout passes the signal on).
+        let _ = std::process::Command::new("ssh").arg(&host).arg("pkill -f '^[t]imeout 40 python3 -c import gi'").status();
+        assert!(differ < 200, "the viewer's picture was the host's: {differ} pixels differ");
+    }
+
     /// A window shared alone shows the menus it opens: Shift+F10 in it opens its context menu, and
     /// the shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
     /// window with a context menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,
