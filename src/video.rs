@@ -143,8 +143,8 @@ impl Video {
         Event::None
     }
 
-    /// Encodes the region from a BGRx capture; returns the H.264 access unit.
-    pub fn encode(&mut self, img: &Image, fps: u8, bitrate: u32) -> Result<Vec<u8>, String> {
+    /// Encodes the region from a BGRx capture, in grey if asked; returns the H.264 access unit.
+    pub fn encode(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool) -> Result<Vec<u8>, String> {
         let r = self.region.ok_or("no video region")?;
         if self.enc.is_none() {
             let config = EncoderConfig::new()
@@ -161,6 +161,12 @@ impl Video {
             let o = y * img.stride + r.x * 4;
             self.crop.extend_from_slice(&img.data[o..o + r.w * 4]);
         }
+        if grey {
+            for px in self.crop.as_chunks_mut::<4>().0 {
+                let l = ((px[0] as u32 * 29 + px[1] as u32 * 150 + px[2] as u32 * 77) >> 8) as u8;
+                (px[0], px[1], px[2]) = (l, l, l);
+            }
+        }
         let yuv = self.yuv.as_mut().unwrap();
         yuv.read_bgra8(BgraSliceU8::new(&self.crop, (r.w, r.h)));
         let enc = self.enc.as_mut().unwrap();
@@ -171,6 +177,27 @@ impl Video {
     pub fn restart(&mut self) {
         self.enc = None;
     }
+}
+
+/// The 32x32 tiles where two captures of one size differ.
+pub fn changed_tiles(prev: &Image, cur: &Image) -> Vec<Rect> {
+    if (prev.w, prev.h) != (cur.w, cur.h) {
+        return vec![Rect { x: 0, y: 0, w: cur.w, h: cur.h }];
+    }
+    let mut out = Vec::new();
+    for ty in (0..cur.h).step_by(TILE) {
+        let th = TILE.min(cur.h - ty);
+        for tx in (0..cur.w).step_by(TILE) {
+            let tw = TILE.min(cur.w - tx);
+            fn row(img: &Image, y: usize, x: usize, w: usize) -> &[u8] {
+                &img.data[y * img.stride + x * 4..y * img.stride + (x + w) * 4]
+            }
+            if (ty..ty + th).any(|y| row(prev, y, tx, tw) != row(cur, y, tx, tw)) {
+                out.push(Rect { x: tx, y: ty, w: tw, h: th });
+            }
+        }
+    }
+    out
 }
 
 pub fn overlaps(a: &Rect, b: &Rect) -> bool {
@@ -255,7 +282,7 @@ mod tests {
         for (i, p) in img.data.chunks_mut(4).enumerate() {
             p.copy_from_slice(&[(i % 251) as u8, (i / w % 200) as u8, 90, 255]);
         }
-        let au = v.encode(&img, 30, 2_000_000).unwrap();
+        let au = v.encode(&img, 30, 2_000_000, false).unwrap();
         assert!(!au.is_empty());
         let mut p = Player::default();
         let rgb = p.decode((r.x, r.y, r.w, r.h), &au).unwrap().expect("picture");

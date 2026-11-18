@@ -58,7 +58,7 @@
 sshremote --gui user@host --open files    # straight to the files
 sshremote terminal user@host --split db   # terminal panes, split
 sshremote user@host                       # the screen in this terminal (sixel or kitty images)
-sshremote user@host --preset 0            # 0 black and white 5 fps .. 4 true colour 60 fps</code></pre>
+sshremote user@host --preset 0            # 0 black and white 30 fps .. 4 true colour 60 fps</code></pre>
   <p>A lost connection is tried again in the same mode, keeping the shells; after 30 seconds the pane offers Reconnect or Close.</p>
   <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or with Start with the computer in the remote access settings): <code>sshremote --install-service</code>.</div>
 

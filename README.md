@@ -126,13 +126,18 @@ What is opened goes into the workspace:
   as a file of its language.
 - Every window draws its own title bar and keeps the system's behaviour: drag and snap,
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
-- **Screen sharing**: quality (auto, five presets from black and white at half size and 5 fps to
-  full colour at 60, or colours, picture size and frame rate of one's own), the resolution of the
+- **Screen sharing**: quality (auto, five presets from black and white at 30 fps to
+  full colour at 60, each at full size, or colours, picture size and frame rate of one's own), the resolution of the
   host's screen itself (its display mode, as RustDesk's: set from the Display menu and set back
   when the connection ends; on Windows, X11, GNOME, KDE Plasma with kscreen-doctor, Sway,
   Hyprland and COSMIC, a virtual screen there taking common sizes; not Hyprland on a virtual machine's
-  graphics, which cannot make a screen larger again once it made it smaller), fit, zoom (below 100% the host sends a
-  smaller picture), monitors (or
+  graphics, which cannot make a screen larger again once it made it smaller), fit, zoom (the host sends its own pixels, which
+  its lossless coding and scrolls keep exact; a smaller pane or zoom makes them smaller here, each
+  pixel the mean of those it covers, so text keeps every stroke), the host's
+  pointer drawn here right where this mouse is (its shape comes apart from the picture on Windows
+  and X11 hosts, so moving it costs no pictures and lags no round trip; in the browser it is the
+  page's own pointer), system keys (Win or Super, Alt+Tab, Alt+Esc, Ctrl+Esc, Print Screen) going
+  to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
   monitors"), sharing one window or application with its menus and dialogs, special keys, chat,
   a voice call (the person there answers in their window), screenshot, recording to MP4, pause,
@@ -223,7 +228,7 @@ sshremote ext dev my-tool          # build, install and reload on every change
 
 ```sh
 sshremote HOST                 # the screen in this terminal, auto quality under 100 KB/s
-sshremote HOST --preset 0      # 0 black and white 50% 5 fps .. 4 true colour 60 fps
+sshremote HOST --preset 0      # 0 black and white 30 fps .. 4 true colour 60 fps
 sshremote terminal HOST        # the workspace with a terminal pane; --split HOST adds panes
 sshremote --gui HOST --open files
 ```

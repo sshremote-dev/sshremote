@@ -73,6 +73,37 @@ impl Remote {
         Ok(())
     }
 
+    /// While its keys go to the host, the picture holds egui's keyboard focus with Tab, the
+    /// arrows and Esc locked to it: with nothing focused egui gives Tab to the toolbar's first
+    /// button, and every key after it would stay here. A click on the picture takes the focus
+    /// back from a field that had it.
+    pub(in crate::gui) fn hold_keys(&mut self, ui: &egui::Ui, area: Rect, keys: bool) {
+        let id = self.keys_id;
+        let ctx = ui.ctx();
+        // A dialog over the window (a modal) or a menu keeps the focus for its own fields.
+        let keys = keys && !ctx.any_popup_open() && ctx.memory(|m| m.allows_interaction(ui.layer_id()));
+        if !keys {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+            return;
+        }
+        ui.interact(area, id, egui::Sense::focusable_noninteractive());
+        let pressed_here = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()).is_some_and(|p| {
+            area.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background)
+        });
+        let lock = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+        ctx.memory_mut(|m| {
+            if m.focused().is_none() || pressed_here {
+                m.request_focus(id);
+            }
+            m.set_focus_lock_filter(id, lock);
+        });
+    }
+
+    /// A widget of this window other than the picture has the keyboard (a field being typed in).
+    pub(in crate::gui) fn keys_elsewhere(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused().is_some_and(|f| f != self.keys_id))
+    }
+
     pub(in crate::gui) fn input(&mut self, ctx: &egui::Context, shown: Option<Rect>, ui_rects: &[Rect]) -> Result<(), String> {
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.focused));
         if !focused {
@@ -85,7 +116,7 @@ impl Remote {
         };
         // Keys go to the remote unless a toolbar widget (a slider, a menu) or the terminal panel has them.
         let term_keys = self.term_split && self.term_focus && self.terms.is_some() && !self.term_detached;
-        let local = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || term_keys;
+        let local = self.keys_elsewhere(ctx) || ctx.any_popup_open() || term_keys;
         if let Some(rect) = shown.filter(|_| !local) {
             // Composed text (Korean, Japanese, Chinese input methods) arrives as IME commits.
             ctx.output_mut(|o| {

@@ -3,7 +3,7 @@
 //! PipeWire's own); Windows through Media Foundation. With SSHREMOTE_TEST_CAMERA set a moving
 //! test picture is a camera too.
 
-use super::{Capture, Image, Input, Monitor, scale_nearest};
+use super::{Capture, Image, Input, Monitor};
 
 /// A camera: its name, and how to open it.
 #[derive(Clone, Debug)]
@@ -28,6 +28,8 @@ pub struct Camera {
     stream: imp::Stream,
     desk: (usize, usize),
     target: (usize, usize),
+    /// The picture made smaller for the viewer, by area averaging.
+    shrink: super::Shrink,
     last: Option<Image>,
     again: bool,
 }
@@ -39,7 +41,7 @@ impl Camera {
     pub fn open(cam: &Cam) -> Result<Camera, String> {
         let mut stream = imp::Stream::open(cam)?;
         let first = stream.next(std::time::Duration::from_secs(8))?.ok_or_else(|| format!("{} sent no picture within 8 s", cam.name))?;
-        Ok(Camera { stream, desk: (first.w, first.h), target: (first.w, first.h), last: Some(first), again: true })
+        Ok(Camera { stream, desk: (first.w, first.h), target: (first.w, first.h), shrink: super::Shrink::default(), last: Some(first), again: true })
     }
 }
 
@@ -70,7 +72,7 @@ impl Capture for Camera {
         if self.target == (img.w, img.h) {
             return Ok(Some(Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() }));
         }
-        Ok(Some(scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
+        Ok(Some(self.shrink.image(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
     }
 
     /// A camera is looked at, not used: input goes nowhere.
@@ -192,6 +194,13 @@ impl Capture for WithCameras {
     }
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.now_mut().grab()
+    }
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        self.screen.pointer_apart(on)
+    }
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        // A camera's picture has no pointer over it.
+        if self.cam.is_some() { (None, None) } else { self.screen.pointer() }
     }
     fn input(&mut self, ev: Input) -> Result<(), String> {
         self.now_mut().input(ev)

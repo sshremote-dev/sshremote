@@ -6,6 +6,9 @@
 //! GNOME gives a drag to one data device of a program, the one first in its lists (the clipboard
 //! has another, and gets the clipboard on every one): this one is made anew each time the
 //! windows take or lose the keyboard, which puts it first.
+//!
+//! On the same connection the desktop's own shortcuts (Super, Alt+Tab) are held back from the
+//! main window while a remote screen there has the keys, so they reach the remote host.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -19,6 +22,8 @@ use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1 as InhibitManager;
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1 as Inhibitor};
 
 const URIS: &str = "text/uri-list";
 
@@ -42,6 +47,11 @@ struct Shared {
     seats: Vec<WlSeat>,
     devices: Vec<WlDataDevice>,
     focused: Option<bool>,
+    /// The main window's surface, what holds the desktop's shortcuts back from it, and the
+    /// holds now (one a seat).
+    surface: Option<WlSurface>,
+    inhibit: Option<InhibitManager>,
+    holds: Vec<Inhibitor>,
 }
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
@@ -56,6 +66,9 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
     seats: Vec::new(),
     devices: Vec::new(),
     focused: None,
+    surface: None,
+    inhibit: None,
+    holds: Vec::new(),
 });
 
 /// The data devices made anew (first in GNOME's lists again), the old ones let go.
@@ -78,6 +91,22 @@ fn repaint() {
     if let Some(c) = &shared().ctx {
         c.request_repaint();
     }
+}
+
+/// Holds the desktop's shortcuts back from the main window, or lets them be again. GNOME asks the
+/// person once whether to allow it.
+pub(crate) fn hold_shortcuts(on: bool) {
+    let mut sh = shared();
+    if on == !sh.holds.is_empty() {
+        return;
+    }
+    let (Some((conn, qh)), Some(m), Some(surface)) = (sh.conn.clone(), sh.inhibit.clone(), sh.surface.clone()) else { return };
+    if on {
+        sh.holds = sh.seats.iter().map(|seat| m.inhibit_shortcuts(&surface, seat, &qh, ())).collect();
+    } else {
+        sh.holds.drain(..).for_each(|h| h.destroy());
+    }
+    let _ = conn.flush();
 }
 
 /// Starts listening, once, on the window system `frame`'s window is on.
@@ -108,6 +137,7 @@ fn listen(display: *mut std::ffi::c_void, surface: *mut std::ffi::c_void) -> Res
     // SAFETY: the main window's surface, alive while the program runs.
     let main = unsafe { wayland_backend::client::ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }.map_err(|e| e.to_string())?;
     shared().main = Some(main.protocol_id());
+    shared().surface = WlSurface::from_id(&conn, main.clone()).ok();
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
     shared().conn = Some((conn.clone(), qh.clone()));
@@ -142,11 +172,23 @@ impl Dispatch<WlRegistry, ()> for State {
                 // Version 2 lets a device go (`release`).
                 "wl_seat" => sh.seats.push(registry.bind::<WlSeat, _, _>(name, version.min(2), qh, ())),
                 "wl_data_device_manager" => sh.manager = Some(registry.bind::<WlDataDeviceManager, _, _>(name, version.min(3), qh, ())),
+                "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
+                    sh.inhibit = Some(registry.bind::<InhibitManager, _, _>(name, 1, qh, ()));
+                    return;
+                }
                 _ => return,
             }
             renew(&mut sh);
         }
     }
+}
+
+impl Dispatch<InhibitManager, ()> for State {
+    fn event(_: &mut State, _: &InhibitManager, _: <InhibitManager as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<State>) {}
+}
+
+impl Dispatch<Inhibitor, ()> for State {
+    fn event(_: &mut State, _: &Inhibitor, _: zwp_keyboard_shortcuts_inhibitor_v1::Event, _: &(), _: &Connection, _: &QueueHandle<State>) {}
 }
 
 impl Dispatch<WlSeat, ()> for State {
@@ -350,6 +392,48 @@ pub(crate) fn point(ctx: &Context) -> Option<Pos2> {
     }
     let (x, y) = x11_pointer()?;
     Some(super::workspace::window_point(ctx, Pos2::new(x as f32, y as f32)))
+}
+
+/// While a remote screen in the main window has the keys, the desktop's own shortcuts (Super,
+/// Alt+Tab) reach it: under X11 the window takes the keyboard (on winit's own connection, so its
+/// keys come as ever), under Wayland the compositor is asked to hold them back.
+pub(crate) fn hold_keys(frame: &eframe::Frame, on: bool) {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+    use x11_dl::xlib::{CurrentTime, GrabModeAsync, GrabSuccess, Xlib};
+    static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static TRIED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    static XLIB: std::sync::OnceLock<Option<Xlib>> = std::sync::OnceLock::new();
+    let held = HELD.load(std::sync::atomic::Ordering::Relaxed);
+    if on == held {
+        return;
+    }
+    let (Ok(d), Ok(w)) = (frame.display_handle(), frame.window_handle()) else { return };
+    match (d.as_raw(), w.as_raw()) {
+        (RawDisplayHandle::Xlib(d), RawWindowHandle::Xlib(w)) => {
+            let (Some(dpy), Some(xlib)) = (d.display, XLIB.get_or_init(|| Xlib::open().ok())) else { return };
+            let dpy = dpy.as_ptr().cast();
+            // A grab another program holds (a menu, the window switcher) is tried again shortly.
+            let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+            if on && tried.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500)) {
+                return;
+            }
+            let now = unsafe {
+                let now = if on { (xlib.XGrabKeyboard)(dpy, w.window, 1, GrabModeAsync, GrabModeAsync, CurrentTime) == GrabSuccess } else {
+                    (xlib.XUngrabKeyboard)(dpy, CurrentTime);
+                    false
+                };
+                (xlib.XFlush)(dpy);
+                now
+            };
+            *tried = (on && !now).then(std::time::Instant::now);
+            HELD.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+        (RawDisplayHandle::Wayland(_), _) => {
+            hold_shortcuts(on);
+            HELD.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+        _ => {}
+    }
 }
 
 /// The pointer on the X screen, in pixels.

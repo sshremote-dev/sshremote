@@ -5,16 +5,21 @@
 use std::time::Instant;
 
 use crate::xk;
-use super::{Capture, Image, Input, scale_nearest};
+use super::{Capture, Image, Input};
 
 const W: usize = 1280;
 const H: usize = 720;
 
 pub struct Synthetic {
     target: (usize, usize),
+    /// The picture made smaller for the viewer, by area averaging.
+    shrink: super::Shrink,
     start: Instant,
     tick: u64,
     pointer: (usize, usize),
+    /// The viewer draws the pointer (its shape sent once).
+    apart: bool,
+    shape_sent: bool,
     typed: Vec<u32>,
     clicks: u32,
     scrolled: usize,
@@ -30,9 +35,12 @@ impl Synthetic {
     pub fn new() -> Synthetic {
         Synthetic {
             target: (W, H),
+            shrink: super::Shrink::default(),
             start: Instant::now(),
             tick: u64::MAX,
             pointer: (W / 2, H / 2),
+            apart: false,
+            shape_sent: false,
             typed: Vec::new(),
             clicks: 0,
             scrolled: 0,
@@ -96,9 +104,11 @@ impl Synthetic {
                 }
             }
         }
-        let (px0, py0) = self.pointer;
-        fill(px0.saturating_sub(1), py0.saturating_sub(1), 12, 12, [0, 0, 0]);
-        fill(px0, py0, 10, 10, [255, 255, 255]);
+        if !self.apart {
+            let (px0, py0) = self.pointer;
+            fill(px0.saturating_sub(1), py0.saturating_sub(1), 12, 12, [0, 0, 0]);
+            fill(px0, py0, 10, 10, [255, 255, 255]);
+        }
         px
     }
 }
@@ -138,6 +148,20 @@ impl Capture for Synthetic {
         Ok(())
     }
 
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        (self.apart, self.shape_sent, self.dirty) = (on, false, true);
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        // The same square as drawn in the picture otherwise: white in a black rim.
+        let shape = (!std::mem::replace(&mut self.shape_sent, true)).then(|| {
+            let rgba = (0..144).flat_map(|i| if (1..11).contains(&(i % 12)) && (1..11).contains(&(i / 12)) { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
+            super::Pointer { w: 12, h: 12, hot: (1, 1), rgba }
+        });
+        (shape, Some((self.pointer.0 as i32, self.pointer.1 as i32)))
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         let tick = self.start.elapsed().as_millis() as u64 / 500;
         if tick == self.tick && !self.dirty && self.playing.is_none() {
@@ -149,7 +173,7 @@ impl Capture for Synthetic {
         self.tick = tick;
         self.dirty = false;
         let (w, h) = self.target;
-        Ok(Some(scale_nearest(&self.render(), W, H, W * 4, w, h)))
+        Ok(Some(self.shrink.image(&self.render(), W, H, W * 4, w, h)))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

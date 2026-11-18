@@ -23,6 +23,10 @@ pub type ScreenModes = (Vec<(u16, u16)>, (u16, u16), (u16, u16));
 
 /// True colour frames whose text and drawings index a palette kept for the session (`color::Palette`).
 pub const FORMAT_PALETTE: u8 = 1;
+/// The viewer draws the pointer itself, from its shape and place (`ToClient::PointerShape`,
+/// `ToClient::PointerAt`), right where its own mouse is: the pictures leave it out, so moving
+/// it costs no pictures and shows no delay. Not in `FORMATS`: a terminal cannot draw it apart.
+pub const FORMAT_POINTER: u8 = 2;
 /// Every form this program reads.
 pub const FORMATS: u8 = FORMAT_PALETTE;
 
@@ -33,10 +37,12 @@ pub struct Preset {
     pub fps: u8,
 }
 
+/// Fewer colours cost fewer bytes, never fewer frames or pixels: a black and white picture is the
+/// quickest to follow, and a smaller one only blurs.
 pub const PRESETS: [Preset; 5] = [
-    Preset { name: "glance", scale: 50, mode: Mode::Mono, fps: 5 },
-    Preset { name: "lean", scale: 75, mode: Mode::Gray16, fps: 10 },
-    Preset { name: "balanced", scale: 100, mode: Mode::Color256, fps: 20 },
+    Preset { name: "glance", scale: 100, mode: Mode::Mono, fps: 30 },
+    Preset { name: "lean", scale: 100, mode: Mode::Gray16, fps: 30 },
+    Preset { name: "balanced", scale: 100, mode: Mode::Color256, fps: 30 },
     Preset { name: "crisp", scale: 100, mode: Mode::True, fps: 30 },
     Preset { name: "exact", scale: 100, mode: Mode::True, fps: 60 },
 ];
@@ -343,6 +349,17 @@ pub enum ToClient {
     Frame(Frame),
     Error(String),
     Pong(u32),
+    /// The pointer's picture (RGBA, not premultiplied) and the pixel of it that points, in the
+    /// host's pixels; sent as it changes, to a viewer that draws the pointer itself.
+    PointerShape {
+        w: u16,
+        h: u16,
+        hot_x: u16,
+        hot_y: u16,
+        rgba: Vec<u8>,
+    },
+    /// Where the pointer is on the shared area, in the host's pixels; None while it is hidden.
+    PointerAt(Option<(i16, i16)>),
     /// Text now on the remote clipboard.
     Clipboard(String),
     /// A picture copied on the remote computer (a screenshot), as PNG.
@@ -959,6 +976,20 @@ impl ToClient {
                 b.extend_from_slice(&t.to_le_bytes());
                 104
             }
+            ToClient::PointerShape { w, h, hot_x, hot_y, rgba } => {
+                for v in [w, h, hot_x, hot_y] {
+                    b.extend_from_slice(&v.to_le_bytes());
+                }
+                b.extend_from_slice(rgba);
+                139
+            }
+            ToClient::PointerAt(at) => {
+                if let Some((x, y)) = at {
+                    b.extend_from_slice(&x.to_le_bytes());
+                    b.extend_from_slice(&y.to_le_bytes());
+                }
+                140
+            }
             ToClient::Clipboard(t) => {
                 b.extend_from_slice(t.as_bytes());
                 105
@@ -1235,6 +1266,12 @@ impl ToClient {
             }
             103 => ToClient::Error(String::from_utf8_lossy(c.rest()).into_owned()),
             104 => ToClient::Pong(c.u32()?),
+            139 => {
+                let (w, h, hot_x, hot_y) = (c.u16()?, c.u16()?, c.u16()?, c.u16()?);
+                let rgba = c.take(w as usize * h as usize * 4)?.to_vec();
+                ToClient::PointerShape { w, h, hot_x, hot_y, rgba }
+            }
+            140 => ToClient::PointerAt(if c.p < c.d.len() { Some((c.u16()? as i16, c.u16()? as i16)) } else { None }),
             105 => ToClient::Clipboard(String::from_utf8_lossy(c.rest()).into_owned()),
             135 => ToClient::ClipImage(c.rest().to_vec()),
             106 => {
@@ -1463,6 +1500,9 @@ mod tests {
                 error: String::new(),
             },
             ToClient::Sharing { kind: 1, text: "Inbox".into() },
+            ToClient::PointerShape { w: 2, h: 1, hot_x: 1, hot_y: 0, rgba: vec![1, 2, 3, 4, 5, 6, 7, 8] },
+            ToClient::PointerAt(Some((-3, 700))),
+            ToClient::PointerAt(None),
             ToClient::AppList { list: vec![("calc.desktop".into(), "계산기".into(), "Sums".into())], error: String::new() },
             ToClient::Launched { ok: true, text: "Calculator".into() },
             ToClient::UiTree {

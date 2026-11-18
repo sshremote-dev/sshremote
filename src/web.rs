@@ -948,6 +948,8 @@ fn client(
     // The picture's quality, as the app's: auto until the browser asks for another.
     let mut ctl = crate::session::Control::for_preset(None, crate::color::Mode::True);
     (ctl.s.view_w, ctl.s.view_h) = view;
+    // The host's pointer comes apart, to be the browser's own (it moves with no delay at all).
+    ctl.s.formats |= crate::proto::FORMAT_POINTER;
     let mut agent = if open.lazy {
         Agent::Idle
     } else {
@@ -1204,6 +1206,22 @@ fn client(
                     if send(&w, 0x2, &[&[8u8][..], &png].concat()).is_err() {
                         break 'run String::new();
                     }
+                }
+                // The pointer's picture as a PNG with the pixel that points, for the page to use
+                // as its own pointer over the screen.
+                ToClient::PointerShape { w: pw, h: ph, hot_x, hot_y, rgba } => {
+                    let mut png = Vec::new();
+                    let ok = image::ImageEncoder::write_image(image::codecs::png::PngEncoder::new(&mut png), &rgba, pw as u32, ph as u32, image::ExtendedColorType::Rgba8).is_ok();
+                    let head = [9u8, hot_x as u8, (hot_x >> 8) as u8, hot_y as u8, (hot_y >> 8) as u8];
+                    if ok && send(&w, 0x2, &[&head[..], &png].concat()).is_err() {
+                        break 'run String::new();
+                    }
+                }
+                // Where the host has it, in the picture's pixels.
+                ToClient::PointerAt(at) => {
+                    let (dw, dh) = (sess.desk.0.max(1) as f64, sess.desk.1.max(1) as f64);
+                    let at = at.map(|(x, y)| [(x as f64 * fb.w as f64 / dw) as i32, (y as f64 * fb.h as f64 / dh) as i32]);
+                    let _ = send_json(&w, serde_json::json!({ "hostPointer": at }));
                 }
                 _ => {}
             }

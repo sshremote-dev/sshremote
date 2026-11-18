@@ -16,7 +16,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use super::{Capture, Image, Input, Monitor, Share, WindowInfo, scale_nearest};
+use super::{Capture, Image, Input, Monitor, Share, WindowInfo};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
 /// A shared memory segment the X server writes the screen into.
@@ -41,10 +41,16 @@ pub struct X11 {
     screens: Vec<(Monitor, i16, i16)>,
     current: usize,
     target: (usize, usize),
+    /// The picture made smaller for the viewer, by area averaging.
+    shrink: super::Shrink,
     /// Something changed since the last picture: the screen, or the pointer (which draws on no
     /// window, so it makes no damage).
     dirty: bool,
     pointer: (i16, i16, u32),
+    /// The viewer draws the pointer: the pictures leave it out, its shape goes as it changes
+    /// (the serial of the one sent last).
+    apart: bool,
+    sent_shape: u32,
     /// The last picture as read, without the pointer, for a pointer that moved alone.
     clean: Option<Vec<u8>>,
     keys: Keys,
@@ -148,8 +154,11 @@ impl X11 {
             screens: Vec::new(),
             current: 0,
             target: (w, h),
+            shrink: super::Shrink::default(),
             dirty: true,
             pointer: (0, 0, 0),
+            apart: false,
+            sent_shape: 0,
             clean: None,
             keys,
             scope: Scope::Screen,
@@ -489,6 +498,31 @@ impl Capture for X11 {
         Ok(())
     }
 
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        (self.apart, self.sent_shape, self.dirty) = (on, 0, true);
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        let Some(c) = self.conn.xfixes_get_cursor_image().ok().and_then(|c| c.reply().ok()) else { return (None, None) };
+        let (ax, ay, _, _) = self.area();
+        let shape = (c.cursor_serial != self.sent_shape).then(|| {
+            self.sent_shape = c.cursor_serial;
+            // XFixes gives premultiplied ARGB.
+            let rgba = c
+                .cursor_image
+                .iter()
+                .flat_map(|&argb| {
+                    let a = argb >> 24;
+                    let un = |v: u32| ((v & 0xff) * 255).checked_div(a).map_or(0, |q| q.min(255) as u8);
+                    [un(argb >> 16), un(argb >> 8), un(argb), a as u8]
+                })
+                .collect();
+            super::Pointer { w: c.width as usize, h: c.height as usize, hot: (c.xhot as usize, c.yhot as usize), rgba }
+        });
+        (shape, Some((c.x as i32 - ax as i32, c.y as i32 - ay as i32)))
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.follow();
         // What the X server said since the last look: damage, or nothing.
@@ -499,10 +533,14 @@ impl Capture for X11 {
         if damaged && let Some(d) = self.damage {
             self.conn.damage_subtract(d, x11rb::NONE, x11rb::NONE).map_err(err)?;
         }
-        let p = self.conn.query_pointer(self.root).map_err(err)?.reply().map_err(err)?;
-        let serial = self.conn.xfixes_get_cursor_image().ok().and_then(|c| c.reply().ok()).map_or(0, |c| c.cursor_serial);
-        let moved = (p.root_x, p.root_y, serial) != self.pointer;
-        self.pointer = (p.root_x, p.root_y, serial);
+        // A pointer drawn by the viewer moves without a picture.
+        let moved = !self.apart && {
+            let p = self.conn.query_pointer(self.root).map_err(err)?.reply().map_err(err)?;
+            let serial = self.conn.xfixes_get_cursor_image().ok().and_then(|c| c.reply().ok()).map_or(0, |c| c.cursor_serial);
+            let moved = (p.root_x, p.root_y, serial) != self.pointer;
+            self.pointer = (p.root_x, p.root_y, serial);
+            moved
+        };
         if !(damaged || moved || self.dirty || self.clean.is_none()) {
             return Ok(None);
         }
@@ -510,9 +548,11 @@ impl Capture for X11 {
         let mut px = clean.clone();
         self.clean = Some(clean);
         self.dirty = false;
-        self.draw_pointer(&mut px);
+        if !self.apart {
+            self.draw_pointer(&mut px);
+        }
         let (_, _, w, h) = self.area();
-        let img = if self.target == (w, h) { Image { w, h, stride: w * 4, data: px } } else { scale_nearest(&px, w, h, w * 4, self.target.0, self.target.1) };
+        let img = if self.target == (w, h) { Image { w, h, stride: w * 4, data: px } } else { self.shrink.image(&px, w, h, w * 4, self.target.0, self.target.1) };
         Ok(Some(img))
     }
 
@@ -596,6 +636,33 @@ mod tests {
         x.set_target(w / 2, h / 2).unwrap();
         let half = x.grab().unwrap().expect("a picture at the new size");
         assert_eq!((half.w, half.h), (w / 2, h / 2));
+    }
+
+    /// The pointer kept apart: a pointer that moves alone makes no picture, its shape comes once
+    /// with where it is, and the pictures leave it out. SSHREMOTE_X11_TEST=1 DISPLAY=:N cargo
+    /// test -- --ignored the_x11_pointer_comes_apart
+    #[test]
+    #[ignore]
+    fn the_x11_pointer_comes_apart() {
+        if std::env::var_os("SSHREMOTE_X11_TEST").is_none() {
+            return;
+        }
+        let mut x = X11::open().expect("an X display");
+        x.input(Input::Move { x: 50.0, y: 60.0 }).unwrap();
+        assert!(x.pointer_apart(true));
+        let with_none = x.grab().unwrap().expect("a picture without the pointer");
+        let (shape, at) = x.pointer();
+        let shape = shape.expect("its shape, the first time");
+        assert!(shape.w > 0 && shape.rgba.len() == shape.w * shape.h * 4);
+        assert_eq!(at, Some((50, 60)));
+        assert!(x.pointer().0.is_none(), "the same shape is not sent again");
+        x.input(Input::Move { x: 200.0, y: 150.0 }).unwrap();
+        assert!(x.grab().unwrap().is_none(), "a pointer moving alone makes no picture");
+        assert_eq!(x.pointer().1, Some((200, 150)));
+        // Put back into the pictures, it shows there again.
+        assert!(x.pointer_apart(false));
+        let with = x.grab().unwrap().expect("a picture with the pointer");
+        assert_ne!(with.data, with_none.data, "the pointer drawn in");
     }
 
     fn xk_unicode(c: char) -> u32 {

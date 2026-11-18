@@ -8,7 +8,7 @@ use gstreamer as gst;
 
 use super::gnome::{Pipe, pipeline, to_image};
 use super::portal::Portal;
-use super::{Capture, Image, Input, scale_nearest};
+use super::{Capture, Image, Input};
 
 /// The portal's session and the stream it gives (the stream ends first).
 struct Live {
@@ -25,6 +25,8 @@ pub struct Wayland {
     wl: Option<super::wlinput::WlInput>,
     desk: (usize, usize),
     target: (usize, usize),
+    /// The picture made smaller for the viewer, by area averaging.
+    shrink: super::Shrink,
     /// The newest picture, and whether it is to be given again (the first look, a new size): a
     /// desktop sends a frame only when its screen changes.
     last: Image,
@@ -55,7 +57,7 @@ impl Wayland {
         // Keys through a virtual keyboard where the compositor offers one (it types any character;
         // COSMIC's portal may not pass keys on), the rest through the portal.
         let wl = super::wlinput::WlInput::open().ok().filter(|w| w.has_pointer() || portal.controls());
-        Ok(Wayland { controls: portal.controls(), live: Some(Live { pipe, portal }), wl, desk: (img.w, img.h), target: (img.w, img.h), last: img, again: true })
+        Ok(Wayland { controls: portal.controls(), live: Some(Live { pipe, portal }), wl, desk: (img.w, img.h), target: (img.w, img.h), shrink: super::Shrink::default(), last: img, again: true })
     }
 
     /// Whether input reaches the desktop (it has the remote-desktop portal).
@@ -112,7 +114,7 @@ impl Capture for Wayland {
         if self.target == (img.w, img.h) {
             return Ok(Some(Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() }));
         }
-        Ok(Some(scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
+        Ok(Some(self.shrink.image(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)))
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

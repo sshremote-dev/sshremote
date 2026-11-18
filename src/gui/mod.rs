@@ -669,7 +669,7 @@ fn menu_open(ctx: &egui::Context) -> bool {
     last.is_some_and(|p| p + 2 >= ctx.cumulative_pass_nr())
 }
 
-/// A preset's real settings, e.g. "256 colours, 100%, 20 fps".
+/// A preset's real settings, e.g. "256 colours, 100%, 30 fps".
 fn preset_text(p: &crate::proto::Preset) -> String {
     format!("{}, {}% size, {} fps", p.mode.label(), p.scale, p.fps)
 }
@@ -1032,6 +1032,8 @@ impl eframe::App for App {
         self.grab_window = if main_grab { None } else { window_grab };
         #[cfg(windows)]
         crate::keygrab::set_active(main_grab || window_grab.is_some());
+        #[cfg(target_os = "linux")]
+        wl_drop::hold_keys(frame, main_grab);
         self.reached(reached);
         // `sshremote terminal` ends with its last pane, unless tabs live on in other windows.
         if closing {

@@ -971,6 +971,10 @@ pub fn run(opt: Options) -> Result<(), String> {
     let keys_total = typing.len();
     let mut next_key = Instant::now() + Duration::from_secs(2);
     let mut type_start = (0u64, 0u32);
+    // When the last input went, and how long each took to come back as a changed picture.
+    let (mut sent_at, mut answers): (Option<Instant>, Vec<f64>) = (None, Vec::new());
+    // The pictures' bytes as film and as tiles.
+    let (mut film, mut tiles) = (0usize, 0usize);
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
         if opt.sound {
@@ -1004,7 +1008,14 @@ pub fn run(opt: Options) -> Result<(), String> {
             // Quick turns while files are being sent, so they go at the link's pace.
             let wait = if v.uploads.is_empty() { 250 } else { 2 };
             match rx.recv_timeout(Duration::from_millis(wait)) {
-                Ok(Ev::Net(ToClient::Frame(f))) => v.apply(f)?,
+                Ok(Ev::Net(ToClient::Frame(f))) => {
+                    if !f.tiles.is_empty() || f.video.is_some() || !f.moves.is_empty() {
+                        answers.extend(sent_at.take().map(|t| t.elapsed().as_secs_f64() * 1000.0));
+                    }
+                    film += f.video.as_ref().map_or(0, |v| v.data.len());
+                    tiles += f.tiles.iter().map(|t| t.data.len()).sum::<usize>();
+                    v.apply(f)?
+                }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
                     failure = Some(e);
                     break;
@@ -1018,6 +1029,7 @@ pub fn run(opt: Options) -> Result<(), String> {
                 if typing.len() == keys_total {
                     type_start = (v.sess.rx(), v.ctl.frames);
                 }
+                sent_at = Some(Instant::now());
                 v.sess.send(typing.pop().unwrap())?;
                 next_key = Instant::now() + Duration::from_millis(500);
             }
@@ -1029,6 +1041,9 @@ pub fn run(opt: Options) -> Result<(), String> {
                 v.status()?;
             }
         }
+        if v.probe.is_some() {
+            eprintln!("probe: pictures as film {:.1} KB, as tiles {:.1} KB (before the link's compression)", film as f64 / 1024.0, tiles as f64 / 1024.0);
+        }
         if opt.sound && v.probe.is_some() {
             eprintln!("probe: sound {:.1} KB", v.audio_bytes as f64 / 1024.0);
         }
@@ -1039,6 +1054,12 @@ pub fn run(opt: Options) -> Result<(), String> {
                 v.ctl.frames - type_start.1,
                 rx as f64 / keys_total as f64
             );
+            // From an input to the first changed picture after it (a screen that changes on its
+            // own meanwhile answers sooner).
+            answers.sort_by(f64::total_cmp);
+            if let (Some(mid), Some(most)) = (answers.get(answers.len() / 2), answers.last()) {
+                eprintln!("probe: input to picture {mid:.0} ms (median of {}), at most {most:.0} ms", answers.len());
+            }
         }
         Ok(())
     })();

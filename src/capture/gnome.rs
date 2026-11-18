@@ -74,6 +74,8 @@ pub struct Gnome {
     /// resolution changes, which the mode list can lag behind).
     screen: (usize, usize),
     target: (usize, usize),
+    /// The picture made smaller for the viewer, by area averaging.
+    shrink: super::Shrink,
     pipe: Option<Pipe>,
     src: Src,
     app: Option<AppShare>,
@@ -415,6 +417,7 @@ impl Gnome {
             desk,
             screen,
             target: desk,
+            shrink: super::Shrink::default(),
             pipe: Some(pipe),
             src,
             app: None,
@@ -981,7 +984,7 @@ impl Capture for Gnome {
             if self.target == self.desk {
                 return Ok(Some(img));
             }
-            return Ok(Some(super::scale_nearest(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)));
+            return Ok(Some(self.shrink.image(&img.data, img.w, img.h, img.stride, self.target.0, self.target.1)));
         }
         // A window stream's buffers can be larger than the window; the window is the crop area.
         // Mutter marks a monitor's frames with an empty crop.
@@ -1002,7 +1005,7 @@ impl Capture for Gnome {
         }
         let from = &frame.data[cy * frame.stride + cx * 4..];
         if self.target != self.desk {
-            return Ok(Some(super::scale_nearest(from, cw, ch, frame.stride, self.target.0, self.target.1)));
+            return Ok(Some(self.shrink.image(from, cw, ch, frame.stride, self.target.0, self.target.1)));
         }
         let mut data = Vec::with_capacity(cw * ch * 4);
         for y in 0..ch {

@@ -400,6 +400,7 @@ impl Remote {
     /// Copies changed pixels into the texture.
     pub(in crate::gui) fn upload(&mut self, ctx: &egui::Context, resized: bool, f: &crate::proto::Frame) {
         let (w, h) = (self.fb.w, self.fb.h);
+        self.fb_dirty = true;
         let opts = TextureOptions::LINEAR;
         match self.tex.as_mut() {
             Some(t) if !resized && t.size() == [w, h] => {

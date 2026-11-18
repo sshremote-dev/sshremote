@@ -1,15 +1,15 @@
 //! Windows backend: the monitor's picture from Desktop Duplication when it changed (GDI copies
 //! when duplication is not available: another session, the secure desktop, a window across
-//! monitors), scaled by StretchBlt when a smaller target is asked for, and SendInput for
+//! monitors), made smaller by area averaging when a smaller target is asked for, and SendInput for
 //! keyboard and mouse.
 
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, COLORONCOLOR, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
+    MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, SetThreadDesktop};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -97,12 +97,19 @@ pub struct Gdi {
     /// Desktop Duplication of the monitor, and the monitor-sized picture it fills.
     dup: Option<super::dxgi::Dup>,
     base: Option<Dib>,
+    /// The whole area, copied from the screen to be made smaller, and what makes it so.
+    full: Option<Dib>,
+    shrink: super::Shrink,
     /// The duplicated picture is complete (its first frame arrived).
     dup_ready: bool,
     /// When duplication may be tried again after it failed.
     dup_retry: std::time::Instant,
     /// The next grab returns a picture even if the screen did not change (new size or scope).
     force: bool,
+    /// The viewer draws the pointer: the pictures leave it out, its shape goes as it changes
+    /// (the handle of the one sent last).
+    apart: bool,
+    sent_cursor: usize,
     /// When the monitors were last looked at for a change of mode or layout; None: look now.
     layout_at: Option<std::time::Instant>,
 }
@@ -191,9 +198,13 @@ impl Gdi {
                 ended: false,
                 dup: None,
                 base: None,
+                full: None,
+                shrink: super::Shrink::default(),
                 dup_ready: false,
                 dup_retry: std::time::Instant::now(),
                 force: true,
+                apart: false,
+                sent_cursor: 0,
                 layout_at: Some(std::time::Instant::now()),
             };
             g.set_target(desk.0, desk.1)?;
@@ -213,7 +224,9 @@ impl Gdi {
 
     /// Copies the captured area into the target bitmap, from the screen or from the duplicated
     /// picture (`src` with its top-left at `at` on the virtual desktop).
-    fn blit_from(&self, src: HDC, at: (i32, i32)) -> bool {
+    /// A smaller target is made from the whole area by area averaging: StretchBlt either drops
+    /// pixels (strokes of text with them) or is slow.
+    fn blit_from(&mut self, src: HDC, at: (i32, i32)) -> bool {
         let (w, h) = (self.target.0 as i32, self.target.1 as i32);
         let (dw, dh) = (self.desk.0 as i32, self.desk.1 as i32);
         let (x, y) = (self.origin.0 - at.0, self.origin.1 - at.1);
@@ -222,15 +235,39 @@ impl Gdi {
         let rop = if src == self.screen { SRCCOPY | CAPTUREBLT } else { SRCCOPY };
         unsafe {
             if (w, h) == (dw, dh) {
-                BitBlt(self.mem, 0, 0, w, h, src, x, y, rop) != 0
-            } else {
-                SetStretchBltMode(self.mem, COLORONCOLOR);
-                StretchBlt(self.mem, 0, 0, w, h, src, x, y, dw, dh, rop) != 0
+                return BitBlt(self.mem, 0, 0, w, h, src, x, y, rop) != 0;
             }
+            GdiFlush();
+            let (sw, sh) = self.desk;
+            // The duplicated picture is read where it is; the screen is copied whole first.
+            let from: &[u8] = match self.base.as_mut() {
+                Some(b) if b.dc == src && x >= 0 && y >= 0 && x as usize + sw <= b.w && y as usize + sh <= b.h => {
+                    let at = y as usize * b.w * 4 + x as usize * 4;
+                    let stride = b.w * 4;
+                    let px = b.pixels();
+                    let out = self.shrink.run(&px[at..], sw, sh, stride, w as usize, h as usize);
+                    std::ptr::copy_nonoverlapping(out.as_ptr(), self.bits, out.len());
+                    return true;
+                }
+                _ => {
+                    if self.full.as_ref().is_none_or(|f| (f.w, f.h) != (sw, sh)) {
+                        self.full = Dib::new(self.screen, sw, sh);
+                    }
+                    let Some(full) = self.full.as_mut() else { return false };
+                    if BitBlt(full.dc, 0, 0, dw, dh, src, x, y, rop) == 0 {
+                        return false;
+                    }
+                    GdiFlush();
+                    full.pixels()
+                }
+            };
+            let out = self.shrink.run(from, sw, sh, sw * 4, w as usize, h as usize);
+            std::ptr::copy_nonoverlapping(out.as_ptr(), self.bits, out.len());
         }
+        true
     }
 
-    fn blit(&self) -> bool {
+    fn blit(&mut self) -> bool {
         self.blit_from(self.screen, (0, 0))
     }
 
@@ -377,7 +414,9 @@ impl Gdi {
     /// The target bitmap with the pointer drawn on it and, while a window is shared, the rest
     /// greyed out.
     fn finish(&self) -> Image {
-        self.draw_cursor();
+        if !self.apart {
+            self.draw_cursor();
+        }
         let (w, h) = self.target;
         let mut data = unsafe {
             GdiFlush();
@@ -406,6 +445,104 @@ impl Gdi {
             DeleteObject(ii.hbmMask);
             DeleteObject(ii.hbmColor);
         }
+    }
+}
+
+/// A pointer's picture as RGBA. A monochrome one (the text cursor) and a colour one without
+/// alpha may invert what is under them: those pixels come out black, with a white rim around
+/// them to stay in sight on dark backgrounds, as other remote desktops draw them.
+unsafe fn cursor_shape(hc: windows_sys::Win32::UI::WindowsAndMessaging::HCURSOR) -> Option<super::Pointer> {
+    use windows_sys::Win32::Graphics::Gdi::{BITMAP, GetDIBits, GetObjectW};
+    unsafe {
+        let mut ii: ICONINFO = std::mem::zeroed();
+        if GetIconInfo(hc, &mut ii) == 0 {
+            return None;
+        }
+        let mut bm: BITMAP = std::mem::zeroed();
+        GetObjectW(ii.hbmMask, size_of::<BITMAP>() as i32, &mut bm as *mut BITMAP as *mut core::ffi::c_void);
+        let mono = ii.hbmColor.is_null();
+        let w = bm.bmWidth.max(0) as usize;
+        let h = if mono { bm.bmHeight.max(0) as usize / 2 } else { bm.bmHeight.max(0) as usize };
+        let dc = CreateCompatibleDC(null_mut());
+        let read = |hbm: HBITMAP, rows: usize| -> Option<Vec<u8>> {
+            let mut bi: BITMAPINFO = std::mem::zeroed();
+            bi.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(rows as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut px = vec![0u8; w * rows * 4];
+            let got = GetDIBits(dc, hbm, 0, rows as u32, px.as_mut_ptr() as *mut core::ffi::c_void, &mut bi, DIB_RGB_COLORS);
+            (got == rows as i32).then_some(px)
+        };
+        let mask = read(ii.hbmMask, if mono { h * 2 } else { h });
+        let color = if mono { None } else { read(ii.hbmColor, h) };
+        DeleteDC(dc);
+        DeleteObject(ii.hbmMask);
+        if !mono {
+            DeleteObject(ii.hbmColor);
+        }
+        let mask = mask?;
+        let n = w * h;
+        if n == 0 {
+            return None;
+        }
+        let mut rgba = vec![0u8; n * 4];
+        let mut inverted = vec![false; n];
+        match color {
+            Some(c) => {
+                let alpha = c.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
+                for i in 0..n {
+                    let (b, g, r, a) = (c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]);
+                    let shows_through = mask[i * 4] != 0;
+                    let px = if alpha {
+                        [r, g, b, a]
+                    } else if !shows_through {
+                        [r, g, b, 255]
+                    } else if (r | g | b) != 0 {
+                        inverted[i] = true;
+                        [0, 0, 0, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    };
+                    rgba[i * 4..i * 4 + 4].copy_from_slice(&px);
+                }
+            }
+            // The AND mask over the XOR one.
+            None => {
+                for i in 0..n {
+                    let px = match (mask[i * 4] != 0, mask[(n + i) * 4] != 0) {
+                        (false, false) => [0, 0, 0, 255],
+                        (false, true) => [255, 255, 255, 255],
+                        (true, false) => [0, 0, 0, 0],
+                        (true, true) => {
+                            inverted[i] = true;
+                            [0, 0, 0, 255]
+                        }
+                    };
+                    rgba[i * 4..i * 4 + 4].copy_from_slice(&px);
+                }
+            }
+        }
+        if inverted.iter().any(|&v| v) {
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if rgba[i * 4 + 3] != 0 {
+                        continue;
+                    }
+                    let near = (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| inverted[yy * w + xx]));
+                    if near {
+                        rgba[i * 4..i * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+            }
+        }
+        Some(super::Pointer { w, h, hot: (ii.xHotspot as usize, ii.yHotspot as usize), rgba })
     }
 }
 
@@ -557,6 +694,28 @@ impl Capture for Gdi {
             (self.bmp, self.bits, self.target) = (bmp, bits as *mut u8, (w, h));
         }
         Ok(())
+    }
+
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        (self.apart, self.sent_cursor, self.force) = (on, 0, true);
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        unsafe {
+            let mut ci: CURSORINFO = std::mem::zeroed();
+            ci.cbSize = size_of::<CURSORINFO>() as u32;
+            if GetCursorInfo(&mut ci) == 0 || ci.flags & CURSOR_SHOWING == 0 {
+                return (None, None);
+            }
+            let shape = if ci.hCursor as usize != self.sent_cursor {
+                self.sent_cursor = ci.hCursor as usize;
+                cursor_shape(ci.hCursor)
+            } else {
+                None
+            };
+            (shape, Some((ci.ptScreenPos.x - self.origin.0, ci.ptScreenPos.y - self.origin.1)))
+        }
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
@@ -805,4 +964,48 @@ pub fn needs_relay() -> bool {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     let mut mine = 0;
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut mine) != 0 && mine != WTSGetActiveConsoleSessionId() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The system's own pointers come apart as pictures: the arrow, and the text cursor, which
+    /// inverts what is under it and so comes with a white rim. No screen is read.
+    /// sshremote-test.exe --ignored windows_pointers_come_as_pictures
+    #[test]
+    #[ignore]
+    fn windows_pointers_come_as_pictures() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IDC_ARROW, IDC_IBEAM, LoadCursorW};
+        for (name, id) in [("arrow", IDC_ARROW), ("text", IDC_IBEAM)] {
+            let p = unsafe { cursor_shape(LoadCursorW(null_mut(), id)) }.unwrap_or_else(|| panic!("the {name} pointer"));
+            assert!(p.w > 0 && p.h > 0 && p.rgba.len() == p.w * p.h * 4, "{name}: {}x{}", p.w, p.h);
+            let opaque = p.rgba.chunks(4).filter(|c| c[3] > 128).count();
+            assert!(opaque > 10 && opaque < p.w * p.h, "{name}: {opaque} opaque pixels");
+            assert!(p.hot.0 < p.w && p.hot.1 < p.h, "{name}: its point inside it");
+            let dark = p.rgba.chunks(4).any(|c| c[3] > 128 && c[0] < 64);
+            let light = p.rgba.chunks(4).any(|c| c[3] > 128 && c[0] > 192);
+            assert!(dark && light, "{name}: dark with a light rim, or the other way round");
+        }
+    }
+
+    /// A smaller picture is the mean of what it covers: one-pixel lines halved come out grey,
+    /// where dropping every other column would leave them all black or all white. Drawn in a
+    /// bitmap of its own; no screen is read.
+    #[test]
+    #[ignore]
+    fn a_smaller_picture_is_averaged_on_windows() {
+        let mut g = Gdi::open().expect("GDI");
+        let (dw, dh) = g.desk;
+        let mut lines = Dib::new(g.screen, dw, dh).expect("a bitmap");
+        for (i, px) in lines.pixels().chunks_exact_mut(4).enumerate() {
+            let v = if i % dw % 2 == 0 { 0 } else { 255 };
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        g.set_target(dw / 2, dh / 2).unwrap();
+        let at = g.origin;
+        assert!(g.blit_from(lines.dc, at), "copied and made smaller");
+        let out = unsafe { std::slice::from_raw_parts(g.bits, (dw / 2) * (dh / 2) * 4) };
+        assert!(out.chunks(4).take(dw / 2 * 10).all(|c| (120..=135).contains(&c[1])), "grey: {:?}", &out[..16]);
+    }
 }

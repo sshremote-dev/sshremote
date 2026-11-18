@@ -546,6 +546,9 @@ impl Remote {
                 if cfg!(windows) {
                     let tip = "While this screen is the active pane, Win, Alt+Tab, Alt+Esc, Ctrl+Esc and Print Screen go to the SSH host instead of this PC";
                     ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
+                } else if cfg!(target_os = "linux") {
+                    let tip = "While this screen is the active pane and the pointer is over it, Super, Alt+Tab and the desktop's other shortcuts go to the SSH host instead of this computer";
+                    ui.checkbox(&mut self.grab_keys, "Send system keys").on_hover_text(tip);
                 }
                 ui.separator();
                 if ui.button("Repaint the whole screen").clicked() {

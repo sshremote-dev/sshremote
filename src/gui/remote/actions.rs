@@ -7,6 +7,8 @@ struct Harness {
     clock: f64,
     size: Vec2,
     shapes: Vec<egui::epaint::ClippedShape>,
+    /// The pointer's look asked of the window in the last frame.
+    cursor: egui::CursorIcon,
     snap: super::super::snapshot::Snap,
 }
 
@@ -28,7 +30,7 @@ impl Harness {
         let r = Remote::new(sess, rx, ctl, "test desktop".into(), None);
         let ctx = egui::Context::default();
         crate::gui::style(&ctx);
-        let mut h = Harness { ctx, r, clock: 0.0, size, shapes: Vec::new(), snap: Default::default() };
+        let mut h = Harness { ctx, r, clock: 0.0, size, shapes: Vec::new(), cursor: egui::CursorIcon::Default, snap: Default::default() };
         // The first picture arrives.
         for _ in 0..40 {
             h.frame(Vec::new()).unwrap();
@@ -66,7 +68,20 @@ impl Harness {
             }
         });
         self.shapes = out.shapes;
+        self.cursor = out.platform_output.cursor_icon;
         result
+    }
+
+    /// Whether a picture was drawn with its top-left corner at `at` (within a pixel).
+    fn drawn_image_at(&self, at: Pos2) -> bool {
+        fn find(shape: &egui::Shape, at: Pos2) -> bool {
+            match shape {
+                egui::Shape::Mesh(m) => m.texture_id != egui::TextureId::default() && m.vertices.first().is_some_and(|v| (v.pos - at).length() < 1.0),
+                egui::Shape::Vec(v) => v.iter().any(|s| find(s, at)),
+                _ => false,
+            }
+        }
+        self.shapes.iter().any(|c| find(&c.shape, at))
     }
 
     /// Where text containing `what` was drawn, the topmost (popups are drawn last).
@@ -189,6 +204,61 @@ fn alt_tab_reaches_the_host_with_alt() {
     assert!(h.r.held.contains(&ALT_L), "held there");
     show(&mut h, egui::Modifiers::NONE, Vec::new());
     assert!(!h.r.mods.alt && !h.r.held.contains(&ALT_L), "and let go");
+}
+
+/// Tab with the toolbar in sight goes to the host, and so does every key after it: egui would
+/// give Tab to the toolbar's first button and keep the keys in this window. Esc and the arrows
+/// likewise stay the host's.
+#[test]
+#[ignore]
+fn tab_and_the_keys_after_it_reach_the_host() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    h.frame(Vec::new()).unwrap();
+    let key = |key, pressed| Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+    for (k, sym) in [(Key::Tab, xk::TAB), (Key::A, 'a' as u32), (Key::Tab, xk::TAB), (Key::ArrowDown, xk::DOWN), (Key::Escape, xk::ESCAPE), (Key::B, 'b' as u32)] {
+        h.frame(vec![key(k, true)]).unwrap();
+        assert!(h.r.held.contains(&sym), "{k:?} is down at the host");
+        h.frame(vec![key(k, false)]).unwrap();
+        h.frame(Vec::new()).unwrap();
+        assert!(!h.r.held.contains(&sym), "{k:?} is let go there");
+        assert!(!h.r.keys_elsewhere(&h.ctx), "no button took the keyboard after {k:?}");
+    }
+    // A field of this window that is clicked has the keys, until the picture is clicked again.
+    let field = egui::Id::unique("a field");
+    h.ctx.memory_mut(|m| m.request_focus(field));
+    assert!(h.r.keys_elsewhere(&h.ctx), "the field has them");
+    let at = h.r.last_shown.expect("the picture").center();
+    h.click_at(at).unwrap();
+    assert!(!h.r.keys_elsewhere(&h.ctx), "the picture has them back");
+}
+
+/// The host's pointer comes apart from the pictures and is drawn here where this mouse is, this
+/// window's own arrow hidden over the picture; away from it, it shows where the host has it.
+#[test]
+#[ignore]
+fn the_host_pointer_is_drawn_where_this_mouse_is() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    for _ in 0..40 {
+        h.frame(Vec::new()).unwrap();
+        if h.r.pointer_tex.is_some() && h.r.host_pointer.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(h.r.pointer_tex.is_some(), "its shape came");
+    assert_eq!(h.r.host_pointer, Some((640, 360)), "and where the host has it");
+    let pic = h.r.last_shown.expect("the picture");
+    // Not over the picture: drawn where the host has it, and the arrow is this window's.
+    h.frame(vec![Event::PointerMoved(Pos2::new(pic.right() + 5.0, pic.top() + 5.0))]).unwrap();
+    let k = pic.width() / 1280.0;
+    let at_host = pic.min + Vec2::new(640.0, 360.0) * k - Vec2::splat(k);
+    assert!(h.drawn_image_at(at_host), "drawn at the host's place");
+    assert_ne!(h.cursor, egui::CursorIcon::None);
+    // Over it: drawn right where this mouse is, the arrow hidden.
+    let p = pic.min + Vec2::new(100.0, 80.0);
+    h.frame(vec![Event::PointerMoved(p)]).unwrap();
+    assert!(h.drawn_image_at(p - Vec2::splat(k)), "drawn where this mouse is");
+    assert_eq!(h.cursor, egui::CursorIcon::None);
 }
 
 #[test]

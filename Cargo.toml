@@ -41,9 +41,11 @@ gstreamer = { optional = true, version = "0.25.4" }
 gstreamer-app = { optional = true, version = "0.25.2" }
 gstreamer-video = { optional = true, version = "0.25.4" }
 # Files dropped on the windows (winit takes none under Wayland), on the windows' own connection;
-# where they were let go under X11. All already in the build through winit.
+# where they were let go under X11; the system's shortcuts held back while a remote screen has
+# the keys. All already in the build through winit.
 wayland-client = { optional = true, version = "0.31" }
 wayland-backend = { optional = true, version = "0.3", features = ["client_system"] }
+wayland-protocols = { optional = true, version = "0.32", features = ["client", "unstable"] }
 x11-dl = { optional = true, version = "2.21" }
 raw-window-handle = { optional = true, version = "0.6" }
 # Input for wlroots desktops (Sway, Hyprland), whose portal takes none.
@@ -64,7 +66,7 @@ default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
 remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
-gui = ["dep:eframe", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:x11-dl", "dep:raw-window-handle"]
+gui = ["dep:eframe", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.
 web = ["remote"]
 mcp = ["remote"]

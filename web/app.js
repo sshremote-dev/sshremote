@@ -803,6 +803,7 @@ class Client {
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       // A picture copied on the host; none (too large to come over) still says the host's clipboard is newer.
       else if (b[0] === 8) { this.hostTurn = true; this.hostAt = Date.now(); if (b.length > 1) this.clipImageIn(new Blob([b.subarray(1)], { type: "image/png" })); else this.hostImage = null; }
+      else if (b[0] === 9) this.pointerShape(m.data);
       return;
     }
     const v = JSON.parse(m.data);
@@ -830,6 +831,7 @@ class Client {
     if (v.agent) this.agentUp(v.agent.screen);
     if (v.agentError) this.agentDown(v.agentError);
     if (v.screen) { this.desk = v.screen; this.figures(); }
+    if (v.hostPointer !== undefined) { this.hostPtrAt = v.hostPointer; this.pointerLook(); }
     if (v.exit !== undefined) {
       this.shellEnded = true;
       this.term.write("\r\n\x1b[2m[" + (v.exit || "the shell ended") + " — press a key for a new one]\x1b[0m\r\n");
@@ -966,6 +968,40 @@ class Client {
     this.rt = setTimeout(() => { if (this.view === "screen") this.send({ view: this.want() }); }, 250);
   }
 
+  // The host's pointer, drawn by this page: its picture is the page's own pointer over the screen
+  // (it moves with the mouse, no round trip behind it), and shows where the host has it while
+  // the mouse is elsewhere or the screen is only looked at.
+  pointerShape(data) {
+    const dv = new DataView(data), hx = dv.getUint16(1, true), hy = dv.getUint16(3, true);
+    const r = new FileReader();
+    r.onload = () => { this.ptr = { url: r.result, hx, hy }; this.pointerLook(); };
+    r.readAsDataURL(new Blob([new Uint8Array(data, 5)], { type: "image/png" }));
+  }
+  pointerLook() {
+    const canvas = $("canvas");
+    if (!canvas || !this.ptr) return;
+    canvas.style.cursor = this.viewOnly ? "" : `url(${this.ptr.url}) ${this.ptr.hx} ${this.ptr.hy}, default`;
+    let img = $("hostptr");
+    if (!img) {
+      img = h("img", { id: "hostptr", alt: "" });
+      img.style.cssText = "position:fixed;pointer-events:none;z-index:5;display:none";
+      document.body.append(img);
+    }
+    if (img.getAttribute("src") !== this.ptr.url) img.src = this.ptr.url;
+    const at = this.hostPtrAt;
+    if (!at || this.view !== "screen" || (this.overCanvas && !this.viewOnly)) { img.style.display = "none"; return; }
+    const r = canvas.getBoundingClientRect();
+    let x, y;
+    if (this.viewFit === "fit") {
+      const k = Math.min(r.width / canvas.width, r.height / canvas.height);
+      x = r.left + (r.width - canvas.width * k) / 2 + at[0] * k; y = r.top + (r.height - canvas.height * k) / 2 + at[1] * k;
+    } else {
+      x = r.left + at[0] * r.width / canvas.width; y = r.top + at[1] * r.height / canvas.height;
+    }
+    img.style.left = (x - this.ptr.hx) + "px";
+    img.style.top = (y - this.ptr.hy) + "px";
+    img.style.display = "";
+  }
   agentUp(screen) {
     if (this.ready && this.t.kind !== "id") this.remember();
     this.agent = "up";
@@ -1130,7 +1166,10 @@ class Client {
       }
       if (fingers.size < 2) pair = null;
     };
+    canvas.addEventListener("pointerenter", () => { this.overCanvas = true; this.pointerLook(); });
+    canvas.addEventListener("pointerleave", () => { this.overCanvas = false; this.pointerLook(); });
     canvas.onpointermove = e => {
+      if (!this.overCanvas) { this.overCanvas = true; this.pointerLook(); }
       if (e.pointerType === "touch") { touchMove(e); return; }
       const p = point(e); if (p) send({ move: p });
     };
@@ -1522,6 +1561,7 @@ class Client {
       this.viewOnly = !this.viewOnly;
       if (this.viewOnly) this.releaseKeys();
       $("vscreen").classList.toggle("viewonly", this.viewOnly);
+      this.pointerLook();
       toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
       this.screenTools();
     };

@@ -20,12 +20,22 @@ mod wayland;
 #[cfg(target_os = "linux")]
 mod wlinput;
 pub mod region;
+mod shrink;
+pub use shrink::Shrink;
 pub use crate::shared::{Image, Share, WindowInfo};
 mod synthetic;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
 pub(crate) mod winlist;
+
+/// The pointer's picture, RGBA not premultiplied, and the pixel of it that points.
+pub struct Pointer {
+    pub w: usize,
+    pub h: usize,
+    pub hot: (usize, usize),
+    pub rgba: Vec<u8>,
+}
 
 /// Input in desktop pixel coordinates; keys are X11 keysyms.
 #[derive(Debug)]
@@ -126,6 +136,16 @@ pub trait Capture {
     fn set_density(&mut self, _d: f64) {}
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
+    /// The viewer draws the pointer itself: the pictures leave it out from now on, or put it
+    /// back. False where the backend cannot keep it apart (it stays in the pictures).
+    fn pointer_apart(&mut self, _on: bool) -> bool {
+        false
+    }
+    /// While the pointer is kept apart: its new shape if it changed since the last look, and
+    /// where it is on the captured area, in its pixels (None while it is hidden).
+    fn pointer(&mut self) -> (Option<Pointer>, Option<(i32, i32)>) {
+        (None, None)
+    }
     fn input(&mut self, ev: Input) -> Result<(), String>;
 
     /// Puts `text` into the focused text field as text, where keys cannot type it; false where
@@ -223,16 +243,3 @@ pub struct Pixels<'a> {
     pub data: &'a [u8],
 }
 
-/// Nearest-neighbour BGRx resize for backends that cannot scale themselves.
-pub fn scale_nearest(src: &[u8], sw: usize, sh: usize, sstride: usize, w: usize, h: usize) -> Image {
-    let mut data = vec![0u8; w * h * 4];
-    let xs: Vec<usize> = (0..w).map(|x| (x * sw / w) * 4).collect();
-    for y in 0..h {
-        let srow = &src[(y * sh / h) * sstride..];
-        let drow = &mut data[y * w * 4..(y + 1) * w * 4];
-        for (x, &sx) in xs.iter().enumerate() {
-            drow[x * 4..x * 4 + 4].copy_from_slice(&srow[sx..sx + 4]);
-        }
-    }
-    Image { w, h, stride: w * 4, data }
-}

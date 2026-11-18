@@ -350,6 +350,9 @@ fn serve_with(
     });
 
     let mut settings: Option<Settings> = None;
+    let mut pointer = PointerApart::default();
+    // The last capture as it was, while few colours are sent (`video::changed_tiles`).
+    let mut prev_img: Option<Image> = None;
     let mut size = (0, 0);
     let mut reducer: Option<Reducer> = None;
     let mut last: Option<Image> = None;
@@ -603,6 +606,7 @@ fn serve_with(
                     let sx = (x as f64 + 0.5) * desk.0 as f64 / img.0.max(1) as f64;
                     let sy = (y as f64 + 0.5) * desk.1 as f64 / img.1.max(1) as f64;
                     report(cap.input(Input::Move { x: sx, y: sy }));
+                    pointer.moved_to = Some((sx as i32, sy as i32));
                 }
                 ToAgent::Button { button, pressed } => {
                     held.button(button, pressed);
@@ -970,6 +974,7 @@ fn serve_with(
             continue;
         };
         let now = Instant::now();
+        pointer.follow(enc, cap.as_mut(), s.formats & crate::proto::FORMAT_POINTER != 0, now).map_err(io_err)?;
         // Grab only when a frame may go out: some backends copy the whole screen per grab.
         let light = in_flight < IN_FLIGHT_SMALL && flight_sizes.iter().sum::<usize>() < SMALL_BYTES;
         if (in_flight >= IN_FLIGHT && !light) || now < due || (paused && !one_shot) {
@@ -1008,39 +1013,54 @@ fn serve_with(
         waited = false;
         one_shot = false;
         let mut moves = Vec::new();
+        let mut scrolled = false;
         if let Some(m) = found
             && let Some(mut moved) = prev.take()
         {
             // The previous screen is replaced below anyway, so it is moved in place, not copied.
             scroll::apply(&mut moved.data, moved.w, moved.mode.bpp(), &m);
-            rects = diff(Some(&moved), &plane);
+            let after = diff(Some(&moved), &plane);
+            // A move that leaves most of the change unexplained still saves what it explains, but
+            // is a likeness rather than a scroll to the film finder: a film panning in few colours
+            // matches itself shifted here and there.
+            let area = |rs: &[crate::color::Rect]| rs.iter().map(|r| r.w * r.h).sum::<usize>();
+            scrolled = area(&after) * 2 <= area(&rects);
+            rects = after;
             moves.push(m);
         }
         let mut video_part = None;
-        if matches!(plane.mode, Mode::Color256 | Mode::True) {
-            if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &rects, !moves.is_empty(), &|r| crate::color::rich(img, r)) {
-                // Its pixels went as a film: they go again losslessly, tile by tile, but for the
-                // tiles this frame sends whole anyway.
-                let inside = |c: &crate::color::Rect, t: &crate::color::Rect| c.x <= t.x && c.y <= t.y && c.x + c.w >= t.x + t.w && c.y + c.h >= t.y + t.h;
-                for ty in (r.y..r.y + r.h).step_by(32) {
-                    for tx in (r.x..r.x + r.w).step_by(32) {
-                        let t = crate::color::Rect { x: tx, y: ty, w: 32.min(r.x + r.w - tx), h: 32.min(r.y + r.h - ty) };
-                        if !rects.iter().any(|c| inside(c, &t)) {
-                            rects.push(t);
-                        }
+        // A film goes as one at every number of colours: frame after frame of it as tiles would
+        // cost a black and white picture more than a colour one. Fewer colours, a grey film.
+        let grey = !matches!(plane.mode, Mode::Color256 | Mode::True);
+        // In few colours most of a film's pixels keep their shade from one frame to the next, so
+        // it is told by what the screen itself did.
+        let watched = match (&prev_img, grey) {
+            (Some(p), true) => video::changed_tiles(p, img),
+            _ => rects.clone(),
+        };
+        prev_img = grey.then(|| Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() });
+        if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &watched, scrolled, &|r| crate::color::rich(img, r)) {
+            // Its pixels went as a film: they go again losslessly, tile by tile, but for the
+            // tiles this frame sends whole anyway.
+            let inside = |c: &crate::color::Rect, t: &crate::color::Rect| c.x <= t.x && c.y <= t.y && c.x + c.w >= t.x + t.w && c.y + c.h >= t.y + t.h;
+            for ty in (r.y..r.y + r.h).step_by(32) {
+                for tx in (r.x..r.x + r.w).step_by(32) {
+                    let t = crate::color::Rect { x: tx, y: ty, w: 32.min(r.x + r.w - tx), h: 32.min(r.y + r.h - ty) };
+                    if !rects.iter().any(|c| inside(c, &t)) {
+                        rects.push(t);
                     }
                 }
             }
-            if let Some(reg) = vid.region {
-                if rects.iter().any(|r| video::overlaps(r, &reg)) {
-                    let rate =
-                        (reg.w * reg.h) as f64 * s.fps as f64 * if plane.mode == Mode::True { 0.08 } else { 0.04 };
-                    let data = vid.encode(img, s.fps, rate.clamp(150e3, 6e6) as u32)?;
-                    let (x, y, w, h) = (reg.x as u16, reg.y as u16, reg.w as u16, reg.h as u16);
-                    video_part = Some(Tile { x, y, w, h, data });
-                }
-                rects = rects.iter().flat_map(|r| video::subtract(r, &reg)).collect();
+        }
+        if let Some(reg) = vid.region {
+            if watched.iter().any(|r| video::overlaps(r, &reg)) {
+                let rate =
+                    (reg.w * reg.h) as f64 * s.fps as f64 * if plane.mode == Mode::True { 0.08 } else { 0.04 };
+                let data = vid.encode(img, s.fps, rate.clamp(150e3, 6e6) as u32, grey)?;
+                let (x, y, w, h) = (reg.x as u16, reg.y as u16, reg.w as u16, reg.h as u16);
+                video_part = Some(Tile { x, y, w, h, data });
             }
+            rects = rects.iter().flat_map(|r| video::subtract(r, &reg)).collect();
         }
         prev = Some(plane);
         if rects.is_empty() && moves.is_empty() && video_part.is_none() {
@@ -1074,6 +1094,47 @@ fn serve_with(
         in_flight += 1;
         flight_sizes.push_back(bytes);
         due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
+    }
+}
+
+/// The pointer as a viewer that draws it itself sees it: apart from the pictures, its shape sent
+/// as it changes and its place as the host moves it (not where the viewer just put it).
+#[derive(Default)]
+struct PointerApart {
+    asked: bool,
+    apart: bool,
+    /// What the viewer was told last.
+    at: Option<Option<(i16, i16)>>,
+    /// Where the viewer moved it, in the host's pixels.
+    moved_to: Option<(i32, i32)>,
+    due: Option<Instant>,
+}
+
+impl PointerApart {
+    fn follow(&mut self, enc: &mut Wire, cap: &mut dyn capture::Capture, asked: bool, now: Instant) -> io::Result<()> {
+        if asked != self.asked {
+            (self.asked, self.at) = (asked, None);
+            self.apart = cap.pointer_apart(asked) && asked;
+        }
+        if !self.apart || self.due.is_some_and(|d| now < d) {
+            return Ok(());
+        }
+        // As often as a screen refreshes.
+        self.due = Some(now + Duration::from_millis(16));
+        let (shape, at) = cap.pointer();
+        if let Some(p) = shape {
+            let (w, h, hot_x, hot_y) = (p.w as u16, p.h as u16, p.hot.0 as u16, p.hot.1 as u16);
+            send(enc, &ToClient::PointerShape { w, h, hot_x, hot_y, rgba: p.rgba })?;
+        }
+        let at = at.map(|(x, y)| (x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16));
+        if self.at != Some(at) {
+            let echo = matches!((at, self.moved_to), (Some((x, y)), Some((mx, my))) if (x as i32 - mx).abs() <= 1 && (y as i32 - my).abs() <= 1);
+            if !echo {
+                send(enc, &ToClient::PointerAt(at))?;
+            }
+            self.at = Some(at);
+        }
+        Ok(())
     }
 }
 

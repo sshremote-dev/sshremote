@@ -443,6 +443,10 @@ pub struct Auto {
 
 /// A round trip this short is a local network: auto climbs at every chance.
 const LAN_RTT: f64 = 30.0;
+/// Auto starts in true colour, and a slow link costs it frames (the agent waits for each to
+/// arrive) before colours: it goes no lower than 256 colours unless a budget asks for it.
+const AUTO_START: usize = 3;
+const AUTO_FLOOR: usize = 2;
 
 impl Auto {
     fn new(budget: Option<f64>, level: usize) -> Auto {
@@ -471,7 +475,8 @@ impl Auto {
         }
         let slow = rtt > (3.0 * min_rtt).max(250.0);
         let quiet = rtt < (1.5 * min_rtt).max(100.0);
-        if std::mem::take(&mut self.climbed) && slow && self.level > 0 {
+        let floor = if self.budget.is_some() { 0 } else { AUTO_FLOOR };
+        if std::mem::take(&mut self.climbed) && slow && self.level > floor {
             // A climb that changes the colour mode resends the whole screen; if the link queued it
             // up, the level stays out of reach for a while.
             self.ceiling = Some((self.level - 1, Instant::now() + Duration::from_secs(600)));
@@ -493,7 +498,7 @@ impl Auto {
             self.hold = [5; PRESETS.len()];
             self.calm_since = Instant::now();
         }
-        let next = if self.over >= 2 && self.level > 0 {
+        let next = if self.over >= 2 && self.level > floor {
             // Climbing back to the level that just failed waits longer each time.
             self.hold[self.level - 1] = (self.hold[self.level - 1] * 2).min(60);
             self.calm_since = Instant::now();
@@ -578,7 +583,7 @@ impl Control {
 
     fn with(preset: Option<usize>, budget: Option<f64>, (mode, scale, fps): (Option<Mode>, Option<u8>, Option<u8>), max_mode: Mode) -> Control {
         let opt = (preset, budget, mode, scale, fps);
-        let level = opt.0.unwrap_or(2).min(PRESETS.len() - 1);
+        let level = opt.0.unwrap_or(AUTO_START).min(PRESETS.len() - 1);
         let p = &PRESETS[level];
         let mode = if p.mode.to_u8() > max_mode.to_u8() { max_mode } else { p.mode };
         let mut s = Settings { view_w: 0, view_h: 0, scale: p.scale, mode, fps: p.fps, formats: crate::proto::FORMATS };
@@ -620,7 +625,7 @@ impl Control {
         self.auto = None;
     }
 
-    /// The settings in effect, e.g. "Auto: 256 colours, 100%, 20 fps".
+    /// The settings in effect, e.g. "Auto: true colour, 100%, 30 fps".
     pub fn describe(&self) -> String {
         let s = format!("{}, {}% size, {} fps", self.s.mode.label(), self.s.scale, self.s.fps);
         if self.auto.is_some() { format!("Auto: {s}") } else { s }

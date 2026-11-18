@@ -13,6 +13,25 @@ type WindowList = Result<Vec<crate::capture::WindowInfo>, String>;
 
 pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
 
+/// `p` moved to the nearest corner of a pixel of the screen: a picture drawn from there maps its
+/// pixels onto the screen's, where half a pixel off would blur every one of them.
+fn on_pixels(p: Pos2, ppp: f32) -> Pos2 {
+    Pos2::new((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp)
+}
+
+/// The host's picture at a pane's size when that is smaller: each pixel the mean of the host's
+/// pixels it covers (only rows that changed are made again), drawn pixel for pixel. The host sends
+/// its own pixels, which its lossless coding and scrolls keep exact; made smaller there, every
+/// scroll would be resent and text would cost far more.
+struct Small {
+    shrink: crate::capture::Shrink<3>,
+    tex: Option<TextureHandle>,
+    size: (usize, usize),
+}
+
+/// Tells the panes' pictures apart in egui's keyboard focus.
+static NEXT_KEYS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// A connection shown in a workspace pane: its screen, files or terminal. The workspace draws its
 /// toolbar and owns full screen; the pane takes input only while it is the active one.
 pub(super) struct Remote {
@@ -40,6 +59,14 @@ pub(super) struct Remote {
     ctl: Control,
     fb: Framebuffer,
     tex: Option<TextureHandle>,
+    /// The picture made smaller here for a pane smaller than the host's screen, and whether the
+    /// host's picture changed since.
+    small: Option<Small>,
+    fb_dirty: bool,
+    /// The host's pointer, drawn here (the pictures leave it out): its picture, size and the
+    /// pixel that points, in the host's pixels, and where the host has it (None: hidden).
+    pointer_tex: Option<(TextureHandle, Vec2, Vec2)>,
+    host_pointer: Option<(i16, i16)>,
     label: String,
     /// Who is at the screen, for the chat: "user (address)".
     peer: crate::chat::Peer,
@@ -148,6 +175,8 @@ pub(super) struct Remote {
     click_pick: bool,
     /// Where the remote picture was drawn last, to tell when the pointer is over it.
     last_shown: Option<Rect>,
+    /// The picture's place in egui's keyboard focus, held while its keys go to the host.
+    keys_id: egui::Id,
     /// That click has been pressed on the picture (the release of the click that opened the mode does not count).
     pick_pressed: bool,
     /// When to share the window that the choosing click brought to the front.
@@ -244,6 +273,9 @@ impl Remote {
     ) -> Self {
         // The conversation with this host so far, from earlier sessions.
         let chat_lines = crate::chat::load_history(label.split("  ").next().unwrap_or(&label));
+        // The pointer is drawn here where this mouse is, never a round trip behind it.
+        let mut ctl = ctl;
+        ctl.s.formats |= crate::proto::FORMAT_POINTER;
         Remote {
             web: sess.backend == "browser",
             screenless: sess.backend == "none",
@@ -262,6 +294,7 @@ impl Remote {
             sharing: (0, String::new()),
             click_pick: false,
             last_shown: None,
+            keys_id: egui::Id::unique(("remote-keys", NEXT_KEYS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))),
             pick_pressed: false,
             pick_at: None,
             peer: crate::chat::Peer::new(label.split("  ").next().unwrap_or(&label)),
@@ -271,6 +304,10 @@ impl Remote {
             ctl,
             fb: Framebuffer::default(),
             tex: None,
+            small: None,
+            fb_dirty: false,
+            pointer_tex: None,
+            host_pointer: None,
             fit: Fit::Window,
             fill_full: true,
             pan: Vec2::ZERO,
@@ -341,12 +378,14 @@ impl Remote {
             let to = if self.allowed & crate::grant::TERMINAL != 0 { super::workspace::PaneMode::Terminal } else { super::workspace::PaneMode::Files };
             self.set_mode(to)?;
         }
-        #[cfg(windows)]
         {
             // System keys go to the remote host while its screen is the active pane of the window
-            // in front, as with RustDesk's focused window; the options menu turns this off.
-            let shown = self.last_shown.is_some();
-            let want = self.grab_keys && !self.view_only && !self.mirror && ctx.input(|i| i.focused) && shown;
+            // in front, as with RustDesk's focused window; on Linux, as there, while the pointer is
+            // over the picture too, so the desktop's own come back as it leaves. The options menu
+            // turns this off.
+            let shown = self.last_shown;
+            let over = cfg!(windows) || shown.zip(ctx.pointer_hover_pos()).is_some_and(|(r, p)| r.contains(p));
+            let want = self.grab_keys && !self.view_only && !self.mirror && ctx.input(|i| i.focused) && shown.is_some() && over;
             self.grab_wanted = want && self.active && self.mode() == super::workspace::PaneMode::Screen;
         }
         // Alt, Ctrl or Shift pressed alone make no key event: they reach the host as they change
@@ -357,7 +396,7 @@ impl Remote {
             && self.active
             && self.mode() == super::workspace::PaneMode::Screen
             && ctx.input(|i| i.focused)
-            && !ctx.memory(|m| m.focused().is_some())
+            && !self.keys_elsewhere(&ctx)
             && !ctx.any_popup_open();
         let changed = (mods.alt, mods.ctrl, mods.shift) != (self.mods.alt, self.mods.ctrl, self.mods.shift);
         let synced = if here && changed { self.sync_mods(mods) } else { Ok(()) };
@@ -527,7 +566,10 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = chat_rect.into_iter().collect();
-        if self.view_only || self.mirror || inline || !self.active {
+        let keys = !(self.view_only || self.mirror || inline || !self.active);
+        let term_keys = split && self.term_focus;
+        self.hold_keys(ui, pic_area, keys && !term_keys && shown.is_some());
+        if !keys {
             self.release_all()?;
         } else {
             self.input(&ctx, shown, &ui_rects)?;
@@ -601,6 +643,23 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::Pong(t))) => self.ctl.pong(t),
+                Ok(Ev::Net(ToClient::PointerShape { w, h, hot_x, hot_y, rgba })) => {
+                    let img = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                    let size = Vec2::new(w as f32, h as f32);
+                    let hot = Vec2::new(hot_x as f32, hot_y as f32);
+                    match self.pointer_tex.as_mut() {
+                        Some((t, s, o)) => {
+                            t.set(img, TextureOptions::LINEAR);
+                            (*s, *o) = (size, hot);
+                        }
+                        None => self.pointer_tex = Some((ctx.load_texture("remote-pointer", img, TextureOptions::LINEAR), size, hot)),
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(Ev::Net(ToClient::PointerAt(at))) => {
+                    self.host_pointer = at;
+                    ctx.request_repaint();
+                }
                 Ok(Ev::Net(ToClient::Voice(p))) => {
                     if let Some(pl) = self.call_player.as_mut() {
                         pl.push(&p);
@@ -831,6 +890,9 @@ impl Remote {
     /// Asks the agent for a capture that fits the window, once resizing has settled.
     pub(super) fn resize(&mut self, px: Vec2) -> Result<(), String> {
         let want = match self.fit {
+            // The host's own pixels, made smaller here when the pane is (`Small`); only a page,
+            // laid out at the size it is shown at, gets the pane's.
+            _ if !self.web => self.sess.desk,
             Fit::Window | Fit::Stretch => (px.x.max(64.0) as u16, px.y.max(64.0) as u16),
             // Below 100% the agent sends fewer pixels; above, the full resolution is enlarged here.
             Fit::Fixed(p) => {
@@ -853,6 +915,51 @@ impl Remote {
         Ok(())
     }
 
+    /// The host's pointer over the picture at `rect`: where this mouse is while it moves the
+    /// host's (this window's own arrow hidden there), else where the host has it.
+    fn draw_pointer(&self, ui: &egui::Ui, painter: &egui::Painter, rect: Rect) {
+        let Some((tex, size, hot)) = &self.pointer_tex else { return };
+        let ctx = ui.ctx();
+        let k = rect.width() / self.sess.desk.0.max(1) as f32;
+        let here = ctx.pointer_hover_pos().filter(|&p| {
+            rect.contains(p) && self.active && !self.view_only() && ctx.layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background) && !ctx.any_popup_open()
+        });
+        let at = match (here, self.host_pointer) {
+            (Some(p), _) => {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+                p
+            }
+            (None, Some((x, y))) => rect.min + Vec2::new(x as f32, y as f32) * k,
+            (None, None) => return,
+        };
+        let r = Rect::from_min_size(at - *hot * k, *size * k);
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    }
+
+    /// The picture at `w` x `h`, made anew where the host's changed.
+    fn small_texture(&mut self, ctx: &egui::Context, w: usize, h: usize) -> Option<egui::TextureId> {
+        if self.fb.w == 0 || self.fb.rgb.len() < self.fb.w * self.fb.h * 3 {
+            return None;
+        }
+        let fresh = self.small.as_ref().is_none_or(|s| s.size != (w, h));
+        if fresh {
+            self.small = Some(Small { shrink: Default::default(), tex: None, size: (w, h) });
+        }
+        let s = self.small.as_mut()?;
+        if fresh || std::mem::take(&mut self.fb_dirty) {
+            s.shrink.run(&self.fb.rgb, self.fb.w, self.fb.h, self.fb.w * 3, w, h);
+            let out = s.shrink.result();
+            match (&mut s.tex, s.shrink.drawn) {
+                (Some(t), Some((y0, y1))) if !fresh => {
+                    t.set_partial([0, y0], ColorImage::from_rgb([w, y1 - y0], &out[y0 * w * 3..y1 * w * 3]), TextureOptions::LINEAR)
+                }
+                (Some(_), None) if !fresh => {}
+                _ => s.tex = Some(ctx.load_texture("remote-small", ColorImage::from_rgb([w, h], out), TextureOptions::LINEAR)),
+            }
+        }
+        s.tex.as_ref().map(|t| t.id())
+    }
+
     /// Draws the remote screen; returns where it is, in points.
     pub(super) fn picture(&mut self, ui: &mut egui::Ui, area: Rect, ppp: f32) -> Option<Rect> {
         let tex = self.tex.as_ref()?;
@@ -860,8 +967,14 @@ impl Remote {
         let rect = match self.fit {
             Fit::Window if self.fill_full && self.filling => area,
             Fit::Window => {
-                let k = (area.width() / size.x).min(area.height() / size.y);
-                Rect::from_center_size(area.center(), size * k)
+                let mut k = (area.width() / size.x).min(area.height() / size.y);
+                // The agent sends the pane's size: within a pixel of it, the picture is drawn at
+                // its own size, pixel for pixel, never blurred by a resampling of a hair.
+                if ((k - 1.0) * size.x.max(size.y) * ppp).abs() < 1.0 {
+                    k = 1.0;
+                }
+                let s = size * k;
+                Rect::from_min_size(on_pixels(area.center() - s / 2.0, ppp), s)
             }
             Fit::Stretch => area,
             Fit::Fixed(p) => {
@@ -873,11 +986,21 @@ impl Remote {
                     if over.x > 0.0 { area.min.x - self.pan.x } else { area.center().x - full.x / 2.0 },
                     if over.y > 0.0 { area.min.y - self.pan.y } else { area.center().y - full.y / 2.0 },
                 );
-                Rect::from_min_size(min, full)
+                Rect::from_min_size(on_pixels(min, ppp), full)
             }
         };
+        // Smaller than the host's pixels: made smaller here, drawn pixel for pixel.
+        let px = (rect.size() * ppp).round();
+        let (w, h) = (px.x as usize, px.y as usize);
+        let (id, rect) = if w > 0 && h > 0 && w <= self.fb.w && h <= self.fb.h && (w, h) != (self.fb.w, self.fb.h) {
+            let id = tex.id();
+            (self.small_texture(ui.ctx(), w, h).unwrap_or(id), Rect::from_min_size(rect.min, px / ppp))
+        } else {
+            (tex.id(), rect)
+        };
         let painter = ui.painter().with_clip_rect(area);
-        painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        painter.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        self.draw_pointer(ui, &painter, rect);
         // Where the visible part lies, when the picture is larger than the window.
         let bar = Color32::from_white_alpha(70);
         if rect.width() > area.width() + 0.5 {
