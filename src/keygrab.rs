@@ -16,7 +16,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use crate::xk;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HC_ACTION, HHOOK,
-    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_INJECTED, LLKHF_UP, MSG, PostThreadMessageW, SetWindowsHookExW,
+    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_UP, MSG, PostThreadMessageW, SetWindowsHookExW,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP,
 };
 
@@ -60,11 +60,27 @@ fn forward(sym: u32, down: bool) -> bool {
     sent
 }
 
+/// Whether a key typed with `extra` (its dwExtraInfo) may be taken: this computer's own agent's
+/// are Windows' (taken, they would go straight back); another program's are a person's too, as
+/// RustDesk or AnyDesk type the keys of someone at another computer, so they are taken.
+fn takeable(extra: usize) -> bool {
+    extra != crate::sys::INJECTED
+}
+
+/// Whether a key pressed is one Windows would act on itself: Win, Print Screen, Alt+Tab,
+/// Alt+Esc, Ctrl+Esc.
+fn system_key(vk: u16, alt: bool, ctrl: bool) -> bool {
+    match vk {
+        VK_LWIN | VK_RWIN | VK_SNAPSHOT => true,
+        VK_TAB => alt,
+        VK_ESCAPE => alt || ctrl,
+        _ => false,
+    }
+}
+
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-    // Keys a program typed (this computer's own agent among them, which would come straight
-    // back) are Windows', never taken.
-    if code == HC_ACTION as i32 && k.flags & LLKHF_INJECTED == 0 {
+    if code == HC_ACTION as i32 && takeable(k.dwExtraInfo) {
         let down = k.flags & LLKHF_UP == 0;
         let vk = k.vkCode as u16;
         let taken = &TAKEN[(vk & 0xff) as usize];
@@ -74,13 +90,7 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         if down && ACTIVE.load(Ordering::Relaxed) && ours_in_front() {
             let alt = k.flags & LLKHF_ALTDOWN != 0;
             let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } < 0;
-            let wanted = match vk {
-                VK_LWIN | VK_RWIN | VK_SNAPSHOT => true,
-                VK_TAB => alt,
-                VK_ESCAPE => alt || ctrl,
-                _ => false,
-            };
-            if wanted && keysym_of(vk).is_some_and(|sym| forward(sym, true)) {
+            if system_key(vk, alt, ctrl) && keysym_of(vk).is_some_and(|sym| forward(sym, true)) {
                 // Swallowed: Windows never sees it, the remote host does.
                 taken.store(true, Ordering::Relaxed);
                 return 1;
@@ -135,4 +145,22 @@ pub fn set_active(on: bool) {
         }
     }
     ACTIVE.store(on, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Win typed by RustDesk or AnyDesk for someone at another computer goes to the session as
+    /// the keyboard's does; what this computer's own agent typed stays Windows'.
+    #[test]
+    fn keys_others_type_are_taken_but_not_our_own() {
+        assert!(takeable(0), "a keyboard's, or RustDesk's (no mark)");
+        assert!(takeable(0xFFC3_C3C3), "another program's mark");
+        assert!(!takeable(crate::sys::INJECTED), "this program's own agent");
+        assert!(system_key(VK_LWIN, false, false) && system_key(VK_RWIN, false, false));
+        assert!(system_key(VK_TAB, true, false) && !system_key(VK_TAB, false, true));
+        assert!(system_key(VK_ESCAPE, false, true) && !system_key(VK_ESCAPE, false, false));
+        assert!(!system_key(b'Q' as u16, true, true));
+    }
 }

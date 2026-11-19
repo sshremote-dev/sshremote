@@ -4,6 +4,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Marks input this program injects (Windows' dwExtraInfo), so the keyboard and mouse it keeps
+/// out, and the keys the viewer takes from Windows, are only others'.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const INJECTED: usize = 0x5352_4d54;
+
 /// The user's home folder (USERPROFILE on Windows, HOME elsewhere).
 pub fn home_dir() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default()

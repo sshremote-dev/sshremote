@@ -10,9 +10,7 @@ pub const BLOCK: u8 = 3;
 pub const HIDE: u8 = 4;
 pub const LOCK_ON_LEAVE: u8 = 5;
 
-/// Marks input this program injects, so the keyboard and mouse it keeps out are only the computer's own.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub const INJECTED: usize = 0x5352_4d54;
+pub use crate::sys::INJECTED;
 
 /// The bit of an act in `HostState`'s masks.
 pub const fn bit(act: u8) -> u8 {
