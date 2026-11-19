@@ -395,8 +395,10 @@ mod tests {
     use super::*;
 
     /// The screen read with no dialog, and it keeps coming: keys typed into the focused terminal
-    /// show in a later picture. In a wlroots desktop's session: SSHREMOTE_WLR_TEST=1 TESTS
-    /// --ignored a_wlroots_screen_is_copied_without_asking
+    /// show in a later picture, and come out as typed (Shift's characters, other scripts, Ctrl).
+    /// With SSHREMOTE_WLR_BOUND=FILE the desktop has Super+B bound to touch FILE: the shortcut
+    /// must reach it. In a wlroots desktop's session: SSHREMOTE_WLR_TEST=1 TESTS --ignored
+    /// a_wlroots_screen_is_copied_without_asking
     #[test]
     #[ignore]
     fn a_wlroots_screen_is_copied_without_asking() {
@@ -424,6 +426,36 @@ mod tests {
             };
             eprintln!("{c:?} shown after {shown:?}");
             assert!(shown < std::time::Duration::from_millis(500), "{c:?} shown after {shown:?}");
+        }
+        let wait = |what: &dyn Fn() -> bool| {
+            let since = std::time::Instant::now();
+            while !what() && since.elapsed() < std::time::Duration::from_secs(3) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            what()
+        };
+        let ctrl = |w: &mut WlrCopy, c: char| w.input(Input::Key { keysym: c as u32, mods: crate::proto::MOD_CTRL }).unwrap();
+        let typed = std::env::temp_dir().join("sshremote-wlr-typed");
+        let _ = std::fs::remove_file(&typed);
+        let line = "Hello, World! @#$%^&*()_+{}|:\"<>? ~ 안녕 üñ";
+        ctrl(&mut w, 'u');
+        for c in format!("cat > {}\n{line}\n", typed.display()).chars() {
+            let keysym = if c == '\n' { crate::xk::RETURN } else { crate::xk::of_char(c) };
+            w.input(Input::Key { keysym, mods: 0 }).unwrap();
+        }
+        // The viewer's own Shift held around a key's own character.
+        for (sym, down) in [(0xffe1, true), ('1' as u32, true), ('1' as u32, false), (0xffe1, false), ('a' as u32, true), ('a' as u32, false), (0xff0d, true), (0xff0d, false)] {
+            w.input(Input::KeyState { keysym: sym, down }).unwrap();
+        }
+        ctrl(&mut w, 'd');
+        assert!(wait(&|| std::fs::read_to_string(&typed).is_ok_and(|t| t.ends_with('\n') && t.lines().count() == 2)), "typed into the terminal");
+        assert_eq!(std::fs::read_to_string(&typed).unwrap(), format!("{line}\n!a\n"));
+        if let Some(bound) = std::env::var_os("SSHREMOTE_WLR_BOUND") {
+            let _ = std::fs::remove_file(&bound);
+            for (sym, down) in [(crate::xk::SUPER_L, true), ('b' as u32, true), ('b' as u32, false), (crate::xk::SUPER_L, false)] {
+                w.input(Input::KeyState { keysym: sym, down }).unwrap();
+            }
+            assert!(wait(&|| std::path::Path::new(&bound).exists()), "Super+B reached the desktop's shortcut");
         }
         // Smaller for a smaller view.
         w.set_target(first.w / 2, first.h / 2).unwrap();
