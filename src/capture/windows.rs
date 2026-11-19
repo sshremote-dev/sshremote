@@ -11,6 +11,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR,
     MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
 };
+use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop, SetThreadDesktop};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -94,9 +95,14 @@ pub struct Gdi {
     pointer_inside: bool,
     /// The shared window closed and the whole screen came back; the viewer is told once.
     ended: bool,
-    /// Desktop Duplication of the monitor, and the monitor-sized picture it fills.
-    dup: Option<super::dxgi::Dup>,
-    base: Option<Dib>,
+    /// Desktop Duplication of the monitor, and the latest picture it gave (the monitor's rows).
+    dup: Option<super::dxgi::Watch>,
+    picture: Vec<u8>,
+    /// A picture's buffer the agent is done with, for the next (see `Capture::recycle`).
+    spare: Vec<u8>,
+    /// What the duplication calls as something changes, and the least time between its pictures.
+    wake: super::dxgi::Waker,
+    gap: u32,
     /// The whole area, copied from the screen to be made smaller, and what makes it so.
     full: Option<Dib>,
     shrink: super::Shrink,
@@ -180,6 +186,9 @@ impl Gdi {
                 return Err("no interactive desktop in this session".into());
             }
             let mem = CreateCompatibleDC(screen);
+            // The agent's waits between frames to the millisecond while the screen is shared:
+            // with Windows' 15.6 ms tick a frame due could go out up to a tick late.
+            timeBeginPeriod(1);
             let mut g = Gdi {
                 screens,
                 current: 0,
@@ -197,7 +206,10 @@ impl Gdi {
                 pointer_inside: true,
                 ended: false,
                 dup: None,
-                base: None,
+                picture: Vec::new(),
+                spare: Vec::new(),
+                wake: Default::default(),
+                gap: gap_for(30),
                 full: None,
                 shrink: super::Shrink::default(),
                 dup_ready: false,
@@ -239,30 +251,67 @@ impl Gdi {
             }
             GdiFlush();
             let (sw, sh) = self.desk;
-            // The duplicated picture is read where it is; the screen is copied whole first.
-            let from: &[u8] = match self.base.as_mut() {
-                Some(b) if b.dc == src && x >= 0 && y >= 0 && x as usize + sw <= b.w && y as usize + sh <= b.h => {
-                    let at = y as usize * b.w * 4 + x as usize * 4;
-                    let stride = b.w * 4;
-                    let px = b.pixels();
-                    let out = self.shrink.run(&px[at..], sw, sh, stride, w as usize, h as usize);
-                    std::ptr::copy_nonoverlapping(out.as_ptr(), self.bits, out.len());
-                    return true;
-                }
-                _ => {
-                    if self.full.as_ref().is_none_or(|f| (f.w, f.h) != (sw, sh)) {
-                        self.full = Dib::new(self.screen, sw, sh);
-                    }
-                    let Some(full) = self.full.as_mut() else { return false };
-                    if BitBlt(full.dc, 0, 0, dw, dh, src, x, y, rop) == 0 {
-                        return false;
-                    }
-                    GdiFlush();
-                    full.pixels()
-                }
-            };
-            let out = self.shrink.run(from, sw, sh, sw * 4, w as usize, h as usize);
+            // The screen is copied whole first.
+            if self.full.as_ref().is_none_or(|f| (f.w, f.h) != (sw, sh)) {
+                self.full = Dib::new(self.screen, sw, sh);
+            }
+            let Some(full) = self.full.as_mut() else { return false };
+            if BitBlt(full.dc, 0, 0, dw, dh, src, x, y, rop) == 0 {
+                return false;
+            }
+            GdiFlush();
+            let out = self.shrink.run(full.pixels(), sw, sh, sw * 4, w as usize, h as usize);
             std::ptr::copy_nonoverlapping(out.as_ptr(), self.bits, out.len());
+        }
+        true
+    }
+
+    /// Where the captured area starts in the duplicated picture, and the picture's row length.
+    fn in_picture(&self) -> Option<(usize, usize)> {
+        let (mw, mh) = self.dup.as_ref()?.size;
+        let ((ml, mt), (sw, sh)) = (self.monitor.0, self.desk);
+        if self.origin.0 < ml || self.origin.1 < mt {
+            return None;
+        }
+        let (x, y) = ((self.origin.0 - ml) as usize, (self.origin.1 - mt) as usize);
+        let stride = mw * 4;
+        (x + sw <= mw && y + sh <= mh && self.picture.len() >= stride * mh).then_some((y * stride + x * 4, stride))
+    }
+
+    /// The captured area of the duplicated picture as it is, for a viewer that draws the pointer
+    /// itself: copied once, not by way of the target bitmap.
+    fn picture_image(&mut self) -> Option<Image> {
+        let (at, stride) = self.in_picture()?;
+        let ((sw, sh), (w, h)) = (self.desk, self.target);
+        let from = &self.picture[at..];
+        let mut data = std::mem::take(&mut self.spare);
+        data.clear();
+        if (w, h) == (sw, sh) {
+            for row in 0..h {
+                data.extend_from_slice(&from[row * stride..row * stride + w * 4]);
+            }
+        } else {
+            data.extend_from_slice(self.shrink.run(from, sw, sh, stride, w, h));
+        }
+        Some(Image { w, h, stride: w * 4, data })
+    }
+
+    /// Copies the captured area into the target bitmap from the duplicated picture, read where
+    /// it is (made smaller by area averaging when asked).
+    fn place(&mut self) -> bool {
+        let Some((at, stride)) = self.in_picture() else { return false };
+        let ((sw, sh), (w, h)) = (self.desk, self.target);
+        let from = &self.picture[at..];
+        unsafe {
+            GdiFlush();
+            if (w, h) == (sw, sh) {
+                for row in 0..h {
+                    std::ptr::copy_nonoverlapping(from[row * stride..].as_ptr(), self.bits.add(row * w * 4), w * 4);
+                }
+            } else {
+                let out = self.shrink.run(from, sw, sh, stride, w, h);
+                std::ptr::copy_nonoverlapping(out.as_ptr(), self.bits, out.len());
+            }
         }
         true
     }
@@ -291,19 +340,14 @@ impl Gdi {
                 return None;
             }
             let ((ml, mt), _) = self.monitor;
-            if let Ok(d) = super::dxgi::Dup::open(ml, mt) {
-                self.base = Dib::new(self.screen, d.size.0, d.size.1);
-                self.dup = self.base.is_some().then_some(d);
-                self.dup_ready = false;
-            }
+            self.dup = super::dxgi::Watch::open(ml, mt, self.wake.clone(), self.gap, follow_input_desktop).ok();
+            self.dup_ready = false;
             if self.dup.is_none() {
                 self.dup_retry = std::time::Instant::now() + std::time::Duration::from_secs(2);
                 return None;
             }
         }
-        let (dup, base) = (self.dup.as_mut()?, self.base.as_mut()?);
-        let stride = base.w * 4;
-        match dup.next(base.pixels(), stride) {
+        match self.dup.as_ref()?.take(&mut self.picture) {
             Ok(super::dxgi::Next::Same) => Some(false),
             Ok(super::dxgi::Next::Pointer) => Some(true),
             Ok(super::dxgi::Next::Picture) => {
@@ -313,7 +357,7 @@ impl Gdi {
             Err(super::dxgi::Lost) => {
                 // A desktop switch or mode change: open again on the next frame, GDI meanwhile,
                 // and look at the monitors at once.
-                (self.dup, self.base, self.dup_ready) = (None, None, false);
+                (self.dup, self.dup_ready) = (None, false);
                 self.layout_at = None;
                 None
             }
@@ -341,7 +385,7 @@ impl Gdi {
         if self.scope == Scope::Screen {
             (self.origin, self.desk) = monitor;
         }
-        (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
+        (self.dup, self.dup_ready, self.force) = (None, false, true);
         self.dup_retry = std::time::Instant::now();
     }
 
@@ -413,15 +457,17 @@ impl Gdi {
 
     /// The target bitmap with the pointer drawn on it and, while a window is shared, the rest
     /// greyed out.
-    fn finish(&self) -> Image {
+    fn finish(&mut self) -> Image {
         if !self.apart {
             self.draw_cursor();
         }
         let (w, h) = self.target;
-        let mut data = unsafe {
+        let mut data = std::mem::take(&mut self.spare);
+        data.clear();
+        unsafe {
             GdiFlush();
-            std::slice::from_raw_parts(self.bits, w * h * 4).to_vec()
-        };
+            data.extend_from_slice(std::slice::from_raw_parts(self.bits, w * h * 4));
+        }
         if self.scope != Scope::Screen {
             self.mask(&mut data);
         }
@@ -546,6 +592,12 @@ unsafe fn cursor_shape(hc: windows_sys::Win32::UI::WindowsAndMessaging::HCURSOR)
     }
 }
 
+/// The least time between two duplicated pictures at the viewer's frame rate: a little less than a
+/// frame, so the next is read back by the time the agent may send it.
+fn gap_for(fps: u8) -> u32 {
+    (1000 / fps.max(1) as u32).saturating_sub(4).max(8)
+}
+
 /// Moves this thread to the desktop that receives input, so the lock screen and
 /// UAC prompts keep working; fails harmlessly without the rights to do so.
 fn follow_input_desktop() -> bool {
@@ -566,6 +618,7 @@ impl Drop for Gdi {
     fn drop(&mut self) {
         self.free_bitmap();
         unsafe {
+            timeEndPeriod(1);
             DeleteDC(self.mem);
             ReleaseDC(null_mut::<core::ffi::c_void>() as HWND, self.screen);
         }
@@ -624,7 +677,7 @@ impl Capture for Gdi {
         self.scope = Scope::Screen;
         self.shown.clear();
         (self.pointer_inside, self.ended) = (true, false);
-        (self.dup, self.base, self.dup_ready, self.force) = (None, None, false, true);
+        (self.dup, self.dup_ready, self.force) = (None, false, true);
         (self.dup_retry, self.layout_at) = (std::time::Instant::now(), Some(std::time::Instant::now()));
         Ok(())
     }
@@ -696,6 +749,22 @@ impl Capture for Gdi {
         Ok(())
     }
 
+    fn set_fps(&mut self, fps: u8) {
+        self.gap = gap_for(fps);
+        if let Some(d) = self.dup.as_ref() {
+            d.set_gap(self.gap);
+        }
+    }
+
+    fn recycle(&mut self, img: Image) {
+        self.spare = img.data;
+    }
+
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+        true
+    }
+
     fn pointer_apart(&mut self, on: bool) -> bool {
         (self.apart, self.sent_cursor, self.force) = (on, 0, true);
         true
@@ -726,9 +795,10 @@ impl Capture for Gdi {
             // Nothing changed on the monitor: no copy, no work further down.
             Some(false) if !force && self.dup_ready => return Ok(None),
             Some(_) if self.dup_ready => {
-                let at = self.monitor.0;
-                let dc = self.base.as_ref().map(|b| b.dc).unwrap_or(self.screen);
-                if self.blit_from(dc, at) {
+                if self.apart && self.scope == Scope::Screen && let Some(img) = self.picture_image() {
+                    return Ok(Some(img));
+                }
+                if self.place() {
                     return Ok(Some(self.finish()));
                 }
             }
@@ -986,6 +1056,98 @@ mod tests {
             let dark = p.rgba.chunks(4).any(|c| c[3] > 128 && c[0] < 64);
             let light = p.rgba.chunks(4).any(|c| c[3] > 128 && c[0] > 192);
             assert!(dark && light, "{name}: dark with a light rim, or the other way round");
+        }
+    }
+
+    /// What the screen costs the agent while little changes on it, looked at as the agent's loop
+    /// looks (woken by the duplication, 30 frames a second), and that no look holds the loop up.
+    /// Only counts are printed; no picture is kept.
+    /// sshremote-test.exe --ignored --nocapture a_quiet_screen_costs_little
+    #[test]
+    #[ignore]
+    fn a_quiet_screen_costs_little() {
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let cpu = || unsafe {
+            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut a, mut b, mut k, mut u) = (z, z, z, z);
+            GetProcessTimes(GetCurrentProcess(), &mut a, &mut b, &mut k, &mut u);
+            let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+            t(k) + t(u)
+        };
+        let secs: f64 = std::env::var("SSHREMOTE_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(10.0);
+        let mut g = Gdi::open().expect("GDI");
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert!(g.set_waker(Box::new(move || {
+            let _ = tx.send(());
+        })));
+        g.set_fps(30);
+        g.pointer_apart(true);
+        let _ = g.grab();
+        let (start, at) = (cpu(), Instant::now());
+        let (mut turns, mut pictures, mut longest, mut due) = (0u32, 0u32, Duration::ZERO, Instant::now());
+        while at.elapsed().as_secs_f64() < secs {
+            let now = Instant::now();
+            let shortest = if due <= now { 8 } else { 1 };
+            let wait = due.saturating_duration_since(now).clamp(Duration::from_millis(shortest), Duration::from_millis(8));
+            let _ = rx.recv_timeout(wait);
+            rx.try_iter().for_each(drop);
+            turns += 1;
+            if Instant::now() < due {
+                continue;
+            }
+            let t = Instant::now();
+            let got = g.grab().expect("grab");
+            longest = longest.max(t.elapsed());
+            if let Some(img) = got {
+                g.recycle(img);
+                pictures += 1;
+                due = Instant::now() + Duration::from_millis(33);
+            }
+        }
+        let (used, took) = (cpu() - start, at.elapsed().as_secs_f64());
+        println!(
+            "{turns} turns ({:.0}/s), {pictures} pictures ({:.1}/s), {:.2}% of a core, longest look {:.1} ms",
+            turns as f64 / took,
+            pictures as f64 / took,
+            used / took * 100.0,
+            longest.as_secs_f64() * 1000.0
+        );
+        assert!(longest < Duration::from_millis(12), "a look held the loop up {longest:?}");
+    }
+
+    /// The duplicated picture is the screen, at its size and made smaller: compared with GDI's copy
+    /// of the same moment, nearly every pixel is the same (a few may change between the two).
+    /// Only the share of equal pixels is printed; no picture is kept.
+    /// sshremote-test.exe --ignored --nocapture the_duplicated_picture_is_the_screen
+    #[test]
+    #[ignore]
+    fn the_duplicated_picture_is_the_screen() {
+        let mut g = Gdi::open().expect("GDI");
+        g.pointer_apart(true);
+        let (dw, dh) = g.desk;
+        for (w, h) in [(dw, dh), (dw / 2, dh / 2)] {
+            g.set_target(w, h).unwrap();
+            let mut best = 0.0f64;
+            for _ in 0..5 {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let dup = loop {
+                    g.force = true;
+                    if let Some(img) = g.grab().unwrap().filter(|_| g.dup_ready) {
+                        break img;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "no duplicated picture");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                assert!(g.blit());
+                let gdi = g.finish();
+                assert_eq!((dup.w, dup.h, dup.data.len()), (gdi.w, gdi.h, gdi.data.len()));
+                let same = dup.data.chunks(4).zip(gdi.data.chunks(4)).filter(|(a, b)| a[..3] == b[..3]).count();
+                best = best.max(same as f64 / (w * h) as f64);
+            }
+            println!("{w}x{h}: {:.2}% of the pixels as GDI copies them", best * 100.0);
+            assert!(best > 0.97, "{w}x{h}: only {:.1}% the same", best * 100.0);
         }
     }
 

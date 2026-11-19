@@ -1,7 +1,13 @@
 //! Desktop Duplication (DXGI): the system hands over a monitor's picture only when something on it
 //! changed, so an idle screen costs nothing, where GDI copies the whole screen for every frame.
 //! The picture lands in a buffer of the monitor's size, from which the GDI path scales, crops and
-//! draws the pointer as before.
+//! draws the pointer as before. A thread of its own waits for each change and reads it back
+//! (reading back waits most of a frame for the graphics card), so the agent's loop is not held up
+//! and need not look every millisecond.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
@@ -27,14 +33,148 @@ pub enum Next {
     Picture,
 }
 
+/// Called from the watching thread as something changes.
+pub type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+/// A monitor's duplication on a thread of its own.
+pub struct Watch {
+    shared: Arc<Shared>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The monitor's size in pixels.
+    pub size: (usize, usize),
+}
+
+struct Shared {
+    state: Mutex<State>,
+    wake: Waker,
+    /// The least time between two pictures read back, in milliseconds: the viewer's pace.
+    gap: AtomicU32,
+}
+
+#[derive(Default)]
+struct State {
+    /// A picture read back and not yet taken, and a buffer the next may be read into.
+    ready: Option<Vec<u8>>,
+    free: Option<Vec<u8>>,
+    pointer: bool,
+    lost: bool,
+    stop: bool,
+}
+
+/// How long the thread waits for a change at a time, before seeing whether it is to stop.
+const LOOK: u32 = 25;
+
+impl Watch {
+    /// Duplicates the monitor at (`left`, `top`) on a new thread, which first takes the input
+    /// desktop with `desktop` (duplication works only there).
+    pub fn open(left: i32, top: i32, wake: Waker, gap_ms: u32, desktop: fn() -> bool) -> Result<Watch, String> {
+        let shared = Arc::new(Shared { state: Mutex::default(), wake, gap: AtomicU32::new(gap_ms) });
+        let (tx, rx) = mpsc::sync_channel(1);
+        let s = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("duplication".into())
+            .spawn(move || {
+                desktop();
+                match Dup::open(left, top) {
+                    Ok(mut dup) => {
+                        let _ = tx.send(Ok(dup.size));
+                        s.run(&mut dup);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        match rx.recv().unwrap_or_else(|_| Err("the duplication thread ended".into())) {
+            Ok(size) => Ok(Watch { shared, thread: Some(thread), size }),
+            Err(e) => {
+                let _ = thread.join();
+                Err(e)
+            }
+        }
+    }
+
+    /// What came since the last look: a new picture is swapped into `picture` (the monitor's
+    /// rows, `size.0 * 4` bytes each), which then holds the latest one.
+    pub fn take(&self, picture: &mut Vec<u8>) -> Result<Next, Lost> {
+        let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.lost {
+            return Err(Lost);
+        }
+        let pointer = std::mem::take(&mut st.pointer);
+        if let Some(new) = st.ready.take() {
+            st.free = Some(std::mem::replace(picture, new));
+            return Ok(Next::Picture);
+        }
+        Ok(if pointer { Next::Pointer } else { Next::Same })
+    }
+
+    pub fn set_gap(&self, ms: u32) {
+        self.shared.gap.store(ms, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        // Within one look: a duplication of the monitor still open would keep a new one from opening.
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Shared {
+    fn wake(&self) {
+        if let Some(w) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            w();
+        }
+    }
+
+    fn run(&self, dup: &mut Dup) {
+        let len = dup.size.0 * dup.size.1 * 4;
+        let mut spare = vec![0u8; len];
+        loop {
+            if self.state.lock().unwrap_or_else(|e| e.into_inner()).stop {
+                return;
+            }
+            let got = dup.next(LOOK, &mut spare, dup.size.0 * 4);
+            {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                match got {
+                    Ok(Next::Same) => continue,
+                    Ok(Next::Pointer) => st.pointer = true,
+                    Ok(Next::Picture) => {
+                        let old = st.ready.replace(spare);
+                        spare = old.or_else(|| st.free.take()).unwrap_or_default();
+                        spare.resize(len, 0);
+                    }
+                    Err(Lost) => st.lost = true,
+                }
+            }
+            self.wake();
+            if matches!(got, Err(Lost)) {
+                return;
+            }
+            // Changes meanwhile gather into the next picture: none is lost by waiting.
+            if matches!(got, Ok(Next::Picture)) {
+                let gap = Duration::from_millis(self.gap.load(Ordering::Relaxed) as u64);
+                std::thread::sleep(gap.saturating_sub(dup.got.elapsed()));
+            }
+        }
+    }
+}
+
 /// The duplication of one monitor.
-pub struct Dup {
+struct Dup {
     device: ID3D11Device,
     ctx: ID3D11DeviceContext,
     dup: IDXGIOutputDuplication,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
-    /// The monitor's size in pixels.
-    pub size: (usize, usize),
+    size: (usize, usize),
+    /// When the last change was handed over.
+    got: Instant,
 }
 
 /// The duplication stopped (desktop switch, mode change, another program took it): open again.
@@ -42,7 +182,7 @@ pub struct Lost;
 
 impl Dup {
     /// Duplicates the monitor whose top-left corner is at (`left`, `top`) on the virtual desktop.
-    pub fn open(left: i32, top: i32) -> Result<Dup, String> {
+    fn open(left: i32, top: i32) -> Result<Dup, String> {
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("DXGI: {e}"))?;
             let mut a = 0;
@@ -60,25 +200,26 @@ impl Dup {
                     let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("DXGI output: {e}"))?;
                     let dup = output1.DuplicateOutput(&device).map_err(|e| format!("Desktop Duplication: {e}"))?;
                     let size = ((r.right - r.left) as usize, (r.bottom - r.top) as usize);
-                    return Ok(Dup { device, ctx, dup, staging: None, size });
+                    return Ok(Dup { device, ctx, dup, staging: None, size, got: Instant::now() });
                 }
             }
             Err("no DXGI output at that place".into())
         }
     }
 
-    /// Looks for a change and, when the picture changed, copies it into `dst` (BGRA rows of
-    /// `stride` bytes, at least the monitor's size).
-    pub fn next(&mut self, dst: &mut [u8], stride: usize) -> Result<Next, Lost> {
+    /// Waits up to `wait` ms for a change and, when the picture changed, copies it into `dst`
+    /// (BGRA rows of `stride` bytes, at least the monitor's size).
+    fn next(&mut self, wait: u32, dst: &mut [u8], stride: usize) -> Result<Next, Lost> {
         unsafe {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut res: Option<IDXGIResource> = None;
-            match self.dup.AcquireNextFrame(0, &mut info, &mut res) {
+            match self.dup.AcquireNextFrame(wait, &mut info, &mut res) {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(Next::Same),
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => return Err(Lost),
                 Err(_) => return Err(Lost),
             }
+            self.got = Instant::now();
             // No new picture, only the pointer.
             if info.LastPresentTime == 0 {
                 let _ = self.dup.ReleaseFrame();
