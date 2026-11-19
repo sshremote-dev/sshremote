@@ -543,6 +543,7 @@ fn serve_with(
                         prev = None;
                         vid.reset();
                     }
+                    cap.set_fps(s.fps);
                     settings = Some(s);
                     // A page laid out at the new size: the viewer hears its new size.
                     if cap.resizable() && cap.desktop_size() != desk {

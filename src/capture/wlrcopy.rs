@@ -38,6 +38,8 @@ struct Copying {
     upside_down: bool,
     ready: bool,
     failed: bool,
+    /// When the compositor began the copy (its monotonic clock), from the ready event.
+    began: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -97,7 +99,10 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::Flags { flags: WEnum::Value(f) } => {
                 c.upside_down = f.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
             }
-            zwlr_screencopy_frame_v1::Event::Ready { .. } => c.ready = true,
+            zwlr_screencopy_frame_v1::Event::Ready { tv_sec_hi, tv_sec_lo, tv_nsec } => {
+                c.ready = true;
+                c.began = Some(Duration::new(((tv_sec_hi as u64) << 32) | tv_sec_lo as u64, tv_nsec));
+            }
             zwlr_screencopy_frame_v1::Event::Failed => c.failed = true,
             _ => {}
         }
@@ -155,6 +160,8 @@ struct Latest {
     want: (usize, u64),
     answers: u64,
     outs: Vec<Told>,
+    /// The least time between two copies (the viewer's pace).
+    gap: Duration,
     /// Why copying stopped for good.
     error: Option<String>,
     stop: bool,
@@ -173,6 +180,20 @@ impl Shared {
 
 /// At most this many pictures a second (a viewer asks for up to 60): changes coming faster wait.
 const MIN_GAP: Duration = Duration::from_millis(15);
+
+/// The least time between copies for a viewer taking `fps` pictures a second: a little under its
+/// pace, so the picture it takes is fresh.
+fn gap_for(fps: u8) -> Duration {
+    (Duration::from_millis(1000 / fps.max(1) as u64).saturating_sub(Duration::from_millis(4))).clamp(MIN_GAP, Duration::from_millis(100))
+}
+
+/// The monotonic clock, as compositors stamp a copy with it.
+fn monotonic() -> Duration {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid timespec to fill.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
 /// A copy asked for this long after the last one came may have missed a change: Hyprland's
 /// "with damage" waits for the next change, not for any since the last copy (wlroots counts them).
 /// Sooner is safe: a change after a copy shows at the screen's next refresh at the earliest.
@@ -302,10 +323,14 @@ impl Copier {
         // whole one.
         let (mut asked, mut pictured) = ((usize::MAX, u64::MAX), false);
         let (mut came, mut whole, mut not_before, mut until_quiet) = (None::<Instant>, true, Instant::now(), None::<Instant>);
+        // How long a copy takes the compositor, on average: one that draws in software (a
+        // virtual machine's) spends most of its time on copies made as fast as the viewer takes
+        // them, so it is given at least twice that between them.
+        let mut cost = Duration::ZERO;
         // A picture's memory, used again; the shared memory the next copy goes into.
         let (mut spare, mut next) = (Vec::new(), 0);
         loop {
-            let want = {
+            let (want, gap) = {
                 let mut l = self.shared.lock();
                 if l.stop {
                     return Ok(());
@@ -314,7 +339,7 @@ impl Copier {
                 if l.outs != outs {
                     l.outs = outs;
                 }
-                l.want
+                (l.want, l.gap)
             };
             if want != asked {
                 self.drop_frame();
@@ -343,8 +368,13 @@ impl Copier {
             } else if c.ready {
                 let (upside_down, read) = (c.upside_down, self.frame.as_ref().and_then(|f| f.given).expect("given"));
                 let at = Instant::now();
-                // Faster than pictures are wanted: the next copy waits a little.
-                not_before = came.filter(|c| at.duration_since(*c) < MIN_GAP).map_or(at, |c| c + MIN_GAP);
+                if let Some(took) = c.began.and_then(|b| monotonic().checked_sub(b)).filter(|t| *t < Duration::from_millis(500)) {
+                    cost = (cost * 4 + took) / 5;
+                }
+                // Faster than pictures are wanted, or than the compositor makes them at ease:
+                // the next copy waits a little.
+                let gap = gap.max(cost * 2);
+                not_before = came.filter(|c| at.duration_since(*c) < gap).map_or(at, |c| c + gap);
                 if version < 2 {
                     not_before = at + Duration::from_millis(33);
                 }
@@ -424,6 +454,7 @@ impl WlrCopy {
             want: (0, 0),
             answers: u64::MAX,
             outs: told(&state.outs),
+            gap: MIN_GAP,
             error: None,
             stop: false,
         };
@@ -544,6 +575,10 @@ impl Capture for WlrCopy {
         Ok(())
     }
 
+    fn set_fps(&mut self, fps: u8) {
+        self.shared.lock().gap = gap_for(fps);
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         if self.take(None)? {
             // Its resolution changed or it turned: the viewer hears the new size.
@@ -600,6 +635,15 @@ impl Drop for WlrCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Copies come no faster than the viewer takes pictures, nor slower than ten a second.
+    #[test]
+    fn copies_keep_to_the_viewers_pace() {
+        assert_eq!(gap_for(30), Duration::from_millis(29));
+        assert_eq!(gap_for(60), MIN_GAP);
+        assert_eq!(gap_for(1), Duration::from_millis(100));
+        assert_eq!(gap_for(0), Duration::from_millis(100));
+    }
 
     /// A monitor left of the first one (at a negative x) and one at twice the scale: points on
     /// each land in the box around them all.
@@ -692,6 +736,8 @@ mod tests {
             return;
         }
         let mut w = WlrCopy::open().expect("screen copying");
+        // At a viewer's usual pace.
+        w.set_fps(30);
         let mut last = w.grab().unwrap().expect("the first picture");
         for round in 0..3 {
             let (start, mut typed) = (Instant::now(), 0);

@@ -138,6 +138,8 @@ pub trait Capture {
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String>;
     /// The viewer's pixels to a point (2 on a HiDPI screen): a page lays itself out by it.
     fn set_density(&mut self, _d: f64) {}
+    /// How many pictures a second the viewer takes: a backend that copies by itself copies no more.
+    fn set_fps(&mut self, _fps: u8) {}
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     /// The viewer draws the pointer itself: the pictures leave it out from now on, or put it
