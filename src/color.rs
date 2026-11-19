@@ -149,6 +149,22 @@ pub struct Plane {
     pub data: Vec<u8>,
 }
 
+/// BGRA pixels to RGB, four at a time as three words: byte by byte it was most of a frame's work.
+fn true_row(row: &[[u8; 4]], out: &mut [u8]) {
+    let rgb = |p: &[u8; 4]| u32::from_le_bytes(*p).swap_bytes() >> 8;
+    let (quads, rest) = row.as_chunks::<4>();
+    let (words, tail) = out.as_chunks_mut::<12>();
+    for (q, o) in quads.iter().zip(words.iter_mut()) {
+        let [a, b, c, d] = [rgb(&q[0]), rgb(&q[1]), rgb(&q[2]), rgb(&q[3])];
+        o[0..4].copy_from_slice(&(a | b << 24).to_le_bytes());
+        o[4..8].copy_from_slice(&(b >> 8 | c << 16).to_le_bytes());
+        o[8..12].copy_from_slice(&(c >> 16 | d << 8).to_le_bytes());
+    }
+    for (p, o) in rest.iter().zip(tail.as_chunks_mut::<3>().0) {
+        *o = [p[2], p[1], p[0]];
+    }
+}
+
 pub struct Reducer {
     mode: Mode,
     lut: Option<Lut>,
@@ -164,38 +180,45 @@ impl Reducer {
         self.mode
     }
 
+    #[cfg(test)]
     pub fn reduce(&self, img: &Image) -> Plane {
+        self.reduce_into(img, Vec::new())
+    }
+
+    /// The same, filling `data` (a buffer done with) instead of a new one.
+    pub fn reduce_into(&self, img: &Image, mut data: Vec<u8>) -> Plane {
         let (w, h) = (img.w, img.h);
-        let mut data = Vec::with_capacity(w * h * self.mode.bpp());
-        for y in 0..h {
-            let row = &img.data[y * img.stride..y * img.stride + w * 4];
-            match self.mode {
-                Mode::True => {
-                    for p in row.as_chunks::<4>().0 {
-                        data.extend_from_slice(&[p[2], p[1], p[0]]);
-                    }
-                }
-                Mode::Color16 | Mode::Color256 => {
-                    let lut = self.lut.as_ref().unwrap();
-                    data.extend(row.as_chunks::<4>().0.iter().map(|p| lut.get(p[2], p[1], p[0])));
-                }
-                Mode::Mono => {}
-                Mode::Gray4 | Mode::Gray16 => {
-                    let levels = if self.mode == Mode::Gray4 { 3 } else { 15 };
-                    data.extend(row.as_chunks::<4>().0.iter().map(|p| {
-                        let luma = (77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8;
-                        ((luma * levels + 127) / 255) as u8
-                    }));
-                }
-            }
-        }
         if self.mode == Mode::Mono {
             // Text and lines on any background, not only dark on light (see `bilevel`).
             let luma: Vec<u8> = (0..h)
                 .flat_map(|y| img.data[y * img.stride..y * img.stride + w * 4].as_chunks::<4>().0.iter())
                 .map(|p| ((77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8) as u8)
                 .collect();
-            data = crate::bilevel::binarize(&luma, w, h);
+            return Plane { w, h, mode: self.mode, data: crate::bilevel::binarize(&luma, w, h) };
+        }
+        let bpp = self.mode.bpp();
+        // Filled row by row in place: pushed a pixel at a time it took a full-screen frame 4 ms.
+        data.clear();
+        data.resize(w * h * bpp, 0);
+        for (y, out) in data.chunks_exact_mut((w * bpp).max(1)).enumerate() {
+            let row = img.data[y * img.stride..y * img.stride + w * 4].as_chunks::<4>().0;
+            match self.mode {
+                Mode::True => true_row(row, out),
+                Mode::Color16 | Mode::Color256 => {
+                    let lut = self.lut.as_ref().unwrap();
+                    for (d, p) in out.iter_mut().zip(row) {
+                        *d = lut.get(p[2], p[1], p[0]);
+                    }
+                }
+                Mode::Gray4 | Mode::Gray16 => {
+                    let levels = if self.mode == Mode::Gray4 { 3 } else { 15 };
+                    for (d, p) in out.iter_mut().zip(row) {
+                        let luma = (77 * p[2] as u32 + 150 * p[1] as u32 + 29 * p[0] as u32) >> 8;
+                        *d = ((luma * levels + 127) / 255) as u8;
+                    }
+                }
+                Mode::Mono => unreachable!(),
+            }
         }
         Plane { w, h, mode: self.mode, data }
     }
@@ -670,8 +693,18 @@ pub fn diff(prev: Option<&Plane>, cur: &Plane) -> Vec<Rect> {
     let bpp = cur.mode.bpp();
     let same_shape = prev.is_some_and(|p| p.w == cur.w && p.h == cur.h && p.mode == cur.mode);
     let mut out = Vec::new();
+    let line = cur.w * bpp;
+    let mut rows = Vec::with_capacity(TILE);
     for ty in (0..cur.h).step_by(TILE) {
         let th = TILE.min(cur.h - ty);
+        if let Some(prev) = prev.filter(|_| same_shape) {
+            // Most rows are as they were: each is looked at whole once, not a tile at a time.
+            rows.clear();
+            rows.extend((ty..ty + th).filter(|&r| cur.data[r * line..(r + 1) * line] != prev.data[r * line..(r + 1) * line]));
+            if rows.is_empty() {
+                continue;
+            }
+        }
         for tx in (0..cur.w).step_by(TILE) {
             let tw = TILE.min(cur.w - tx);
             if !same_shape {
@@ -680,7 +713,7 @@ pub fn diff(prev: Option<&Plane>, cur: &Plane) -> Vec<Rect> {
             }
             let prev = prev.unwrap();
             let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-            for row in ty..ty + th {
+            for &row in &rows {
                 let s = (row * cur.w + tx) * bpp;
                 let a = &cur.data[s..s + tw * bpp];
                 let b = &prev.data[s..s + tw * bpp];
@@ -836,6 +869,75 @@ mod tests {
             assert_eq!(data[0][0], 2, "frame {f} as slots");
             viewer.update(fresh, &changed);
             assert_eq!(viewer.unpack(&data[0], 256, 256).unwrap(), p.data, "frame {f}");
+        }
+    }
+
+    /// Reduced and compared the plain way, a pixel at a time, to check the quicker ones by.
+    fn reduce_by_pixel(red: &Reducer, img: &Image) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in 0..img.h {
+            for x in 0..img.w {
+                let p = &img.data[y * img.stride + x * 4..][..4];
+                let (r, g, b) = (p[2], p[1], p[0]);
+                let luma = (77 * r as u32 + 150 * g as u32 + 29 * b as u32) >> 8;
+                match red.mode {
+                    Mode::True => out.extend_from_slice(&[r, g, b]),
+                    Mode::Color16 | Mode::Color256 => out.push(red.lut.as_ref().unwrap().get(r, g, b)),
+                    Mode::Gray4 => out.push(((luma * 3 + 127) / 255) as u8),
+                    Mode::Gray16 => out.push(((luma * 15 + 127) / 255) as u8),
+                    Mode::Mono => unreachable!(),
+                }
+            }
+        }
+        out
+    }
+
+    fn diff_by_pixel(prev: &Plane, cur: &Plane) -> Vec<Rect> {
+        let bpp = cur.mode.bpp();
+        let mut out = Vec::new();
+        for ty in (0..cur.h).step_by(TILE) {
+            for tx in (0..cur.w).step_by(TILE) {
+                let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+                for y in ty..(ty + TILE).min(cur.h) {
+                    for x in tx..(tx + TILE).min(cur.w) {
+                        let i = (y * cur.w + x) * bpp;
+                        if cur.data[i..i + bpp] != prev.data[i..i + bpp] {
+                            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                        }
+                    }
+                }
+                if x0 != usize::MAX {
+                    out.push(Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn reduce_and_diff_match_a_pixel_by_pixel_look() {
+        let mut seed = 7u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed >> 8
+        };
+        // Not a whole number of tiles, rows with room after them.
+        let (w, h, stride) = (101, 67, 101 * 4 + 12);
+        let mut img = Image { w, h, stride, data: (0..stride * h).map(|_| next() as u8).collect() };
+        for mode in [Mode::Gray4, Mode::Gray16, Mode::Color16, Mode::Color256, Mode::True] {
+            let red = Reducer::new(mode);
+            let before = red.reduce(&img);
+            assert_eq!(before.data, reduce_by_pixel(&red, &img), "{mode:?}");
+            for _ in 0..20 {
+                let at = (next() as usize % h) * stride + (next() as usize % w) * 4;
+                img.data[at + next() as usize % 3] ^= 0x80;
+            }
+            for y in 40..47 {
+                img.data[y * stride + 64 * 4..y * stride + 90 * 4].fill(next() as u8);
+            }
+            let after = red.reduce(&img);
+            assert_eq!(after.data, reduce_by_pixel(&red, &img), "{mode:?}");
+            assert_eq!(diff(Some(&before), &after), diff_by_pixel(&before, &after), "{mode:?}");
         }
     }
 

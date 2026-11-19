@@ -421,6 +421,9 @@ fn serve_with(
     // Paused: no frames unless the viewer asks for one with Refresh.
     let (mut paused, mut one_shot) = (false, false);
     let mut prev: Option<Plane> = None;
+    // Planes done with, filled again for the next frames: a fresh full-screen buffer each frame
+    // cost Windows milliseconds of page faults.
+    let mut spares: Vec<Vec<u8>> = Vec::new();
     let mut vid = video::Video::new();
     let mut colours = crate::color::Palette::default();
     // The picture's size changed: tell the viewer and start the stream over.
@@ -1054,7 +1057,9 @@ fn serve_with(
             continue;
         }
         if let Some(img) = cap.grab()? {
-            last = Some(img);
+            if let Some(old) = last.replace(img) {
+                cap.recycle(old);
+            }
             fresh = true;
         }
         // A shared window was resized or moved to where its size changed.
@@ -1069,7 +1074,7 @@ fn serve_with(
             continue;
         }
         fresh = false;
-        let plane = red.reduce(img);
+        let plane = red.reduce_into(img, spares.pop().unwrap_or_default());
         // A whole new picture: the viewer starts its palette over too.
         let whole = prev.is_none();
         let mut rects = diff(prev.as_ref(), &plane);
@@ -1100,6 +1105,7 @@ fn serve_with(
             scrolled = area(&after) * 2 <= area(&rects);
             rects = after;
             moves.push(m);
+            spares.push(moved.data);
         } else if s.formats & crate::proto::FORMAT_SIDEWAYS != 0
             && let Some(p) = prev.as_ref()
         {
@@ -1107,7 +1113,10 @@ fn serve_with(
             let text: Vec<_> = rects.iter().filter(|r| vid.region.is_none_or(|v| !video::overlaps(r, &v))).copied().collect();
             let found = scroll::sideways(p, &plane, &text);
             if !found.is_empty() {
-                let mut moved = p.clone();
+                let mut data = spares.pop().unwrap_or_default();
+                data.clear();
+                data.extend_from_slice(&p.data);
+                let mut moved = Plane { data, ..*p };
                 for m in &found {
                     scroll::apply(&mut moved.data, moved.w, moved.mode.bpp(), m);
                 }
@@ -1117,6 +1126,7 @@ fn serve_with(
                     rects = after;
                     moves = found;
                 }
+                spares.push(moved.data);
             }
         }
         let mut video_part = None;
@@ -1153,7 +1163,10 @@ fn serve_with(
             }
             rects = rects.iter().flat_map(|r| video::subtract(r, &reg)).collect();
         }
-        prev = Some(plane);
+        if let Some(old) = prev.replace(plane) {
+            spares.push(old.data);
+        }
+        spares.truncate(2);
         if rects.is_empty() && moves.is_empty() && video_part.is_none() {
             due = now + Duration::from_millis(1000 / s.fps.max(1) as u64);
             continue;
