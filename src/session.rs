@@ -87,6 +87,13 @@ const WINDOWS_AGENT: [&str; 3] = [
 /// The agent command that worked for each SSH host, when not the usual one.
 static WORKED: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
 
+/// Lines ssh writes that are no error: OpenSSH 10's warning about an older server's key
+/// exchange (Windows' OpenSSH 9), a host key just added to the known ones.
+fn ssh_chatter(line: &str) -> bool {
+    let l = line.trim();
+    l.is_empty() || l == "**" || l.starts_with("** ") || l.starts_with("Warning: Permanently added")
+}
+
 /// Whether the usual agent command failed as Windows' shells fail it: cmd takes `PATH=...` as its
 /// own command and ends without a word or a byte (the stream ends before its first frame, and
 /// with nothing on stderr the error is the reader's own); PowerShell and cmd say a name is not
@@ -249,8 +256,11 @@ impl Session {
             Ok(Ev::Closed(e)) => {
                 sess.link.wait();
                 thread::sleep(Duration::from_millis(100));
+                // What ssh said, but for its warnings that are no error (a newer ssh's word on
+                // an older server's key exchange, a host key just learnt).
                 let log = sess.log();
-                Err(if log.is_empty() { e } else { log })
+                let said: Vec<&str> = log.lines().filter(|l| !ssh_chatter(l)).collect();
+                Err(if said.is_empty() { e } else { said.join("\n") })
             }
             _ => {
                 sess.link.close();
@@ -1411,6 +1421,16 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let fb = Framebuffer { rgb: shot, w: part.0 as usize, h: part.1 as usize, ..Framebuffer::default() };
         a_picture(&fb, "program");
         sess.close();
+    }
+
+    /// ssh's warnings that are no error do not hide how a connection ended: a newer ssh warns
+    /// of an older Windows server's key exchange, and the Windows commands must still be tried.
+    #[test]
+    fn ssh_warnings_are_not_taken_for_errors() {
+        let log = "Warning: Permanently added '[192.168.40.1]:2222' (ED25519) to the list of known hosts.\n** WARNING: connection is not using a post-quantum key exchange algorithm.\n** This session may be vulnerable to \"store now, decrypt later\" attacks.\n** The server may need to be upgraded. See https://openssh.com/pq.html\n**";
+        assert!(log.lines().all(ssh_chatter));
+        assert!(!ssh_chatter("ssh: connect to host 10.0.0.1 port 22: Connection refused"));
+        assert!(!ssh_chatter("'sshremote' is not recognized as an internal or external command,"));
     }
 
     /// Any SSH host with sshremote on it answers to the usual agent command, as it always did.
