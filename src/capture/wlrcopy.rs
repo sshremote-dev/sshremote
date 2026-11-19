@@ -1,10 +1,12 @@
 //! Wayland desktops built on wlroots and its kin (Hyprland, Sway, river, niri...): the screen read
 //! through wlr-screencopy, as grim and wayvnc read it, with no portal and so no dialog for someone
 //! at the screen to answer; input through the virtual pointer and keyboard (`wlinput`). A copy
-//! waits for the screen to change, so a still screen costs nothing.
+//! waits for the screen to change, so a still screen costs nothing; one is always waiting (a thread
+//! of its own asks again as soon as one comes), so no change goes by unseen.
 
 use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd};
+use std::time::{Duration, Instant};
 
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_output::{self, WlOutput};
@@ -130,25 +132,262 @@ impl Drop for Memory {
     }
 }
 
-pub struct WlrCopy {
+/// A monitor as the copying thread last heard of it.
+#[derive(Clone, PartialEq)]
+struct Told {
+    name: String,
+    size: (i32, i32),
+    at: (i32, i32),
+    scale: i32,
+}
+
+fn told(outs: &[Out]) -> Vec<Told> {
+    outs.iter().map(|o| Told { name: o.name.clone(), size: o.size, at: o.at, scale: o.scale }).collect()
+}
+
+/// What the copying thread and the capture share.
+struct Latest {
+    /// The newest picture, and whether it was taken yet.
+    img: Image,
+    fresh: bool,
+    /// The monitor wanted and how many times one was asked for; the ask the picture answers
+    /// (a picture of the monitor shown before is not given).
+    want: (usize, u64),
+    answers: u64,
+    outs: Vec<Told>,
+    /// Why copying stopped for good.
+    error: Option<String>,
+    stop: bool,
+}
+
+struct Shared {
+    latest: std::sync::Mutex<Latest>,
+    came: std::sync::Condvar,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Latest> {
+        self.latest.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// At most this many pictures a second (a viewer asks for up to 60): changes coming faster wait.
+const MIN_GAP: Duration = Duration::from_millis(15);
+/// A copy asked for this long after the last one came may have missed a change: Hyprland's
+/// "with damage" waits for the next change, not for any since the last copy (wlroots counts them).
+const LATE: Duration = Duration::from_millis(4);
+/// How long the screen stays still before a late copy is taken over by a whole one.
+const QUIET: Duration = Duration::from_millis(100);
+
+/// The copy being made: the compositor's frame, whether its memory was given, whether it waits
+/// for the screen to change.
+struct Frame {
+    proxy: ZwlrScreencopyFrameV1,
+    given: bool,
+    whole: bool,
+}
+
+/// The copying, on a thread of its own: the next copy is asked for as soon as one comes, so a
+/// change made while the picture is not taken (the viewer's pace) still reaches the next one.
+struct Copier {
     conn: Connection,
     queue: EventQueue<State>,
     state: State,
-    current: usize,
-    /// The copy asked for, and whether its memory was given yet.
-    frame: Option<(ZwlrScreencopyFrameV1, bool)>,
+    frame: Option<Frame>,
     memory: Option<Memory>,
+    shared: std::sync::Arc<Shared>,
+}
+
+// SAFETY: the connection and the mapping are used only by the copying thread.
+unsafe impl Send for Copier {}
+
+impl Copier {
+    /// Reads what the compositor sent, waiting up to `wait` for it.
+    fn pump(&mut self, wait: Duration) -> Result<(), String> {
+        let _ = self.conn.flush();
+        self.queue.dispatch_pending(&mut self.state).map_err(|e| e.to_string())?;
+        if let Some(guard) = self.queue.prepare_read() {
+            let mut fd = libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one pollfd, for the connection's open descriptor.
+            if unsafe { libc::poll(&mut fd, 1, wait.as_millis().min(1000) as i32) } > 0 {
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(format!("the Wayland display went away ({e})")),
+                }
+            }
+        }
+        self.queue.dispatch_pending(&mut self.state).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn drop_frame(&mut self) {
+        if let Some(f) = self.frame.take() {
+            f.proxy.destroy();
+        }
+        self.state.copying = Copying::default();
+    }
+
+    /// Asks for a copy of monitor `out`: `whole` at once, otherwise once the screen changes.
+    fn ask(&mut self, out: usize, whole: bool) -> Result<(), String> {
+        let output = self.state.outs.get(out).ok_or("the monitor is gone")?.output.clone();
+        self.drop_frame();
+        // The pointer drawn in: this desktop does not tell it apart.
+        let proxy = self.state.manager.as_ref().ok_or("no screen copying")?.0.capture_output(1, &output, &self.queue.handle(), ());
+        self.frame = Some(Frame { proxy, given: false, whole });
+        let _ = self.conn.flush();
+        Ok(())
+    }
+
+    /// Gives the copy its memory once the compositor told what it takes; true when given.
+    fn give(&mut self) -> Result<bool, String> {
+        let version = self.state.manager.as_ref().map_or(1, |m| m.1);
+        let Some(f) = self.frame.as_mut().filter(|f| !f.given) else { return Ok(false) };
+        let c = &self.state.copying;
+        if c.form.is_none() || (version >= 3 && !c.told) {
+            return Ok(false);
+        }
+        let form = c.form.ok_or("no form of memory this program reads")?;
+        if self.memory.as_ref().is_none_or(|m| m.form != form) {
+            self.memory = None;
+            self.memory = Some(memory(self.state.shm.as_ref().ok_or("no shared memory")?, form, &self.queue.handle())?);
+        }
+        let buffer = &self.memory.as_ref().expect("made above").buffer;
+        if f.whole || version < 2 {
+            f.proxy.copy(buffer);
+        } else {
+            f.proxy.copy_with_damage(buffer);
+        }
+        f.given = true;
+        let _ = self.conn.flush();
+        Ok(true)
+    }
+
+    /// The picture in the memory, the right way up and in BGRX order.
+    fn picture(&self, upside_down: bool, mut data: Vec<u8>) -> Image {
+        let m = self.memory.as_ref().expect("given");
+        let (format, w, h, stride) = (m.form.0, m.form.1 as usize, m.form.2 as usize, m.form.3 as usize);
+        // SAFETY: the mapping holds `len` bytes, the compositor done writing them (ready).
+        let px = unsafe { std::slice::from_raw_parts(m.at, m.len) };
+        data.clear();
+        data.reserve(w * h * 4);
+        for y in 0..h {
+            let row = if upside_down { h - 1 - y } else { y };
+            data.extend_from_slice(&px[row * stride..row * stride + w * 4]);
+        }
+        if matches!(format, wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888) {
+            for p in data.as_chunks_mut::<4>().0 {
+                p.swap(0, 2);
+            }
+        }
+        Image { w, h, stride: w * 4, data }
+    }
+
+    fn run(mut self) {
+        if let Err(e) = self.copy_on() {
+            self.shared.lock().error = Some(e);
+            self.shared.came.notify_all();
+        }
+        self.drop_frame();
+        self.memory = None;
+        let _ = self.conn.flush();
+    }
+
+    fn copy_on(&mut self) -> Result<(), String> {
+        let version = self.state.manager.as_ref().map_or(1, |m| m.1);
+        // The monitor and ask being copied, whether a picture came for it, when the last came,
+        // what the next copy is and when it may be asked for, and when a late one gives way to a
+        // whole one.
+        let (mut asked, mut pictured) = ((usize::MAX, u64::MAX), false);
+        let (mut came, mut whole, mut not_before, mut until_quiet) = (None::<Instant>, true, Instant::now(), None::<Instant>);
+        // A picture's memory, used again.
+        let mut spare = Vec::new();
+        loop {
+            let want = {
+                let mut l = self.shared.lock();
+                if l.stop {
+                    return Ok(());
+                }
+                let outs = told(&self.state.outs);
+                if l.outs != outs {
+                    l.outs = outs;
+                }
+                l.want
+            };
+            if want != asked {
+                self.drop_frame();
+                (asked, pictured, whole, not_before, until_quiet) = (want, false, true, Instant::now(), None);
+            }
+            let now = Instant::now();
+            if until_quiet.is_some_and(|t| now >= t) && self.frame.as_ref().is_some_and(|f| !f.whole) {
+                self.drop_frame();
+                (whole, until_quiet) = (true, None);
+            }
+            if self.frame.is_none() && now >= not_before {
+                self.ask(asked.0, whole)?;
+            }
+            if self.give()? && !whole && came.is_some_and(|c| c.elapsed() > LATE) {
+                until_quiet = Some(Instant::now() + QUIET);
+            }
+            let c = &self.state.copying;
+            if c.failed {
+                self.drop_frame();
+                // The first copy refused (Hyprland with its permissions enforced): the portal's turn.
+                if !pictured && asked.1 == 0 {
+                    return Err("the screen copy failed".into());
+                }
+                // The monitor turned off, say: asked again in a moment.
+                (whole, not_before) = (true, Instant::now() + Duration::from_millis(200));
+            } else if c.ready {
+                let upside_down = c.upside_down;
+                let at = Instant::now();
+                // Faster than pictures are wanted: the next copy waits a little.
+                not_before = came.filter(|c| at.duration_since(*c) < MIN_GAP).map_or(at, |c| c + MIN_GAP);
+                if version < 2 {
+                    not_before = at + Duration::from_millis(33);
+                }
+                (came, whole, until_quiet, pictured) = (Some(at), false, None, true);
+                // The next copy is asked for first, so its answer comes while this one is read.
+                self.drop_frame();
+                if at >= not_before {
+                    self.ask(asked.0, false)?;
+                }
+                let mut img = self.picture(upside_down, std::mem::take(&mut spare));
+                let mut l = self.shared.lock();
+                if l.want == asked {
+                    std::mem::swap(&mut l.img, &mut img);
+                    (l.fresh, l.answers) = (true, asked.1);
+                    self.shared.came.notify_all();
+                }
+                spare = img.data;
+                continue;
+            }
+            // Nothing to do until the compositor answers, the next copy may go, or a late one
+            // has waited long enough.
+            let mut wait = Duration::from_millis(50);
+            if self.frame.is_none() {
+                wait = wait.min(not_before.saturating_duration_since(Instant::now()));
+            }
+            if let Some(t) = until_quiet {
+                wait = wait.min(t.saturating_duration_since(Instant::now()));
+            }
+            self.pump(wait)?;
+        }
+    }
+}
+
+pub struct WlrCopy {
+    shared: std::sync::Arc<Shared>,
+    copier: Option<std::thread::JoinHandle<()>>,
+    current: usize,
     desk: (usize, usize),
     target: (usize, usize),
     shrink: super::Shrink,
-    /// The newest picture, and whether it is to be given again (the first look, a new size).
+    /// The newest picture taken, and whether it is to be given again (the first look, a new size).
     last: Image,
     again: bool,
     input: super::wlinput::WlInput,
 }
-
-// SAFETY: the connection and the mapping are used from the thread that holds them.
-unsafe impl Send for WlrCopy {}
 
 impl WlrCopy {
     pub fn open() -> Result<WlrCopy, String> {
@@ -169,13 +408,22 @@ impl WlrCopy {
         if !input.has_pointer() {
             return Err("this desktop offers no virtual pointer".into());
         }
+        let latest = Latest {
+            img: Image { w: 0, h: 0, stride: 0, data: Vec::new() },
+            fresh: false,
+            want: (0, 0),
+            answers: u64::MAX,
+            outs: told(&state.outs),
+            error: None,
+            stop: false,
+        };
+        let shared = std::sync::Arc::new(Shared { latest: std::sync::Mutex::new(latest), came: std::sync::Condvar::new() });
+        let copier = Copier { conn, queue, state, frame: None, memory: None, shared: shared.clone() };
+        let copier = std::thread::Builder::new().name("wlr-screencopy".into()).spawn(move || copier.run()).map_err(|e| e.to_string())?;
         let mut w = WlrCopy {
-            conn,
-            queue,
-            state,
+            shared,
+            copier: Some(copier),
             current: 0,
-            frame: None,
-            memory: None,
             desk: (0, 0),
             target: (0, 0),
             shrink: super::Shrink::default(),
@@ -185,94 +433,31 @@ impl WlrCopy {
         };
         // The first picture, which also tells the screen's size; a compositor that refuses
         // (Hyprland with its permissions enforced) leaves it to the portal.
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while w.last.w == 0 {
-            w.step()?;
-            if std::time::Instant::now() > until {
-                return Err("the screen copy gave no picture".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        if !w.take(Some(Duration::from_secs(5)))? {
+            return Err("the screen copy gave no picture".into());
         }
         (w.desk, w.target) = ((w.last.w, w.last.h), (w.last.w, w.last.h));
         Ok(w)
     }
 
-    /// Reads what the compositor sent, without waiting.
-    fn pump(&mut self) -> Result<(), String> {
-        let _ = self.conn.flush();
-        if let Some(guard) = self.queue.prepare_read() {
-            match guard.read() {
-                Ok(_) => {}
-                Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(format!("the Wayland display went away ({e})")),
+    /// Takes the newest picture if one came since, waiting up to `wait` for it; true if taken.
+    fn take(&mut self, wait: Option<Duration>) -> Result<bool, String> {
+        let until = wait.map(|w| Instant::now() + w);
+        let mut l = self.shared.lock();
+        loop {
+            if let Some(e) = &l.error {
+                return Err(e.clone());
             }
-        }
-        self.queue.dispatch_pending(&mut self.state).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Moves the copy on: asks for one, gives it memory, takes the picture when it is ready.
-    /// True when a new picture came.
-    fn step(&mut self) -> Result<bool, String> {
-        self.pump()?;
-        let qh = self.queue.handle();
-        let Some((manager, version)) = self.state.manager.clone() else { return Err("no screen copying".into()) };
-        let out = self.state.outs.get(self.current).ok_or("the monitor is gone")?.output.clone();
-        let Some((frame, given)) = &mut self.frame else {
-            self.state.copying = Copying::default();
-            // The pointer drawn in: this desktop does not tell it apart.
-            self.frame = Some((manager.capture_output(1, &out, &qh, ()), false));
-            let _ = self.conn.flush();
-            return Ok(false);
-        };
-        let c = &self.state.copying;
-        if c.failed {
-            frame.destroy();
-            self.frame = None;
-            return Err("the screen copy failed".into());
-        }
-        if !*given {
-            if c.form.is_none() || (version >= 3 && !c.told) {
+            if l.fresh && l.answers == l.want.1 {
+                l.fresh = false;
+                std::mem::swap(&mut self.last, &mut l.img);
+                return Ok(true);
+            }
+            let Some(left) = until.map(|u| u.saturating_duration_since(Instant::now())).filter(|d| !d.is_zero()) else {
                 return Ok(false);
-            }
-            let form = c.form.ok_or("no form of memory this program reads")?;
-            if self.memory.as_ref().is_none_or(|m| m.form != form) {
-                self.memory = None;
-                self.memory = Some(memory(self.state.shm.as_ref().ok_or("no shared memory")?, form, &qh)?);
-            }
-            let buffer = &self.memory.as_ref().expect("made above").buffer;
-            // After the first, a copy waits for the screen to change.
-            if version >= 2 && self.last.w > 0 {
-                frame.copy_with_damage(buffer);
-            } else {
-                frame.copy(buffer);
-            }
-            *given = true;
-            let _ = self.conn.flush();
-            return Ok(false);
+            };
+            l = self.shared.came.wait_timeout(l, left).unwrap_or_else(|e| e.into_inner()).0;
         }
-        if !c.ready {
-            return Ok(false);
-        }
-        let upside_down = c.upside_down;
-        frame.destroy();
-        self.frame = None;
-        let m = self.memory.as_ref().expect("given above");
-        let (format, w, h, stride) = (m.form.0, m.form.1 as usize, m.form.2 as usize, m.form.3 as usize);
-        // SAFETY: the mapping holds `len` bytes, the compositor done writing them (ready).
-        let px = unsafe { std::slice::from_raw_parts(m.at, m.len) };
-        let mut data = Vec::with_capacity(w * h * 4);
-        for y in 0..h {
-            let row = if upside_down { h - 1 - y } else { y };
-            data.extend_from_slice(&px[row * stride..row * stride + w * 4]);
-        }
-        if matches!(format, wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888) {
-            for p in data.as_chunks_mut::<4>().0 {
-                p.swap(0, 2);
-            }
-        }
-        self.last = Image { w, h, stride: w * 4, data };
-        Ok(true)
     }
 }
 
@@ -302,7 +487,8 @@ impl Capture for WlrCopy {
     }
 
     fn monitors(&self) -> Vec<Monitor> {
-        self.state
+        self.shared
+            .lock()
             .outs
             .iter()
             .enumerate()
@@ -315,22 +501,20 @@ impl Capture for WlrCopy {
     }
 
     fn screen_id(&self) -> Option<String> {
-        self.state.outs.get(self.current).map(|o| o.name.clone())
+        self.shared.lock().outs.get(self.current).map(|o| o.name.clone())
     }
 
     fn select(&mut self, index: usize) -> Result<(), String> {
-        if index >= self.state.outs.len() {
-            return Err("no such monitor".into());
-        }
-        if let Some((f, _)) = self.frame.take() {
-            f.destroy();
+        {
+            let mut l = self.shared.lock();
+            if index >= l.outs.len() {
+                return Err("no such monitor".into());
+            }
+            l.want = (index, l.want.1 + 1);
+            l.fresh = false;
         }
         (self.current, self.last) = (index, Image { w: 0, h: 0, stride: 0, data: Vec::new() });
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.last.w == 0 && std::time::Instant::now() < until {
-            self.step()?;
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        self.take(Some(Duration::from_secs(5)))?;
         (self.desk, self.target, self.again) = ((self.last.w, self.last.h), (self.last.w, self.last.h), true);
         Ok(())
     }
@@ -342,17 +526,9 @@ impl Capture for WlrCopy {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
-        // A copy that failed (the monitor turned off, say) is asked for again.
-        let fresh = match self.step() {
-            Ok(f) => f,
-            Err(e) if e == "the screen copy failed" => false,
-            Err(e) => return Err(e),
-        };
-        if fresh {
+        if self.take(None)? {
             // Its resolution changed or it turned: the viewer hears the new size.
             self.desk = (self.last.w, self.last.h);
-            // The next copy waits for a change meanwhile.
-            self.step()?;
         } else if !std::mem::take(&mut self.again) {
             return Ok(None);
         }
@@ -367,12 +543,19 @@ impl Capture for WlrCopy {
         // The virtual pointer goes over all the monitors as one: points on this one are placed
         // where it lies among them.
         let ev = match ev {
-            Input::Move { x, y } if self.state.outs.len() > 1 => {
-                let o = &self.state.outs[self.current];
-                let s = o.scale as f64;
-                let (x, y) = (o.at.0 as f64 + x / s, o.at.1 as f64 + y / s);
-                let extent = self.state.outs.iter().fold((0, 0), |(w, h), o| (w.max(o.at.0 + o.size.0 / o.scale), h.max(o.at.1 + o.size.1 / o.scale)));
-                return self.input.input(Input::Move { x, y }, (extent.0.max(1) as usize, extent.1.max(1) as usize));
+            Input::Move { x, y } => {
+                let placed = {
+                    let l = self.shared.lock();
+                    l.outs.get(self.current).filter(|_| l.outs.len() > 1).map(|o| {
+                        let s = o.scale as f64;
+                        let extent = l.outs.iter().fold((0, 0), |(w, h), o| (w.max(o.at.0 + o.size.0 / o.scale), h.max(o.at.1 + o.size.1 / o.scale)));
+                        ((o.at.0 as f64 + x / s, o.at.1 as f64 + y / s), extent)
+                    })
+                };
+                if let Some(((x, y), extent)) = placed {
+                    return self.input.input(Input::Move { x, y }, (extent.0.max(1) as usize, extent.1.max(1) as usize));
+                }
+                Input::Move { x, y }
             }
             ev => ev,
         };
@@ -382,11 +565,10 @@ impl Capture for WlrCopy {
 
 impl Drop for WlrCopy {
     fn drop(&mut self) {
-        if let Some((f, _)) = self.frame.take() {
-            f.destroy();
+        self.shared.lock().stop = true;
+        if let Some(t) = self.copier.take() {
+            let _ = t.join();
         }
-        self.memory = None;
-        let _ = self.conn.flush();
     }
 }
 
@@ -461,5 +643,39 @@ mod tests {
         w.set_target(first.w / 2, first.h / 2).unwrap();
         let half = w.grab().unwrap().expect("a picture at the new size");
         assert_eq!((half.w, half.h), (first.w / 2, first.h / 2));
+    }
+
+    /// Grabbed at a viewer's pace while keys come in between, the picture ends where the screen
+    /// does: a change made while no copy was asked for still reaches it. In a wlroots desktop's
+    /// session with a terminal focused: SSHREMOTE_WLR_TEST=1 TESTS --ignored the_last_change
+    #[test]
+    #[ignore]
+    fn the_last_change_reaches_the_picture() {
+        use std::time::{Duration, Instant};
+        if std::env::var_os("SSHREMOTE_WLR_TEST").is_none() {
+            return;
+        }
+        let mut w = WlrCopy::open().expect("screen copying");
+        let mut last = w.grab().unwrap().expect("the first picture");
+        for round in 0..3 {
+            let (start, mut typed) = (Instant::now(), 0);
+            while start.elapsed() < Duration::from_millis(1500) {
+                if typed < 6 && start.elapsed() >= Duration::from_millis(45 * typed as u64) {
+                    let keysym = if round == 1 { crate::xk::BACKSPACE } else { b"sshrem"[typed] as u32 };
+                    w.input(Input::Key { keysym, mods: 0 }).unwrap();
+                    typed += 1;
+                }
+                if let Some(img) = w.grab().unwrap() {
+                    last = img;
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+            let now = WlrCopy::open().expect("another copy").grab().unwrap().expect("its picture");
+            let differ = last.data.iter().zip(&now.data).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "round {round}: the picture is behind the screen ({differ} bytes differ)");
+        }
+        for _ in 0..6 {
+            w.input(Input::Key { keysym: crate::xk::BACKSPACE, mods: 0 }).unwrap();
+        }
     }
 }
