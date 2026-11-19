@@ -100,9 +100,20 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
+/// Takes back the keyboard's raw input that winit asks for (it reads it only for device events,
+/// which egui does not use): while a window of a process that asks for it is in front, Windows
+/// calls none of that process's low-level keyboard hooks, so no key would ever be taken.
+fn no_raw_keyboard() -> bool {
+    use windows_sys::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_REMOVE, RegisterRawInputDevices};
+    // The generic desktop page's keyboard; removing takes no window.
+    let d = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_REMOVE, hwndTarget: std::ptr::null_mut() };
+    unsafe { RegisterRawInputDevices(&d, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0 }
+}
+
 /// Installs the hook on its own thread: Windows skips a low-level hook whose thread is
 /// busy (drawing a frame, say), so that thread does nothing but pump messages.
 pub fn install(ctx: eframe::egui::Context) -> Option<Receiver<(u32, bool)>> {
+    no_raw_keyboard();
     let (tx, rx) = mpsc::channel();
     *SINK.lock().unwrap() = Some(tx);
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
