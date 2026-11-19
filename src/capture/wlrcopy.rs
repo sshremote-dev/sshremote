@@ -387,6 +387,8 @@ pub struct WlrCopy {
     last: Image,
     again: bool,
     input: super::wlinput::WlInput,
+    /// Whether the pointer is kept to the monitor shown (its points need no placing among the others).
+    kept: bool,
 }
 
 impl WlrCopy {
@@ -430,6 +432,7 @@ impl WlrCopy {
             last: Image { w: 0, h: 0, stride: 0, data: Vec::new() },
             again: true,
             input,
+            kept: false,
         };
         // The first picture, which also tells the screen's size; a compositor that refuses
         // (Hyprland with its permissions enforced) leaves it to the portal.
@@ -437,7 +440,14 @@ impl WlrCopy {
             return Err("the screen copy gave no picture".into());
         }
         (w.desk, w.target) = ((w.last.w, w.last.h), (w.last.w, w.last.h));
+        w.keep_pointer();
         Ok(w)
+    }
+
+    /// Keeps the pointer to the monitor shown.
+    fn keep_pointer(&mut self) {
+        let name = self.shared.lock().outs.get(self.current).map(|o| o.name.clone());
+        self.kept = name.is_some_and(|n| self.input.keep_to(&n));
     }
 
     /// Takes the newest picture if one came since, waiting up to `wait` for it; true if taken.
@@ -516,6 +526,7 @@ impl Capture for WlrCopy {
         (self.current, self.last) = (index, Image { w: 0, h: 0, stride: 0, data: Vec::new() });
         self.take(Some(Duration::from_secs(5)))?;
         (self.desk, self.target, self.again) = ((self.last.w, self.last.h), (self.last.w, self.last.h), true);
+        self.keep_pointer();
         Ok(())
     }
 
@@ -540,27 +551,33 @@ impl Capture for WlrCopy {
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
-        // The virtual pointer goes over all the monitors as one: points on this one are placed
-        // where it lies among them.
-        let ev = match ev {
-            Input::Move { x, y } => {
-                let placed = {
-                    let l = self.shared.lock();
-                    l.outs.get(self.current).filter(|_| l.outs.len() > 1).map(|o| {
-                        let s = o.scale as f64;
-                        let extent = l.outs.iter().fold((0, 0), |(w, h), o| (w.max(o.at.0 + o.size.0 / o.scale), h.max(o.at.1 + o.size.1 / o.scale)));
-                        ((o.at.0 as f64 + x / s, o.at.1 as f64 + y / s), extent)
-                    })
-                };
-                if let Some(((x, y), extent)) = placed {
-                    return self.input.input(Input::Move { x, y }, (extent.0.max(1) as usize, extent.1.max(1) as usize));
-                }
-                Input::Move { x, y }
+        // A pointer not kept to this monitor goes over all of them as one (the box around them):
+        // points on this one are placed where it lies among them.
+        if let Input::Move { x, y } = ev
+            && !self.kept
+        {
+            let placed = {
+                let l = self.shared.lock();
+                l.outs.get(self.current).filter(|_| l.outs.len() > 1).map(|o| placed(&l.outs, o, (x, y)))
+            };
+            if let Some(((x, y), extent)) = placed {
+                return self.input.input(Input::Move { x, y }, extent);
             }
-            ev => ev,
-        };
+        }
         self.input.input(ev, self.desk)
     }
+}
+
+/// A point on monitor `o`'s picture, placed in the box around all `outs` (layout points), and
+/// that box's size.
+fn placed(outs: &[Told], o: &Told, (x, y): (f64, f64)) -> ((f64, f64), (usize, usize)) {
+    let ends = |o: &Told| (o.at, (o.at.0 + o.size.0 / o.scale, o.at.1 + o.size.1 / o.scale));
+    let (mut lo, mut hi) = ends(o);
+    for (a, b) in outs.iter().map(ends) {
+        (lo, hi) = ((lo.0.min(a.0), lo.1.min(a.1)), (hi.0.max(b.0), hi.1.max(b.1)));
+    }
+    let s = o.scale as f64;
+    (((o.at.0 - lo.0) as f64 + x / s, (o.at.1 - lo.1) as f64 + y / s), ((hi.0 - lo.0).max(1) as usize, (hi.1 - lo.1).max(1) as usize))
 }
 
 impl Drop for WlrCopy {
@@ -575,6 +592,17 @@ impl Drop for WlrCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A monitor left of the first one (at a negative x) and one at twice the scale: points on
+    /// each land in the box around them all.
+    #[test]
+    fn points_are_placed_among_the_monitors() {
+        let told = |at, size, scale| Told { name: String::new(), size, at, scale };
+        let outs = [told((0, 0), (1920, 1080), 1), told((-1280, 0), (1280, 1024), 1), told((1920, 0), (3840, 2160), 2)];
+        assert_eq!(placed(&outs, &outs[0], (10.0, 20.0)), ((1290.0, 20.0), (5120, 1080)));
+        assert_eq!(placed(&outs, &outs[1], (0.0, 1000.0)), ((0.0, 1000.0), (5120, 1080)));
+        assert_eq!(placed(&outs, &outs[2], (3840.0, 2000.0)), ((5120.0, 1000.0), (5120, 1080)));
+    }
 
     /// The screen read with no dialog, and it keeps coming: keys typed into the focused terminal
     /// show in a later picture, and come out as typed (Shift's characters, other scripts, Ctrl).
@@ -676,6 +704,57 @@ mod tests {
         }
         for _ in 0..6 {
             w.input(Input::Key { keysym: crate::xk::BACKSPACE, mods: 0 }).unwrap();
+        }
+    }
+
+    /// On every monitor (any scale and place among the others), the pointer goes where it is
+    /// sent on that monitor's picture: the picture changes around that point and nowhere else.
+    /// In a wlroots desktop's session: SSHREMOTE_WLR_TEST=1 TESTS --ignored the_pointer_lands
+    #[test]
+    #[ignore]
+    fn the_pointer_lands_on_the_monitor_shown() {
+        use std::time::{Duration, Instant};
+        if std::env::var_os("SSHREMOTE_WLR_TEST").is_none() {
+            return;
+        }
+        let mut w = WlrCopy::open().expect("screen copying");
+        // The picture once it stopped changing (some compositors send the same one again and again).
+        let settled = |w: &mut WlrCopy| {
+            let mut last = Image { w: w.last.w, h: w.last.h, stride: w.last.stride, data: w.last.data.clone() };
+            let (start, mut quiet) = (Instant::now(), Instant::now());
+            while quiet.elapsed() < Duration::from_millis(300) && start.elapsed() < Duration::from_secs(5) {
+                if let Some(img) = w.grab().unwrap()
+                    && img.data != last.data
+                {
+                    last = img;
+                    quiet = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            last
+        };
+        for i in 0..w.monitors().len() {
+            w.select(i).unwrap();
+            let (mw, mh) = w.desktop_size();
+            let (a, b) = ((mw as f64 * 0.3, mh as f64 * 0.5), (mw as f64 * 0.3 + 90.0, mh as f64 * 0.5 + 70.0));
+            w.input(Input::Move { x: a.0, y: a.1 }).unwrap();
+            let before = settled(&mut w);
+            w.input(Input::Move { x: b.0, y: b.1 }).unwrap();
+            let after = settled(&mut w);
+            let (mut lo, mut hi) = ((usize::MAX, usize::MAX), (0, 0));
+            for y in 0..after.h {
+                for x in 0..after.w {
+                    let o = y * after.stride + x * 4;
+                    if before.data[o..o + 3] != after.data[o..o + 3] {
+                        (lo, hi) = ((lo.0.min(x), lo.1.min(y)), (hi.0.max(x), hi.1.max(y)));
+                    }
+                }
+            }
+            eprintln!("monitor {i} ({mw}x{mh}): pointer {a:?} -> {b:?}, picture changed in {lo:?}..{hi:?}");
+            let near = |p: (f64, f64), q: (usize, usize)| (q.0 as f64 - p.0).abs() <= 100.0 && (q.1 as f64 - p.1).abs() <= 100.0;
+            assert!(hi.0 >= lo.0, "monitor {i}: the pointer did not show on it");
+            assert!(lo.0 as f64 <= b.0 && b.0 <= hi.0 as f64 + 1.0 && lo.1 as f64 <= b.1 && b.1 <= hi.1 as f64 + 1.0, "monitor {i}: not where it was sent");
+            assert!((near(a, lo) || near(b, lo)) && (near(a, hi) || near(b, hi)), "monitor {i}: the picture changed away from the pointer");
         }
     }
 }

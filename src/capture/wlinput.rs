@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::os::fd::AsFd;
 
+use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
@@ -22,19 +23,35 @@ use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 #[derive(Default)]
 struct Globals {
     seat: Option<WlSeat>,
-    pointers: Option<ZwlrVirtualPointerManagerV1>,
+    pointers: Option<(ZwlrVirtualPointerManagerV1, u32)>,
     keyboards: Option<ZwpVirtualKeyboardManagerV1>,
+    /// The monitors by their names, for a pointer kept to one of them; the registry's name each.
+    outputs: Vec<(WlOutput, String, u32)>,
 }
 
 impl Dispatch<WlRegistry, ()> for Globals {
     fn event(g: &mut Globals, r: &WlRegistry, e: wl_registry::Event, _: &(), _: &Connection, qh: &QueueHandle<Globals>) {
-        if let wl_registry::Event::Global { name, interface, version } = e {
-            match interface.as_str() {
+        match e {
+            wl_registry::Event::Global { name, interface, version } => match interface.as_str() {
                 "wl_seat" if g.seat.is_none() => g.seat = Some(r.bind(name, version.min(1), qh, ())),
-                "zwlr_virtual_pointer_manager_v1" => g.pointers = Some(r.bind(name, version.min(1), qh, ())),
+                "zwlr_virtual_pointer_manager_v1" => g.pointers = Some((r.bind(name, version.min(2), qh, ()), version.min(2))),
                 "zwp_virtual_keyboard_manager_v1" => g.keyboards = Some(r.bind(name, 1, qh, ())),
+                // Its name comes from version 4 on.
+                "wl_output" if version >= 4 => g.outputs.push((r.bind(name, 4, qh, name), String::new(), name)),
                 _ => {}
-            }
+            },
+            wl_registry::Event::GlobalRemove { name } => g.outputs.retain(|o| o.2 != name),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlOutput, u32> for Globals {
+    fn event(g: &mut Globals, _: &WlOutput, e: wl_output::Event, id: &u32, _: &Connection, _: &QueueHandle<Globals>) {
+        if let wl_output::Event::Name { name } = e
+            && let Some(o) = g.outputs.iter_mut().find(|o| o.2 == *id)
+        {
+            o.1 = name;
         }
     }
 }
@@ -96,8 +113,11 @@ fn us_key(keysym: u32) -> Option<(u32, bool)> {
 pub struct WlInput {
     conn: Connection,
     queue: EventQueue<Globals>,
+    globals: Globals,
     /// None where the compositor has a virtual keyboard only (COSMIC): its pointer goes by the portal.
     pointer: Option<ZwlrVirtualPointerV1>,
+    /// The monitor the pointer is kept to (its points are that monitor's), if any.
+    bound: Option<String>,
     keyboard: ZwpVirtualKeyboardV1,
     /// The characters no US key has, on the spare codes: (keysym, code), the latest used last.
     extra: Vec<(u32, u32)>,
@@ -117,15 +137,57 @@ impl WlInput {
         conn.display().get_registry(&qh, ());
         let mut g = Globals::default();
         queue.roundtrip(&mut g).map_err(|e| e.to_string())?;
+        // The monitors' names.
+        queue.roundtrip(&mut g).map_err(|e| e.to_string())?;
         let (Some(seat), Some(km)) = (g.seat.clone(), g.keyboards.clone()) else {
             return Err("this desktop offers no virtual keyboard".into());
         };
-        let pointer = g.pointers.clone().map(|pm| pm.create_virtual_pointer(Some(&seat), &qh, ()));
+        let pointer = g.pointers.as_ref().map(|pm| pm.0.create_virtual_pointer(Some(&seat), &qh, ()));
         let keyboard = km.create_virtual_keyboard(&seat, &qh, ());
-        let mut w = WlInput { conn, queue, pointer, keyboard, extra: Vec::new(), held: Vec::new(), mods: 0, start: std::time::Instant::now(), last_key: None };
+        let mut w = WlInput {
+            conn,
+            queue,
+            globals: g,
+            pointer,
+            bound: None,
+            keyboard,
+            extra: Vec::new(),
+            held: Vec::new(),
+            mods: 0,
+            start: std::time::Instant::now(),
+            last_key: None,
+        };
         w.upload()?;
-        w.queue.roundtrip(&mut g).map_err(|e| e.to_string())?;
+        w.queue.roundtrip(&mut w.globals).map_err(|e| e.to_string())?;
         Ok(w)
+    }
+
+    /// Keeps the pointer to the monitor named `name`, so a point on its picture lands there
+    /// whatever its scale and place among the others; false where that cannot be (an older
+    /// compositor, a monitor without a name), and the pointer goes over all monitors as one.
+    pub fn keep_to(&mut self, name: &str) -> bool {
+        if self.bound.as_deref() == Some(name) {
+            return true;
+        }
+        // Monitors come and go.
+        let _ = self.queue.roundtrip(&mut self.globals);
+        let qh = self.queue.handle();
+        let (Some((pm, version)), Some(seat)) = (self.globals.pointers.as_ref(), self.globals.seat.as_ref()) else { return false };
+        let Some(output) = self.globals.outputs.iter().find(|o| o.1 == name).map(|o| o.0.clone()).filter(|_| *version >= 2) else {
+            if self.bound.take().is_some() {
+                if let Some(p) = self.pointer.replace(pm.create_virtual_pointer(Some(seat), &qh, ())) {
+                    p.destroy();
+                }
+                let _ = self.conn.flush();
+            }
+            return false;
+        };
+        if let Some(p) = self.pointer.replace(pm.create_virtual_pointer_with_output(Some(seat), Some(&output), &qh, ())) {
+            p.destroy();
+        }
+        self.bound = Some(name.to_string());
+        let _ = self.conn.flush();
+        true
     }
 
     /// Whether the pointer goes this way too.
