@@ -175,15 +175,16 @@ impl Shared {
 const MIN_GAP: Duration = Duration::from_millis(15);
 /// A copy asked for this long after the last one came may have missed a change: Hyprland's
 /// "with damage" waits for the next change, not for any since the last copy (wlroots counts them).
-const LATE: Duration = Duration::from_millis(4);
+/// Sooner is safe: a change after a copy shows at the screen's next refresh at the earliest.
+const LATE: Duration = Duration::from_millis(6);
 /// How long the screen stays still before a late copy is taken over by a whole one.
 const QUIET: Duration = Duration::from_millis(100);
 
-/// The copy being made: the compositor's frame, whether its memory was given, whether it waits
-/// for the screen to change.
+/// The copy being made: the compositor's frame, the memory given to it (which of two), whether
+/// it waits for the screen to change.
 struct Frame {
     proxy: ZwlrScreencopyFrameV1,
-    given: bool,
+    given: Option<usize>,
     whole: bool,
 }
 
@@ -194,11 +195,12 @@ struct Copier {
     queue: EventQueue<State>,
     state: State,
     frame: Option<Frame>,
-    memory: Option<Memory>,
+    /// Two, so the next copy goes into one while the last is read from the other.
+    memory: [Option<Memory>; 2],
     shared: std::sync::Arc<Shared>,
 }
 
-// SAFETY: the connection and the mapping are used only by the copying thread.
+// SAFETY: the connection and the mappings are used only by the copying thread.
 unsafe impl Send for Copier {}
 
 impl Copier {
@@ -234,38 +236,38 @@ impl Copier {
         self.drop_frame();
         // The pointer drawn in: this desktop does not tell it apart.
         let proxy = self.state.manager.as_ref().ok_or("no screen copying")?.0.capture_output(1, &output, &self.queue.handle(), ());
-        self.frame = Some(Frame { proxy, given: false, whole });
+        self.frame = Some(Frame { proxy, given: None, whole });
         let _ = self.conn.flush();
         Ok(())
     }
 
-    /// Gives the copy its memory once the compositor told what it takes; true when given.
-    fn give(&mut self) -> Result<bool, String> {
+    /// Gives the copy memory `which` once the compositor told what it takes; true when given.
+    fn give(&mut self, which: usize) -> Result<bool, String> {
         let version = self.state.manager.as_ref().map_or(1, |m| m.1);
-        let Some(f) = self.frame.as_mut().filter(|f| !f.given) else { return Ok(false) };
+        let Some(f) = self.frame.as_mut().filter(|f| f.given.is_none()) else { return Ok(false) };
         let c = &self.state.copying;
         if c.form.is_none() || (version >= 3 && !c.told) {
             return Ok(false);
         }
         let form = c.form.ok_or("no form of memory this program reads")?;
-        if self.memory.as_ref().is_none_or(|m| m.form != form) {
-            self.memory = None;
-            self.memory = Some(memory(self.state.shm.as_ref().ok_or("no shared memory")?, form, &self.queue.handle())?);
+        if self.memory[which].as_ref().is_none_or(|m| m.form != form) {
+            self.memory[which] = None;
+            self.memory[which] = Some(memory(self.state.shm.as_ref().ok_or("no shared memory")?, form, &self.queue.handle())?);
         }
-        let buffer = &self.memory.as_ref().expect("made above").buffer;
+        let buffer = &self.memory[which].as_ref().expect("made above").buffer;
         if f.whole || version < 2 {
             f.proxy.copy(buffer);
         } else {
             f.proxy.copy_with_damage(buffer);
         }
-        f.given = true;
+        f.given = Some(which);
         let _ = self.conn.flush();
         Ok(true)
     }
 
-    /// The picture in the memory, the right way up and in BGRX order.
-    fn picture(&self, upside_down: bool, mut data: Vec<u8>) -> Image {
-        let m = self.memory.as_ref().expect("given");
+    /// The picture in memory `which`, the right way up and in BGRX order.
+    fn picture(&self, which: usize, upside_down: bool, mut data: Vec<u8>) -> Image {
+        let m = self.memory[which].as_ref().expect("given");
         let (format, w, h, stride) = (m.form.0, m.form.1 as usize, m.form.2 as usize, m.form.3 as usize);
         // SAFETY: the mapping holds `len` bytes, the compositor done writing them (ready).
         let px = unsafe { std::slice::from_raw_parts(m.at, m.len) };
@@ -289,7 +291,7 @@ impl Copier {
             self.shared.came.notify_all();
         }
         self.drop_frame();
-        self.memory = None;
+        self.memory = [None, None];
         let _ = self.conn.flush();
     }
 
@@ -300,8 +302,8 @@ impl Copier {
         // whole one.
         let (mut asked, mut pictured) = ((usize::MAX, u64::MAX), false);
         let (mut came, mut whole, mut not_before, mut until_quiet) = (None::<Instant>, true, Instant::now(), None::<Instant>);
-        // A picture's memory, used again.
-        let mut spare = Vec::new();
+        // A picture's memory, used again; the shared memory the next copy goes into.
+        let (mut spare, mut next) = (Vec::new(), 0);
         loop {
             let want = {
                 let mut l = self.shared.lock();
@@ -326,7 +328,7 @@ impl Copier {
             if self.frame.is_none() && now >= not_before {
                 self.ask(asked.0, whole)?;
             }
-            if self.give()? && !whole && came.is_some_and(|c| c.elapsed() > LATE) {
+            if self.give(next)? && !whole && came.is_some_and(|c| c.elapsed() > LATE) {
                 until_quiet = Some(Instant::now() + QUIET);
             }
             let c = &self.state.copying;
@@ -339,7 +341,7 @@ impl Copier {
                 // The monitor turned off, say: asked again in a moment.
                 (whole, not_before) = (true, Instant::now() + Duration::from_millis(200));
             } else if c.ready {
-                let upside_down = c.upside_down;
+                let (upside_down, read) = (c.upside_down, self.frame.as_ref().and_then(|f| f.given).expect("given"));
                 let at = Instant::now();
                 // Faster than pictures are wanted: the next copy waits a little.
                 not_before = came.filter(|c| at.duration_since(*c) < MIN_GAP).map_or(at, |c| c + MIN_GAP);
@@ -347,12 +349,18 @@ impl Copier {
                     not_before = at + Duration::from_millis(33);
                 }
                 (came, whole, until_quiet, pictured) = (Some(at), false, None, true);
-                // The next copy is asked for first, so its answer comes while this one is read.
+                // The next copy is asked for and given the other memory first, so the screen is
+                // watched again at once while this picture is read.
                 self.drop_frame();
+                next = 1 - read;
                 if at >= not_before {
                     self.ask(asked.0, false)?;
+                    let until = Instant::now() + LATE;
+                    while !self.give(next)? && Instant::now() < until && !self.state.copying.failed {
+                        self.pump(until.saturating_duration_since(Instant::now()))?;
+                    }
                 }
-                let mut img = self.picture(upside_down, std::mem::take(&mut spare));
+                let mut img = self.picture(read, upside_down, std::mem::take(&mut spare));
                 let mut l = self.shared.lock();
                 if l.want == asked {
                     std::mem::swap(&mut l.img, &mut img);
@@ -420,7 +428,7 @@ impl WlrCopy {
             stop: false,
         };
         let shared = std::sync::Arc::new(Shared { latest: std::sync::Mutex::new(latest), came: std::sync::Condvar::new() });
-        let copier = Copier { conn, queue, state, frame: None, memory: None, shared: shared.clone() };
+        let copier = Copier { conn, queue, state, frame: None, memory: [None, None], shared: shared.clone() };
         let copier = std::thread::Builder::new().name("wlr-screencopy".into()).spawn(move || copier.run()).map_err(|e| e.to_string())?;
         let mut w = WlrCopy {
             shared,
@@ -756,5 +764,9 @@ mod tests {
             assert!(lo.0 as f64 <= b.0 && b.0 <= hi.0 as f64 + 1.0 && lo.1 as f64 <= b.1 && b.1 <= hi.1 as f64 + 1.0, "monitor {i}: not where it was sent");
             assert!((near(a, lo) || near(b, lo)) && (near(a, hi) || near(b, hi)), "monitor {i}: the picture changed away from the pointer");
         }
+        // Back on the first monitor, where the other tests type.
+        w.select(0).unwrap();
+        let (mw, mh) = w.desktop_size();
+        w.input(Input::Move { x: mw as f64 / 2.0, y: mh as f64 / 2.0 }).unwrap();
     }
 }
