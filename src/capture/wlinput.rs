@@ -219,7 +219,7 @@ impl WlInput {
 }
 
 /// An unnamed file for the keymap (memfd).
-fn tempfile_fd() -> Result<std::fs::File, String> {
+pub(super) fn tempfile_fd() -> Result<std::fs::File, String> {
     use std::os::fd::FromRawFd;
     let fd = unsafe { libc::memfd_create(c"sshremote-keymap".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {

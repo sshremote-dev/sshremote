@@ -7,9 +7,9 @@ moves sent in one zstd stream (H.264 only for areas that keep moving).
 
 Hosts: Windows (GDI capture, SendInput); GNOME on Wayland (Mutter RemoteDesktop, PipeWire); X11
 desktops such as Xfce, MATE, LXQt, Cinnamon, i3, and KDE or GNOME on Xorg (MIT-SHM, XDamage, XFixes,
-XTest, with no dialog); and other Wayland desktops through the xdg desktop portal (KDE Plasma,
-COSMIC: allowed once at the screen, then kept where the desktop keeps it), with input of its own on
-wlroots ones that take none through the portal (Sway, Hyprland: a virtual pointer and keyboard).
+XTest, with no dialog); Hyprland, Sway and other wlroots-based desktops (wlr-screencopy, a virtual
+pointer and keyboard, with no dialog); and other Wayland desktops through the xdg desktop portal (KDE
+Plasma, COSMIC: allowed once at the screen, then kept where the desktop keeps it).
 A desktop whose screen cannot be shared still gives its terminal and files.
 
 **Cameras** (as RustDesk's view camera): the host's cameras are listed after its monitors, in the

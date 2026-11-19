@@ -21,6 +21,8 @@ mod x11;
 mod wayland;
 #[cfg(target_os = "linux")]
 mod wlinput;
+#[cfg(target_os = "linux")]
+mod wlrcopy;
 pub mod region;
 mod shrink;
 pub use shrink::Shrink;
@@ -209,6 +211,14 @@ fn linux_desktop() -> Result<Box<dyn Capture>, String> {
             Err(_) => {}
         }
     }
+    // wlroots and its kin (Hyprland, Sway...) copy their screen for the session's own programs:
+    // no dialog for someone at the screen to answer. COSMIC's is left to its portal until tried.
+    if wayland
+        && !desktop.to_ascii_lowercase().contains("cosmic")
+        && let Ok(w) = wlrcopy::WlrCopy::open()
+    {
+        return Ok(Box::new(w));
+    }
     if wayland {
         // Through the desktop's portal (X11 here would see only the programs under Xwayland).
         let name = if desktop.is_empty() { "this desktop".to_string() } else { desktop.replace(':', " / ") };
@@ -229,6 +239,8 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         "x11" => Ok(Box::new(x11::X11::open()?)),
         #[cfg(target_os = "linux")]
         "portal" => Ok(Box::new(wayland::Wayland::open()?)),
+        #[cfg(target_os = "linux")]
+        "wlroots" => Ok(Box::new(wlrcopy::WlrCopy::open()?)),
         #[cfg(target_os = "linux")]
         "auto" => linux_desktop(),
         #[cfg(windows)]
