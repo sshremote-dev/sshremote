@@ -779,6 +779,8 @@ mod tests {
         assert_eq!(key_name("Ctrl"), Some(xk::CONTROL_L));
         assert_eq!(key_name("win"), Some(xk::SUPER_L));
         assert_eq!(key_name("F5"), Some(xk::F1 + 4));
+        assert_eq!(key_name("f24"), Some(xk::F24));
+        assert_eq!(key_name("f25"), None);
         assert_eq!(key_name("a"), Some('a' as u32));
         assert_eq!(key_name("bogus"), None);
         assert_eq!(key_name("grave"), Some('`' as u32), "VS Code's terminal: ctrl+grave");

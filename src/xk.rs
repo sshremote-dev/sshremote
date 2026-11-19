@@ -33,9 +33,9 @@ pub const SUPER_L: u32 = 0xffeb;
 pub const SUPER_R: u32 = 0xffec;
 pub const DELETE: u32 = 0xffff;
 
-/// F`n`, for `n` from 1 to 12.
+/// F`n`, for `n` from 1 to 24.
 pub fn f(n: u32) -> Option<u32> {
-    (1..=12).contains(&n).then(|| F1 + n - 1)
+    (1..=24).contains(&n).then(|| F1 + n - 1)
 }
 
 /// The keysym of a character: Latin-1 as itself, anything else in the Unicode range.

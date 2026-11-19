@@ -2056,6 +2056,7 @@ mod tests {
         assert_eq!(keysym(Key::Num7), Some('7' as u32));
         assert_eq!(keysym(Key::F1), Some(xk::F1));
         assert_eq!(keysym(Key::F12), Some(xk::F12));
+        assert_eq!(keysym(Key::F24), Some(xk::F24));
         assert_eq!(keysym(Key::Enter), Some(xk::RETURN));
         assert_eq!(keysym(Key::Quote), Some('\'' as u32));
     }
