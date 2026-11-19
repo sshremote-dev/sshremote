@@ -140,6 +140,11 @@ pub trait Capture {
     fn set_density(&mut self, _d: f64) {}
     /// How many pictures a second the viewer takes: a backend that copies by itself copies no more.
     fn set_fps(&mut self, _fps: u8) {}
+    /// `wake` is called whenever a new picture is ready for `grab`; false where the backend does
+    /// not (it is looked at often instead).
+    fn set_waker(&mut self, _wake: Box<dyn Fn() + Send>) -> bool {
+        false
+    }
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     /// The viewer draws the pointer itself: the pictures leave it out from now on, or put it

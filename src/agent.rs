@@ -186,6 +186,13 @@ pub fn code_arg() -> String {
 }
 
 /// Serves on stdin/stdout, or on the named pipes a Windows relay created.
+/// What the agent's loop hears: a message from the viewer, a picture ready, the viewer gone.
+enum Heard {
+    Msg(ToAgent),
+    Picture,
+    Gone,
+}
+
 pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
     let backend = starting(backend);
     #[cfg(windows)]
@@ -355,7 +362,14 @@ fn serve_with(
         send(enc, &ToClient::Notice("This desktop lets its screen be seen, not controlled: it has no remote-desktop portal (as with Sway). Its terminal and files work.".into())).map_err(io_err)?;
     }
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<Heard>();
+    // A capture that says when a picture comes lets the loop wait for it instead of looking.
+    let woken = {
+        let tx = tx.clone();
+        cap.set_waker(Box::new(move || {
+            let _ = tx.send(Heard::Picture);
+        }))
+    };
     // Why the viewer's stream ended, when it ended badly, for the viewer to see.
     let (why_tx, why) = mpsc::channel::<String>();
     // Kinds of message this agent could not read, each reported once.
@@ -367,7 +381,7 @@ fn serve_with(
             match read_msg(&mut input) {
                 Ok(Some((k, p))) => match ToAgent::decode(k, &p) {
                     Ok(m) => {
-                        if tx.send(m).is_err() {
+                        if tx.send(Heard::Msg(m)).is_err() {
                             break;
                         }
                     }
@@ -390,6 +404,8 @@ fn serve_with(
                 }
             }
         }
+        // Said, as the capture's waker keeps the channel open.
+        let _ = tx.send(Heard::Gone);
     });
 
     let mut settings: Option<Settings> = None;
@@ -455,27 +471,40 @@ fn serve_with(
     let mut flight_sizes: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
     let mut next_id = 1u32;
     let mut due = Instant::now();
+    let mut ending = false;
     loop {
         // Everything queued in the last turn goes out before waiting.
         enc.flush().map_err(io_err)?;
         // A download in progress keeps the loop turning; otherwise wait for input or the next frame.
         let longest = if outbox.busy() { 1 } else { 8 };
+        // A capture that wakes the loop is not looked at every millisecond for a new picture.
+        let shortest = if woken && due <= Instant::now() { longest } else { 1 };
         let wait = due
             .saturating_duration_since(Instant::now())
-            .clamp(Duration::from_millis(1), Duration::from_millis(longest));
+            .clamp(Duration::from_millis(shortest), Duration::from_millis(longest));
         let mut msgs = Vec::new();
+        let mut gone = false;
         match rx.recv_timeout(wait) {
-            Ok(m) => msgs.push(m),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(_) => {
-                if let Ok(why) = why.try_recv() {
-                    let _ = send(enc, &ToClient::Error(why));
-                    let _ = enc.flush();
-                }
-                return Ok(());
+            Ok(Heard::Msg(m)) => msgs.push(m),
+            Ok(Heard::Picture) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Heard::Gone) | Err(_) => gone = true,
+        }
+        for h in rx.try_iter() {
+            match h {
+                Heard::Msg(m) => msgs.push(m),
+                Heard::Picture => {}
+                Heard::Gone => gone = true,
             }
         }
-        msgs.extend(rx.try_iter());
+        // The viewer's last messages are seen to before the loop ends.
+        ending |= gone;
+        if ending && msgs.is_empty() {
+            if let Ok(why) = why.try_recv() {
+                let _ = send(enc, &ToClient::Error(why));
+                let _ = enc.flush();
+            }
+            return Ok(());
+        }
         msgs.splice(0..0, queued.drain(..));
         for k in skipped.try_iter() {
             let text = format!("The SSH host's sshremote is older than this one and passed over a request it does not know (message {k}); update it there.");

@@ -170,6 +170,8 @@ struct Latest {
 struct Shared {
     latest: std::sync::Mutex<Latest>,
     came: std::sync::Condvar,
+    /// Told when a picture comes.
+    wake: std::sync::Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl Shared {
@@ -396,6 +398,10 @@ impl Copier {
                     std::mem::swap(&mut l.img, &mut img);
                     (l.fresh, l.answers) = (true, asked.1);
                     self.shared.came.notify_all();
+                    drop(l);
+                    if let Some(wake) = self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                        wake();
+                    }
                 }
                 spare = img.data;
                 continue;
@@ -458,7 +464,7 @@ impl WlrCopy {
             error: None,
             stop: false,
         };
-        let shared = std::sync::Arc::new(Shared { latest: std::sync::Mutex::new(latest), came: std::sync::Condvar::new() });
+        let shared = std::sync::Arc::new(Shared { latest: std::sync::Mutex::new(latest), came: std::sync::Condvar::new(), wake: std::sync::Mutex::new(None) });
         let copier = Copier { conn, queue, state, frame: None, memory: [None, None], shared: shared.clone() };
         let copier = std::thread::Builder::new().name("wlr-screencopy".into()).spawn(move || copier.run()).map_err(|e| e.to_string())?;
         let mut w = WlrCopy {
@@ -577,6 +583,11 @@ impl Capture for WlrCopy {
 
     fn set_fps(&mut self, fps: u8) {
         self.shared.lock().gap = gap_for(fps);
+    }
+
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        *self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+        true
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
