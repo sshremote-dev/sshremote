@@ -10,6 +10,7 @@ pub const BLOCK: u8 = 3;
 pub const HIDE: u8 = 4;
 pub const LOCK_ON_LEAVE: u8 = 5;
 
+#[cfg(windows)]
 pub use crate::sys::INJECTED;
 
 /// The bit of an act in `HostState`'s masks.
