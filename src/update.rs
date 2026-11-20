@@ -297,4 +297,19 @@ mod tests {
         assert_eq!(std::fs::read(&alone).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A real release's zip (SSHREMOTE_UPDATE_ZIP) put in place of the app at SSHREMOTE_UPDATE_APP:
+    /// cargo test -- --ignored a_released_app_takes_the_apps_place
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn a_released_app_takes_the_apps_place() {
+        let (Some(zip), Some(app)) = (std::env::var_os("SSHREMOTE_UPDATE_ZIP"), std::env::var_os("SSHREMOTE_UPDATE_APP")) else { return };
+        let exe = std::path::Path::new(&app).join("Contents/MacOS/sshremote");
+        mac::place(&exe, &std::fs::read(zip).unwrap()).unwrap();
+        let out = std::process::Command::new(&exe).arg("--version").output().unwrap();
+        println!("now {}", String::from_utf8_lossy(&out.stdout).trim());
+        let check = std::process::Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(&app).status().unwrap();
+        assert!(check.success(), "the app's signature holds");
+    }
 }
