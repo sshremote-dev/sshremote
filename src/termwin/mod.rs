@@ -907,11 +907,9 @@ impl TermWindow {
             return vec![Cmd::Close];
         }
         let window_title = if host.is_empty() { self.title.clone() } else { format!("{} - {host}", self.title) };
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title(window_title)
-            .with_inner_size([900.0, 560.0])
-            .with_min_inner_size([360.0, 200.0])
-            .with_decorations(false);
+        let mut builder = crate::gui::chrome::framed(
+            egui::ViewportBuilder::default().with_title(window_title).with_inner_size([900.0, 560.0]).with_min_inner_size([360.0, 200.0]),
+        );
         self.framed = true;
         if let Some(icon) = crate::gui::app_icon() {
             builder = builder.with_icon(icon);

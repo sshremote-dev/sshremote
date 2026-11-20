@@ -510,16 +510,16 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
         unsafe { std::env::set_var("WGPU_BACKEND", "dx12") };
     }
     let mut native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size(size)
-            .with_min_inner_size([320.0, 240.0])
-            // Every window draws its own title bar (see chrome).
-            .with_decorations(false),
+        // Every window draws its own title bar (see chrome).
+        viewport: chrome::framed(egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_min_inner_size([320.0, 240.0])),
         ..Default::default()
     };
     if let Some(icon) = app_icon() {
         native.viewport = native.viewport.with_icon(icon);
+    }
+    #[cfg(target_os = "macos")]
+    if !metal_here() {
+        native.renderer = eframe::Renderer::Glow;
     }
     // Some drivers block a vsynced present for a quarter second; frames are paced by the agent anyway.
     native.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
@@ -536,6 +536,19 @@ pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
         });
     }
     native
+}
+
+/// Whether this Mac's GPU draws with Metal; one without (a virtual machine, the oldest Macs) gets
+/// OpenGL. Native adapters are listed at once, so one look at the list is enough.
+#[cfg(target_os = "macos")]
+fn metal_here() -> bool {
+    use std::future::Future;
+    let instance = eframe::wgpu::Instance::default();
+    let mut list = std::pin::pin!(instance.enumerate_adapters(eframe::wgpu::Backends::METAL));
+    match list.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+        std::task::Poll::Ready(found) => !found.is_empty(),
+        std::task::Poll::Pending => true,
+    }
 }
 
 /// Status colours for text and icons, a shade for each theme so they read on its background.
@@ -1410,12 +1423,9 @@ impl App {
         let mut grab = None;
         windows.retain_mut(|(id, w, at)| {
             let mut keep = true;
-            let mut builder = egui::ViewportBuilder::default()
-                .with_title("SSH Remote")
-                .with_inner_size([1100.0, 720.0])
-                .with_min_inner_size(MIN_WORK)
-                .with_position(*at)
-                .with_decorations(false);
+            let mut builder = chrome::framed(
+                egui::ViewportBuilder::default().with_title("SSH Remote").with_inner_size([1100.0, 720.0]).with_min_inner_size(MIN_WORK).with_position(*at),
+            );
             if let Some(icon) = app_icon() {
                 builder = builder.with_icon(icon);
             }

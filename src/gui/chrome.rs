@@ -4,11 +4,24 @@
 //! a double click maximizes or restores it, the icon, a right click or Alt+Space open the system
 //! menu, and the edges resize it.
 
-use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2, ViewportCommand};
 
 /// Height of a title bar, as in Windows 11 apps with tabs.
 pub const HEIGHT: f32 = 40.0;
+/// macOS keeps its own close, minimize and zoom buttons at the left of the bar: room for them.
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHTS: f32 = 76.0;
+
+/// A window that draws its own frame: no system frame, or on macOS the system's title bar made
+/// see-through over the content, keeping its buttons, its resizing and its full screen.
+pub fn framed(b: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    #[cfg(target_os = "macos")]
+    return b.with_decorations(true).with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    #[cfg(not(target_os = "macos"))]
+    b.with_decorations(false)
+}
 /// Width of a caption button.
+#[cfg(not(target_os = "macos"))]
 const BUTTON: f32 = 46.0;
 /// Width of the edge that resizes the window.
 const EDGE: f32 = 6.0;
@@ -45,7 +58,8 @@ pub fn behaviour(ctx: &egui::Context) {
         system_menu(ctx, Pos2::new(8.0, HEIGHT));
     }
     super::look::frame(ctx);
-    if maximized(ctx) {
+    // macOS resizes its windows itself.
+    if maximized(ctx) || cfg!(target_os = "macos") {
         return;
     }
     let screen = ctx.content_rect();
@@ -81,6 +95,7 @@ pub fn behaviour(ctx: &egui::Context) {
 pub fn on_edge(ctx: &egui::Context, p: Pos2) -> bool {
     let r = ctx.content_rect();
     !maximized(ctx)
+        && !cfg!(target_os = "macos")
         && (p.x - r.left() < EDGE || r.right() - p.x < EDGE || p.y - r.top() < EDGE || r.bottom() - p.y < EDGE)
 }
 
@@ -118,13 +133,19 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         {
             system_menu(&ctx, p);
         }
-        let buttons = Rect::from_min_max(Pos2::new(bar.right() - 3.0 * BUTTON, bar.top()), bar.max);
+        // macOS: its own buttons at the left, none of ours at the right.
+        #[cfg(target_os = "macos")]
+        let (buttons, icon_rect) = (Rect::from_min_max(bar.right_top(), bar.max), Rect::from_min_size(bar.min, Vec2::new(TRAFFIC_LIGHTS, HEIGHT)));
+        #[cfg(not(target_os = "macos"))]
+        let (buttons, icon_rect) = (Rect::from_min_max(Pos2::new(bar.right() - 3.0 * BUTTON, bar.top()), bar.max), Rect::from_min_size(bar.min, Vec2::new(40.0, HEIGHT)));
         // The icon opens the system menu, as the system's own title bar does.
-        let icon_rect = Rect::from_min_size(bar.min, Vec2::new(40.0, HEIGHT));
-        let icon = ui.interact(icon_rect, ui.scope_id().with("chrome-icon"), Sense::click());
-        super::paint_logo(ui.painter(), Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0)), ui.visuals().text_color());
-        if icon.clicked() {
-            system_menu(&ctx, Pos2::new(icon_rect.left(), icon_rect.bottom()));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let icon = ui.interact(icon_rect, ui.scope_id().with("chrome-icon"), Sense::click());
+            super::paint_logo(ui.painter(), Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0)), ui.visuals().text_color());
+            if icon.clicked() {
+                system_menu(&ctx, Pos2::new(icon_rect.left(), icon_rect.bottom()));
+            }
         }
         let middle =
             Rect::from_min_max(Pos2::new(icon_rect.right(), bar.top()), Pos2::new(buttons.left() - 8.0, bar.bottom()));
@@ -133,14 +154,18 @@ pub fn title_bar(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> BarR
         );
         child.set_clip_rect(middle);
         content(&mut child);
-        let (close, leave) = caption_buttons(ui, buttons);
-        out.close |= close;
-        out.leave_full |= leave;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (close, leave) = caption_buttons(ui, buttons);
+            out.close |= close;
+            out.leave_full |= leave;
+        }
     });
     out
 }
 
 /// Minimize, maximize or restore, and close, drawn as Windows 11 draws them. True for close.
+#[cfg(not(target_os = "macos"))]
 fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> (bool, bool) {
     let ctx = ui.ctx().clone();
     let fg = ui.visuals().text_color();
@@ -161,9 +186,9 @@ fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> (bool, bool) {
             _ => (Color32::TRANSPARENT, fg),
         };
         let p = ui.painter();
-        p.rect_filled(r, CornerRadius::ZERO, bg);
+        p.rect_filled(r, egui::CornerRadius::ZERO, bg);
         let c = r.center();
-        let s = Stroke::new(1.0, color);
+        let s = egui::Stroke::new(1.0, color);
         match k {
             0 => {
                 p.hline((c.x - 5.0)..=(c.x + 5.0), c.y, s);

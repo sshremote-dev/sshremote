@@ -117,7 +117,12 @@ fn names() -> (String, String) {
     } else {
         String::new()
     };
-    let dns = canonical(&name).filter(|d| d.contains('.') && *d != name).unwrap_or_default();
+    // macOS: the name the Mac is given in its settings ("Anna's MacBook Air"), its host name beside it.
+    #[cfg(target_os = "macos")]
+    if let Some(given) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|n| !n.is_empty()) {
+        return (given, name);
+    }
+    let dns = canonical(&name).filter(|d| d.contains('.') && !d.eq_ignore_ascii_case(&name)).unwrap_or_default();
     (name, dns)
 }
 

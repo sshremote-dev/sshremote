@@ -37,6 +37,10 @@ wasmi = { version = "2", default-features = false, features = ["std", "validate"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# OpenGL as well, for a Mac whose GPU has no Metal (a virtual machine, the oldest Macs).
+eframe = { optional = true, version = "0.37", default-features = false, features = ["glow"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gstreamer = { optional = true, version = "0.25.4" }
 gstreamer-app = { optional = true, version = "0.25.2" }
