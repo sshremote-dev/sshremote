@@ -42,7 +42,7 @@
 </nav>
 <article>
   <h2 id="start">Getting started</h2>
-  <p>Download the file for your system from the <a href="index.html#download">download section</a>. It is a single program: put it on your own computer and on each host you want to reach, as <code>~/.local/bin/sshremote</code> on Linux or anywhere on <code>PATH</code> on Windows.</p>
+  <p>Download the file for your system from the <a href="index.html#download">download section</a>. It is a single program: put it on your own computer and on each host you want to reach, as <code>~/.local/bin/sshremote</code> on Linux, anywhere on <code>PATH</code> on Windows, or the app in Applications on a Mac (its program is <code>/Applications/SSH Remote.app/Contents/MacOS/sshremote</code>, for SSH and the command line).</p>
   <pre class="cmd"><code>sshremote</code></pre>
   <p>With no arguments it opens the home window. On the left is this computer as others reach it: its remote access ID, IP addresses and SSH address, each copied with a click, and the Remote access by ID switch. On the right is one address field for <code>user@host</code>, an alias, an IP or an ID; it says what it reads and opens a terminal, the screen or the files there. Under it are your computers: this computer, favorites, the last opened and the aliases of <code>~/.ssh/config</code>, each with a sheet for its name, key, saved password and SSH tunnels. The gear opens the settings. What you open goes into the workspace as tabs and panes; each pane switches between terminal, screen and files from its mode menu.</p>
   <table>
@@ -61,6 +61,7 @@ sshremote user@host                       # the screen in this terminal (sixel o
 sshremote user@host --preset 0            # 0 black and white 30 fps .. 4 true colour 60 fps</code></pre>
   <p>A lost connection is tried again in the same mode, keeping the shells; after 30 seconds the pane offers Reconnect or Close.</p>
   <div class="note"><b>Windows hosts.</b> The agent starts a helper in the logged-on user's session. To see the sign-in screen and send Ctrl+Alt+Del, add the service once (elevated, or with Start with the computer in the remote access settings): <code>sshremote --install-service</code>.</div>
+  <div class="note"><b>Mac hosts.</b> macOS lets a program record its screen and control it only once its person allows it, in System Settings &gt; Privacy &amp; Security: <b>Screen &amp; System Audio Recording</b> and <b>Accessibility</b> for SSH Remote. macOS asks the first time, and the viewer is told which one is missing (meanwhile the screen is shown without control, or terminals and files work alone). By ID the agent runs from the app, so the app's permissions count; over SSH it runs under the SSH server, whose permissions count instead (<code>sshd-keygen-wrapper</code> in those lists). The app is signed with one certificate for every version, so what was allowed stays allowed after updates.</div>
 
   <h2 id="relay">Connecting by ID through the relay</h2>
   <p>For a PC without SSH or a fixed address, for example a laptop on Wi-Fi, the way RustDesk works. The PC keeps a lasting 9-digit ID, the same across restarts, and a password its owner sets or generates. A viewer connects with both through the relay.</p>
