@@ -79,6 +79,18 @@ const FIN: u8 = 8;
 /// Kind, sender (0 viewer, 1 agent), the session's tag.
 const HEAD: usize = 10;
 const VIEWER: u8 = 0;
+/// With a key both sides were given on the sealed line, every packet ends with this much of its
+/// HMAC-SHA256: one that anyone else sent or changed (who saw the tag go by, a machine on the
+/// network the probes reached) is not taken.
+const MAC: usize = 8;
+
+/// The check a packet ends with under `key`.
+fn mac_of(key: &[u8; 32], pkt: &[u8]) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::Mac;
+    let mut m = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("any key length");
+    m.update(pkt);
+    m
+}
 
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
@@ -101,6 +113,8 @@ enum Phase {
 struct State {
     phase: Phase,
     tag: [u8; 8],
+    /// The key packets are checked with, when both sides know them (`MAC`).
+    key: Option<[u8; 32]>,
     // Punching.
     peers: Vec<SocketAddr>,
     probes: VecDeque<(u32, Instant)>,
@@ -161,6 +175,7 @@ impl State {
         State {
             phase: Phase::Idle,
             tag: [0; 8],
+            key: None,
             peers: Vec::new(),
             probes: VecDeque::new(),
             probe_n: 0,
@@ -256,6 +271,11 @@ impl Inner {
         p.extend_from_slice(&st.tag);
         for b in body {
             p.extend_from_slice(b);
+        }
+        if let Some(key) = &st.key {
+            use hmac::Mac;
+            let check = mac_of(key, &p).finalize().into_bytes();
+            p.extend_from_slice(&check[..MAC]);
         }
         st.said = Instant::now();
         #[cfg(test)]
@@ -500,7 +520,23 @@ impl Inner {
         }
     }
 
+    /// A packet as it came: its check (when packets are checked) taken off first.
     fn receive(&self, st: &mut State, pkt: &[u8], from: SocketAddr) {
+        let pkt = match &st.key {
+            Some(key) => {
+                use hmac::Mac;
+                let Some(at) = pkt.len().checked_sub(MAC).filter(|&n| n >= HEAD) else { return };
+                if mac_of(key, &pkt[..at]).verify_truncated_left(&pkt[at..]).is_err() {
+                    return;
+                }
+                &pkt[..at]
+            }
+            None => pkt,
+        };
+        self.take(st, pkt, from);
+    }
+
+    fn take(&self, st: &mut State, pkt: &[u8], from: SocketAddr) {
         if pkt.len() < HEAD || pkt[1] == self.me || pkt[1] > 1 || pkt[2..HEAD] != st.tag {
             return;
         }
@@ -538,7 +574,7 @@ impl Inner {
                 NOMINATE_ACK | DATA | ACK | PING if self.me == VIEWER && st.nominee == Some(from) => {
                     self.up(st, from, now);
                     if kind != NOMINATE_ACK {
-                        self.receive(st, pkt, from);
+                        self.take(st, pkt, from);
                     }
                 }
                 _ => {}
@@ -793,14 +829,16 @@ impl Path {
         out
     }
 
-    /// Starts trying the other side's addresses, with the tag both were given.
-    pub fn punch(&mut self, tag: [u8; 8], peers: &[SocketAddr], start: Start) {
+    /// Starts trying the other side's addresses, with the tag both were given, and the key
+    /// every packet is checked with when both know it.
+    pub fn punch(&mut self, tag: [u8; 8], key: Option<[u8; 32]>, peers: &[SocketAddr], start: Start) {
         let (local, v6) = (self.local_relay, self.inner.socks.len() > 1);
         let mut st = self.inner.lock();
         if st.phase != Phase::Idle {
             return;
         }
         st.tag = tag;
+        st.key = key;
         st.peers = peers.iter().copied().filter(|p| p.port() != 0 && (p.is_ipv4() || v6) && (usable(p.ip()) || (local && p.ip().is_loopback()))).take(20).collect();
         st.phase = Phase::Punching;
         st.started = Instant::now();
@@ -1172,8 +1210,8 @@ mod tests {
         v.local_relay = true;
         a.local_relay = true;
         let tag = [3u8; 8];
-        a.punch(tag, &[local(&v), v6], Start::Second);
-        v.punch(tag, &[local(&a), a6], Start::Now);
+        a.punch(tag, None, &[local(&v), v6], Start::Second);
+        v.punch(tag, None, &[local(&a), a6], Start::Now);
         assert_eq!(v.wait(Duration::from_secs(5)), Some(a6));
         assert_eq!(a.wait(Duration::from_secs(5)), Some(v6));
         let (mut vs, mut at) = (v.stream(), a.stream());
@@ -1200,8 +1238,10 @@ mod tests {
         a.local_relay = true;
         let (vl, al) = (local(&v), local(&a));
         let tag = [7u8; 8];
-        a.punch(tag, &[vl], Start::Second);
-        v.punch(tag, &[al], Start::Now);
+        // Every packet checked, as two current versions agree to.
+        let key = Some([5u8; 32]);
+        a.punch(tag, key, &[vl], Start::Second);
+        v.punch(tag, key, &[al], Start::Now);
         assert_eq!(v.wait(Duration::from_secs(5)), Some(al));
         assert_eq!(a.wait(Duration::from_secs(5)), Some(vl));
         v.lossy(one_in);
@@ -1315,13 +1355,41 @@ mod tests {
         assert_eq!(&got, b"real");
     }
 
+    /// With a key, a packet from anyone without it (who saw the tag go by, as a machine the
+    /// probes reached does) is not taken: a made-up answer to a probe names no path, where
+    /// without a key it would.
+    #[test]
+    fn packets_without_the_key_are_not_taken() {
+        for key in [None, Some([9u8; 32])] {
+            let mut v = Path::bind(true).unwrap();
+            v.local_relay = true;
+            let forger = UdpSocket::bind("127.0.0.1:0").unwrap();
+            forger.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            v.punch([4; 8], key, &[forger.local_addr().unwrap()], Start::Now);
+            let mut b = [0u8; 1500];
+            let (n, from) = forger.recv_from(&mut b).unwrap();
+            assert_eq!((b[0], n), (PROBE, HEAD + 4 + if key.is_some() { MAC } else { 0 }));
+            // Its answer as one who saw the probe would make it: the tag, the probe's number,
+            // and (it has nothing better) the probe's own check.
+            let mut ack = vec![PROBE_ACK, 1];
+            ack.extend_from_slice(&b[2..HEAD + 4]);
+            if key.is_some() {
+                ack.extend_from_slice(&b[n - MAC..n]);
+            }
+            forger.send_to(&ack, from).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            let taken = v.inner.lock().working.contains(&forger.local_addr().unwrap());
+            assert_eq!(taken, key.is_none(), "{key:?}");
+        }
+    }
+
     /// Nobody answering: the attempt ends, in its time.
     #[test]
     fn nobody_there_is_no_path() {
         let mut v = Path::bind(true).unwrap();
         v.local_relay = true;
         let nowhere = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        v.punch([1; 8], &[nowhere], Start::Now);
+        v.punch([1; 8], None, &[nowhere], Start::Now);
         let started = Instant::now();
         assert_eq!(v.wait(PUNCH_LIMIT + Duration::from_secs(2)), None);
         assert!(started.elapsed() >= PUNCH_LIMIT - Duration::from_millis(100));

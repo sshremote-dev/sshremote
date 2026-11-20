@@ -147,7 +147,7 @@ struct Line {
     moved: AtomicU8,
     punch: Option<Punch>,
     /// The viewer's wait for the agent's addresses.
-    answer: Mutex<Option<mpsc::Sender<Vec<SocketAddr>>>>,
+    answer: Mutex<Option<mpsc::Sender<(Vec<SocketAddr>, bool)>>>,
     /// Attempts at a straight path so far.
     tried: AtomicU8,
     ended: AtomicBool,
@@ -246,11 +246,14 @@ impl Line {
                 let Ok(mut path) = crate::udp::Path::bind(true) else { return };
                 let mine = path.candidates(&p.relay);
                 let tag: [u8; 8] = crate::sys::random(8).try_into().unwrap_or([0; 8]);
-                if line.frame(format!("offer {} {first} {}", crate::sys::hex(&tag), addresses(&mine)).as_bytes(), true).is_err() {
+                // The key the path's packets are checked with, if the agent knows how (an older
+                // one passes the word by, as it is no address, and answers without "mac").
+                let key: [u8; 32] = crate::sys::random(32).try_into().unwrap_or([0; 32]);
+                if line.frame(format!("offer {} {first} mac={} {}", crate::sys::hex(&tag), crate::sys::hex(&key), addresses(&mine)).as_bytes(), true).is_err() {
                     return;
                 }
-                let Ok(peers) = rx.recv_timeout(MOVE_WAIT) else { return };
-                path.punch(tag, &peers, start(first, true));
+                let Ok((peers, checked)) = rx.recv_timeout(MOVE_WAIT) else { return };
+                path.punch(tag, checked.then_some(key), &peers, start(first, true));
                 if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                     line.go_straight(path.stream(), to);
                     return;
@@ -259,8 +262,9 @@ impl Line {
         });
     }
 
-    /// The viewer offered its addresses: the agent answers with its own and tries them.
-    fn offered(self: &Arc<Self>, tag: [u8; 8], first: &str, peers: Vec<SocketAddr>) {
+    /// The viewer offered its addresses: the agent answers with its own and tries them, its
+    /// packets checked with the viewer's key when it gave one.
+    fn offered(self: &Arc<Self>, tag: [u8; 8], key: Option<[u8; 32]>, first: &str, peers: Vec<SocketAddr>) {
         let Some(p) = self.punch.clone().filter(|p| !p.viewer) else { return };
         if self.held.load(Ordering::Acquire) {
             return;
@@ -273,10 +277,11 @@ impl Line {
         std::thread::spawn(move || {
             let Ok(mut path) = crate::udp::Path::bind(false) else { return };
             let mine = path.candidates(&p.relay);
-            if line.frame(format!("answer {}", addresses(&mine)).as_bytes(), true).is_err() {
+            let checked = if key.is_some() { "mac " } else { "" };
+            if line.frame(format!("answer {checked}{}", addresses(&mine)).as_bytes(), true).is_err() {
                 return;
             }
-            path.punch(tag, &peers, start);
+            path.punch(tag, key, &peers, start);
             if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                 line.go_straight(path.stream(), to);
             }
@@ -422,7 +427,6 @@ impl SealedReader {
     fn control(&mut self, msg: &[u8]) -> io::Result<()> {
         let text = String::from_utf8_lossy(msg);
         let mut words = text.split_whitespace();
-        let peers = |w: std::str::SplitWhitespace| w.filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect::<Vec<_>>();
         match words.next() {
             // From here on its frames come on the straight path.
             Some("move") => {
@@ -430,17 +434,24 @@ impl SealedReader {
                 self.wire = Wire::Udp(path);
                 self.line.moved(MOVED_IN);
             }
-            // offer TAG FIRST ADDRESS...: FIRST names the side that probes first.
+            // offer TAG FIRST [mac=KEY] ADDRESS...: FIRST names the side that probes first, KEY
+            // checks every packet of the path.
             Some("offer") => {
-                let tag = words.next().filter(|t| t.len() == 16 && t.bytes().all(|b| b.is_ascii_hexdigit())).and_then(|t| (0..8).map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Option<Vec<u8>>>());
+                let unhex = |t: &str| (t.len() % 2 == 0 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (0..t.len() / 2).filter_map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Vec<u8>>());
+                let tag = words.next().filter(|t| t.len() == 16).and_then(unhex);
                 let first = words.next().unwrap_or("viewer").to_string();
+                let rest: Vec<&str> = words.collect();
+                let key = rest.iter().find_map(|w| w.strip_prefix("mac=")).filter(|k| k.len() == 64).and_then(unhex).and_then(|k| <[u8; 32]>::try_from(k).ok());
                 if let Some(tag) = tag.and_then(|t| <[u8; 8]>::try_from(t).ok()) {
-                    self.line.offered(tag, &first, peers(words));
+                    self.line.offered(tag, key, &first, rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect());
                 }
             }
+            // answer [mac] ADDRESS...: "mac" when it checks the packets with the key offered.
             Some("answer") => {
                 if let Some(tx) = guard(&self.line.answer).take() {
-                    let _ = tx.send(peers(words));
+                    let rest: Vec<&str> = words.collect();
+                    let checked = rest.first() == Some(&"mac");
+                    let _ = tx.send((rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect(), checked));
                 }
             }
             _ => {}
