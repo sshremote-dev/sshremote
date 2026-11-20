@@ -1439,7 +1439,7 @@ impl TermWindow {
         let mut asks: Vec<(usize, PaneAsk)> = Vec::new();
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // The background, with the picture chosen in Appearance behind the text.
-            crate::gui::look::backdrop(ui, ui.max_rect().expand(6.0), scheme_bg());
+            crate::gui::look::backdrop(ui, ui.max_rect().expand(6.0), scheme_bg(), true);
             let font_size = self.font_size;
             let Some(group) = self.tabs.get(self.active).map(|t| t.group) else { return };
             let panes = self.panes(group);

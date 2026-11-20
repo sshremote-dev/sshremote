@@ -443,8 +443,9 @@ fn read_frames(path: &str) -> Result<Vec<(egui::ColorImage, f64)>, String> {
 
 /// Paints a terminal pane's background over `rect`: its colour, and the picture when one is set
 /// (the pane's own, or its part of one across the window), seen through the colour as strongly
-/// as chosen. Returns the colour to fill with from then on: clear over a picture, else `base`.
-pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32) -> Color32 {
+/// as chosen, moving if `play`. Returns the colour to fill with from then on: clear over a
+/// picture, else `base`.
+pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32, play: bool) -> Color32 {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::ZERO, base);
     if !PICTURE.load(Ordering::Relaxed) {
@@ -458,16 +459,16 @@ pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32) -> Color32 {
             Scope::Pane => rect,
             Scope::Window => ui.ctx().content_rect(),
         };
-        shown |= layer(ui, rect, place, &b.src, b.fit, b.strength);
+        shown |= layer(ui, rect, place, &b.src, b.fit, b.strength, play);
     }
     if shown { Color32::TRANSPARENT } else { base }
 }
 
 /// One picture or animation of the background over `rect`, placed in `place` as `fit` says and
 /// as strongly as `strength`; whether it could be drawn.
-fn layer(ui: &egui::Ui, rect: Rect, place: Rect, path: &str, fit: Fit, strength: f32) -> bool {
+fn layer(ui: &egui::Ui, rect: Rect, place: Rect, path: &str, fit: Fit, strength: f32, play: bool) -> bool {
     let painter = ui.painter();
-    let Ok(Some((tex, next))) = picture(ui.ctx(), path, true, place.width().max(place.height())) else { return false };
+    let Ok(Some((tex, next))) = picture(ui.ctx(), path, play, place.width().max(place.height())) else { return false };
     if let Some(next) = next {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next));
     }

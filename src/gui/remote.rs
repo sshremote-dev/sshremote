@@ -490,8 +490,9 @@ impl Remote {
         let ppp = ctx.pixels_per_point();
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         // Around the picture (scaled down, or of another shape), the background layers show, as
-        // behind the terminals; black when there are none.
-        super::look::backdrop(ui, area, Color32::BLACK);
+        // behind the terminals but still: moving, they had the window drawn up to 40 times a
+        // second under a still screen (each frame of them made on the CPU); black when there are none.
+        super::look::backdrop(ui, area, Color32::BLACK, false);
         let inline = self.term_inline && self.terms.is_some();
         // Side panels, as in an editor: the chat on the right, the terminal along the bottom; the
         // picture takes what is left, so both can be used while watching.
