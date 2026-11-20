@@ -163,6 +163,11 @@ pub trait Capture {
     fn wakes(&self) -> bool {
         true
     }
+    /// A word for the viewer when something keeps the picture from coming (a locked screen this
+    /// program may not read), once each time.
+    fn notice(&mut self) -> Option<String> {
+        None
+    }
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     /// A picture `grab` gave that is done with: its buffer may hold a later one.

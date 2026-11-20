@@ -118,6 +118,10 @@ pub struct Gdi {
     sent_cursor: usize,
     /// When the monitors were last looked at for a change of mode or layout; None: look now.
     layout_at: Option<std::time::Instant>,
+    /// The input desktop (lock screen, UAC) cannot be followed: when to try again, and whether
+    /// the viewer was told.
+    shut_out: Option<std::time::Instant>,
+    told_shut_out: bool,
 }
 
 /// A device-independent bitmap selected into its own memory DC.
@@ -218,6 +222,8 @@ impl Gdi {
                 apart: false,
                 sent_cursor: 0,
                 layout_at: Some(std::time::Instant::now()),
+                shut_out: None,
+                told_shut_out: false,
             };
             g.set_target(desk.0, desk.1)?;
             Ok(g)
@@ -800,6 +806,8 @@ impl Capture for Gdi {
             // Nothing changed on the monitor: no copy, no work further down.
             Some(false) if !force && self.dup_ready => return Ok(None),
             Some(_) if self.dup_ready => {
+                // Shown again: a later lock is told again.
+                (self.shut_out, self.told_shut_out) = (None, false);
                 if self.apart && self.scope == Scope::Screen && let Some(img) = self.picture_image() {
                     return Ok(Some(img));
                 }
@@ -809,9 +817,14 @@ impl Capture for Gdi {
             }
             _ => {}
         }
+        if self.shut_out.is_some_and(|t| std::time::Instant::now() < t) {
+            return Ok(None);
+        }
         if !self.blit() {
-            // The input desktop changed (lock screen, UAC); follow it and retry once.
+            // The input desktop changed (lock screen, UAC); follow it and retry once. Without the
+            // rights to (not the service), tried again twice a second, not at every turn.
             if !follow_input_desktop() {
+                self.shut_out = Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
                 return Ok(None);
             }
             unsafe {
@@ -822,7 +835,19 @@ impl Capture for Gdi {
                 return Ok(None);
             }
         }
+        (self.shut_out, self.told_shut_out) = (None, false);
         Ok(Some(self.finish()))
+    }
+
+    fn notice(&mut self) -> Option<String> {
+        if self.shut_out.is_none() || std::mem::replace(&mut self.told_shut_out, true) {
+            return None;
+        }
+        Some(if crate::console_user::running_as_system() {
+            "The screen there is on a desktop that cannot be shown just now; the picture comes back with it.".into()
+        } else {
+            "The screen there is locked or asks for permission (UAC), which cannot be shown without SSH Remote's service there; the picture comes back once it is unlocked. To see and use that screen too, install the service there (Remote access settings, or sshremote remote-access install).".into()
+        })
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {

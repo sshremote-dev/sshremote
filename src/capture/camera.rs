@@ -206,6 +206,9 @@ impl Capture for WithCameras {
     fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
         self.screen.set_waker(wake)
     }
+    fn notice(&mut self) -> Option<String> {
+        self.screen.notice()
+    }
     // A camera does not wake the agent: it is looked at every millisecond while shown.
     fn wakes(&self) -> bool {
         self.cam.is_none() && self.screen.wakes()

@@ -1049,6 +1049,9 @@ fn serve_with(
             }
             _ => {}
         }
+        if let Some(text) = cap.notice() {
+            send(enc, &ToClient::Notice(text)).map_err(io_err)?;
+        }
         // The choice made in the desktop's sharing dialog, even while the picture is paused.
         match cap.poll_share() {
             Some(Ok((kind, text))) => {
