@@ -27,6 +27,9 @@ pub struct Recording {
     last: Option<Instant>,
     /// The picture changed since the last frame was kept.
     pub dirty: bool,
+    /// A session's recording keeps the size of its first picture, in one file, however the
+    /// viewer's size changes.
+    size: Option<(usize, usize)>,
 }
 
 impl Recording {
@@ -35,7 +38,7 @@ impl Recording {
         let (jobs, rx) = mpsc::sync_channel(2);
         let base = name(what);
         std::thread::spawn(move || encode(rx, base));
-        Recording { jobs, started: Instant::now(), last: None, dirty: true }
+        Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None }
     }
 
     /// Starts one of a session by ID in `dir` (made if need be), the time in its name.
@@ -46,7 +49,7 @@ impl Recording {
         let base = dir.join(file);
         let (jobs, rx) = mpsc::sync_channel(2);
         std::thread::spawn(move || encode(rx, base));
-        Ok(Recording { jobs, started: Instant::now(), last: None, dirty: true })
+        Ok(Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None })
     }
 
     /// Hands a captured picture over (BGRx rows `stride` apart), when one is due.
@@ -55,16 +58,25 @@ impl Recording {
         if !self.due() || img.w < 16 || img.h < 16 {
             return;
         }
-        let mut rgb = Vec::with_capacity(img.w * img.h * 3);
-        for row in img.data.chunks(img.stride).take(img.h) {
-            for px in row[..img.w * 4].chunks_exact(4) {
+        // At the first picture's size, nearest pixels taken where another size came.
+        let (w, h) = *self.size.get_or_insert((img.w, img.h));
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            let row = &img.data[(y * img.h / h) * img.stride..];
+            for x in 0..w {
+                let px = &row[(x * img.w / w) * 4..][..3];
                 rgb.extend_from_slice(&[px[2], px[1], px[0]]);
             }
         }
         let now = Instant::now();
-        if self.jobs.try_send(Job::Frame(rgb, img.w, img.h, now)).is_ok() {
+        if self.jobs.try_send(Job::Frame(rgb, w, h, now)).is_ok() {
             (self.last, self.dirty) = (Some(now), false);
         }
+    }
+
+    /// Whether a picture would be kept now, if it changed: the last one is old enough.
+    pub fn wants(&self) -> bool {
+        self.last.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000 / FPS as u64))
     }
 
     /// Whether a frame would be kept now (the picture changed, and the last one is old enough).
@@ -383,8 +395,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sshremote-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recording::session(&dir).unwrap();
-        let (w, h, stride) = (80, 60, 80 * 4 + 16);
         for i in 0..12u8 {
+            // The viewer's size changes halfway: still one file.
+            let (w, h) = if i < 6 { (80, 60) } else { (120, 50) };
+            let stride = w * 4 + 16;
             let data: Vec<u8> = (0..stride * h).map(|b| (b as u8).wrapping_mul(i + 1)).collect();
             r.picture(&crate::capture::Image { w, h, stride, data });
             std::thread::sleep(Duration::from_millis(35));

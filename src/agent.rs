@@ -717,6 +717,9 @@ fn serve_with(
                     // Some backends only deliver a picture when the screen changes; wait a little for one.
                     for _ in 0..40 {
                         if let Some(img) = cap.grab()? {
+                            if let Some(r) = rec.0.as_mut() {
+                                r.picture(&img);
+                            }
                             last = Some(img);
                             fresh = true;
                         }
@@ -1140,7 +1143,21 @@ fn serve_with(
         pointer.follow(enc, cap.as_mut(), s.formats & crate::proto::FORMAT_POINTER != 0, now).map_err(io_err)?;
         // Grab only when a frame may go out: some backends copy the whole screen per grab.
         let light = in_flight < IN_FLIGHT_SMALL && flight_sizes.iter().sum::<usize>() < SMALL_BYTES;
-        if (in_flight >= IN_FLIGHT && !light) || now < due || (paused && !one_shot) {
+        if paused && !one_shot {
+            // Recorded all the same: a viewer that paused the picture (a program driving the
+            // computer by snapshots) still acts on it.
+            if let Some(r) = rec.0.as_mut().filter(|r| r.wants())
+                && let Some(img) = cap.grab()?
+            {
+                r.picture(&img);
+                if let Some(old) = last.replace(img) {
+                    cap.recycle(old);
+                }
+                fresh = true;
+            }
+            continue;
+        }
+        if (in_flight >= IN_FLIGHT && !light) || now < due {
             continue;
         }
         if let Some(img) = cap.grab()? {
