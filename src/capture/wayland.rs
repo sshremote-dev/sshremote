@@ -63,24 +63,7 @@ impl Wayland {
             let _ = f.parent().map(std::fs::create_dir_all);
             let _ = std::fs::write(f, t);
         }
-        // Read here, buffers given back at once: GStreamer's reader keeps the few that
-        // wlroots' portals (Sway, Hyprland) have, and their screen copying then stops after the
-        // first picture. COSMIC's is left to GStreamer until tried.
-        let cosmic = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("COSMIC")));
-        let own = (portal.apart || (super::pw::usable() && !cosmic))
-            .then(|| super::pw::Stream::open(Some(portal.fd()), portal.node, std::time::Duration::from_secs(10)));
-        let (feed, img) = match own.map(|r| r.map(|s| (s.take().0, s))) {
-            Some(Ok((Some(f), s))) => (Feed::Own(s), Image { w: f.w, h: f.h, stride: f.w * 4, data: f.data }),
-            other => {
-                // Read by GStreamer instead: the picture without the pointer, rather than none.
-                if let Some(Err((_, true))) = other {
-                    super::pw::give_up();
-                }
-                let pipe = pipeline(&portal.source(), None)?;
-                let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the shared screen within 10 s")?;
-                (Feed::Gst(pipe), to_image(&first)?)
-            }
-        };
+        let (feed, img) = feed_for(&portal, portal.node)?;
         // Keys through a virtual keyboard where the compositor offers one (it types any character;
         // COSMIC's portal may not pass keys on), the rest through the portal.
         let wl = super::wlinput::WlInput::open().ok().filter(|w| w.has_pointer() || portal.controls());
@@ -103,6 +86,35 @@ impl Wayland {
     pub fn controls(&self) -> bool {
         self.controls || self.wl.is_some()
     }
+
+    /// The screens shared, when there are several to pick from.
+    fn screens(&self) -> &[super::portal::Screen] {
+        match &self.live {
+            Some(l) if l.portal.screens.len() > 1 => &l.portal.screens,
+            _ => &[],
+        }
+    }
+}
+
+/// The stream `node` of `portal` read, and its first picture.
+fn feed_for(portal: &super::portal::Portal, node: u32) -> Result<(Feed, Image), String> {
+    // Read here, buffers given back at once: GStreamer's reader keeps the few that wlroots'
+    // portals (Sway, Hyprland) have, and their screen copying then stops after the first
+    // picture. COSMIC's is left to GStreamer until tried.
+    let cosmic = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("COSMIC")));
+    let own = (portal.apart || (super::pw::usable() && !cosmic)).then(|| super::pw::Stream::open(Some(portal.fd()), node, std::time::Duration::from_secs(10)));
+    Ok(match own.map(|r| r.map(|s| (s.take().0, s))) {
+        Some(Ok((Some(f), s))) => (Feed::Own(s), Image { w: f.w, h: f.h, stride: f.w * 4, data: f.data }),
+        other => {
+            // Read by GStreamer instead: the picture without the pointer, rather than none.
+            if let Some(Err((_, true))) = other {
+                super::pw::give_up();
+            }
+            let pipe = pipeline(&portal.source_of(node), None)?;
+            let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the shared screen within 10 s")?;
+            (Feed::Gst(pipe), to_image(&first)?)
+        }
+    })
 }
 
 impl Capture for Wayland {
@@ -112,6 +124,52 @@ impl Capture for Wayland {
 
     fn desktop_size(&self) -> (usize, usize) {
         self.desk
+    }
+
+    fn monitors(&self) -> Vec<super::Monitor> {
+        self.screens()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| super::Monitor { name: format!("screen {}", i + 1), w: s.size.0.max(0) as usize, h: s.size.1.max(0) as usize, primary: i == 0 })
+            .collect()
+    }
+
+    fn current(&self) -> usize {
+        let node = self.live.as_ref().map_or(0, |l| l.portal.node);
+        self.screens().iter().position(|s| s.node == node).unwrap_or(0)
+    }
+
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        let Some(live) = self.live.as_ref() else { return Err("the screen sharing is not on now".into()) };
+        let s = live.portal.screens.get(index).cloned().ok_or("that computer has no such monitor")?;
+        let was = live.portal.node;
+        if s.node == was {
+            return Ok(());
+        }
+        // The stream shown ends first: a desktop may not feed two at once (KWin's second one gets
+        // no buffers). Should the other not come, the one shown comes back.
+        let Some(Live { feed, mut portal }) = self.live.take() else { unreachable!() };
+        drop(feed);
+        match feed_for(&portal, s.node) {
+            Ok((feed, img)) => {
+                portal.node = s.node;
+                self.live = Some(Live { feed, portal });
+                (self.desk, self.last, self.again, self.sent_shape) = ((img.w, img.h), img, true, 0);
+                Ok(())
+            }
+            Err(e) => {
+                if let Ok((feed, img)) = feed_for(&portal, was) {
+                    self.live = Some(Live { feed, portal });
+                    (self.desk, self.last, self.again) = ((img.w, img.h), img, true);
+                }
+                Err(format!("that monitor's picture did not come: {e}"))
+            }
+        }
+    }
+
+    fn origin(&self) -> (i32, i32) {
+        let node = self.live.as_ref().map_or(0, |l| l.portal.node);
+        self.screens().iter().find(|s| s.node == node).map_or((0, 0), |s| s.at)
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
@@ -146,7 +204,9 @@ impl Capture for Wayland {
     fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
         let Some(Live { feed: Feed::Own(s), .. }) = &self.live else { return (None, None) };
         let p = s.pointer();
-        let Some(shape) = p.shape.filter(|s| s.w > 0) else { return (None, None) };
+        // Where it is, even before this stream sent its picture: the same pointer as on the
+        // monitor shown before, whose picture the viewer has.
+        let Some(shape) = p.shape.filter(|s| s.w > 0) else { return (None, p.at) };
         let new = (p.serial != self.sent_shape).then(|| shape.to_pointer());
         self.sent_shape = p.serial;
         (new, p.at)
@@ -272,6 +332,36 @@ mod tests {
         let gst = matches!(w.live.as_ref().map(|l| &l.feed), Some(Feed::Gst(_)));
         println!("read by {}, woken {} times for {later} later pictures", if gst { "GStreamer" } else { "PipeWire here" }, woken.load(std::sync::atomic::Ordering::Relaxed));
         assert!(woken.load(std::sync::atomic::Ordering::Relaxed) > 0, "the stream woke the agent");
+    }
+
+    /// A desktop with two monitors shares both: both are listed, each shows when picked, and the
+    /// pointer goes where it is sent on the one shown. In a session with two screens:
+    /// SSHREMOTE_PORTAL_TEST=2 TESTS --ignored the_portals_monitors_are_picked
+    #[test]
+    #[ignore]
+    fn the_portals_monitors_are_picked() {
+        if std::env::var_os("SSHREMOTE_PORTAL_TEST").is_none_or(|v| v != "2") {
+            return;
+        }
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut w = Wayland::open().expect("a portal");
+        let list = w.monitors();
+        eprintln!("monitors {:?}", list.iter().map(|m| (m.name.clone(), m.w, m.h)).collect::<Vec<_>>());
+        assert_eq!(list.len(), 2, "both shared");
+        w.pointer_apart(true);
+        for i in [1, 0, 1] {
+            w.select(i).unwrap_or_else(|e| panic!("monitor {i}: {e}"));
+            assert_eq!(w.current(), i);
+            assert_eq!(w.desktop_size(), (list[i].w, list[i].h));
+            w.set_target(list[i].w, list[i].h).unwrap();
+            let img = (0..150).find_map(|_| w.grab().unwrap().or_else(|| (pause(), None).1)).expect("its picture");
+            assert_eq!((img.w, img.h), (list[i].w, list[i].h));
+            // On the screen shown, where it was sent.
+            let to = (100 + 50 * i as i32, 120);
+            w.input(Input::Move { x: to.0 as f64, y: to.1 as f64 }).unwrap();
+            assert!((0..150).any(|_| w.pointer().1 == Some(to) || (pause(), false).1), "screen {i}: pointer at {:?}", w.pointer().1);
+        }
+        assert_eq!(w.origin(), (list[0].w as i32, 0), "the second to the right of the first");
     }
 
     /// A portal's pointer kept apart (KDE Plasma sends it as metadata): its picture comes once

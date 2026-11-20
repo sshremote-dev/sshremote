@@ -15,10 +15,23 @@ const RD: &str = "org.freedesktop.portal.RemoteDesktop";
 const SC: &str = "org.freedesktop.portal.ScreenCast";
 
 /// A stream the person chose in the portal dialog, with the session that sends input to it.
+/// One of the screens a portal shares: its PipeWire node, and where it is and how large on the
+/// desktop (as far as the portal says).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Screen {
+    pub node: u32,
+    pub at: (i32, i32),
+    pub size: (i32, i32),
+}
+
 pub struct Portal {
     conn: Connection,
     session: OwnedObjectPath,
+    /// The stream shown, which pointer positions are given in.
     pub node: u32,
+    /// Every screen shared (a desktop with several monitors may share them all at once),
+    /// left to right.
+    pub screens: Vec<Screen>,
     /// A whole monitor was chosen, rather than a window.
     pub monitor: bool,
     fd: OwnedFd,
@@ -129,7 +142,9 @@ fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<
     let apart = apart
         && Proxy::new(&conn, DEST, PATH, SC).ok().and_then(|p| p.get_property::<u32>("AvailableCursorModes").ok()).is_some_and(|m| m & 4 != 0);
     o.insert("types", Value::U32(types));
-    o.insert("multiple", Value::Bool(false));
+    // Every monitor, where the desktop offers them together: the viewer picks one as it would
+    // elsewhere. A window alone.
+    o.insert("multiple", Value::Bool(types == 1));
     o.insert("cursor_mode", Value::U32(if apart { 4 } else { 2 }));
     if !input {
         keep(&mut o);
@@ -148,6 +163,9 @@ fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<
     let node = *node;
     // source_type 1 is a monitor, 2 a window.
     let monitor = props.get("source_type").and_then(|v| u32::try_from(v).ok()) == Some(1);
+    let pair = |props: &HashMap<String, OwnedValue>, k: &str| props.get(k).and_then(|v| <(i32, i32)>::try_from(v.clone()).ok()).unwrap_or((0, 0));
+    let mut screens: Vec<Screen> = streams.iter().map(|(node, p)| Screen { node: *node, at: pair(p, "position"), size: pair(p, "size") }).collect();
+    screens.sort_by_key(|s| (s.at.0, s.at.1));
 
     let p = Proxy::new(&conn, DEST, PATH, SC).map_err(err("ScreenCast"))?;
     let fd: OwnedFd =
@@ -165,7 +183,9 @@ fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<
     } else {
         None
     };
-    Ok(Portal { conn, session, node, monitor, fd, rd, restore, apart })
+    // The one at the left first, as monitors are listed.
+    let node = screens.first().map_or(node, |s| s.node);
+    Ok(Portal { conn, session, node, screens, monitor, fd, rd, restore, apart })
 }
 
 impl Portal {
@@ -181,9 +201,14 @@ impl Portal {
             .is_ok()
     }
 
-    /// What GStreamer's pipewiresrc needs to read the stream.
+    /// What GStreamer's pipewiresrc needs to read the stream shown.
     pub fn source(&self) -> String {
-        format!("fd={} path={}", self.fd.as_raw_fd(), self.node)
+        self.source_of(self.node)
+    }
+
+    /// The same for stream `node`.
+    pub fn source_of(&self, node: u32) -> String {
+        format!("fd={} path={node}", self.fd.as_raw_fd())
     }
 
     /// The PipeWire connection the stream is read on.
