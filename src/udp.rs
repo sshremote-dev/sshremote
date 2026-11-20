@@ -33,6 +33,9 @@ pub const PUNCH_LIMIT: Duration = Duration::from_secs(6);
 /// naming, so the viewer giving up just then would leave the two on different paths.
 pub const NOMINATE_GRACE: Duration = Duration::from_secs(3);
 const ACK_DELAY: Duration = Duration::from_millis(3);
+/// Before the timeout, the last packet is sent again this many times, each wait twice the one
+/// before: a single key whose packet and first probe were both lost waited the whole timeout.
+const TAIL_PROBES: u32 = 2;
 /// One side waits this long before it probes (or until it hears from the other), so the other
 /// side's router has seen its side send first. A probe that reaches a router before its side sent
 /// anything is turned away, and some routers then keep the way shut: a Linux router that answers
@@ -133,7 +136,8 @@ struct State {
     rto: Duration,
     backoff: u32,
     progress: Instant,
-    probed_tail: bool,
+    /// Tail probes sent since the last progress (`TAIL_PROBES` at most before the timeout).
+    tail_probes: u32,
     window: u32,
     // Receiving.
     expect: u32,
@@ -186,7 +190,7 @@ impl State {
             rto: Duration::from_secs(1),
             backoff: 0,
             progress: now,
-            probed_tail: false,
+            tail_probes: 0,
             window: (RECV_LIMIT / MSS) as u32,
             expect: 0,
             ahead: BTreeMap::new(),
@@ -229,6 +233,10 @@ struct Inner {
     me: u8,
     st: Mutex<State>,
     cv: Condvar,
+    /// Wakes the timers' own thread: something went out with none in flight before, so a
+    /// deadline nearer than the one it sleeps to may be due (its sockets' threads, asleep in a
+    /// read, are woken only by a packet).
+    timer: Condvar,
     /// Tests: one packet of the stream in this many is dropped on the way out (0: none).
     #[cfg(test)]
     lossy: std::sync::atomic::AtomicU32,
@@ -354,6 +362,9 @@ impl Inner {
             st.seq += 1;
             if st.flight.is_empty() {
                 st.progress = now;
+                // A key after a quiet while: its tail probe is due long before the timers next
+                // look (a lost one waited the whole timeout, 200 ms).
+                self.timer.notify_all();
             }
             self.send(st, DATA, &[&seq.to_le_bytes(), &data], to);
             st.flight_bytes += data.len();
@@ -402,7 +413,7 @@ impl Inner {
         }
         st.backoff = 0;
         st.progress = now;
-        st.probed_tail = false;
+        st.tail_probes = 0;
         if let Some(at) = sample {
             st.rtt(now - at);
         }
@@ -650,8 +661,8 @@ impl Inner {
                         st.recover = st.seq;
                         st.backoff = (st.backoff + 1).min(5);
                         st.progress = now;
-                        st.probed_tail = false;
-                    } else if !st.probed_tail && st.lost.is_empty() && now >= st.progress + pto {
+                        st.tail_probes = 0;
+                    } else if st.tail_probes < TAIL_PROBES && st.lost.is_empty() && now >= st.progress + pto * (1 << st.tail_probes) {
                         // The last packets may be what was lost: the last one again tells.
                         if let Some((&seq, s)) = st.flight.last_key_value() {
                             let data = s.data.clone();
@@ -661,11 +672,11 @@ impl Inner {
                                 s.again = true;
                             }
                         }
-                        st.probed_tail = true;
+                        st.tail_probes += 1;
                     }
                     next = next.min(st.progress + (st.rto * (1 << st.backoff)).min(MAX_RTO));
-                    if !st.probed_tail {
-                        next = next.min(st.progress + pto);
+                    if st.tail_probes < TAIL_PROBES {
+                        next = next.min(st.progress + pto * (1 << st.tail_probes));
                     }
                 }
                 let stuck = st.window == 0 && !st.queue.is_empty() && now.duration_since(st.said) >= st.rto;
@@ -681,6 +692,16 @@ impl Inner {
                 }
                 Some(next)
             }
+        }
+    }
+
+    /// Keeps the timers between packets, woken early as data goes out after a quiet while.
+    fn keep_time(self: Arc<Self>) {
+        let mut st = self.lock();
+        loop {
+            let Some(next) = self.tick(&mut st, Instant::now()) else { return };
+            let wait = next.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            st = self.timer.wait_timeout(st, wait).unwrap_or_else(|e| e.into_inner()).0;
         }
     }
 
@@ -727,6 +748,7 @@ impl Path {
             me: if viewer { VIEWER } else { 1 },
             st: Mutex::new(State::new()),
             cv: Condvar::new(),
+            timer: Condvar::new(),
             #[cfg(test)]
             lossy: std::sync::atomic::AtomicU32::new(0),
         };
@@ -790,6 +812,8 @@ impl Path {
             let inner = self.inner.clone();
             std::thread::spawn(move || inner.run(which));
         }
+        let inner = self.inner.clone();
+        std::thread::spawn(move || inner.keep_time());
     }
 
     /// Waits for the path: where it goes, or None when none was found.
