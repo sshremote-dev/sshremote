@@ -64,12 +64,15 @@ pub struct X11 {
     watch: Option<Watch>,
 }
 
-/// Ends the watching thread as the capture goes (within a quarter second).
-struct Watch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// Ends the watching thread as the capture goes (within a quarter second); `alive` until it ends.
+struct Watch {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -88,10 +91,19 @@ impl Watch {
         conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR).map_err(err)?;
         conn.flush().map_err(err)?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ended = stop.clone();
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (ended, living) = (stop.clone(), alive.clone());
         std::thread::Builder::new()
             .name("x11-watch".into())
             .spawn(move || {
+                // Gone for good (the connection broke): the agent looks for itself again.
+                struct Gone(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Gone {
+                    fn drop(&mut self) {
+                        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let _gone = Gone(living);
                 let fd = conn.stream().as_raw_fd();
                 while !ended.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut came = false;
@@ -117,13 +129,17 @@ impl Watch {
                         continue;
                     }
                     let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                    if unsafe { libc::poll(&mut p, 1, 250) } < 0 || p.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                    let r = unsafe { libc::poll(&mut p, 1, 250) };
+                    if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    if r < 0 || p.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
                         return;
                     }
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Watch(stop))
+        Ok(Watch { stop, alive })
     }
 }
 
@@ -576,6 +592,10 @@ impl Capture for X11 {
         }
         self.watch = Watch::start(wake).ok();
         self.watch.is_some()
+    }
+
+    fn wakes(&self) -> bool {
+        self.watch.as_ref().is_some_and(|w| w.alive.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {

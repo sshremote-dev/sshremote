@@ -157,6 +157,10 @@ impl Capture for Wayland {
         true
     }
 
+    fn wakes(&self) -> bool {
+        self.live.is_some()
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         let live = self.live.as_ref().ok_or("the screen sharing did not come back after its resolution changed")?;
         // The stream read now (one opened again after a resolution change too) wakes the agent.

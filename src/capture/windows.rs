@@ -765,6 +765,11 @@ impl Capture for Gdi {
         true
     }
 
+    // GDI, while duplication is not there, wakes nobody.
+    fn wakes(&self) -> bool {
+        self.dup.is_some()
+    }
+
     fn pointer_apart(&mut self, on: bool) -> bool {
         (self.apart, self.sent_cursor, self.force) = (on, 0, true);
         true

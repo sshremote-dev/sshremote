@@ -157,6 +157,12 @@ pub trait Capture {
     fn set_waker(&mut self, _wake: Box<dyn Fn() + Send>) -> bool {
         false
     }
+    /// Whether the waker given to `set_waker` is called now: not while this can only be looked at
+    /// (a camera shown, GDI standing in for duplication, a watch that ended), when the agent
+    /// looks every millisecond again.
+    fn wakes(&self) -> bool {
+        true
+    }
     /// Returns a frame when one arrived since the last call.
     fn grab(&mut self) -> Result<Option<Image>, String>;
     /// A picture `grab` gave that is done with: its buffer may hold a later one.

@@ -489,7 +489,7 @@ fn serve_with(
         // A download in progress keeps the loop turning; otherwise wait for input or the next frame.
         let longest = if outbox.busy() || ports.busy() { 1 } else { 8 };
         // A capture that wakes the loop is not looked at every millisecond for a new picture.
-        let shortest = if woken && due <= Instant::now() { longest } else { 1 };
+        let shortest = if woken && cap.wakes() && due <= Instant::now() { longest } else { 1 };
         let mut wait = due
             .saturating_duration_since(Instant::now())
             .clamp(Duration::from_millis(shortest), Duration::from_millis(longest));

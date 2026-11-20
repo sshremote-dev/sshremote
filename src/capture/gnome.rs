@@ -1178,6 +1178,10 @@ impl Capture for Gnome {
         true
     }
 
+    fn wakes(&self) -> bool {
+        self.pw.is_some() || self.pipe.is_some()
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         // Whichever reads the stream now wakes the agent as it sends something.
         if let Some(pw) = &self.pw {

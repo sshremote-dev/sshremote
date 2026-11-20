@@ -203,9 +203,12 @@ impl Capture for WithCameras {
     fn set_fps(&mut self, fps: u8) {
         self.screen.set_fps(fps)
     }
-    // A camera shown is looked at every few milliseconds, as it does not wake the agent.
     fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
         self.screen.set_waker(wake)
+    }
+    // A camera does not wake the agent: it is looked at every millisecond while shown.
+    fn wakes(&self) -> bool {
+        self.cam.is_none() && self.screen.wakes()
     }
     fn pointer_apart(&mut self, on: bool) -> bool {
         self.screen.pointer_apart(on)
