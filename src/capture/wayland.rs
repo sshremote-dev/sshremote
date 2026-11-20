@@ -161,6 +161,10 @@ impl Capture for Wayland {
                 if let Ok((feed, img)) = feed_for(&portal, was) {
                     self.live = Some(Live { feed, portal });
                     (self.desk, self.last, self.again) = ((img.w, img.h), img, true);
+                } else {
+                    // Neither came: the sharing starts over, as after a resolution change.
+                    drop(portal);
+                    self.screen_changed();
                 }
                 Err(format!("that monitor's picture did not come: {e}"))
             }
@@ -204,9 +208,14 @@ impl Capture for Wayland {
     fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
         let Some(Live { feed: Feed::Own(s), .. }) = &self.live else { return (None, None) };
         let p = s.pointer();
-        // Where it is, even before this stream sent its picture: the same pointer as on the
-        // monitor shown before, whose picture the viewer has.
-        let Some(shape) = p.shape.filter(|s| s.w > 0) else { return (None, p.at) };
+        let shape = match p.shape {
+            // Hidden (by a game, a player).
+            Some(s) if s.w == 0 => return (None, None),
+            Some(s) => s,
+            // Where it is, even before this stream sent its picture: the same pointer as on the
+            // monitor shown before, whose picture the viewer has.
+            None => return (None, p.at),
+        };
         let new = (p.serial != self.sent_shape).then(|| shape.to_pointer());
         self.sent_shape = p.serial;
         (new, p.at)
