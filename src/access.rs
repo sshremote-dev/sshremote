@@ -1063,21 +1063,48 @@ pub fn online(id: &str, relay: &str) -> Result<bool, String> {
     }
 }
 
-/// Wrong passwords in a row past which no password is checked for a day, or until the password
-/// is changed: a guesser gets this many tries, not thousands.
+/// Wrong passwords in a row past which a place they come from (an address, or an IPv6 network's
+/// /64) is not checked for a day, or until the password is changed: a guesser gets this many
+/// tries there, not thousands. `LOCK_ALL_AFTER` in a row from places not let in lately (more
+/// than one place makes alone) stop the checking of all such places the same way; those a right
+/// password came from lately are still checked, so a guesser who knows the ID cannot lock its
+/// owner out.
 const LOCK_AFTER: u32 = 20;
+const LOCK_ALL_AFTER: u32 = 100;
 const LOCK_FOR: Duration = Duration::from_secs(24 * 3600);
-/// Calls answered at once; more (a flood from a relay or someone on the path) are dropped.
+/// Calls answered at once; more (a flood from a relay or someone on the path) are dropped. Places
+/// let in lately have a few more of their own, which a flood from elsewhere cannot take.
 const MOST_CALLS: usize = 8;
+const KNOWN_CALLS: usize = 4;
+/// Places let in lately that are remembered, and places with wrong passwords counted.
+const KNOWN_MOST: usize = 32;
+const COUNTED_MOST: usize = 4096;
+
+/// Where guesses are counted from: an address, or the /64 an IPv6 one is in (one network's).
+fn place(from: Option<std::net::IpAddr>) -> String {
+    match from.map(|a| a.to_canonical()) {
+        Some(std::net::IpAddr::V4(a)) => a.to_string(),
+        Some(std::net::IpAddr::V6(a)) => {
+            let s = a.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        None => "?".into(),
+    }
+}
 
 /// Wrong passwords seen lately, and one password check at a time: guesses wait their turn and
 /// cost more time each, and the count fades after a quiet quarter of an hour, so wrong guesses
-/// slow an attacker without locking the owner out. Many in a row stop the checking altogether.
+/// slow an attacker without locking the owner out. Many in a row stop the checking (see
+/// `LOCK_AFTER`); places a right password came from lately keep a way of their own in.
 #[derive(Default)]
 struct Guard {
+    /// Wrong passwords from places not let in lately, for their delay, and those in a row.
     failures: Mutex<(u32, Option<std::time::Instant>)>,
-    /// Wrong passwords since the last right one, and when the last was.
     strikes: Mutex<(u32, Option<std::time::Instant>)>,
+    /// Each place's wrong passwords in a row, and when the last was.
+    places: Mutex<std::collections::HashMap<String, (u32, std::time::Instant)>>,
+    /// Places a right password came from lately, the latest last.
+    known: Mutex<std::collections::VecDeque<String>>,
     turn: Mutex<()>,
     /// Calls waiting for the turn: past two, more are turned away at once, so a queue of guesses
     /// cannot keep the owner's own call waiting until it gives up.
@@ -1086,53 +1113,115 @@ struct Guard {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-/// Wrong passwords in a row in this process's remote access, for the window.
+/// Wrong passwords in a row in this process's remote access from places not let in lately, for
+/// the window.
 static STRIKES: AtomicU32 = AtomicU32::new(0);
 
-/// Whether this process's remote access stopped taking passwords after too many wrong ones.
+/// Whether this process's remote access stopped taking passwords from places not let in lately,
+/// after too many wrong ones.
 pub fn locked() -> bool {
-    STRIKES.load(Ordering::Relaxed) >= LOCK_AFTER
+    STRIKES.load(Ordering::Relaxed) >= LOCK_ALL_AFTER
 }
 
 impl Guard {
-    /// No password is checked: too many wrong ones in a row, not long ago.
-    fn locked(&self) -> bool {
+    /// A right password came from there lately.
+    fn known(&self, from: &str) -> bool {
+        self.known.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k == from)
+    }
+
+    /// No password is checked from there: too many wrong ones in a row, not long ago, from there
+    /// (or, for a place not let in lately, from all such places).
+    fn locked(&self, from: &str) -> bool {
+        let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((n, at)) = places.get(from).copied() {
+            if at.elapsed() > LOCK_FOR {
+                places.remove(from);
+            } else if n >= LOCK_AFTER {
+                return true;
+            }
+        }
+        drop(places);
+        if self.known(from) {
+            return false;
+        }
         let mut s = self.strikes.lock().unwrap_or_else(|e| e.into_inner());
         if s.1.is_some_and(|t| t.elapsed() > LOCK_FOR) {
             *s = (0, None);
             STRIKES.store(0, Ordering::Relaxed);
         }
-        s.0 >= LOCK_AFTER
+        s.0 >= LOCK_ALL_AFTER
     }
 
     /// A new password: what was guessed against the old one no longer counts.
     fn reset(&self) {
         *self.strikes.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
         *self.failures.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+        self.places.lock().unwrap_or_else(|e| e.into_inner()).clear();
         STRIKES.store(0, Ordering::Relaxed);
     }
 
-    fn delay(&self) -> Duration {
+    /// How long a check from there waits first: more for each wrong one lately, from there or,
+    /// for a place not let in lately, from all such places.
+    fn delay(&self, from: &str) -> Duration {
+        let wait = |n: u32| if n == 0 { Duration::ZERO } else { Duration::from_secs((1u64 << n.min(5)).min(30)) };
+        let quiet = Duration::from_secs(15 * 60);
+        let own = self.places.lock().unwrap_or_else(|e| e.into_inner()).get(from).filter(|(_, at)| at.elapsed() < quiet).map_or(0, |p| p.0);
+        if self.known(from) {
+            return wait(own);
+        }
         let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        if f.1.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
+        if f.1.is_some_and(|t| t.elapsed() > quiet) {
             *f = (0, None);
         }
-        if f.0 == 0 { Duration::ZERO } else { Duration::from_secs((1u64 << f.0.min(5)).min(30)) }
+        wait(own.max(f.0))
     }
 
-    fn failed(&self) {
-        let now = Some(std::time::Instant::now());
+    fn failed(&self, from: &str) {
+        let now = std::time::Instant::now();
+        let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        if places.len() >= COUNTED_MOST {
+            // Addresses made up by the thousand: only those locked out are kept.
+            places.retain(|_, (n, at)| *n >= LOCK_AFTER && at.elapsed() < LOCK_FOR);
+        }
+        let p = places.entry(from.to_string()).or_insert((0, now));
+        *p = (p.0 + 1, now);
+        drop(places);
+        if self.known(from) {
+            return;
+        }
         let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        *f = (f.0 + 1, now);
+        *f = (f.0 + 1, Some(now));
         let mut s = self.strikes.lock().unwrap_or_else(|e| e.into_inner());
-        *s = (s.0 + 1, now);
+        *s = (s.0 + 1, Some(now));
         STRIKES.store(s.0, Ordering::Relaxed);
     }
 
-    fn passed(&self) {
+    fn passed(&self, from: &str) {
+        self.places.lock().unwrap_or_else(|e| e.into_inner()).remove(from);
+        let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|k| k != from);
+        if known.len() >= KNOWN_MOST {
+            known.pop_front();
+        }
+        known.push_back(from.to_string());
+        drop(known);
         *self.failures.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
         *self.strikes.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
         STRIKES.store(0, Ordering::Relaxed);
+    }
+
+    /// Takes one of the calls answered at once, if there is one for a call from there.
+    /// Given back with `calls.fetch_sub` when the call is over.
+    fn take_call(&self, from: &str) -> bool {
+        if self.locked(from) {
+            return false;
+        }
+        let most = if self.known(from) { MOST_CALLS + KNOWN_CALLS } else { MOST_CALLS };
+        if self.calls.fetch_add(1, Ordering::AcqRel) >= most {
+            self.calls.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        true
     }
 }
 
@@ -1247,12 +1336,8 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 } else if let Some(nonce) = l.strip_prefix("call ") {
                     let from = seen.remove(nonce);
                     // A flood of calls is not answered past a handful at once, nor at all while
-                    // no password is taken.
-                    if guard.locked() {
-                        continue;
-                    }
-                    if guard.calls.fetch_add(1, Ordering::AcqRel) >= MOST_CALLS {
-                        guard.calls.fetch_sub(1, Ordering::AcqRel);
+                    // no password is taken from there.
+                    if !guard.take_call(&place(from)) {
                         continue;
                     }
                     let (cfg, nonce, guard) = (cfg.clone(), nonce.to_string(), guard.clone());
@@ -1326,10 +1411,7 @@ fn listen_direct(guard: Arc<Guard>) {
         match l.accept() {
             Ok((mut s, _)) => {
                 let _ = s.set_nonblocking(false);
-                if guard.locked() || guard.calls.fetch_add(1, Ordering::AcqRel) >= MOST_CALLS {
-                    if !guard.locked() {
-                        guard.calls.fetch_sub(1, Ordering::AcqRel);
-                    }
+                if !guard.take_call(&place(s.peer_addr().ok().map(|a| a.ip()))) {
                     continue;
                 }
                 let guard = guard.clone();
@@ -1372,23 +1454,30 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
     // The first check is of the password, the next of the two-step code.
     let checks = std::cell::Cell::new(0);
+    let at = place(from);
     let judge = |check: &mut dyn FnMut() -> bool| -> io::Result<bool> {
         let what = if checks.replace(checks.get() + 1) == 0 { "a wrong password" } else { "a wrong two-step code" };
-        if guard.locked() {
+        if guard.locked(&at) {
             return Err(io::Error::other("no passwords taken now"));
         }
-        if guard.waiting.fetch_add(1, Ordering::AcqRel) >= 2 {
+        // A place let in lately waits only for its own wrong ones, never behind others' guesses.
+        let _turn = if guard.known(&at) {
+            None
+        } else {
+            if guard.waiting.fetch_add(1, Ordering::AcqRel) >= 2 {
+                guard.waiting.fetch_sub(1, Ordering::AcqRel);
+                return Err(io::Error::other("busy"));
+            }
+            let turn = guard.turn.lock().unwrap_or_else(|e| e.into_inner());
             guard.waiting.fetch_sub(1, Ordering::AcqRel);
-            return Err(io::Error::other("busy"));
-        }
-        let _turn = guard.turn.lock().unwrap_or_else(|e| e.into_inner());
-        guard.waiting.fetch_sub(1, Ordering::AcqRel);
-        thread::sleep(guard.delay());
+            Some(turn)
+        };
+        thread::sleep(guard.delay(&at));
         let right = check();
         if right {
-            guard.passed()
+            guard.passed(&at)
         } else {
-            guard.failed();
+            guard.failed(&at);
             note_visit(serde_json::json!({ "refused": what, "at": crate::sys::now_secs(), "from": from_text }));
         }
         Ok(right)
@@ -2406,30 +2495,55 @@ mod tests {
     }
 
     #[test]
-    fn twenty_wrong_passwords_in_a_row_stop_the_checking() {
+    fn wrong_passwords_lock_out_where_they_come_from_never_the_owner() {
         let g = Guard::default();
+        let (owner, guesser, other) = ("192.0.2.1", "198.51.100.7", "2001:db8:1:2::/64");
+        g.passed(owner);
         for _ in 0..LOCK_AFTER - 1 {
-            g.failed();
+            g.failed(guesser);
         }
-        assert!(!g.locked(), "not yet");
-        g.passed();
-        for _ in 0..LOCK_AFTER - 1 {
-            g.failed();
+        assert!(!g.locked(guesser), "not yet");
+        assert!(g.delay(guesser) >= Duration::from_secs(30) && g.delay(owner) == Duration::ZERO, "a wait for guessers, none for the owner");
+        g.failed(guesser);
+        assert!(g.locked(guesser) && !g.locked(other) && !g.locked(owner), "{LOCK_AFTER} in a row lock out only their place");
+        assert!(!g.take_call(guesser) && g.take_call(owner));
+        g.calls.fetch_sub(1, Ordering::AcqRel);
+        // Guesses from places by the hundred: all places not let in lately are locked, not the owner's.
+        for i in 0..LOCK_ALL_AFTER {
+            g.failed(&format!("203.0.{}.{}", i / 200, i % 200));
         }
-        assert!(!g.locked(), "a right password starts the count again");
-        g.failed();
-        assert!(g.locked() && locked(), "{LOCK_AFTER} in a row");
-        // A day later, or a new password, opens it again.
-        // (A day back exists only on a computer up for longer than that.)
+        assert!(g.locked(other) && locked() && !g.locked(owner), "{LOCK_ALL_AFTER} from many places");
+        // The owner keeps calls of its own while a flood takes all the others.
+        g.calls.store(MOST_CALLS, Ordering::Release);
+        assert!(!g.take_call("203.0.9.9") && g.take_call(owner));
+        g.calls.store(0, Ordering::Release);
+        // The owner's own mistakes count against the owner's place alone.
+        let before = g.strikes.lock().unwrap().0;
+        for _ in 0..LOCK_AFTER {
+            g.failed(owner);
+        }
+        assert!(g.locked(owner) && g.strikes.lock().unwrap().0 == before, "its own place only");
+        // A day later, or a new password, opens it all again.
         if let Some(day) = std::time::Instant::now().checked_sub(LOCK_FOR + Duration::from_secs(1)) {
             g.strikes.lock().unwrap().1 = Some(day);
-            assert!(!g.locked(), "a day on");
+            g.places.lock().unwrap().values_mut().for_each(|p| p.1 = day);
+            assert!(!g.locked(guesser) && !g.locked(other), "a day on");
         }
-        for _ in 0..LOCK_AFTER {
-            g.failed();
+        for _ in 0..LOCK_ALL_AFTER {
+            g.failed(guesser);
         }
         g.reset();
-        assert!(!g.locked() && !locked(), "a new password");
+        assert!(!g.locked(guesser) && !g.locked(other) && !locked(), "a new password");
+    }
+
+    #[test]
+    fn guesses_count_by_address_or_ipv6_network() {
+        let p = |s: &str| place(Some(s.parse().unwrap()));
+        assert_eq!(p("198.51.100.7"), "198.51.100.7");
+        assert_eq!(p("::ffff:198.51.100.7"), "198.51.100.7");
+        assert_eq!(p("2001:db8:1:2:aaaa::1"), p("2001:db8:1:2:bbbb::9"));
+        assert_ne!(p("2001:db8:1:2::1"), p("2001:db8:1:3::1"));
+        assert_eq!(place(None), "?");
     }
 
     #[test]

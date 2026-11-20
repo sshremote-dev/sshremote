@@ -144,7 +144,7 @@ impl App {
             return (weak, "Off: nobody can connect by ID".into());
         }
         if !svc.runs && access::locked() {
-            return (bad(), "Too many wrong passwords in a row: none is taken for a day, or until you set a new one".into());
+            return (bad(), "Too many wrong passwords in a row from many places: for a day, or until you set a new one, only places you came in from lately are let in".into());
         }
         match (&local, online) {
             (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
