@@ -485,7 +485,7 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
         let agent = match &gate.local {
             Some(capture) => crate::transport::Target::Local { capture: capture.clone() },
             None => {
-                let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone() };
+                let addr = crate::net::Address { id: id.clone(), relay: gate.relay.clone(), for_whom: Some(who) };
                 // The two-step code rides with the password (`net::CODE_SEP`).
                 let code = text("code");
                 let password = if code.trim().is_empty() { text("password") } else { format!("{}{}{}", text("password"), crate::net::CODE_SEP, code.trim()) };

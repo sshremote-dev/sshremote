@@ -484,6 +484,27 @@ pub fn relay_addr(relay: &str) -> (String, u16) {
     }
 }
 
+/// The relay, reached for someone else (a web gateway's visitor at `whom`): a relay on this
+/// computer takes their address from a web server here, so their calls count as theirs, not as
+/// all the gateway's visitors' together. Elsewhere it is dialled as for this person.
+pub fn dial_for(relay: &str, whom: std::net::IpAddr) -> io::Result<TcpStream> {
+    let (host, port) = relay_addr(relay);
+    let here = host.eq_ignore_ascii_case("localhost") || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback());
+    if !here {
+        return dial(relay);
+    }
+    let mut s = TcpStream::connect_timeout(&(host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().unwrap_or(std::net::Ipv4Addr::LOCALHOST.into()), port).into(), Duration::from_secs(4))?;
+    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+    write!(s, "GET /relay HTTP/1.1\r\nHost: {host}\r\nUpgrade: sshremote-relay\r\nConnection: Upgrade\r\nX-Real-IP: {}\r\n\r\n", whom.to_canonical())?;
+    let status = line(&mut s)?;
+    while !line(&mut s)?.is_empty() {}
+    if !status.contains(" 101") {
+        return Err(io::Error::other(format!("the relay did not take the visitor's address: {status}")));
+    }
+    s.set_read_timeout(None)?;
+    Ok(s)
+}
+
 /// A viewer's address for an ID: `sshremote://ID@relay`.
 pub fn address(id: &str, relay: &str) -> String {
     format!("sshremote://{}@{}", id.trim().replace(' ', ""), crate::computers::relay_name(relay))
@@ -2534,6 +2555,36 @@ mod tests {
         }
         g.reset();
         assert!(!g.locked(guesser) && !g.locked(other) && !locked(), "a new password");
+    }
+
+    /// A web gateway's visitor is named to a relay on this computer, through the upgrade it
+    /// takes from a web server here, and the line goes on after it.
+    #[test]
+    fn a_visitor_is_named_to_a_relay_here() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = l.local_addr().unwrap().to_string();
+        let t = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut r = std::io::BufReader::new(s.try_clone().unwrap());
+            let mut head = Vec::new();
+            loop {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut r, &mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                head.push(line.trim().to_string());
+            }
+            (&s).write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: sshremote-relay\r\n\r\n").unwrap();
+            let mut next = String::new();
+            std::io::BufRead::read_line(&mut r, &mut next).unwrap();
+            (head, next)
+        });
+        let mut s = dial_for(&relay, "2001:db8::7".parse().unwrap()).unwrap();
+        writeln!(s, "viewer 123456789").unwrap();
+        let (head, next) = t.join().unwrap();
+        assert!(head[0].starts_with("GET ") && head.iter().any(|h| h == "X-Real-IP: 2001:db8::7"), "{head:?}");
+        assert_eq!(next.trim(), "viewer 123456789");
     }
 
     #[test]

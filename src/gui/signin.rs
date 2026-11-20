@@ -297,7 +297,7 @@ mod tests {
     #[cfg(feature = "remote")]
     #[test]
     fn a_wrong_id_password_is_asked_again() {
-        let addr = crate::net::Address { id: "123456789".into(), relay: "relay.example".into() };
+        let addr = crate::net::Address { id: "123456789".into(), relay: "relay.example".into(), for_whom: None };
         let t = Target::Direct { addr, password: "old".into() };
         let mut s = SignIn::new(3, &t, "Screen sharing", "wrong password").unwrap();
         assert_eq!(s.host, "ID 123 456 789");

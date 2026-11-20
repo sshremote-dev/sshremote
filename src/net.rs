@@ -22,11 +22,13 @@ const WRITE_FRAME: usize = 64 << 10;
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 
 /// Where a viewer finds an agent: `sshremote://ID@relay[:port]`, or `sshremote://ID` at the default relay.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Address {
     pub id: String,
     /// As remote access keeps it: `host` or `host:port`, dialled by [`crate::access::dial`].
     pub relay: String,
+    /// Whom it is reached for, when not this program's own person (a web gateway's visitor).
+    pub for_whom: Option<std::net::IpAddr>,
 }
 
 impl Address {
@@ -34,7 +36,7 @@ impl Address {
         let rest = s.strip_prefix("sshremote://")?.trim_end_matches('/');
         let (id, relay) = rest.split_once('@').unwrap_or((rest, crate::access::DEFAULT_RELAY));
         let (host, _) = crate::access::relay_addr(relay);
-        (crate::access::valid_id(id) && !host.is_empty()).then(|| Address { id: id.into(), relay: crate::computers::relay_name(relay) })
+        (crate::access::valid_id(id) && !host.is_empty()).then(|| Address { id: id.into(), relay: crate::computers::relay_name(relay), for_whom: None })
     }
 }
 
@@ -991,8 +993,13 @@ pub fn connect_via(addr: &Address, password: &str, direct: &[String]) -> Result<
 
 /// Viewer side: reaches the ID through its relay and runs the handshake.
 pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWriter), String> {
-    // Dialled as remote access does: port 80 when the relay's own port is shut.
-    let mut s = crate::access::dial(&addr.relay).map_err(|e| e.to_string())?;
+    // Dialled as remote access does: port 80 when the relay's own port is shut. For someone
+    // else, a relay on this computer is told whom, so their calls are counted as theirs.
+    let mut s = match addr.for_whom {
+        Some(whom) => crate::access::dial_for(&addr.relay, whom),
+        None => crate::access::dial(&addr.relay),
+    }
+    .map_err(|e| e.to_string())?;
     // A relay that never answers does not hold the viewer.
     let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
     writeln!(s, "viewer {}", addr.id).map_err(|e| e.to_string())?;
@@ -1224,11 +1231,11 @@ mod tests {
     fn addresses() {
         assert_eq!(
             Address::parse("sshremote://123456789"),
-            Some(Address { id: "123456789".into(), relay: crate::access::DEFAULT_RELAY.into() })
+            Some(Address { id: "123456789".into(), relay: crate::access::DEFAULT_RELAY.into(), for_whom: None })
         );
         assert_eq!(
             Address::parse("sshremote://123456789@relay.example:9000"),
-            Some(Address { id: "123456789".into(), relay: "relay.example:9000".into() })
+            Some(Address { id: "123456789".into(), relay: "relay.example:9000".into(), for_whom: None })
         );
         assert_eq!(Address::parse("sshremote://10.0.0.5"), None);
         assert_eq!(Address::parse("user@host"), None);
@@ -1313,12 +1320,12 @@ mod tests {
             });
             at
         };
-        let addr = Address { id: "482913075".into(), relay: "relay.example".into() };
+        let addr = Address { id: "482913075".into(), relay: "relay.example".into(), for_whom: None };
         let at = serve("right one");
         assert!(matches!(connect_direct(&addr, "right one", &[at]), Ok(Some(_))));
         let at = serve("right one");
         assert!(connect_direct(&addr, "wrong one", &[at]).is_err());
-        let other = Address { id: "111222333".into(), relay: "relay.example".into() };
+        let other = Address { id: "111222333".into(), relay: "relay.example".into(), for_whom: None };
         let at = serve("right one");
         assert!(matches!(connect_direct(&other, "right one", &[at]), Ok(None)));
         // Nobody there: no answer, quickly.
