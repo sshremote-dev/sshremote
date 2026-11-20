@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "sshremote"
-version = "0.25.15"
+version = "0.25.16"
 dependencies = [
  "alacritty_terminal",
  "arboard",
