@@ -1946,7 +1946,15 @@ pub fn service_runs() -> bool {
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"));
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("launchctl")
+            .args(["print", &launchd_target()])
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("state = running"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         return Command::new("systemctl").args(["--user", "is-active", "--quiet", UNIT]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     }
@@ -1954,28 +1962,66 @@ pub fn service_runs() -> bool {
     false
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const UNIT: &str = "sshremote-access.service";
 
+/// macOS: the launchd agent that runs remote access in the signed-in session, and where it is
+/// kept.
+#[cfg(target_os = "macos")]
+const LAUNCHD_LABEL: &str = "dev.sshremote.access";
+
+#[cfg(target_os = "macos")]
+fn launchd_target() -> String {
+    // SAFETY: getuid cannot fail.
+    format!("gui/{}/{LAUNCHD_LABEL}", unsafe { libc::getuid() })
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[&str]) -> Result<(), String> {
+    let o = Command::new("launchctl").args(args).output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(()) } else { Err(format!("launchctl {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim())) }
+}
+
 /// The sign-in entry that starts the icon in the top bar.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn autostart_file() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("autostart").join("sshremote-tray.desktop"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn unit_file() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unit_file() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("systemd").join("user").join(UNIT))
 }
 
-/// Starts remote access with the computer: the Windows service (elevated), or a systemd user
-/// unit that also runs before anyone opens the window (with lingering, before sign-in).
+/// Starts remote access with the computer: the Windows service (elevated), a systemd user unit
+/// that also runs before anyone opens the window (with lingering, before sign-in), or on macOS a
+/// launchd agent of the signed-in session (where the screen is, and the app's permissions count).
 pub fn install_service() -> Result<(), String> {
     #[cfg(windows)]
     return crate::service::install();
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let f = unit_file().ok_or("no home folder")?;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(f.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
+        let xml = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LAUNCHD_LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>remote-access</string><string>run</string><string>--service</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n<key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
+            xml(&exe.display().to_string())
+        );
+        std::fs::write(&f, plist).map_err(|e| e.to_string())?;
+        let _ = launchctl(&["bootout", &launchd_target()]);
+        // SAFETY: getuid cannot fail.
+        return launchctl(&["bootstrap", &format!("gui/{}", unsafe { libc::getuid() }), &f.display().to_string()]);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let f = unit_file().ok_or("no home folder")?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -2025,7 +2071,19 @@ pub fn service_control(start: bool) -> Result<(), String> {
             false => Err("administrator rights were not given".into()),
         };
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = verb;
+        let f = unit_file().ok_or("no home folder")?;
+        // Kept alive by launchd while loaded: stopping is unloading it, starting loading it again.
+        return if start {
+            // SAFETY: getuid cannot fail.
+            launchctl(&["bootstrap", &format!("gui/{}", unsafe { libc::getuid() }), &f.display().to_string()]).or_else(|_| launchctl(&["kickstart", &launchd_target()]))
+        } else {
+            launchctl(&["bootout", &launchd_target()])
+        };
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let ok = Command::new("systemctl").args(["--user", verb, UNIT]).status().map_err(|e| e.to_string())?;
         return if ok.success() { Ok(()) } else { Err(format!("systemctl --user {verb} {UNIT} failed")) };
@@ -2037,7 +2095,15 @@ pub fn service_control(start: bool) -> Result<(), String> {
 pub fn uninstall_service() -> Result<(), String> {
     #[cfg(windows)]
     return crate::service::uninstall();
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = launchctl(&["bootout", &launchd_target()]);
+        if let Some(f) = unit_file() {
+            let _ = std::fs::remove_file(f);
+        }
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = Command::new("systemctl").args(["--user", "disable", "--now", UNIT]).status();
         if let Some(f) = unit_file() {
