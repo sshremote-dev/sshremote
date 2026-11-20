@@ -411,6 +411,8 @@ impl App {
                                     kit::copy(ui, &crate::totp::uri(&secret, &cfg.id), at);
                                 }
                             });
+                            ui.add(egui::Label::new(RichText::new("Or scan it with the app's camera:").size(12.5)).wrap());
+                            qr(ui, &crate::totp::uri(&secret, &cfg.id), 200.0);
                             kit::row(ui, "Its code now", |ui| {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let ok = crate::totp::check(&secret, &self.access.totp_code);
@@ -533,5 +535,26 @@ fn address_row(ui: &mut egui::Ui, label: &str, shown: &str, value: &str, what: &
     let tip = if done { "Copied".to_string() } else { format!("Click to copy the {what}: {value}") };
     if r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         kit::copy(ui, value, at);
+    }
+}
+
+/// `text` as a QR code `side` points wide: dark squares on white with the quiet border around them
+/// that cameras look for, in either theme.
+fn qr(ui: &mut egui::Ui, text: &str, side: f32) {
+    let Ok(code) = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M) else { return };
+    let n = code.width();
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, egui::Color32::WHITE);
+    // Four modules of white on each side, as the standard asks.
+    let cell = side / (n + 8) as f32;
+    let at = rect.min + egui::Vec2::splat(cell * 4.0);
+    for (i, c) in code.to_colors().iter().enumerate() {
+        if *c == qrcode::Color::Dark {
+            let (x, y) = ((i % n) as f32, (i / n) as f32);
+            let r = egui::Rect::from_min_size(at + egui::Vec2::new(x * cell, y * cell), egui::Vec2::splat(cell));
+            // A hair larger, so no seams show between neighbours.
+            painter.rect_filled(r.expand(0.25), 0.0, egui::Color32::BLACK);
+        }
     }
 }

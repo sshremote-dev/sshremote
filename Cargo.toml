@@ -12,6 +12,7 @@ chacha20poly1305 = "0.10"
 cpal = { optional = true, version = "0.18.2" }
 crossterm = "0.29.0"
 eframe = { optional = true, version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
+qrcode = { optional = true, version = "0.15", default-features = false, features = ["std"] }
 getrandom = "0.2"
 hkdf = { optional = true, version = "0.12" }
 curve25519-dalek = { optional = true, version = "4" }
@@ -66,7 +67,7 @@ default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
 remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
-gui = ["dep:eframe", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle"]
+gui = ["dep:eframe", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.
 web = ["remote"]
 mcp = ["remote"]
