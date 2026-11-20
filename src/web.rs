@@ -67,6 +67,8 @@ fn password_file() -> Option<PathBuf> {
 
 /// `sshremote web [--listen ADDR] [--password-file FILE] [--id-only] [--relay HOST[:PORT]]`
 pub fn run(args: &[String]) -> Result<(), String> {
+    // Its visitors are not the person this program runs as.
+    crate::transport::serve_others();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let listen = get("--listen").unwrap_or_else(|| "127.0.0.1:8022".into());
     let file = get("--password-file").map(PathBuf::from).or_else(password_file).ok_or("no settings folder")?;

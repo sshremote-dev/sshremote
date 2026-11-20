@@ -56,17 +56,27 @@ impl Drop for Link {
 }
 
 
+/// This process connects for others (the web gateway's visitors): what this person keeps (the
+/// tokens of devices computers trust, where computers were found) is not theirs to use.
+static FOR_OTHERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn serve_others() {
+    FOR_OTHERS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {
+        let own = !FOR_OTHERS.load(std::sync::atomic::Ordering::Relaxed);
         // Where it was last found on this network: tried first, straight, before the relay.
         let direct: Vec<String> = crate::computers::all()
             .into_iter()
+            .filter(|_| own)
             .find(|c| c.id() == Some(addr.id.as_str()))
             .map(|c| c.direct.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect())
             .unwrap_or_default();
         // A device the computer trusts gives its token where the two-step code is asked.
         let trust = crate::vault::trust_name(&crate::access::address(&addr.id, &addr.relay));
-        let token = crate::vault::get(&trust).filter(|t| !t.trim().is_empty());
+        let token = own.then(|| crate::vault::get(&trust)).flatten().filter(|t| !t.trim().is_empty());
         let given = match &token {
             Some(t) => format!("{}{}{}{t}", password.split(crate::net::CODE_SEP).next().unwrap_or(""), crate::net::CODE_SEP, crate::net::TRUST_MARK),
             None => password.clone(),
