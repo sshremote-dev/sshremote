@@ -137,7 +137,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --version             which version this is
        sshremote --agent [--capture B] remote side, started by the viewer
-       sshremote remote-access [status|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
+       sshremote remote-access [status|log|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
                                 straight|lan|direct|requests|cameras on|off|passwords lasting|one-time|both|one-time|
                                 from ADDRESS|RANGE...|anywhere|viewers|end N|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay

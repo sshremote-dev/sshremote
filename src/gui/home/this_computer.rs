@@ -191,6 +191,19 @@ impl App {
                 if svc.runs {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
                 }
+                ui.add_space(6.0);
+                kit::heading(ui, "Lately");
+                let lately = access::visits(6);
+                if lately.is_empty() {
+                    ui.label(RichText::new("Nobody has come by the ID yet.").weak().size(12.5));
+                }
+                for v in lately {
+                    let (mark, colour) = if v.let_in { (ic::DESKTOP, ui.visuals().weak_text_color()) } else { (ic::WARNING, warn()) };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(mark).size(13.0).color(colour));
+                        ui.add(egui::Label::new(RichText::new(v.describe()).size(12.0)).wrap());
+                    });
+                }
             }
             ui.add_space(4.0);
             ui.separator();

@@ -474,6 +474,109 @@ pub fn service_viewers() -> Vec<Viewer> {
     v.and_then(|v| v.get("viewers").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Viewer::from_json).collect())).unwrap_or_default()
 }
 
+/// Who came in by the ID, from where, how and for how long, and who was turned away: one JSON
+/// object a line. The service keeps its own beside its state, which every user reads and only it
+/// writes; remote access run in the window keeps the user's.
+fn visits_written() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if crate::console_user::running_as_system() {
+        return state_file().map(|f| f.with_file_name("visits.txt"));
+    }
+    crate::hosts::config_dir().map(|d| d.join("visits.txt"))
+}
+
+fn visit_files() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    out.extend(state_file().map(|f| f.with_file_name("visits.txt")));
+    out.extend(crate::hosts::config_dir().map(|d| d.join("visits.txt")));
+    out
+}
+
+/// Past this the older half of the record goes.
+const VISITS_MOST: u64 = 256 << 10;
+
+fn note_visit(v: serde_json::Value) {
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(f) = visits_written() else { return };
+    if let Some(d) = f.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if std::fs::metadata(&f).is_ok_and(|m| m.len() > VISITS_MOST)
+        && let Ok(t) = std::fs::read_to_string(&f)
+    {
+        let rest = &t[t.len() / 2..];
+        let _ = std::fs::write(&f, rest.find('\n').map_or("", |i| &rest[i + 1..]));
+    }
+    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&f) {
+        let _ = writeln!(out, "{v}");
+    }
+}
+
+/// A viewer by the ID as the record has it: let in (and for how long, once gone), or turned away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Visit {
+    pub at: u64,
+    pub from: Option<String>,
+    /// How it was let in, or why it was turned away.
+    pub how: String,
+    pub let_in: bool,
+    /// Through the relay, straight from an address, or on this network; and for how long.
+    pub path: String,
+    pub secs: Option<u64>,
+}
+
+impl Visit {
+    /// "12 min ago from 203.0.113.7: let in with the lasting password, straight, for 4 min".
+    pub fn describe(&self) -> String {
+        let from = self.from.as_deref().map(|f| format!(" from {f}")).unwrap_or_default();
+        if !self.let_in {
+            return format!("{}{from}: turned away, {}", crate::hosts::ago(self.at), self.how);
+        }
+        let stay = match self.secs {
+            Some(s) if s < 60 => format!(", for {s} s"),
+            Some(s) if s < 3600 => format!(", for {} min", s / 60),
+            Some(s) => format!(", for {} h {} min", s / 3600, s % 3600 / 60),
+            None => ", still here or cut off".into(),
+        };
+        format!("{}{from}: let in {}, {}{stay}", crate::hosts::ago(self.at), self.how, self.path)
+    }
+}
+
+/// The latest `most` visits, newest first, from the service's record and the user's.
+pub fn visits(most: usize) -> Vec<Visit> {
+    let mut out: Vec<Visit> = Vec::new();
+    for f in visit_files() {
+        if let Ok(text) = std::fs::read_to_string(f) {
+            read_visits(&text, &mut out);
+        }
+    }
+    out.sort_by_key(|v| std::cmp::Reverse(v.at));
+    out.truncate(most);
+    out
+}
+
+/// The visits in one record: a viewer let in is its "in" line with the "out" line of the same
+/// session (number and start; numbers start again with the program), if it ended.
+fn read_visits(text: &str, out: &mut Vec<Visit>) {
+    {
+        let lines: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        let u = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64());
+        for v in &lines {
+            let at = u(v, "at").unwrap_or(0);
+            if let Some(why) = s(v, "refused") {
+                out.push(Visit { at, from: s(v, "from"), how: why, let_in: false, path: String::new(), secs: None });
+            } else if let Some(n) = u(v, "in") {
+                let gone = lines.iter().find(|o| u(o, "out") == Some(n) && u(o, "at") == Some(at));
+                let path = gone.and_then(|o| s(o, "path")).or_else(|| s(v, "path")).unwrap_or_default();
+                out.push(Visit { at, from: s(v, "from"), how: s(v, "how").unwrap_or_default(), let_in: true, path, secs: gone.and_then(|o| u(o, "secs")) });
+            }
+        }
+    }
+}
+
 /// Where the window and the icon ask the service to end a viewer's connection: one number a line.
 fn end_file() -> Option<PathBuf> {
     state_file().map(|f| f.with_file_name(if cfg!(windows) { "end.txt" } else { "sshremote-end.txt" }))
@@ -1110,7 +1213,9 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard, from: Option<std::net::
 /// Through the relay, it may move to a straight path through the routers. `from`: where the
 /// viewer is, as far as is known.
 fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from: Option<std::net::IpAddr>) {
+    let from_text = from.map(|a| a.to_canonical().to_string());
     if !comes_from(&cfg.from, from) {
+        note_visit(serde_json::json!({ "refused": "its address is not on the list", "at": crate::sys::now_secs(), "from": from_text }));
         crate::net::turn_away_address(&mut s);
         return;
     }
@@ -1129,7 +1234,12 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         guard.waiting.fetch_sub(1, Ordering::AcqRel);
         thread::sleep(guard.delay());
         let right = check();
-        if right { guard.passed() } else { guard.failed() }
+        if right {
+            guard.passed()
+        } else {
+            guard.failed();
+            note_visit(serde_json::json!({ "refused": "a wrong password", "at": crate::sys::now_secs(), "from": from_text }));
+        }
         Ok(right)
     };
     let totp = (!cfg.totp.is_empty()).then_some(cfg.totp.as_str());
@@ -1173,11 +1283,25 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let grant = if code.is_some() { cfg.grant() | crate::grant::ASK } else { cfg.grant() };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let how = match &came {
+        crate::net::Came::Lasting => "with the lasting password",
+        crate::net::Came::OneTime => "with a one-time password",
+        crate::net::Came::Request(_) => "by asking, at the screen",
+    };
+    let how = if cfg.totp.is_empty() { how.to_string() } else { format!("{how} and the two-step code") };
+    let (at, ender) = (crate::sys::now_secs(), w.ender());
+    note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { "through the relay" } else { "on this network" } }));
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from), w.ender()));
-    SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, crate::sys::now_secs()));
+    SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
+    let path = match ender.straight() {
+        Some(a) => format!("straight from {}", a.ip()),
+        None if relayed => "through the relay".into(),
+        None => "on this network".into(),
+    };
+    note_visit(serde_json::json!({ "out": n, "at": at, "secs": crate::sys::now_secs().saturating_sub(at), "path": path }));
     if once {
         one_time_used(&cfg.one_time);
     }
@@ -1620,6 +1744,17 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             show(&c);
             Ok(())
         }
+        // Who came in by the ID and who was turned away, newest first.
+        Some("log") => {
+            let all = visits(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(30));
+            if all.is_empty() {
+                println!("nobody has come by the ID here yet");
+            }
+            for v in all {
+                println!("{}", v.describe());
+            }
+            Ok(())
+        }
         Some("one-time") => {
             c.one_time = crate::net::new_one_time();
             save(&c)?;
@@ -1768,12 +1903,33 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn visits_pair_each_coming_with_its_going() {
+        let text = [
+            r#"{"at":100,"from":"203.0.113.7","refused":"a wrong password"}"#,
+            r#"{"at":200,"from":"203.0.113.7","how":"with the lasting password","in":1,"path":"through the relay"}"#,
+            // The program started again: session 1 once more, another start.
+            r#"{"at":300,"from":"198.51.100.2","how":"with a one-time password","in":1,"path":"on this network"}"#,
+            r#"{"at":200,"out":1,"path":"straight from 203.0.113.7","secs":240}"#,
+            "not json",
+        ]
+        .join("\n");
+        let mut v = Vec::new();
+        read_visits(&text, &mut v);
+        assert_eq!(v.len(), 3);
+        assert!(!v[0].let_in && v[0].how == "a wrong password" && v[0].from.as_deref() == Some("203.0.113.7"));
+        assert_eq!((v[1].secs, v[1].path.as_str()), (Some(240), "straight from 203.0.113.7"));
+        assert_eq!((v[2].secs, v[2].path.as_str()), (None, "on this network"));
+        assert!(v[1].describe().ends_with("let in with the lasting password, straight from 203.0.113.7, for 4 min"), "{}", v[1].describe());
+        assert!(v[2].describe().contains("still here or cut off"));
+    }
 
     #[test]
     fn viewers_come_only_from_the_addresses_listed() {
