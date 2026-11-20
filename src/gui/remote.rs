@@ -579,7 +579,7 @@ impl Remote {
             self.full_toggle = true;
         }
         // Network messages wake the window themselves; this only keeps statistics and pings going.
-        ctx.request_repaint_after(Duration::from_secs(1));
+        ctx.request_repaint_after(self.ctl.next_tick());
         Ok(())
     }
 

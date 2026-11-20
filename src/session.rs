@@ -546,6 +546,9 @@ pub enum Action {
 
 /// A picture unchanged this long is pinged this seldom.
 const STILL: Duration = Duration::from_secs(3);
+/// How often a still screen is pinged: the link keeps itself alive (UDP keepalives, a 120 s idle
+/// limit), so this keeps only the round trip shown fresh, and wakes a window drawn for it rarely.
+const STILL_PING: Duration = Duration::from_secs(10);
 
 /// Settings, the menu that edits them, and live statistics.
 pub struct Control {
@@ -712,6 +715,16 @@ impl Control {
     }
 
     /// Once a second: refresh the statistics, ping, and let auto pick a preset.
+    /// How soon `tick` has work: each second while pictures come or a ping is out; on a still
+    /// screen not before the next ping.
+    pub fn next_tick(&self) -> Duration {
+        let mut at = self.stat_at + Duration::from_secs(1);
+        if self.ping.is_none() && self.busy.elapsed() > STILL {
+            at = at.max(self.pinged + STILL_PING);
+        }
+        at.saturating_duration_since(Instant::now()).max(Duration::from_millis(10))
+    }
+
     /// Returns true when the statistics changed; settings changes are sent here.
     pub fn tick(&mut self, sess: &mut Session) -> io::Result<bool> {
         let dt = self.stat_at.elapsed().as_secs_f64();
@@ -725,7 +738,7 @@ impl Control {
             self.busy = Instant::now();
         }
         (self.stat_rx, self.stat_frames, self.stat_at) = (rx, 0, Instant::now());
-        let still = self.busy.elapsed() > STILL && self.pinged.elapsed() < STILL;
+        let still = self.busy.elapsed() > STILL && self.pinged.elapsed() < STILL_PING;
         match self.ping {
             // An unanswered ping is at least as slow as its age.
             Some((_, at)) => self.rtt = self.rtt.max(at.elapsed().as_secs_f64() * 1000.0),
