@@ -4,7 +4,8 @@
 # SSH-HOST "local" writes into WEB-ROOT on this computer.
 # The registry comes from the extensions repository beside this one ($EXTENSIONS, by default
 # ../sshremote-extensions); its build writes the packages and their index.
-# Downloads are taken from $WINDOWS_BIN and $LINUX_BIN when set (scripts/release.sh builds them).
+# Downloads are taken from $WINDOWS_BIN, $LINUX_BIN and $MAC_ZIP when set (scripts/release.sh
+# builds them).
 # The registry's index and the list of downloads (which the program's update takes) are signed
 # with $SIGNING_KEY here, or, with $SIGN_HOST set, on that computer with its key ($SIGN_KEY there,
 # relative to its home), so the key never has to be on the web server.
@@ -23,6 +24,7 @@ chmod 755 "$OUT"
 set -- "$OUT"
 [ -n "${WINDOWS_BIN:-}" ] && set -- "$@" --download "sshremote-windows-x86_64.exe=$WINDOWS_BIN"
 [ -n "${LINUX_BIN:-}" ] && set -- "$@" --download "sshremote-linux-x86_64=$LINUX_BIN"
+[ -n "${MAC_ZIP:-}" ] && set -- "$@" --download "sshremote-macos.zip=$MAC_ZIP"
 python3 "$EXT/build.py" "$OUT"
 python3 "$HERE/site.py" "$@"
 

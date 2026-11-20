@@ -2,6 +2,7 @@
 """SSH Remote logo. Python 3 standard library only; run in an output folder:
 python make_icon.py        icon.png (256), icon.ico (16..256), preview.png
 python make_icon.py svg    logo.svg (the mark in currentColor) and favicon.svg (mark on the plate)
+python make_icon.py iconset DIR   DIR/icon_*.png, each size macOS's iconutil takes (16..1024)
 
 The mark is drawn like a toolbar icon: a 24-unit grid, round 2-unit lines. A prompt chevron
 enters an open frame: one SSH connection into the whole machine. The app icon is the same mark
@@ -44,7 +45,19 @@ def sample(x, y, size):
     return (*MARK, 255) if mark(gx, gy) <= width / 2 else (0, 0, 0, 0)
 
 
-def render(size):
+def plated(x, y, size):
+    # macOS's icons: a plate on Apple's grid (824 of 1024, corners a fifth of it rounded), the
+    # mark in white on it.
+    lo, hi, r = 256 * 100 / 1024, 256 * 924 / 1024, 256 * 185 / 1024
+    qx, qy = max(lo + r - x, 0, x - (hi - r)), max(lo + r - y, 0, y - (hi - r))
+    if math.hypot(qx, qy) > r:
+        return (0, 0, 0, 0)
+    unit = (hi - lo) * 0.58 / 14
+    width = 2.4 if size >= 64 else {16: 3.6, 32: 3.0}.get(size, 2.7)
+    return (255, 255, 255, 255) if mark(12 + (x - 128) / unit, 12 + (y - 128) / unit) <= width / 2 else (*MARK, 255)
+
+
+def render(size, sample=sample):
     ss = 8 if size <= 48 else 4
     scale = 256 / (size * ss)
     out = bytearray()
@@ -83,9 +96,23 @@ def svgs():
     print('Wrote logo.svg and favicon.svg')
 
 
+def iconset(folder):
+    out = Path(folder)
+    out.mkdir(parents=True, exist_ok=True)
+    drawn = {}
+    for base in (16, 32, 128, 256, 512):
+        for scale, suffix in ((1, ''), (2, '@2x')):
+            size = base * scale
+            if size not in drawn:
+                drawn[size] = png(size, size, render(size, plated))
+            (out / f'icon_{base}x{base}{suffix}.png').write_bytes(drawn[size])
+
+
 def main():
     if 'svg' in sys.argv[1:]:
         return svgs()
+    if sys.argv[1:2] == ['iconset']:
+        return iconset(sys.argv[2])
     masters = {s: render(s) for s in SIZES}
     images = [(s, png(s, s, masters[s])) for s in SIZES]
     Path('icon.png').write_bytes(images[-1][1])

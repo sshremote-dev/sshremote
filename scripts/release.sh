@@ -3,7 +3,10 @@
 #   scripts/release.sh OUT
 # OUT gets sshremote-linux-x86_64 and sshremote-windows-x86_64.exe, the program with every part
 # in, which scripts/deploy.sh takes as $LINUX_BIN and $WINDOWS_BIN. They build in target-full,
-# so the next release only builds what changed.
+# so the next release only builds what changed. With $MAC_HOST (a Mac reached by ssh, with
+# rustup, Xcode's command line tools and CMake; $MAC_PATH adds to its PATH), the commit is built
+# there too (scripts/macos.sh, in ~/sshremote-build, kept between releases): OUT gets
+# sshremote-macos.zip, deploy.sh's $MAC_ZIP.
 set -eu
 OUT=$(mkdir -p "$1" && cd "$1" && pwd)
 cd "$(dirname "$0")/.."
@@ -24,4 +27,14 @@ build() { # PLATFORM
 # One after the other: both use the one target folder.
 build linux-x86_64
 build windows-x86_64
+if [ -n "${MAC_HOST:-}" ]; then
+  git archive --format=tar.gz --prefix=src/ HEAD | ssh "$MAC_HOST" 'rm -rf ~/sshremote-build/src && mkdir -p ~/sshremote-build/tree && tar xzf - -C ~/sshremote-build && rsync -a --delete --exclude target ~/sshremote-build/src/ ~/sshremote-build/tree/'
+  if ssh "$MAC_HOST" "cd ~/sshremote-build/tree && PATH=\$HOME/.cargo/bin:${MAC_PATH:-}:\$PATH sh scripts/macos.sh ~/sshremote-build/out" > "$OUT/sshremote-macos.log" 2>&1; then
+    scp -q "$MAC_HOST:sshremote-build/out/sshremote-macos.zip" "$OUT/sshremote-macos.zip"
+    echo "built macos"
+  else
+    echo "FAILED macos: see $OUT/sshremote-macos.log"
+    exit 1
+  fi
+fi
 echo "all built in $OUT"
