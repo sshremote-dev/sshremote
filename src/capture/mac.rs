@@ -13,7 +13,7 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
-    CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGEventField, CGEventFlags, CGEventSource,
+    CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGEventField, CGEventFlags, CGEventSource,
     CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess,
     CGRequestScreenCaptureAccess, CGScrollEventUnit,
 };
@@ -215,16 +215,7 @@ pub struct Mac {
     fps: u8,
     live: Option<Live>,
     latest: Arc<Latest>,
-    /// Where the pointer was sent, in points, and the buttons held there.
-    at: CGPoint,
-    held: [bool; 5],
-    /// The last click, to count double and triple clicks as macOS does.
-    last_click: Option<(Instant, CGPoint, u8, i64)>,
-    /// Modifier keys held (keysyms), for the flags of the keys typed meanwhile.
-    mods: Vec<u32>,
-    /// Asked for Accessibility already; told the viewer already.
-    asked: bool,
-    notice: Option<String>,
+    hands: Hands,
     /// When the stream was last given a new size: pictures of the old one still come a while.
     resized: Option<Instant>,
 }
@@ -266,12 +257,7 @@ impl Mac {
             fps: 30,
             live: None,
             latest,
-            at: CGPoint::new(0.0, 0.0),
-            held: [false; 5],
-            last_click: None,
-            mods: Vec::new(),
-            asked: false,
-            notice: None,
+            hands: Hands::default(),
             resized: None,
         };
         mac.restart()?;
@@ -312,13 +298,43 @@ impl Mac {
         }
     }
 
-    /// Desktop pixels of the display shown to the point events go to.
-    fn point(&self, x: f64, y: f64) -> CGPoint {
-        let d = self.display();
-        let (kx, ky) = (d.points.0 / d.pixels.0 as f64, d.points.1 / d.pixels.1 as f64);
-        CGPoint::new(d.at.0 + x.clamp(0.0, d.pixels.0 as f64 - 1.0) * kx, d.at.1 + y.clamp(0.0, d.pixels.1 as f64 - 1.0) * ky)
+}
+
+/// Input as Core Graphics events: where the pointer was sent (points) and the buttons held there,
+/// the last click (to count double and triple clicks as macOS does), the modifier keys held
+/// (keysyms, for the flags of the keys typed meanwhile), and whether Accessibility was asked
+/// for and the viewer told.
+#[derive(Default)]
+struct Hands {
+    at: CGPoint,
+    held: [bool; 5],
+    last_click: Option<(Instant, CGPoint, u8, i64)>,
+    mods: Vec<u32>,
+    asked: bool,
+    notice: Option<String>,
+}
+
+impl Display {
+    /// The main display as Core Graphics measures it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn main() -> Display {
+        let id = CGMainDisplayID();
+        let b = CGDisplayBounds(id);
+        let mode = CGDisplayCopyDisplayMode(id);
+        let pixels = (CGDisplayMode::pixel_width(mode.as_deref()), CGDisplayMode::pixel_height(mode.as_deref()));
+        let points = (b.size.width, b.size.height);
+        let pixels = if pixels.0 == 0 { (points.0 as usize, points.1 as usize) } else { pixels };
+        Display { id, at: (b.origin.x, b.origin.y), points, pixels }
     }
 
+    /// Its pixels to the point events go to.
+    fn point(&self, x: f64, y: f64) -> CGPoint {
+        let (kx, ky) = (self.points.0 / self.pixels.0 as f64, self.points.1 / self.pixels.1 as f64);
+        CGPoint::new(self.at.0 + x.clamp(0.0, self.pixels.0 as f64 - 1.0) * kx, self.at.1 + y.clamp(0.0, self.pixels.1 as f64 - 1.0) * ky)
+    }
+}
+
+impl Hands {
     fn flags(&self) -> CGEventFlags {
         let mut f = CGEventFlags::empty();
         for &k in &self.mods {
@@ -442,6 +458,65 @@ impl Mac {
             }
         }
         Ok(())
+    }
+
+    /// One piece of input on display `d`.
+    fn input(&mut self, d: &Display, ev: Input) -> Result<(), String> {
+        match ev {
+            Input::Move { x, y } => {
+                let at = d.point(x, y);
+                self.moved(at, None)
+            }
+            Input::MoveBy { dx, dy } => {
+                                let (kx, ky) = (d.points.0 / d.pixels.0 as f64, d.points.1 / d.pixels.1 as f64);
+                let at = CGPoint::new(
+                    (self.at.x + dx as f64 * kx).clamp(d.at.0, d.at.0 + d.points.0 - 1.0),
+                    (self.at.y + dy as f64 * ky).clamp(d.at.1, d.at.1 + d.points.1 - 1.0),
+                );
+                self.moved(at, Some((dx, dy)))
+            }
+            Input::Button { button, pressed } => self.button(button, pressed),
+            Input::Scroll { steps } => self.scroll(steps, 0),
+            Input::HScroll { steps } => self.scroll(0, steps),
+            Input::KeyState { keysym, down } => {
+                if modifier(keysym) {
+                    self.mods.retain(|&k| k != keysym);
+                    if down {
+                        self.mods.push(keysym);
+                    }
+                }
+                match code_of(keysym) {
+                    Some((code, _)) => self.key(code, down, self.flags()),
+                    // A character no key types here: as text, once, when it goes down.
+                    None if down => {
+                        let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
+                        char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()))
+                    }
+                    None => Ok(()),
+                }
+            }
+            Input::Key { keysym, mods } => {
+                let shortcut = mods & (MOD_CTRL | MOD_ALT | MOD_SUPER) != 0;
+                let code = special(keysym).map(|c| (c, false)).or_else(|| if shortcut || keysym < 0x80 { code_of(keysym) } else { None });
+                let Some((code, shift)) = code else {
+                    let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
+                    return char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()));
+                };
+                let mut flags = self.flags();
+                for (bit, f) in [(MOD_SHIFT, CGEventFlags::MaskShift), (MOD_CTRL, CGEventFlags::MaskControl), (MOD_ALT, CGEventFlags::MaskAlternate), (MOD_SUPER, CGEventFlags::MaskCommand)] {
+                    if mods & bit != 0 {
+                        flags |= f;
+                    }
+                }
+                if shift {
+                    flags |= CGEventFlags::MaskShift;
+                }
+                self.key(code, true, flags)?;
+                self.key(code, false, flags)
+            }
+            Input::SecureAttention => Ok(()),
+        }
+    
     }
 }
 
@@ -585,7 +660,7 @@ impl Capture for Mac {
     }
 
     fn notice(&mut self) -> Option<String> {
-        self.notice.take()
+        self.hands.notice.take()
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
@@ -612,65 +687,12 @@ impl Capture for Mac {
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
-        match ev {
-            Input::Move { x, y } => {
-                let at = self.point(x, y);
-                self.moved(at, None)
-            }
-            Input::MoveBy { dx, dy } => {
-                let d = self.display().clone();
-                let (kx, ky) = (d.points.0 / d.pixels.0 as f64, d.points.1 / d.pixels.1 as f64);
-                let at = CGPoint::new(
-                    (self.at.x + dx as f64 * kx).clamp(d.at.0, d.at.0 + d.points.0 - 1.0),
-                    (self.at.y + dy as f64 * ky).clamp(d.at.1, d.at.1 + d.points.1 - 1.0),
-                );
-                self.moved(at, Some((dx, dy)))
-            }
-            Input::Button { button, pressed } => self.button(button, pressed),
-            Input::Scroll { steps } => self.scroll(steps, 0),
-            Input::HScroll { steps } => self.scroll(0, steps),
-            Input::KeyState { keysym, down } => {
-                if modifier(keysym) {
-                    self.mods.retain(|&k| k != keysym);
-                    if down {
-                        self.mods.push(keysym);
-                    }
-                }
-                match code_of(keysym) {
-                    Some((code, _)) => self.key(code, down, self.flags()),
-                    // A character no key types here: as text, once, when it goes down.
-                    None if down => {
-                        let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
-                        char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()))
-                    }
-                    None => Ok(()),
-                }
-            }
-            Input::Key { keysym, mods } => {
-                let shortcut = mods & (MOD_CTRL | MOD_ALT | MOD_SUPER) != 0;
-                let code = special(keysym).map(|c| (c, false)).or_else(|| if shortcut || keysym < 0x80 { code_of(keysym) } else { None });
-                let Some((code, shift)) = code else {
-                    let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
-                    return char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()));
-                };
-                let mut flags = self.flags();
-                for (bit, f) in [(MOD_SHIFT, CGEventFlags::MaskShift), (MOD_CTRL, CGEventFlags::MaskControl), (MOD_ALT, CGEventFlags::MaskAlternate), (MOD_SUPER, CGEventFlags::MaskCommand)] {
-                    if mods & bit != 0 {
-                        flags |= f;
-                    }
-                }
-                if shift {
-                    flags |= CGEventFlags::MaskShift;
-                }
-                self.key(code, true, flags)?;
-                self.key(code, false, flags)
-            }
-            Input::SecureAttention => Ok(()),
-        }
+        let d = self.display().clone();
+        self.hands.input(&d, ev)
     }
 
     fn commit_text(&mut self, text: &str) -> bool {
-        self.text(text).is_ok()
+        self.hands.text(text).is_ok()
     }
 }
 
@@ -717,7 +739,7 @@ mod tests {
         let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).expect("where the pointer is");
         m.input(Input::Move { x: w as f64 / 2.0, y: h as f64 / 2.0 }).unwrap();
         std::thread::sleep(Duration::from_millis(200));
-        let want = m.point(w as f64 / 2.0, h as f64 / 2.0);
+        let want = m.display().point(w as f64 / 2.0, h as f64 / 2.0);
         let at = here();
         println!("{w}x{h} shown as {}x{}, notice {:?}; pointer at {:.0},{:.0} (sent {:.0},{:.0})", img.w, img.h, m.notice(), at.x, at.y, want.x, want.y);
         assert!((at.x - want.x).abs() < 2.0 && (at.y - want.y).abs() < 2.0, "the pointer went where it was sent");
@@ -725,5 +747,45 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let by = here();
         assert!(by.x > at.x && by.y < at.y, "moved by: {:.0},{:.0}", by.x, by.y);
+    }
+
+    /// The pointer and the keys driven, nothing recorded: run where macOS lets this program
+    /// control it (as the allowed app, or over SSH when the SSH server may: sshd-keygen-wrapper in
+    /// Accessibility). Nothing is clicked or typed: the pointer moves and comes back, and Shift,
+    /// which does nothing alone, is held and let go.
+    /// SSHREMOTE_MAC_TEST=1 cargo test -- --ignored a_mac_is_driven
+    #[test]
+    #[ignore]
+    fn a_mac_is_driven_by_its_events() {
+        if std::env::var_os("SSHREMOTE_MAC_TEST").is_none() {
+            return;
+        }
+        let d = Display::main();
+        let mut h = Hands::default();
+        let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).expect("where the pointer is");
+        let settle = || std::thread::sleep(Duration::from_millis(200));
+        let was = here();
+        let (x, y) = (d.pixels.0 as f64 / 3.0, d.pixels.1 as f64 / 3.0);
+        h.input(&d, Input::Move { x, y }).unwrap();
+        settle();
+        assert!(h.notice.is_none(), "{:?}", h.notice);
+        let (want, at) = (d.point(x, y), here());
+        assert!((at.x - want.x).abs() < 2.0 && (at.y - want.y).abs() < 2.0, "sent to {:.0},{:.0}, at {:.0},{:.0}", want.x, want.y, at.x, at.y);
+        h.input(&d, Input::MoveBy { dx: 30, dy: -20 }).unwrap();
+        settle();
+        let by = here();
+        assert!(by.x > at.x + 5.0 && by.y < at.y - 5.0, "moved by: {:.0},{:.0}", by.x, by.y);
+        let shift = |down| CGEventSource::key_state(CGEventSourceStateID::HIDSystemState, 0x38) == down;
+        h.input(&d, Input::KeyState { keysym: xk::SHIFT_L, down: true }).unwrap();
+        settle();
+        let held = shift(true) && CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState).contains(CGEventFlags::MaskShift);
+        h.input(&d, Input::KeyState { keysym: xk::SHIFT_L, down: false }).unwrap();
+        settle();
+        let let_go = shift(false);
+        // The pointer back where it was.
+        let (kx, ky) = (d.pixels.0 as f64 / d.points.0, d.pixels.1 as f64 / d.points.1);
+        h.input(&d, Input::Move { x: (was.x - d.at.0) * kx, y: (was.y - d.at.1) * ky }).unwrap();
+        println!("pointer {:.0},{:.0} -> {:.0},{:.0} -> {:.0},{:.0}; Shift held {held}, let go {let_go}", was.x, was.y, at.x, at.y, by.x, by.y);
+        assert!(held && let_go);
     }
 }
