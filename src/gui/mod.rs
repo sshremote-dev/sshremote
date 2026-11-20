@@ -745,7 +745,6 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         crate::exthost::start(move || ctx.request_repaint());
         let mut app = App::new(form, budget, open, grabbed);
-        crate::update::tidy();
         app.update.look(&cc.egui_ctx);
         app
     }

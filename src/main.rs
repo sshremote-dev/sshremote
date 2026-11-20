@@ -388,6 +388,7 @@ fn note_crashes() {
 
 fn main() {
     note_crashes();
+    update::tidy();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A command the notification area's icon runs with administrator rights: no console for it.
     let no_console = args.first().is_some_and(|a| a == "--no-console");
