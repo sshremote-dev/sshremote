@@ -1340,7 +1340,7 @@ class Client {
     };
     // The picture sent, not the screen: its resolution is set in the quality menu.
     const [scaleRow, scale] = slider("Picture size", 10, 100, 5, Q.scale || 100, "%");
-    const [fpsRow, fps] = slider("Frame rate", 1, 60, 1, Q.fps || 30, " fps");
+    const [fpsRow, fps] = slider("Frame rate", 1, 120, 1, Q.fps || 30, " fps");
     const finish = ok => {
       $("modal").hidden = true;
       removeEventListener("keydown", keys, true);

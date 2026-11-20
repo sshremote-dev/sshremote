@@ -157,7 +157,7 @@ options:
   --budget KB/s   traffic auto stays under (default: as much as the link takes without delay)
   --mode M        mono gray4 gray16 16c 256c true
   --scale P       capture scale in percent, 10-100
-  --fps N         frame rate cap, 1-60
+  --fps N         frame rate cap, 1-120
   --cell WxH      terminal cell size in pixels (default: ask the terminal, else 10x20)
   --capture B     agent capture backend: auto gnome windows synthetic
   --remote CMD    agent command on HOST (default: sshremote --agent)

@@ -181,7 +181,7 @@ impl Shared {
 }
 
 /// At most this many pictures a second (a viewer asks for up to 60): changes coming faster wait.
-const MIN_GAP: Duration = Duration::from_millis(15);
+const MIN_GAP: Duration = Duration::from_millis(7);
 
 /// The least time between copies for a viewer taking `fps` pictures a second: a little under its
 /// pace, so the picture it takes is fresh.
@@ -460,7 +460,7 @@ impl WlrCopy {
             want: (0, 0),
             answers: u64::MAX,
             outs: told(&state.outs),
-            gap: MIN_GAP,
+            gap: gap_for(30),
             error: None,
             stop: false,
         };
@@ -651,7 +651,8 @@ mod tests {
     #[test]
     fn copies_keep_to_the_viewers_pace() {
         assert_eq!(gap_for(30), Duration::from_millis(29));
-        assert_eq!(gap_for(60), MIN_GAP);
+        assert_eq!(gap_for(60), Duration::from_millis(12));
+        assert_eq!(gap_for(120), MIN_GAP);
         assert_eq!(gap_for(1), Duration::from_millis(100));
         assert_eq!(gap_for(0), Duration::from_millis(100));
     }

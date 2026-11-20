@@ -702,7 +702,7 @@ fn ask(frame: Frame) -> Option<Ask> {
             "preset" => WebQuality::Preset(level?),
             "custom" => {
                 let mode = crate::color::Mode::parse(&s("mode")?)?;
-                WebQuality::Custom(mode, n("scale")?.clamp(10, 100) as u8, n("fps")?.clamp(1, 60) as u8)
+                WebQuality::Custom(mode, n("scale")?.clamp(10, 100) as u8, n("fps")?.clamp(1, crate::session::MOST_FPS as u64) as u8)
             }
             // The page's older words.
             "best" => WebQuality::Preset(crate::proto::PRESETS.len() - 1),
@@ -1927,7 +1927,7 @@ Host: x
         assert!(matches!(a(r#"{"quality":"fast"}"#), Some(Ask::Quality(WebQuality::Preset(1)))));
         assert!(matches!(a(r#"{"quality":"auto"}"#), Some(Ask::Quality(WebQuality::Auto))));
         assert!(matches!(a(r#"{"quality":"preset","level":0}"#), Some(Ask::Quality(WebQuality::Preset(0)))));
-        assert!(matches!(a(r#"{"quality":"custom","mode":"mono","scale":5,"fps":90}"#), Some(Ask::Quality(WebQuality::Custom(crate::color::Mode::Mono, 10, 60)))));
+        assert!(matches!(a(r#"{"quality":"custom","mode":"mono","scale":5,"fps":200}"#), Some(Ask::Quality(WebQuality::Custom(crate::color::Mode::Mono, 10, 120)))));
         assert!(a(r#"{"quality":"custom","mode":"sepia","scale":50,"fps":10}"#).is_none(), "an unknown colour mode is refused");
         assert!(matches!(a(r#"{"drawn":7}"#), Some(Ask::Drawn(7))));
         assert!(matches!(a(r#"{"pause":true}"#), Some(Ask::Pause(true))));

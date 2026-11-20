@@ -238,7 +238,7 @@ impl Remote {
                 ui.add(egui::Slider::new(&mut scale, 20..=100).text("Picture size %"))
                     .on_hover_text("A smaller picture than the screen is sent (less to send); the screen's own resolution stays as it is");
                 let mut fps = self.ctl.s.fps;
-                ui.add(egui::Slider::new(&mut fps, 1..=60).text("Frames per second"));
+                ui.add(egui::Slider::new(&mut fps, 1..=crate::session::MOST_FPS).text("Frames per second"));
                 if (mode, scale, fps) != (self.ctl.s.mode, self.ctl.s.scale, self.ctl.s.fps) {
                     *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
                 }

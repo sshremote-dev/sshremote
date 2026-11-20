@@ -546,6 +546,8 @@ pub enum Action {
 
 /// A picture unchanged this long is pinged this seldom.
 const STILL: Duration = Duration::from_secs(3);
+/// The most pictures a second a viewer may ask for: as many as a fast monitor shows.
+pub const MOST_FPS: u8 = 120;
 /// How often a still screen is pinged: the link keeps itself alive (UDP keepalives, a 120 s idle
 /// limit), so this keeps only the round trip shown fresh, and wakes a window drawn for it rarely.
 const STILL_PING: Duration = Duration::from_secs(10);
@@ -590,7 +592,7 @@ impl Control {
     pub fn set_custom(&mut self, mode: Mode, scale: u8, fps: u8) {
         self.s.mode = if mode.to_u8() > self.max_mode.to_u8() { self.max_mode } else { mode };
         self.s.scale = scale.clamp(10, 100);
-        self.s.fps = fps.clamp(1, 60);
+        self.s.fps = fps.clamp(1, MOST_FPS);
         self.custom();
     }
 
@@ -603,7 +605,7 @@ impl Control {
         let custom = opt.2.is_some() || opt.3.is_some() || opt.4.is_some();
         s.mode = opt.2.unwrap_or(s.mode);
         s.scale = opt.3.unwrap_or(s.scale).clamp(10, 100);
-        s.fps = opt.4.unwrap_or(s.fps).clamp(1, 60);
+        s.fps = opt.4.unwrap_or(s.fps).clamp(1, MOST_FPS);
         let now = Instant::now();
         Control {
             s,
