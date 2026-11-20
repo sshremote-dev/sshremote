@@ -195,6 +195,18 @@ impl Capture for WithCameras {
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.now_mut().grab()
     }
+    fn recycle(&mut self, img: Image) {
+        if self.cam.is_none() {
+            self.screen.recycle(img);
+        }
+    }
+    fn set_fps(&mut self, fps: u8) {
+        self.screen.set_fps(fps)
+    }
+    // A camera shown is looked at every few milliseconds, as it does not wake the agent.
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        self.screen.set_waker(wake)
+    }
     fn pointer_apart(&mut self, on: bool) -> bool {
         self.screen.pointer_apart(on)
     }
