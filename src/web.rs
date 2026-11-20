@@ -119,6 +119,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         std::thread::spawn(move || {
             let _served = served;
             let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
+            // Small messages (keys, a shell's echo) go at once, not held for the last one's
+            // acknowledgement (up to 40 ms on Linux, the proxy's link here too).
+            let _ = conn.set_nodelay(true);
             if let Err(e) = serve(conn, &gate) {
                 eprintln!("web: {e}");
             }
@@ -336,6 +339,11 @@ fn send(w: &Mutex<TcpStream>, op: u8, data: &[u8]) -> Result<(), String> {
             head.push(127);
             head.extend_from_slice(&(n as u64).to_be_bytes());
         }
+    }
+    // One write for a small frame: two let the second wait for the first's acknowledgement.
+    if data.len() < 64 << 10 {
+        head.extend_from_slice(data);
+        return w.lock().map_err(|e| e.to_string())?.write_all(&head).map_err(|e| e.to_string());
     }
     let mut s = w.lock().map_err(|e| e.to_string())?;
     s.write_all(&head).and_then(|_| s.write_all(data)).map_err(|e| e.to_string())
@@ -945,6 +953,15 @@ fn client(
     let io = |e: std::io::Error| e.to_string();
     let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {}\u{2026}", open.name) }));
     let start = reach;
+    // Rung by the agent's messages, the browser's and the shell here's output, so the loop below
+    // takes each at once rather than after its wait for the agent (keys waited up to 10 ms).
+    let (bell, rung) = mpsc::channel::<()>();
+    let hook = |s: &crate::session::Session| {
+        let b = bell.clone();
+        s.on_message(move || {
+            let _ = b.send(());
+        });
+    };
     // The picture's quality, as the app's: auto until the browser asks for another.
     let mut ctl = crate::session::Control::for_preset(None, crate::color::Mode::True);
     (ctl.s.view_w, ctl.s.view_h) = view;
@@ -954,7 +971,10 @@ fn client(
         Agent::Idle
     } else {
         match start(open.agent.clone(), settings(&ctl, view), w.clone()) {
-            Ok((s, rx)) => Agent::Up(s, rx),
+            Ok((s, rx)) => {
+                hook(&s);
+                Agent::Up(s, rx)
+            }
             Err(e) => {
                 let refused = e.to_lowercase().contains("wrong password") || e.to_lowercase().contains("wrong code");
                 send_json(&w, serde_json::json!({ "error": plain(&e) }))?;
@@ -967,7 +987,10 @@ fn client(
     let mut pty: Option<crate::pty::Local> = None;
     let spawn = |cols: u16, rows: u16| -> Result<crate::pty::Local, String> {
         let (argv, env) = open.shell.as_ref().expect("a shell here");
-        crate::pty::Local::spawn_with(argv, env, cols, rows, Box::new(|| {}))
+        let b = bell.clone();
+        crate::pty::Local::spawn_with(argv, env, cols, rows, Box::new(move || {
+            let _ = b.send(());
+        }))
     };
     match (&open.shell, &mut agent) {
         (Some(_), _) => match spawn(cols, rows) {
@@ -987,6 +1010,7 @@ fn client(
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
     let w_in = w.clone();
+    let b = bell.clone();
     std::thread::spawn(move || {
         loop {
             let msg = match read_frame(&mut r, &w_in) {
@@ -995,7 +1019,9 @@ fn client(
             };
             if let Some(m) = msg {
                 let gone = matches!(m, Ask::Gone);
-                if in_tx.send(m).is_err() || gone {
+                let sent = in_tx.send(m).is_ok();
+                let _ = b.send(());
+                if !sent || gone {
                     return;
                 }
             }
@@ -1026,15 +1052,28 @@ fn client(
     let end = 'run: loop {
         // The agent's messages, or a short wait when there is no agent to hear from.
         let mut msgs = Vec::new();
+        let wait = || {
+            let _ = rung.recv_timeout(Duration::from_millis(10));
+            rung.try_iter().for_each(drop);
+        };
         match &mut agent {
-            Agent::Up(_, rx) => match rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(m) => {
-                    msgs.push(m);
-                    msgs.extend(rx.try_iter().take(256));
+            Agent::Up(_, rx) => {
+                let first = match rx.try_recv() {
+                    Err(mpsc::TryRecvError::Empty) => {
+                        wait();
+                        rx.try_recv()
+                    }
+                    got => got,
+                };
+                match first {
+                    Ok(m) => {
+                        msgs.push(m);
+                        msgs.extend(rx.try_iter().take(256));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => msgs.push(Ev::Closed("the session ended".into())),
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => msgs.push(Ev::Closed("the session ended".into())),
-            },
+            }
             Agent::Connecting(c) => match c.try_recv() {
                 Ok(Ok((mut sess, rx))) => {
                     // Reached: what was asked meanwhile goes now.
@@ -1045,6 +1084,7 @@ fn client(
                     for m in waiting.drain(..) {
                         sess.send(m).map_err(io)?;
                     }
+                    hook(&sess);
                     agent = Agent::Up(sess, rx);
                 }
                 Ok(Err(e)) => {
@@ -1053,9 +1093,9 @@ fn client(
                     waiting.clear();
                     agent = Agent::Failed(text);
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                Err(_) => wait(),
             },
-            _ => std::thread::sleep(Duration::from_millis(10)),
+            _ => wait(),
         }
         for m in msgs {
             let m = match m {
@@ -1312,8 +1352,11 @@ fn client(
                         let _ = send_json(&w, serde_json::json!({ "status": "Connecting for the screen and files\u{2026}" }));
                         let (tx, rx) = mpsc::channel();
                         let (target, at) = (open.agent.clone(), settings(&ctl, view));
-                        let w = w.clone();
-                        std::thread::spawn(move || drop(tx.send(start(target, at, w))));
+                        let (w, b) = (w.clone(), bell.clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(start(target, at, w));
+                            let _ = b.send(());
+                        });
                         agent = Agent::Connecting(rx);
                     }
                     if on == shown {
@@ -1376,8 +1419,11 @@ fn client(
                 Agent::Idle => {
                     let (tx, rx) = mpsc::channel();
                     let (target, at) = (open.agent.clone(), settings(&ctl, view));
-                    let w = w.clone();
-                        std::thread::spawn(move || drop(tx.send(start(target, at, w))));
+                    let (w, b) = (w.clone(), bell.clone());
+                    std::thread::spawn(move || {
+                        let _ = tx.send(start(target, at, w));
+                        let _ = b.send(());
+                    });
                     agent = Agent::Connecting(rx);
                     waiting.push(m);
                 }
