@@ -140,19 +140,33 @@ impl Remote {
             // The mouse for games: its movement goes as it is, never where the pointer is here;
             // Ctrl+Alt lets it go, and a click on the picture holds it again.
             if self.games && !local {
+                if matches!(e, Event::Key { pressed: true, .. } | Event::PointerButton { pressed: true, .. } | Event::MouseWheel { .. }) {
+                    self.let_go_armed = false;
+                }
                 match &e {
                     Event::MouseMoved(d) if self.grab_set => {
                         self.moved_by += *d;
                         continue;
                     }
                     Event::PointerMoved(_) if self.grab_set => continue,
-                    Event::ModifiersChanged(m) | Event::Key { modifiers: m, .. } if self.games_held && m.ctrl && m.alt => {
-                        self.games_held = false;
-                        self.notify("The mouse is yours again: click the picture to hold it for the game");
+                    // Ctrl+Alt pressed and let go with nothing between lets go of the mouse; with a
+                    // key between (Ctrl+Alt+Delete, a game's own) the keys are the host's.
+                    Event::ModifiersChanged(m) if self.games_held => {
+                        if m.ctrl && m.alt {
+                            self.let_go_armed = true;
+                        } else if std::mem::take(&mut self.let_go_armed) {
+                            self.games_held = false;
+                            self.notify("The mouse is yours again: click the picture to hold it for the game");
+                        }
                     }
-                    Event::PointerButton { pos, pressed: true, .. } if !self.games_held && shown.is_some_and(|r| r.contains(*pos)) && !over_toolbar(*pos) => {
+                    Event::PointerButton { pos, button, pressed: true, .. } if !self.games_held && shown.is_some_and(|r| r.contains(*pos)) && !over_toolbar(*pos) => {
                         self.games_held = true;
+                        self.hold_click = Some(*button);
                         self.notify("The mouse is held for the game: Ctrl+Alt lets it go");
+                        continue;
+                    }
+                    Event::PointerButton { button, pressed: false, .. } if self.hold_click == Some(*button) => {
+                        self.hold_click = None;
                         continue;
                     }
                     Event::PointerButton { pos: _, button, pressed, modifiers } if self.grab_set => {
@@ -321,34 +335,37 @@ impl Remote {
         Ok(())
     }
 
-    /// The window holds the pointer while the mouse is for the game (`shown`: the picture, when
-    /// its keys go to the host): hidden and kept in the window, where only its movement counts.
-    /// Wayland locks it in place; elsewhere it is kept in the window and put back in the middle.
+    /// Whether the pointer is held for the game this frame (`shown`: the picture, when its keys
+    /// go to the host): hidden, where only its movement counts, and put back in the middle where
+    /// the window cannot lock it in place. Not while a menu, or a field of this window, is in use.
+    /// The window itself holds it (`pointer_grab`), for the pane in front only, so a pane that
+    /// goes (its connection lost, closed, another tab shown) lets it go with it.
     pub(in crate::gui) fn hold_pointer(&mut self, ctx: &egui::Context, shown: Option<Rect>) -> Result<(), String> {
-        let hold = self.games && self.games_held && shown.is_some();
+        let hold = self.games && self.games_held && shown.is_some() && !ctx.any_popup_open() && !self.keys_elsewhere(ctx);
         if !hold {
             self.games_held &= self.games;
             self.moved_by = Vec2::ZERO;
         }
-        let locks = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("WINIT_UNIX_BACKEND").ok().is_none_or(|b| b != "x11");
-        if hold != self.grab_set {
-            self.grab_set = hold;
-            let grab = match (hold, locks) {
-                (false, _) => egui::CursorGrab::None,
-                (true, true) => egui::CursorGrab::Locked,
-                (true, false) => egui::CursorGrab::Confined,
-            };
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(grab));
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!hold));
-        }
+        self.grab_set = hold;
         if let Some(r) = shown.filter(|_| hold) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
             // Kept from the window's edges, where it would stop.
-            if !locks && ctx.input(|i| i.pointer.latest_pos()).is_none_or(|p| (p - r.center()).length() > r.size().min_elem() / 4.0) {
+            if !pointer_locks() && ctx.input(|i| i.pointer.latest_pos()).is_none_or(|p| (p - r.center()).length() > r.size().min_elem() / 4.0) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(r.center()));
             }
         }
         Ok(())
+    }
+
+    /// The pointer is held for the game.
+    pub(in crate::gui) fn holds_pointer(&self) -> bool {
+        self.grab_set
+    }
+
+    /// The mouse for games on and holding, as a click on the picture would leave it.
+    #[cfg(test)]
+    pub(in crate::gui) fn hold_for_game(&mut self) {
+        (self.games, self.games_held) = (true, true);
     }
 
     /// Text pasted into the host from an extension or the command palette: a screen gets it on
@@ -387,4 +404,20 @@ fn button_number(b: egui::PointerButton) -> u8 {
         egui::PointerButton::Extra1 => 8,
         egui::PointerButton::Extra2 => 9,
     }
+}
+
+/// Whether the window can lock the pointer in place (Wayland); elsewhere it is kept inside it.
+fn pointer_locks() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("WINIT_UNIX_BACKEND").ok().is_none_or(|b| b != "x11")
+}
+
+/// The window's hold on the pointer for a game, or none.
+pub(in crate::gui) fn pointer_grab(ctx: &egui::Context, hold: bool) {
+    let grab = match (hold, pointer_locks()) {
+        (false, _) => egui::CursorGrab::None,
+        (true, true) => egui::CursorGrab::Locked,
+        (true, false) => egui::CursorGrab::Confined,
+    };
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(grab));
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!hold));
 }

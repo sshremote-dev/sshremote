@@ -859,6 +859,7 @@ impl Capture for Gdi {
                     self.pointer_inside = self.shown.iter().any(|r| r.contains(*x as i32, *y as i32));
                 }
                 Input::Button { pressed: true, .. } if !self.pointer_inside => return Err(super::OUTSIDE.into()),
+                Input::MoveBy { .. } => return Err(super::WHOLE_SCREEN_MOUSE.into()),
                 Input::Scroll { .. } | Input::HScroll { .. } if !self.pointer_inside => return Ok(()),
                 Input::Key { .. } | Input::KeyState { down: true, .. } if !winlist::focus_inside(&self.scope) => {
                     return Err("keys go only to the shared window; click it first".into());

@@ -79,6 +79,10 @@ pub struct Monitor {
 /// What a click outside the shared window or program answers, so the viewer can tell the way out.
 pub const OUTSIDE: &str = "That is outside the shared window. To reach other windows, share the whole screen (the Share button, or Ctrl+] v in a terminal).";
 
+/// What the mouse for games answers while a window or program is shared: its movement would take
+/// the pointer where the viewer cannot see.
+pub const WHOLE_SCREEN_MOUSE: &str = "The mouse for games moves the pointer over the whole screen: share the whole screen for it (the Share button).";
+
 /// Shown in the window chooser when GNOME Shell lacks the sshremote helper; the viewer offers to install it.
 pub const NEEDS_HELPER: &str =
     "Picking from a list on GNOME needs the sshremote helper, a small GNOME Shell extension.";

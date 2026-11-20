@@ -86,6 +86,9 @@ impl Remote {
     pub(super) fn open_panels(&mut self, _: bool, _: bool) {
         match self.never {}
     }
+    pub(in crate::gui) fn holds_pointer(&self) -> bool {
+        false
+    }
     pub(super) fn background(&mut self, _: &egui::Context) -> Result<(), String> {
         match self.never {}
     }
@@ -117,3 +120,5 @@ impl Remote {
         match self.never {}
     }
 }
+
+pub(super) fn pointer_grab(_: &egui::Context, _: bool) {}

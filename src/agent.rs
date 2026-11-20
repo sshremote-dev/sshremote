@@ -757,7 +757,16 @@ fn serve_with(
                     report(cap.input(Input::Move { x: sx, y: sy }));
                     pointer.moved((sx as i32, sy as i32), Instant::now());
                 }
-                ToAgent::PointerBy { dx, dy } => report(cap.input(Input::MoveBy { dx: dx as i32, dy: dy as i32 })),
+                ToAgent::PointerBy { dx, dy } => {
+                    if let Err(e) = cap.input(Input::MoveBy { dx: dx as i32, dy: dy as i32 }) {
+                        if e == crate::capture::WHOLE_SCREEN_MOUSE && told_outside.is_none_or(|t| t.elapsed() > Duration::from_secs(4)) {
+                            told_outside = Some(Instant::now());
+                            send(enc, &ToClient::Notice(e)).map_err(io_err)?;
+                        } else if e != crate::capture::WHOLE_SCREEN_MOUSE {
+                            report(Err(e));
+                        }
+                    }
+                }
                 ToAgent::Button { button, pressed } => {
                     held.button(button, pressed);
                     // A click the shared window does not take: say once in a while how to get out.

@@ -1312,6 +1312,7 @@ impl Capture for Gnome {
             match &ev {
                 Input::Move { x, y } => a.inside = a.shown.iter().any(|r| r.contains(*x as i32, *y as i32)),
                 Input::Button { pressed: true, .. } if !a.inside => return Err(super::OUTSIDE.into()),
+                Input::MoveBy { .. } => return Err(super::WHOLE_SCREEN_MOUSE.into()),
                 Input::Scroll { .. } | Input::HScroll { .. } if !a.inside => return Ok(()),
                 Input::Key { .. } | Input::KeyState { down: true, .. } if !a.focused => {
                     let what = if matches!(a.of, Cut::Window(_)) { "window" } else { "program" };

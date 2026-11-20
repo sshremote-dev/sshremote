@@ -724,6 +724,32 @@ fn a_screen_in_a_hidden_tab_stops_its_picture() {
     h.w.close_all();
 }
 
+/// The pointer held for a game in a pane is the window's while that pane is in front: another
+/// tab shown, or the pane's connection lost, lets it go.
+#[test]
+#[ignore]
+fn the_pointer_held_for_a_game_goes_with_its_pane() {
+    let mut h = Harness::new();
+    h.w.add(test_desktop(), Place::Tab, PaneStart::default());
+    h.until("the test desktop connects", |w| live(w, 0));
+    if let State::Live(r) = &mut h.w.panes[0].state {
+        r.hold_for_game();
+    }
+    h.until("held", |w| w.pointer_held);
+    let profile = crate::termwin::local_profiles().into_iter().next().unwrap();
+    h.w.add(Launch::Shell { label: "shell".into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Tab, PaneStart::default());
+    h.until("let go behind another tab", |w| !w.pointer_held);
+    h.w.select_tab(0);
+    h.until("held again in front", |w| w.pointer_held);
+    if let State::Live(r) = &mut h.w.panes[0].state {
+        r.close();
+    }
+    h.until("let go with the connection", |w| !w.pointer_held && !live(w, 0));
+    h.w.close_all();
+    h.frame(Vec::new());
+    assert!(!h.w.pointer_held);
+}
+
 /// Panes in different windows never share an id, so extensions told of them never see one
 /// twice, or a "closed" for a pane still open elsewhere.
 #[test]

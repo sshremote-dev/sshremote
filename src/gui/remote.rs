@@ -7,6 +7,7 @@ mod input;
 mod panels;
 mod toolbar;
 mod transfer;
+pub(super) use input::pointer_grab;
 pub(super) use transfer::Carry;
 
 /// Windows or programs offered for sharing, or why there are none.
@@ -192,11 +193,14 @@ pub(super) struct Remote {
     /// The computer's address, asked to trust this one (`ToAgent::TrustMe`).
     trust_for: Option<String>,
     /// The mouse for games: on (`games`), holding the pointer now (`games_held`, until Ctrl+Alt), as
-    /// the window was last told (`grab_set`), and movement not yet a whole pixel.
+    /// the window was last told (`grab_set`), and movement not yet a whole pixel; the button whose
+    /// click took hold (its release stays here too), and Ctrl+Alt held with no other key yet.
     pub(super) games: bool,
     games_held: bool,
     grab_set: bool,
     moved_by: Vec2,
+    hold_click: Option<egui::PointerButton>,
+    let_go_armed: bool,
     /// Uploads and downloads finished since the last notice about them.
     sent: Settled,
     got: Settled,
@@ -396,6 +400,8 @@ impl Remote {
             games_held: false,
             grab_set: false,
             moved_by: Vec2::ZERO,
+            hold_click: None,
+            let_go_armed: false,
             sent: Settled::default(),
             got: Settled::default(),
             ssh_cmd,

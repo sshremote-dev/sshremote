@@ -287,6 +287,8 @@ pub(super) struct Workspace {
     pub(super) failed: Option<String>,
     /// Notices of the workspace itself (an extension's command that failed, say), over the panes.
     toasts: super::toast::Toasts,
+    /// The window holds the pointer for the front pane's mouse for games.
+    pointer_held: bool,
     /// A host refused the login: the dialog asking how to sign in.
     signin: Option<super::signin::SignIn>,
     /// The extensions' side panel, and the command palette while open (its filter and choice).
@@ -373,6 +375,7 @@ impl Workspace {
             reached: Vec::new(),
             failed: None,
             toasts: Default::default(),
+            pointer_held: false,
             signin: None,
             side: Default::default(),
             palette: None,
@@ -1274,6 +1277,7 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
         if self.tabs.is_empty() {
+            self.hold_pointer(&ctx, false);
             return Out { empty: true, grab: false };
         }
         if std::mem::take(&mut self.close_asked) {
@@ -1316,6 +1320,7 @@ impl Workspace {
             self.full_screen_dock(&ctx, area, &mut remote_action);
         }
         if self.tabs.is_empty() {
+            self.hold_pointer(&ctx, false);
             return Out { empty: true, grab: false };
         }
         ui.painter().rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill);
@@ -1352,6 +1357,7 @@ impl Workspace {
         let mut lost = Vec::new();
         let mut full_toggle = false;
         let mut grab = false;
+        let mut hold = false;
         let mut to_shell = Vec::new();
         for (id, rect) in &rects {
             let Some(i) = self.index(*id) else { continue };
@@ -1379,6 +1385,7 @@ impl Workspace {
                                 closing.push(*id);
                             }
                             grab |= is_active && r.grab_wanted;
+                            hold |= is_active && r.holds_pointer();
                         }
                     }
                 }
@@ -1516,7 +1523,16 @@ impl Workspace {
                 self.title = title;
             }
         }
+        self.hold_pointer(&ctx, hold);
         Out { empty: self.tabs.is_empty(), grab }
+    }
+
+    /// Holds the pointer in the window, or lets it go, as the pane in front wants.
+    fn hold_pointer(&mut self, ctx: &egui::Context, hold: bool) {
+        if hold != self.pointer_held {
+            self.pointer_held = hold;
+            remote::pointer_grab(ctx, hold);
+        }
     }
 
     /// The active pane shows a remote screen, whose keys all go to its host (not this computer's

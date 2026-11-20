@@ -697,6 +697,8 @@ impl Capture for X11 {
                 }
             }
             Input::SecureAttention => {}
+            // A window shared: out of it, where the viewer cannot see.
+            Input::MoveBy { .. } if self.shown.is_some() => return Err(super::WHOLE_SCREEN_MOUSE.into()),
             // XTest moves it by so much when told the motion is relative.
             Input::MoveBy { dx, dy } => {
                 let (dx, dy) = (dx.clamp(-32768, 32767) as i16, dy.clamp(-32768, 32767) as i16);
