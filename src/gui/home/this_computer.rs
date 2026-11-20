@@ -390,6 +390,14 @@ impl App {
                         if ui.checkbox(&mut cfg.cameras, "Let viewers look at this computer's cameras").changed() {
                             changed = true;
                         }
+                        kit::row(ui, "End a session left idle", |ui| {
+                            let name = |m: u32| if m == 0 { "Never".to_string() } else { format!("After {m} min without input") };
+                            egui::ComboBox::from_id_salt("idle-end").selected_text(name(cfg.idle)).show_ui(ui, |ui| {
+                                for m in [0, 5, 15, 30, 60, 120] {
+                                    changed |= ui.selectable_value(&mut cfg.idle, m, name(m)).changed();
+                                }
+                            });
+                        });
                         ui.add(
                             egui::Label::new(RichText::new("They are listed after the monitors; the person at the computer is told each time one is looked at.").weak().size(12.0)).wrap(),
                         );

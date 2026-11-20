@@ -574,6 +574,12 @@ fn serve_with(
                 _ => None,
             };
             match m {
+                // The computer's side ends the session (a session by ID left without input).
+                ToAgent::End(why) => {
+                    let _ = send(enc, &ToClient::Error(why));
+                    let _ = enc.flush();
+                    return Ok(());
+                }
                 ToAgent::Settings(s) => {
                     let t = target(desk, &s, cap.resizable());
                     if t != size {

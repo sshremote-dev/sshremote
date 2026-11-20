@@ -61,6 +61,9 @@ pub use crate::xk::SUPER_L;
 
 #[derive(Debug, PartialEq)]
 pub enum ToAgent {
+    /// The computer ends the session, saying why to the viewer (from the computer's own side of
+    /// a session by ID, never sent by a viewer).
+    End(String),
     Settings(Settings),
     Ack(u32),
     Key {
@@ -722,6 +725,10 @@ impl ToAgent {
                 b.extend_from_slice(t.as_bytes());
                 21
             }
+            ToAgent::End(t) => {
+                b.extend_from_slice(t.as_bytes());
+                50
+            }
             ToAgent::Pause(on) => {
                 b.push(*on as u8);
                 22
@@ -870,6 +877,7 @@ impl ToAgent {
             19 => ToAgent::SelectMonitor(c.u8()?),
             20 => ToAgent::Audio(c.u8()? != 0),
             21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
+            50 => ToAgent::End(String::from_utf8_lossy(c.rest()).into_owned()),
             22 => ToAgent::Pause(c.u8()? != 0),
             23 => ToAgent::Snapshot,
             24 => ToAgent::FileStart { id: c.u32()?, size: c.u64()?, dir: c.str()?, name: c.str()? },

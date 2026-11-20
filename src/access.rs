@@ -60,6 +60,8 @@ pub struct Config {
     /// Whether viewers may look at this computer's cameras (listed after its monitors); off
     /// unless chosen, and the person at the screen is told each time.
     pub cameras: bool,
+    /// Minutes without input from a viewer after which its session ends; 0: never.
+    pub idle: u32,
 }
 
 /// Which passwords remote access takes.
@@ -107,7 +109,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -139,6 +141,7 @@ impl Config {
             from: s("from").unwrap_or_default(),
             relay_key: s("relay_key").unwrap_or_default(),
             cameras: v.get("cameras").and_then(|x| x.as_bool()).unwrap_or(false),
+            idle: v.get("idle").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         })
     }
 }
@@ -278,6 +281,7 @@ pub fn fresh() -> Config {
         from: String::new(),
         relay_key: String::new(),
         cameras: false,
+        idle: 0,
     }
 }
 
@@ -1294,7 +1298,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
-    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras);
+    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     let path = match ender.straight() {
         Some(a) => format!("straight from {}", a.ip()),
@@ -1403,7 +1407,48 @@ fn one_time_used(used: &str) {
 
 /// The agent as a process of its own, its input and output the sealed stream.
 /// `code`: someone who asked without a password, and the code to show the person at the screen.
-fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8, code: Option<&str>, cameras: bool) -> Result<(), String> {
+/// Where the viewer's stream stands: within a message's head or its payload (messages are a kind,
+/// a length and that many bytes), to tell the person's doing from the app's own messages and to
+/// put a message of this side's in between two.
+#[derive(Default)]
+struct Frames {
+    head: [u8; 5],
+    have: usize,
+    left: usize,
+}
+
+/// What a viewer sends by itself: settings, acknowledgements, pings, pausing, refreshing,
+/// accessibility state and density.
+const AUTOMATIC: [u8; 8] = [1, 2, 7, 8, 18, 22, 36, 46];
+
+impl Frames {
+    /// Follows `b`; true when a message it begins is the person's doing.
+    fn feed(&mut self, mut b: &[u8]) -> bool {
+        let mut person = false;
+        while !b.is_empty() {
+            if self.left > 0 {
+                let n = self.left.min(b.len());
+                (self.left, b) = (self.left - n, &b[n..]);
+                continue;
+            }
+            let n = (5 - self.have).min(b.len());
+            self.head[self.have..self.have + n].copy_from_slice(&b[..n]);
+            (self.have, b) = (self.have + n, &b[n..]);
+            if self.have == 5 {
+                self.have = 0;
+                self.left = u32::from_le_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]) as usize;
+                person |= !AUTOMATIC.contains(&self.head[0]);
+            }
+        }
+        person
+    }
+
+    fn between(&self) -> bool {
+        self.have == 0 && self.left == 0
+    }
+}
+
+fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8, code: Option<&str>, cameras: bool, idle: u32) -> Result<(), String> {
     // The session's own pings come every second; two minutes of nothing means it is gone.
     let ender = w.ender();
     ender.set_idle_limit(Duration::from_secs(120));
@@ -1423,8 +1468,31 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     crate::sys::tie(&child);
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdin = child.stdin.take().ok_or("no stdin")?;
     let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    // The viewer's stream as it goes in, followed message by message; the last time the person
+    // did something there.
+    let input = Arc::new(Mutex::new((stdin, Frames::default(), std::time::Instant::now())));
+    if idle > 0 {
+        let input = Arc::downgrade(&input);
+        let limit = Duration::from_secs(idle as u64 * 60);
+        thread::spawn(move || {
+            while let Some(input) = input.upgrade() {
+                {
+                    let mut i = input.lock().unwrap_or_else(|e| e.into_inner());
+                    // Said between two of the viewer's messages, never inside one.
+                    if i.2.elapsed() > limit && i.1.between() {
+                        let why = format!("This session ended after {idle} minutes without input from you, as the computer is set to.");
+                        let (k, p) = crate::proto::ToAgent::End(why).encode();
+                        let _ = crate::proto::write_msg(&mut i.0, k, &p).and_then(|_| i.0.flush());
+                        return;
+                    }
+                }
+                drop(input);
+                thread::sleep(Duration::from_secs(5));
+            }
+        });
+    }
     let up = thread::spawn(move || {
         let mut buf = vec![0u8; 1 << 16];
         loop {
@@ -1446,13 +1514,17 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
         match r.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if stdin.write_all(&buf[..n]).and_then(|_| stdin.flush()).is_err() {
+                let mut i = input.lock().unwrap_or_else(|e| e.into_inner());
+                if i.1.feed(&buf[..n]) {
+                    i.2 = std::time::Instant::now();
+                }
+                if i.0.write_all(&buf[..n]).and_then(|_| i.0.flush()).is_err() {
                     break;
                 }
             }
         }
     }
-    drop(stdin);
+    drop(input);
     // The agent ends within a few seconds of its viewer; past that it is ended.
     for _ in 0..40 {
         if child.try_wait().ok().flatten().is_some() {
@@ -1703,6 +1775,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             (false, true) => "not found, but computers on this network may come straight in",
             (false, false) => "not found by computers on this network",
         });
+        println!("idle:     {}", if c.idle == 0 { "a session goes on however long the viewer does nothing".to_string() } else { format!("a session ends after {} minutes without input from its viewer", c.idle) });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
         println!("connect with: sshremote --gui {}", address(&c.id, &c.relay));
@@ -1740,6 +1813,17 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         // Which passwords viewers may give, and a new one-time password.
         Some("passwords") => {
             c.passwords = args.get(1).and_then(|w| Passwords::from_word(w)).ok_or("usage: sshremote remote-access passwords lasting|one-time|both")?;
+            save(&c)?;
+            show(&c);
+            Ok(())
+        }
+        // Minutes without input from a viewer after which its session ends.
+        Some("idle") => {
+            c.idle = match args.get(1).map(String::as_str) {
+                Some("off" | "0") => 0,
+                Some(n) => n.parse().ok().filter(|&m| m > 0).ok_or("usage: sshremote remote-access idle MINUTES|off")?,
+                None => return Err("usage: sshremote remote-access idle MINUTES|off".into()),
+            };
             save(&c)?;
             show(&c);
             Ok(())
@@ -1903,12 +1987,37 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_viewers_stream_is_followed_message_by_message() {
+        use crate::proto::ToAgent;
+        let msg = |m: ToAgent| {
+            let (k, p) = m.encode();
+            let mut b = Vec::new();
+            crate::proto::write_msg(&mut b, k, &p).unwrap();
+            b
+        };
+        let (ack, ping, key) = (msg(ToAgent::Ack(7)), msg(ToAgent::Ping(0)), msg(ToAgent::Key { keysym: 0x61, mods: 0 }));
+        let mut f = Frames::default();
+        assert!(!f.feed(&[ack.clone(), ping.clone()].concat()), "the app's own messages are no input");
+        assert!(f.between());
+        // A key cut in three, across reads: the acknowledgement's last two bytes come with the
+        // key's five-byte head.
+        let all = [ack, key, ping].concat();
+        let (a, rest) = all.split_at(7);
+        let (b, c) = rest.split_at(7);
+        assert!(!f.feed(a) && !f.between());
+        assert!(f.feed(b), "the key's head is whole here");
+        assert!(!f.between());
+        assert!(!f.feed(c));
+        assert!(f.between());
+    }
 
     #[test]
     fn visits_pair_each_coming_with_its_going() {

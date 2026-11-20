@@ -1705,7 +1705,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0 };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1761,7 +1761,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0 };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
