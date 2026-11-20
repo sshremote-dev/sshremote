@@ -141,7 +141,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote update [--check]      put the newer version from sshremote.dev in place of this one
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|log|idle MIN|off|trusted [forget]|proxy URL|off|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
-                                straight|lan|direct|requests|cameras on|off|passwords lasting|one-time|both|one-time|
+                                straight|lan|direct|requests|cameras|record on|off|passwords lasting|one-time|both|one-time|
                                 from ADDRESS|RANGE...|anywhere|viewers|end N|install|uninstall|service start|stop]
                                        this computer reachable by ID and password through a relay
        sshremote --tray                Windows: the icon in the notification area for the service (remote

@@ -136,6 +136,17 @@ fn upload_place(dir: &str, name: String) -> (std::path::PathBuf, String) {
     }
 }
 
+/// A session's recording, written out whole however the session ends.
+struct SessionRecording(Option<crate::record::Recording>);
+
+impl Drop for SessionRecording {
+    fn drop(&mut self) {
+        if let Some(r) = self.0.take() {
+            let _ = r.stop();
+        }
+    }
+}
+
 /// The token this agent may hand a viewer that asks to be trusted (`ToAgent::TrustToken`).
 static TRUST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -378,6 +389,17 @@ fn serve_with(
         && let Err(why) = cap.windows()
     {
         send(enc, &ToClient::Notice(format!("This computer's screen cannot be shown: {why}. Its terminal and files work."))).map_err(io_err)?;
+    }
+    // A session by ID recorded, as the computer is set to: its viewer is told.
+    let mut rec = SessionRecording(None);
+    if by_id() && crate::access::stored().ok().flatten().is_some_and(|c| c.record) {
+        match crate::access::recordings_dir().ok_or_else(|| "no folder for it".to_string()).and_then(|d| crate::record::Recording::session(&d)) {
+            Ok(r) => {
+                rec.0 = Some(r);
+                send(enc, &ToClient::Notice("This computer records this session.".into())).map_err(io_err)?;
+            }
+            Err(e) => eprintln!("sshremote agent: the session is not recorded: {e}"),
+        }
     }
     if cap.name() == "portal-view" {
         send(enc, &ToClient::Notice("This desktop lets its screen be seen, not controlled: it has no remote-desktop portal (as with Sway). Its terminal and files work.".into())).map_err(io_err)?;
@@ -1122,6 +1144,9 @@ fn serve_with(
             continue;
         }
         if let Some(img) = cap.grab()? {
+            if let Some(r) = rec.0.as_mut() {
+                r.picture(&img);
+            }
             if let Some(old) = last.replace(img) {
                 cap.recycle(old);
             }

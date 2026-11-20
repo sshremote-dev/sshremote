@@ -38,6 +38,35 @@ impl Recording {
         Recording { jobs, started: Instant::now(), last: None, dirty: true }
     }
 
+    /// Starts one of a session by ID in `dir` (made if need be), the time in its name.
+    pub fn session(dir: &Path) -> Result<Recording, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let base = name("session");
+        let file = base.file_name().ok_or("no name")?;
+        let base = dir.join(file);
+        let (jobs, rx) = mpsc::sync_channel(2);
+        std::thread::spawn(move || encode(rx, base));
+        Ok(Recording { jobs, started: Instant::now(), last: None, dirty: true })
+    }
+
+    /// Hands a captured picture over (BGRx rows `stride` apart), when one is due.
+    pub fn picture(&mut self, img: &crate::capture::Image) {
+        self.dirty = true;
+        if !self.due() || img.w < 16 || img.h < 16 {
+            return;
+        }
+        let mut rgb = Vec::with_capacity(img.w * img.h * 3);
+        for row in img.data.chunks(img.stride).take(img.h) {
+            for px in row[..img.w * 4].chunks_exact(4) {
+                rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        let now = Instant::now();
+        if self.jobs.try_send(Job::Frame(rgb, img.w, img.h, now)).is_ok() {
+            (self.last, self.dirty) = (Some(now), false);
+        }
+    }
+
     /// Whether a frame would be kept now (the picture changed, and the last one is old enough).
     pub fn due(&self) -> bool {
         self.dirty && self.last.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000 / FPS as u64))
@@ -345,6 +374,28 @@ mod tests {
         let b = [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 9, 9];
         let n = nal_units(&b);
         assert_eq!(n, vec![&[0x67, 1, 2][..], &[0x68, 3], &[0x65, 9, 9]]);
+    }
+
+    /// A session recorded on the computer from its captured pictures (BGRx, rows with room to
+    /// spare) is a whole MP4 in the folder asked for, at most 15 pictures a second.
+    #[test]
+    fn a_session_is_recorded_from_captured_pictures() {
+        let dir = std::env::temp_dir().join(format!("sshremote-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::session(&dir).unwrap();
+        let (w, h, stride) = (80, 60, 80 * 4 + 16);
+        for i in 0..12u8 {
+            let data: Vec<u8> = (0..stride * h).map(|b| (b as u8).wrapping_mul(i + 1)).collect();
+            r.picture(&crate::capture::Image { w, h, stride, data });
+            std::thread::sleep(Duration::from_millis(35));
+        }
+        let files = r.stop().unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].starts_with(&dir) && files[0].file_name().unwrap().to_string_lossy().starts_with("sshremote-session-"));
+        let data = std::fs::read(&files[0]).unwrap();
+        assert_eq!(&data[4..8], b"ftyp");
+        assert!(data.windows(4).any(|b| b == b"moov"), "its index written");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A recording of a changing picture is an MP4 whose boxes add up and whose frames are all

@@ -67,6 +67,21 @@ pub struct Config {
     /// The proxy the relay is reached through (`proxy::Proxy`'s URL); empty: straight. Kept
     /// here for a service that runs without the person's own settings.
     pub proxy: String,
+    /// Whether sessions by ID are recorded here, as their viewers see the screen
+    /// (`recordings_dir`); off unless chosen, and each viewer is told.
+    pub record: bool,
+}
+
+/// Where sessions by ID are recorded: the service's own folder (Windows, run as SYSTEM), else
+/// "SSH Remote sessions" in Videos (or Downloads).
+pub fn recordings_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if crate::console_user::running_as_system() {
+        return state_file().and_then(|f| f.parent().map(|d| d.join("recordings")));
+    }
+    let downloads = crate::files::downloads();
+    let base = downloads.parent().map(|h| h.join("Videos")).filter(|p| p.is_dir()).unwrap_or(downloads);
+    Some(base.join("SSH Remote sessions"))
 }
 
 /// A device a viewer came in from with the two-step code and asked to be trusted on.
@@ -206,7 +221,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -241,6 +256,8 @@ impl Config {
             idle: v.get("idle").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             trusted: v.get("trusted").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Trusted::from_json).collect()).unwrap_or_default(),
             proxy: s("proxy").unwrap_or_default(),
+            // Off unless chosen.
+            record: v.get("record").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
 }
@@ -383,6 +400,7 @@ pub fn fresh() -> Config {
         idle: 0,
         trusted: Vec::new(),
         proxy: String::new(),
+        record: false,
     }
 }
 
@@ -1935,6 +1953,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         if let Some(p) = crate::proxy::current() {
             println!("proxy:    the relay is reached through {}", p.shown());
         }
+        if c.record {
+            println!("record:   sessions by ID are recorded in {}", recordings_dir().map(|d| d.display().to_string()).unwrap_or_default());
+        }
         println!("idle:     {}", if c.idle == 0 { "a session goes on however long the viewer does nothing".to_string() } else { format!("a session ends after {} minutes without input from its viewer", c.idle) });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
@@ -2043,7 +2064,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Switches, each `on` or `off`.
-        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras")) => {
+        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record")) => {
             let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
@@ -2054,6 +2075,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 "lan" => c.lan = on,
                 "requests" => c.requests = on,
                 "cameras" => c.cameras = on,
+                "record" => c.record = on,
                 _ => c.direct = on,
             }
             save(&c)?;
@@ -2178,7 +2200,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 

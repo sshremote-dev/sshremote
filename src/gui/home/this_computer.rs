@@ -390,6 +390,14 @@ impl App {
                         if ui.checkbox(&mut cfg.cameras, "Let viewers look at this computer's cameras").changed() {
                             changed = true;
                         }
+                        let folder = crate::access::recordings_dir().map(|d| d.display().to_string()).unwrap_or_default();
+                        if ui
+                            .checkbox(&mut cfg.record, "Record each session by ID")
+                            .on_hover_text(format!("As its viewer sees the screen, into {folder}; the viewer is told"))
+                            .changed()
+                        {
+                            changed = true;
+                        }
                         kit::row(ui, "End a session left idle", |ui| {
                             let name = |m: u32| if m == 0 { "Never".to_string() } else { format!("After {m} min without input") };
                             egui::ComboBox::from_id_salt("idle-end").selected_text(name(cfg.idle)).show_ui(ui, |ui| {
