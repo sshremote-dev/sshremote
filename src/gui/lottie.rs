@@ -344,7 +344,9 @@ fn run(path: &str, side: u32, dark: bool, ctx: &egui::Context, me: &Arc<Mutex<Pl
             Ok(p) => (p.play, p.used.elapsed()),
             Err(_) => return,
         };
-        if idle > Duration::from_secs(3) {
+        // Longer than a still window goes undrawn (a still remote screen is drawn every ten
+        // seconds), or each time it is drawn the animation would be read and prepared anew.
+        if idle > Duration::from_secs(30) {
             if let Ok(mut list) = PLAYERS.lock() {
                 list.retain(|p| !Arc::ptr_eq(p, me));
             }
