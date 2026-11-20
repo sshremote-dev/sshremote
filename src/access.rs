@@ -72,16 +72,43 @@ pub struct Config {
     pub record: bool,
 }
 
-/// Where sessions by ID are recorded: the service's own folder (Windows, run as SYSTEM), else
-/// "SSH Remote sessions" in Videos (or Downloads).
+/// Where sessions by ID are recorded: on Windows where the service runs them (as SYSTEM), a
+/// folder of its own that only administrators open; else "SSH Remote sessions" in Videos (or
+/// Downloads).
 pub fn recordings_dir() -> Option<PathBuf> {
     #[cfg(windows)]
-    if crate::console_user::running_as_system() {
-        return state_file().and_then(|f| f.parent().map(|d| d.join("recordings")));
+    if crate::console_user::running_as_system() || service_installed() {
+        return state_file().and_then(|f| f.parent().map(|d| d.join("Session recordings")));
     }
     let downloads = crate::files::downloads();
     let base = downloads.parent().map(|h| h.join("Videos")).filter(|p| p.is_dir()).unwrap_or(downloads);
     Some(base.join("SSH Remote sessions"))
+}
+
+/// The same, made if need be, for none but its owner (Windows' service: SYSTEM and the
+/// administrators) to open; one that others could open is not recorded in.
+pub fn recordings_made() -> Result<PathBuf, String> {
+    let dir = recordings_dir().ok_or("no folder for recordings")?;
+    #[cfg(windows)]
+    if crate::console_user::running_as_system() {
+        if !shared_folder_ready() {
+            return Err("the service's folder is not safe to use".into());
+        }
+        if !dir.exists() {
+            win_create(&dir, true, "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")?;
+        }
+        if !win_folder_is_safe(&dir) {
+            return Err(format!("{} is not the service's own folder", dir.display()));
+        }
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    Ok(dir)
 }
 
 /// A device a viewer came in from with the two-step code and asked to be trusted on.

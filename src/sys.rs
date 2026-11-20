@@ -193,6 +193,29 @@ pub fn human(n: u64) -> String {
     }
 }
 
+/// Room left for this user on the disk that holds `path` (an existing file or folder), in bytes.
+#[cfg_attr(not(feature = "remote"), allow(dead_code))]
+pub fn free_space(path: &std::path::Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let dir = if path.is_dir() { path } else { path.parent()? };
+        let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+        // SAFETY: a zero-ended path and valid out-pointers.
+        (unsafe { GetDiskFreeSpaceExW(wide(&dir.to_string_lossy()).as_ptr(), &mut avail, &mut total, &mut free) } != 0).then_some(avail)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: a zero-ended path and a zeroed statvfs to fill.
+        unsafe {
+            let mut st: libc::statvfs = std::mem::zeroed();
+            (libc::statvfs(c.as_ptr(), &mut st) == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

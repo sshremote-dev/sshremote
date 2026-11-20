@@ -1,9 +1,9 @@
 //! Recording a remote screen as it shows here, into an MP4 file (H.264) any player opens. Frames
 //! are encoded on a thread of their own, at most 15 a second and only when the picture changed;
-//! the file is written as it goes and its index added at the end.
+//! the file is written as it goes, in pieces that each play, so one cut off plays to its end.
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
@@ -27,10 +27,14 @@ pub struct Recording {
     last: Option<Instant>,
     /// The picture changed since the last frame was kept.
     pub dirty: bool,
-    /// A session's recording keeps the size of its first picture, in one file, however the
-    /// viewer's size changes.
+    /// A session's recording keeps one size, in one file, however the viewer's changes: its
+    /// first picture's shape, as large as the screen's (up to `MOST`) where it was smaller.
     size: Option<(usize, usize)>,
+    screen: (usize, usize),
 }
+
+/// The largest a session is recorded.
+const MOST: (usize, usize) = (1920, 1200);
 
 impl Recording {
     /// Starts one, its file named after `what` in the Videos folder (or Downloads).
@@ -38,18 +42,22 @@ impl Recording {
         let (jobs, rx) = mpsc::sync_channel(2);
         let base = name(what);
         std::thread::spawn(move || encode(rx, base));
-        Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None }
+        Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None, screen: (0, 0) }
     }
 
-    /// Starts one of a session by ID in `dir` (made if need be), the time in its name.
-    pub fn session(dir: &Path) -> Result<Recording, String> {
+    /// Starts one of a session by ID in `dir` (made if need be), the time in its name, of a
+    /// screen of `screen` pixels.
+    pub fn session(dir: &Path, screen: (usize, usize)) -> Result<Recording, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if crate::sys::free_space(dir).is_some_and(|f| f < KEEP_FREE) {
+            return Err(format!("the disk of {} is nearly full", dir.display()));
+        }
         let base = name("session");
         let file = base.file_name().ok_or("no name")?;
         let base = dir.join(file);
         let (jobs, rx) = mpsc::sync_channel(2);
         std::thread::spawn(move || encode(rx, base));
-        Ok(Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None })
+        Ok(Recording { jobs, started: Instant::now(), last: None, dirty: true, size: None, screen })
     }
 
     /// Hands a captured picture over (BGRx rows `stride` apart), when one is due.
@@ -58,14 +66,22 @@ impl Recording {
         if !self.due() || img.w < 16 || img.h < 16 {
             return;
         }
-        // At the first picture's size, nearest pixels taken where another size came.
-        let (w, h) = *self.size.get_or_insert((img.w, img.h));
-        let mut rgb = Vec::with_capacity(w * h * 3);
-        for y in 0..h {
-            let row = &img.data[(y * img.h / h) * img.stride..];
-            for x in 0..w {
-                let px = &row[(x * img.w / w) * 4..][..3];
-                rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        let screen = (self.screen.0.min(MOST.0), self.screen.1.min(MOST.1));
+        let (w, h) = *self.size.get_or_insert_with(|| {
+            // A small first picture (a pane in a grid) as large as the screen allows.
+            let k = (screen.0 as f64 / img.w as f64).min(screen.1 as f64 / img.h as f64).max(1.0);
+            ((img.w as f64 * k) as usize & !1, (img.h as f64 * k) as usize & !1)
+        });
+        // Fitted in whole, nearest pixels taken; black on the sides of another shape.
+        let (fw, fh) = if img.w * h <= img.h * w { ((img.w * h / img.h).max(1), h) } else { (w, (img.h * w / img.w).max(1)) };
+        let (ox, oy) = ((w - fw) / 2, (h - fh) / 2);
+        let mut rgb = vec![0; w * h * 3];
+        for y in 0..fh {
+            let row = &img.data[(y * img.h / fh) * img.stride..];
+            let out = &mut rgb[((oy + y) * w + ox) * 3..][..fw * 3];
+            for (x, o) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let px = &row[(x * img.w / fw) * 4..][..3];
+                *o = [px[2], px[1], px[0]];
             }
         }
         let now = Instant::now();
@@ -173,26 +189,39 @@ fn encode(rx: Receiver<Job>, base: PathBuf) {
     }
 }
 
-/// One MP4 being written: its frames' data in `mdat` as they come, their sizes, places, times
-/// and which are key frames for the index at the end.
+/// How long a piece of a file holds at most: a recording cut off (its program killed, the
+/// computer turned off) plays up to its last whole piece.
+const PIECE_MS: u64 = 2000;
+/// Room on the disk a recording leaves: it stops before taking that.
+const KEEP_FREE: u64 = 1 << 30;
+
+/// One MP4 written as it goes: after the header (`moov`, what decoding needs, written with the
+/// first key frame) the frames come in pieces of a couple of seconds (`moof` and `mdat`), each
+/// whole in itself. The length is filled in at the end.
 struct Mp4 {
     path: PathBuf,
-    out: BufWriter<File>,
+    out: File,
     w: usize,
     h: usize,
     enc: Encoder,
     yuv: YUVBuffer,
     crop: Vec<u8>,
     begun: Instant,
-    /// Where the mdat box starts, and where the next sample goes.
-    mdat: u64,
+    /// The frames of the piece being gathered: data, whether a key frame, when (ms from `begun`).
+    piece: Vec<(Vec<u8>, bool, u64)>,
+    /// Where the header keeps the length, once written; the time the pieces have filled.
+    length_at: Option<u64>,
+    filled: u64,
+    pieces: u32,
+    /// How far the file is written, and how many frames are in it.
     at: u64,
-    samples: Vec<(u64, u32, bool, u64)>,
+    frames: usize,
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
 
 impl Mp4 {
+    /// A new file at `path`, or beside it (NAME-2.mp4 and on) where one is there already.
     fn create(path: &Path, w: usize, h: usize, begun: Instant) -> Result<Mp4, String> {
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
@@ -202,16 +231,30 @@ impl Mp4 {
             .intra_frame_period(IntraFramePeriod::from_num_frames(FPS * 20))
             .skip_frames(false);
         let enc = Encoder::with_api_config(OpenH264API::from_source(), config).map_err(|e| e.to_string())?;
-        let mut out = BufWriter::new(File::create(path).map_err(|e| format!("{}: {e}", path.display()))?);
-        let ftyp = bx(b"ftyp", &[b"isom".as_slice(), &512u32.to_be_bytes(), b"isom", b"iso2", b"avc1", b"mp41"].concat());
+        let (path, mut out) = create_beside(path)?;
+        let ftyp = bx(b"ftyp", &[b"isom".as_slice(), &512u32.to_be_bytes(), b"isom", b"iso6", b"avc1", b"mp41"].concat());
         out.write_all(&ftyp).map_err(|e| e.to_string())?;
-        // mdat with a 64-bit size, set at the end.
-        out.write_all(&[0, 0, 0, 1]).and_then(|_| out.write_all(b"mdat")).and_then(|_| out.write_all(&[0; 8])).map_err(|e| e.to_string())?;
-        let mdat = ftyp.len() as u64;
-        Ok(Mp4 { path: path.to_path_buf(), out, w, h, enc, yuv: YUVBuffer::new(w, h), crop: Vec::new(), begun, mdat, at: mdat + 16, samples: Vec::new(), sps: Vec::new(), pps: Vec::new() })
+        Ok(Mp4 {
+            path,
+            out,
+            w,
+            h,
+            enc,
+            yuv: YUVBuffer::new(w, h),
+            crop: Vec::new(),
+            begun,
+            piece: Vec::new(),
+            length_at: None,
+            filled: 0,
+            pieces: 0,
+            at: ftyp.len() as u64,
+            frames: 0,
+            sps: Vec::new(),
+            pps: Vec::new(),
+        })
     }
 
-    /// Encodes a picture `stride_w` pixels wide (cut to even sides) and writes it as a sample.
+    /// Encodes a picture `stride_w` pixels wide (cut to even sides) and keeps it as a frame.
     fn add(&mut self, rgb: &[u8], stride_w: usize, when: Instant) -> Result<(), String> {
         self.crop.clear();
         for y in 0..self.h {
@@ -233,54 +276,97 @@ impl Mp4 {
                 }
             }
         }
-        // Before the first key frame nothing can be shown.
-        if sample.is_empty() || (self.samples.is_empty() && !key) {
+        let ms = when.saturating_duration_since(self.begun).as_millis() as u64;
+        if self.length_at.is_none() {
+            // Before the first key frame nothing can be shown.
+            if sample.is_empty() || !key || self.sps.len() < 4 || self.pps.is_empty() {
+                return Ok(());
+            }
+            let (moov, length) = self.moov();
+            self.out.write_all(&moov).map_err(|e| e.to_string())?;
+            self.length_at = Some(self.at + length as u64);
+            self.at += moov.len() as u64;
+        }
+        if sample.is_empty() {
             return Ok(());
         }
-        self.out.write_all(&sample).map_err(|e| e.to_string())?;
-        let ms = when.saturating_duration_since(self.begun).as_millis() as u64;
-        self.samples.push((self.at, sample.len() as u32, key, ms));
-        self.at += sample.len() as u64;
+        // A piece ends before a key frame (where a player can start), or once long enough.
+        if self.piece.first().is_some_and(|f| key || ms.saturating_sub(f.2) >= PIECE_MS) {
+            self.write_piece(ms)?;
+        }
+        self.piece.push((sample, key, ms));
+        self.frames += 1;
         Ok(())
     }
 
-    /// Writes the index and closes the file.
+    /// Writes the frames gathered as a piece, the last lasting until `next` (ms).
+    fn write_piece(&mut self, next: u64) -> Result<(), String> {
+        if self.piece.is_empty() {
+            return Ok(());
+        }
+        let piece = std::mem::take(&mut self.piece);
+        let durations: Vec<u32> = (0..piece.len()).map(|i| (piece.get(i + 1).map_or(next, |f| f.2).saturating_sub(piece[i].2)).max(1) as u32).collect();
+        self.pieces += 1;
+        let mfhd = full(b"mfhd", 0, 0, &self.pieces.to_be_bytes());
+        // Data offsets from the piece's own start.
+        let tfhd = full(b"tfhd", 0, 0x02_0000, &1u32.to_be_bytes());
+        let tfdt = full(b"tfdt", 1, 0, &self.filled.to_be_bytes());
+        let trun_len = 12 + 8 + piece.len() * 12;
+        let moof_len = 8 + mfhd.len() + 8 + tfhd.len() + tfdt.len() + trun_len;
+        let mut runs = Vec::with_capacity(trun_len);
+        runs.extend_from_slice(&(piece.len() as u32).to_be_bytes());
+        runs.extend_from_slice(&((moof_len + 8) as u32).to_be_bytes());
+        for (f, d) in piece.iter().zip(&durations) {
+            // A key frame depends on no other; the others are not where a player may start.
+            let flags: u32 = if f.1 { 0x0200_0000 } else { 0x0101_0000 };
+            runs.extend_from_slice(&[d.to_be_bytes(), (f.0.len() as u32).to_be_bytes(), flags.to_be_bytes()].concat());
+        }
+        // Duration, size and flags for each frame, after the data offset.
+        let trun = full(b"trun", 0, 0x0701, &runs);
+        let moof = bx(b"moof", &[mfhd, bx(b"traf", &[tfhd, tfdt, trun].concat())].concat());
+        debug_assert_eq!(moof.len(), moof_len);
+        let data: usize = piece.iter().map(|f| f.0.len()).sum();
+        let mut all = Vec::with_capacity(moof.len() + 8 + data);
+        all.extend_from_slice(&moof);
+        all.extend_from_slice(&((data + 8) as u32).to_be_bytes());
+        all.extend_from_slice(b"mdat");
+        for f in &piece {
+            all.extend_from_slice(&f.0);
+        }
+        // Whole, at once: killed, the file keeps every piece written and no part of one.
+        self.out.write_all(&all).map_err(|e| e.to_string())?;
+        self.at += all.len() as u64;
+        self.filled += durations.iter().map(|&d| d as u64).sum::<u64>();
+        if crate::sys::free_space(&self.path).is_some_and(|f| f < KEEP_FREE) {
+            return Err(format!("the disk is nearly full, so the recording stopped ({})", self.path.display()));
+        }
+        Ok(())
+    }
+
+    /// Writes the last piece and the length, and closes the file.
     fn finish(mut self, end: Instant) -> Result<PathBuf, String> {
-        if self.samples.is_empty() || self.sps.is_empty() || self.pps.is_empty() {
+        let Some(length_at) = self.length_at else {
             drop(self.out);
             let _ = std::fs::remove_file(&self.path);
             return Err("nothing was recorded".into());
-        }
-        let first = self.samples[0].3;
+        };
         let end_ms = end.saturating_duration_since(self.begun).as_millis() as u64;
-        let durations: Vec<u32> = (0..self.samples.len())
-            .map(|i| {
-                let next = self.samples.get(i + 1).map_or(end_ms.max(self.samples[i].3 + 1), |s| s.3);
-                (next.saturating_sub(self.samples[i].3)).max(1) as u32
-            })
-            .collect();
-        let duration = (end_ms.max(self.samples.last().map_or(0, |s| s.3) + 1) - first) as u32;
-        let moov = self.moov(&durations, duration);
-        // The mdat holds everything written after its header.
-        let mdat_size = self.at - self.mdat;
-        self.out.write_all(&moov).map_err(|e| e.to_string())?;
-        let mut f = self.out.into_inner().map_err(|e| e.to_string())?;
-        f.seek(SeekFrom::Start(self.mdat + 8)).and_then(|_| f.write_all(&mdat_size.to_be_bytes())).map_err(|e| e.to_string())?;
+        let last = self.piece.last().map_or(0, |f| f.2 + 1);
+        let pieces = self.write_piece(end_ms.max(last));
+        let f = &mut self.out;
+        f.seek(SeekFrom::Start(length_at)).and_then(|_| f.write_all(&self.filled.to_be_bytes())).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
-        Ok(self.path)
+        pieces.map(|_| self.path)
     }
 
-    fn moov(&self, durations: &[u32], duration: u32) -> Vec<u8> {
+    /// The header: the picture's size and decoding parameters, no frames (they come in pieces);
+    /// and where in it the length goes.
+    fn moov(&self) -> (Vec<u8>, usize) {
         let (w, h) = (self.w as u32, self.h as u32);
         let matrix: Vec<u8> = [0x0001_0000u32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000].iter().flat_map(|v| v.to_be_bytes()).collect();
-        let mvhd = full(b"mvhd", 0, 0, &[&[0u8; 8][..], &1000u32.to_be_bytes(), &duration.to_be_bytes(), &0x0001_0000u32.to_be_bytes(), &0x0100u16.to_be_bytes(), &[0; 10], &matrix, &[0; 24], &2u32.to_be_bytes()].concat());
-        let tkhd = full(
-            b"tkhd",
-            0,
-            3,
-            &[&[0u8; 8][..], &1u32.to_be_bytes(), &[0; 4], &duration.to_be_bytes(), &[0; 8], &[0; 4], &[0; 4], &matrix, &(w << 16).to_be_bytes(), &(h << 16).to_be_bytes()].concat(),
-        );
-        let mdhd = full(b"mdhd", 0, 0, &[&[0u8; 8][..], &1000u32.to_be_bytes(), &duration.to_be_bytes(), &0x55c4u16.to_be_bytes(), &[0; 2]].concat());
+        let mvhd = full(b"mvhd", 0, 0, &[&[0u8; 8][..], &1000u32.to_be_bytes(), &[0; 4], &0x0001_0000u32.to_be_bytes(), &0x0100u16.to_be_bytes(), &[0; 10], &matrix, &[0; 24], &2u32.to_be_bytes()].concat());
+        let tkhd = full(b"tkhd", 0, 3, &[&[0u8; 8][..], &1u32.to_be_bytes(), &[0; 4], &[0; 4], &[0; 8], &[0; 4], &[0; 4], &matrix, &(w << 16).to_be_bytes(), &(h << 16).to_be_bytes()].concat());
+        let mdhd = full(b"mdhd", 0, 0, &[&[0u8; 8][..], &1000u32.to_be_bytes(), &[0; 4], &0x55c4u16.to_be_bytes(), &[0; 2]].concat());
         let hdlr = full(b"hdlr", 0, 0, &[&[0u8; 4][..], b"vide", &[0; 12], b"Video\0"].concat());
         let vmhd = full(b"vmhd", 0, 1, &[0; 8]);
         let dinf = bx(b"dinf", &full(b"dref", 0, 0, &[&1u32.to_be_bytes()[..], &full(b"url ", 0, 1, &[])].concat()));
@@ -319,27 +405,35 @@ impl Mp4 {
             .concat(),
         );
         let stsd = full(b"stsd", 0, 0, &[&1u32.to_be_bytes()[..], &avc1].concat());
-        // Times as runs of equal durations.
-        let mut runs: Vec<(u32, u32)> = Vec::new();
-        for &d in durations {
-            match runs.last_mut() {
-                Some((n, last)) if *last == d => *n += 1,
-                _ => runs.push((1, d)),
-            }
-        }
-        let stts = full(b"stts", 0, 0, &[(runs.len() as u32).to_be_bytes().to_vec(), runs.iter().flat_map(|(n, d)| [n.to_be_bytes(), d.to_be_bytes()].concat()).collect()].concat());
-        let keys: Vec<u32> = self.samples.iter().enumerate().filter(|(_, s)| s.2).map(|(i, _)| i as u32 + 1).collect();
-        let stss = full(b"stss", 0, 0, &[(keys.len() as u32).to_be_bytes().to_vec(), keys.iter().flat_map(|k| k.to_be_bytes()).collect()].concat());
-        let stsc = full(b"stsc", 0, 0, &[1u32, 1, 1, 1].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
-        let n = self.samples.len() as u32;
-        let stsz = full(b"stsz", 0, 0, &[[0u32.to_be_bytes(), n.to_be_bytes()].concat(), self.samples.iter().flat_map(|s| s.1.to_be_bytes()).collect()].concat());
-        let co64 = full(b"co64", 0, 0, &[n.to_be_bytes().to_vec(), self.samples.iter().flat_map(|s| s.0.to_be_bytes()).collect()].concat());
-        let stbl = bx(b"stbl", &[stsd, stts, stss, stsc, stsz, co64].concat());
+        // No frames here: the tables are empty.
+        let none = 0u32.to_be_bytes();
+        let stbl = bx(b"stbl", &[stsd, full(b"stts", 0, 0, &none), full(b"stsc", 0, 0, &none), full(b"stsz", 0, 0, &[none, none].concat()), full(b"stco", 0, 0, &none)].concat());
         let minf = bx(b"minf", &[vmhd, dinf, stbl].concat());
         let mdia = bx(b"mdia", &[mdhd, hdlr, minf].concat());
         let trak = bx(b"trak", &[tkhd, mdia].concat());
-        bx(b"moov", &[mvhd, trak].concat())
+        // Track 1's frames come in pieces; the length (ms) goes in mehd at the end.
+        let trex = full(b"trex", 0, 0, &[1u32, 1, 0, 0, 0].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
+        let mvex = bx(b"mvex", &[full(b"mehd", 1, 0, &[0; 8]), trex.clone()].concat());
+        let moov = bx(b"moov", &[mvhd, trak, mvex].concat());
+        let length = moov.len() - trex.len() - 8;
+        (moov, length)
     }
+}
+
+/// Opens a new file at `path`, or NAME-2.mp4 and on beside it when that is taken (two sessions
+/// recorded in the same second): never one written over another.
+fn create_beside(path: &Path) -> Result<(PathBuf, File), String> {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut last = String::new();
+    for n in 1..100 {
+        let p = if n == 1 { path.to_path_buf() } else { path.with_file_name(format!("{stem}-{n}.mp4")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(f) => return Ok((p, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e.to_string(),
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Err(format!("{}: {last}", path.display()))
 }
 
 fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
@@ -388,61 +482,62 @@ mod tests {
         assert_eq!(n, vec![&[0x67, 1, 2][..], &[0x68, 3], &[0x65, 9, 9]]);
     }
 
-    /// A session recorded on the computer from its captured pictures (BGRx, rows with room to
-    /// spare) is a whole MP4 in the folder asked for, at most 15 pictures a second.
-    #[test]
-    fn a_session_is_recorded_from_captured_pictures() {
-        let dir = std::env::temp_dir().join(format!("sshremote-session-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut r = Recording::session(&dir).unwrap();
-        for i in 0..12u8 {
-            // The viewer's size changes halfway: still one file.
-            let (w, h) = if i < 6 { (80, 60) } else { (120, 50) };
-            let stride = w * 4 + 16;
-            let data: Vec<u8> = (0..stride * h).map(|b| (b as u8).wrapping_mul(i + 1)).collect();
-            r.picture(&crate::capture::Image { w, h, stride, data });
-            std::thread::sleep(Duration::from_millis(35));
+    /// The top-level boxes of a file (kind, start, size), which must cover it exactly.
+    fn boxes(data: &[u8]) -> Vec<(String, usize, usize)> {
+        let mut at = 0;
+        let mut out = Vec::new();
+        while at < data.len() {
+            let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8 && at + size <= data.len(), "a box past the end at {at}");
+            out.push((String::from_utf8_lossy(&data[at + 4..at + 8]).into_owned(), at, size));
+            at += size;
         }
-        let files = r.stop().unwrap();
-        assert_eq!(files.len(), 1);
-        assert!(files[0].starts_with(&dir) && files[0].file_name().unwrap().to_string_lossy().starts_with("sshremote-session-"));
-        let data = std::fs::read(&files[0]).unwrap();
-        assert_eq!(&data[4..8], b"ftyp");
-        assert!(data.windows(4).any(|b| b == b"moov"), "its index written");
-        std::fs::remove_dir_all(&dir).unwrap();
+        out
     }
 
-    /// A recording of a changing picture is an MP4 whose boxes add up and whose frames are all
-    /// in it, the first a key frame.
-    #[test]
-    fn a_recording_is_a_whole_mp4() {
-        let dir = std::env::temp_dir().join(format!("sshremote-rec-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.mp4");
-        let t0 = Instant::now();
-        let mut m = Mp4::create(&path, 64, 48, t0).unwrap();
-        for i in 0..10u8 {
-            let rgb: Vec<u8> = (0..65 * 48).flat_map(|p| [(p as u8).wrapping_add(i * 20), i * 10, 90]).collect();
-            m.add(&rgb, 65, t0 + Duration::from_millis(100 * i as u64)).unwrap();
+    /// The frames of the pieces: where each one's data is, and whether a key frame.
+    fn frames(data: &[u8]) -> Vec<(usize, usize, bool)> {
+        let mut out = Vec::new();
+        for (kind, at, size) in boxes(data) {
+            if kind != "moof" {
+                continue;
+            }
+            let t = at + data[at..at + size].windows(4).position(|w| w == b"trun").unwrap() + 4;
+            let n = u32::from_be_bytes(data[t + 4..t + 8].try_into().unwrap()) as usize;
+            let mut place = at + u32::from_be_bytes(data[t + 8..t + 12].try_into().unwrap()) as usize;
+            for i in 0..n {
+                let e = t + 12 + i * 12;
+                let len = u32::from_be_bytes(data[e + 4..e + 8].try_into().unwrap()) as usize;
+                let flags = u32::from_be_bytes(data[e + 8..e + 12].try_into().unwrap());
+                out.push((place, len, flags == 0x0200_0000));
+                place += len;
+            }
         }
-        let n = m.samples.len();
-        assert!(n >= 9 && m.samples[0].2);
-        let (samples, sps, pps) = (m.samples.clone(), m.sps.clone(), m.pps.clone());
-        let out = m.finish(t0 + Duration::from_millis(1100)).unwrap();
-        let data = std::fs::read(&out).unwrap();
-        // Every frame decodes, from its place in the file with the parameters of its avcC.
+        out
+    }
+
+    /// How wide and high a file's picture is (its tkhd).
+    fn picture_size(data: &[u8]) -> (u32, u32) {
+        let t = data.windows(4).position(|w| w == b"tkhd").unwrap() - 4;
+        let at = |o: usize| u32::from_be_bytes(data[t + o..t + o + 4].try_into().unwrap()) >> 16;
+        (at(84), at(88))
+    }
+
+    /// Every frame decodes, from its place in the file with the parameters of the header.
+    fn decoded(data: &[u8], sps: &[u8], pps: &[u8]) -> usize {
         let mut dec = openh264::decoder::Decoder::new().unwrap();
         let mut shown = 0;
-        for (i, (at, size, ..)) in samples.iter().enumerate() {
+        for (i, (at, size, key)) in frames(data).into_iter().enumerate() {
+            assert!(key || i > 0, "the first frame is a key frame");
             let mut annexb = Vec::new();
             if i == 0 {
-                for p in [&sps, &pps] {
+                for p in [sps, pps] {
                     annexb.extend_from_slice(&[0, 0, 0, 1]);
                     annexb.extend_from_slice(p);
                 }
             }
-            let mut k = *at as usize;
-            while k < (*at + *size as u64) as usize {
+            let mut k = at;
+            while k < at + size {
                 let len = u32::from_be_bytes(data[k..k + 4].try_into().unwrap()) as usize;
                 annexb.extend_from_slice(&[0, 0, 0, 1]);
                 annexb.extend_from_slice(&data[k + 4..k + 4 + len]);
@@ -452,18 +547,74 @@ mod tests {
                 shown += 1;
             }
         }
-        assert_eq!(shown, n);
-        // The top-level boxes cover the file exactly.
-        let mut at = 0usize;
-        let mut kinds = Vec::new();
-        while at < data.len() {
-            let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as u64;
-            let size = if size == 1 { u64::from_be_bytes(data[at + 8..at + 16].try_into().unwrap()) } else { size };
-            kinds.push(String::from_utf8_lossy(&data[at + 4..at + 8]).into_owned());
-            at += size as usize;
+        shown
+    }
+
+    /// A session recorded on the computer from its captured pictures (BGRx, rows with room to
+    /// spare) is a whole MP4 in the folder asked for, at the screen's size whatever the viewer's,
+    /// and two begun in the same second are two files.
+    #[test]
+    fn a_session_is_recorded_from_captured_pictures() {
+        let dir = std::env::temp_dir().join(format!("sshremote-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Recording::session(&dir, (160, 120)).unwrap();
+        let mut other = Recording::session(&dir, (0, 0)).unwrap();
+        for i in 0..12u8 {
+            // The viewer's size changes halfway, to another shape: still one file.
+            let (w, h) = if i < 6 { (80, 60) } else { (120, 50) };
+            let stride = w * 4 + 16;
+            let data: Vec<u8> = (0..stride * h).map(|b| (b as u8).wrapping_mul(i + 1)).collect();
+            r.picture(&crate::capture::Image { w, h, stride, data: data.clone() });
+            other.picture(&crate::capture::Image { w, h, stride, data });
+            std::thread::sleep(Duration::from_millis(70));
         }
-        assert_eq!(at, data.len());
-        assert_eq!(kinds, ["ftyp", "mdat", "moov"]);
+        let files = r.stop().unwrap();
+        let others = other.stop().unwrap();
+        assert_eq!((files.len(), others.len()), (1, 1));
+        assert_ne!(files[0], others[0]);
+        assert!(files[0].starts_with(&dir) && files[0].file_name().unwrap().to_string_lossy().starts_with("sshremote-session-"));
+        let data = std::fs::read(&files[0]).unwrap();
+        let kinds: Vec<String> = boxes(&data).into_iter().map(|b| b.0).collect();
+        assert_eq!(kinds[..2], ["ftyp", "moov"]);
+        assert!(kinds[2..].chunks(2).all(|p| p == ["moof", "mdat"]), "{kinds:?}");
+        assert_eq!(picture_size(&data), (160, 120), "as large as the screen");
+        assert_eq!(picture_size(&std::fs::read(&others[0]).unwrap()), (80, 60), "the first picture's size");
+        // The length, filled in at the end.
+        let length = u64::from_be_bytes(data[data.windows(4).position(|w| w == b"mehd").unwrap() + 8..][..8].try_into().unwrap());
+        assert!((300..2000).contains(&length), "{length} ms");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A recording of a changing picture is an MP4 in pieces whose frames are all in it and
+    /// decode, the first a key frame; one cut off plays up to its last piece.
+    #[test]
+    fn a_recording_is_a_whole_mp4_even_cut_off() {
+        let dir = std::env::temp_dir().join(format!("sshremote-rec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.mp4");
+        let _ = std::fs::remove_file(&path);
+        let t0 = Instant::now();
+        let mut m = Mp4::create(&path, 64, 48, t0).unwrap();
+        // A screen where a little changes: a bar moving over a still picture.
+        let picture = |i: u8| -> Vec<u8> { (0..65 * 48).flat_map(|p| if (p % 65) / 4 == i as usize % 16 { [255, 255, 255] } else { [p as u8, (p / 65) as u8 * 5, 90] }).collect() };
+        // Five seconds at 10 a second: pieces of two seconds.
+        for i in 0..50u8 {
+            m.add(&picture(i), 65, t0 + Duration::from_millis(100 * i as u64)).unwrap();
+        }
+        let n = m.frames;
+        assert!(n >= 49);
+        let (sps, pps) = (m.sps.clone(), m.pps.clone());
+        // Cut off here, as by a kill: the pieces written so far play.
+        let cut = std::fs::read(&path).unwrap();
+        let pieces = boxes(&cut).iter().filter(|b| b.0 == "moof").count();
+        assert!((2..=3).contains(&pieces), "{pieces} pieces");
+        assert_eq!(decoded(&cut, &sps, &pps), frames(&cut).len());
+        assert!(frames(&cut).len() >= 40);
+        let out = m.finish(t0 + Duration::from_millis(5100)).unwrap();
+        let data = std::fs::read(&out).unwrap();
+        assert_eq!(decoded(&data, &sps, &pps), n);
+        let length = u64::from_be_bytes(data[data.windows(4).position(|w| w == b"mehd").unwrap() + 8..][..8].try_into().unwrap());
+        assert!((5000..=5100).contains(&length), "{length} ms");
         // Kept for a player to try: SSHREMOTE_KEEP_MP4 names where.
         if let Some(keep) = std::env::var_os("SSHREMOTE_KEEP_MP4") {
             std::fs::copy(&out, keep).unwrap();
