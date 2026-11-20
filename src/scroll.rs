@@ -332,7 +332,7 @@ mod tests {
         for (i, &g) in glyphs.iter().enumerate() {
             for dy in 0..14 {
                 for dx in 0..adv - 2 {
-                    let on = ((g as u32 * 2_654_435_761) ^ (dx as u32 * 40_503) ^ (dy as u32 * 9_973)).wrapping_mul(2_246_822_519) >> 29 < 3;
+                    let on = ((g as u32).wrapping_mul(2_654_435_761) ^ (dx as u32 * 40_503) ^ (dy as u32 * 9_973)).wrapping_mul(2_246_822_519) >> 29 < 3;
                     p.data[(y0 + dy) * p.w + x0 + i * adv + dx] = if on { 200 + g % 50 } else { 10 };
                 }
             }
