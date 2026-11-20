@@ -229,7 +229,8 @@ mod sys {
             let ws = winsize(cols, rows);
             libc::ioctl(m, libc::TIOCSWINSZ, &ws);
             let login = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-            let home: std::ffi::OsString = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
+            // A home folder that is not there would fail the start as if the shell were missing.
+            let home: std::ffi::OsString = std::env::var_os("HOME").filter(|h| std::path::Path::new(h).is_dir()).unwrap_or_else(|| "/".into());
             let (shell, args): (String, Vec<String>) = match argv {
                 Some([first, rest @ ..]) => (first.clone(), rest.to_vec()),
                 _ => (login, vec!["-l".into()]),
