@@ -74,6 +74,9 @@ fn open_to(target: crate::transport::Target, port: u16, dest: &str) -> Result<Fo
                 match listener.accept() {
                     Ok((s, _)) => {
                         let _ = s.set_nonblocking(false);
+                        // Passed on as it comes: a small write is not held for the last one's
+                        // acknowledgement (an interactive program through the port waited).
+                        let _ = s.set_nodelay(true);
                         if tx.send(Event::Accepted(s)).is_err() {
                             return;
                         }
@@ -281,6 +284,7 @@ impl Ports {
                     return;
                 }
             };
+            let _ = s.set_nodelay(true);
             let _ = tx(ToClient::PortOpened { id, ok: true, text: String::new() });
             let Ok(mut reading) = s.try_clone() else { return };
             std::thread::spawn(move || write_out(s, wrx));
