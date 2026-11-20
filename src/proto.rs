@@ -1600,9 +1600,8 @@ mod tests {
         assert!(!is_unknown(&ToAgent::decode(k, &p[..p.len() - 3]).unwrap_err()));
     }
 
-    #[test]
-    fn roundtrip() {
-        let msgs = [
+    fn agent_samples() -> Vec<ToAgent> {
+        vec![
             ToAgent::Settings(Settings { view_w: 1900, view_h: 1000, scale: 75, mode: Mode::Gray16, fps: 10, formats: FORMATS }),
             ToAgent::Ack(7),
             ToAgent::Key { keysym: xk::RETURN, mods: MOD_CTRL },
@@ -1652,8 +1651,11 @@ mod tests {
             ToAgent::PortData { id: 2, data: vec![1, 2, 3] },
             ToAgent::PortClose { id: 2 },
             ToAgent::PasteFiles { batch: "3".into(), names: vec!["a.txt".into(), "photos".into()] },
-        ];
-        for m in [
+        ]
+    }
+
+    fn client_samples() -> Vec<ToClient> {
+        vec![
             ToClient::DirList {
                 path: "/h".into(),
                 entries: vec![DirEntry { name: "a".into(), dir: true, size: 0, mtime: 1_700_000_000 }],
@@ -1718,11 +1720,16 @@ mod tests {
             },
             ToClient::Modes { list: vec![(2560, 1440), (1920, 1080)], current: (1920, 1080), own: (2560, 1440) },
             ToClient::Modes { list: vec![], current: (800, 600), own: (800, 600) },
-        ] {
+        ]
+    }
+
+    #[test]
+    fn roundtrip() {
+        for m in client_samples() {
             let (k, p) = m.encode();
             assert_eq!(ToClient::decode(k, &p).unwrap(), m);
         }
-        for m in msgs {
+        for m in agent_samples() {
             let (k, p) = m.encode();
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);
         }
@@ -1789,6 +1796,54 @@ mod tests {
         let (k, mut p) = ToAgent::Settings(Settings { view_w: 9, view_h: 9, scale: 100, mode: Mode::True, fps: 5, formats: 0 }).encode();
         p.pop();
         assert!(matches!(ToAgent::decode(k, &p).unwrap(), ToAgent::Settings(Settings { formats: 0, .. })));
+    }
+
+    #[test]
+    fn damaged_messages_are_refused_without_a_panic() {
+        // The same damage on every run.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+        let frame = ToClient::Frame(Frame {
+            id: 9,
+            w: 64,
+            h: 32,
+            mode: Mode::True,
+            moves: vec![Move { x: 0, y: 10, w: 64, h: 15, dy: -3, dx: 0 }, Move { x: 9, y: 2, w: 40, h: 6, dy: 0, dx: 4 }],
+            palette: Some((true, vec![(0, [255, 255, 255]), (4000, [9, 8, 7])])),
+            tiles: vec![Tile { x: 1, y: 2, w: 3, h: 4, data: vec![1, 2] }],
+            video: Some(Tile { x: 0, y: 0, w: 16, h: 16, data: vec![0, 0, 1] }),
+        });
+        let mut wires: Vec<(bool, u8, Vec<u8>)> = agent_samples().iter().map(|m| (true, m.encode())).map(|(a, (k, p))| (a, k, p)).collect();
+        wires.extend(client_samples().into_iter().chain([frame]).map(|m| (false, m.encode())).map(|(a, (k, p))| (a, k, p)));
+        let rounds = std::env::var("SSHREMOTE_DAMAGE_ROUNDS").ok().and_then(|n| n.parse().ok()).unwrap_or(300);
+        for (agent, k, p) in &wires {
+            for _ in 0..rounds {
+                let mut d = p.clone();
+                for _ in 0..1 + next() % 3 {
+                    let at = next() % (d.len() + 1);
+                    match next() % 4 {
+                        0 => d.truncate(at),
+                        1 if at < d.len() => d[at] = next() as u8,
+                        2 => d.insert(at, next() as u8),
+                        _ if at + 4 <= d.len() => d[at..at + 4].copy_from_slice(&((next() as u32) >> (next() % 32)).to_le_bytes()),
+                        _ => {}
+                    }
+                }
+                let _ = if *agent { ToAgent::decode(*k, &d).map(drop) } else { ToClient::decode(*k, &d).map(drop) };
+            }
+        }
+        for k in 0..=255u8 {
+            for n in 0..48 {
+                let d: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+                let _ = ToAgent::decode(k, &d);
+                let _ = ToClient::decode(k, &d);
+            }
+        }
     }
 
     #[test]

@@ -815,6 +815,59 @@ impl Control {
 mod tests {
     use super::*;
 
+    /// Pictures damaged on the way (or made up by a host) are refused or drawn wrong, never a crash.
+    #[test]
+    fn damaged_pictures_never_bring_the_viewer_down() {
+        use crate::proto::{Frame, Tile};
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+        let (w, h) = (40, 24);
+        let img = crate::shared::Image { w, h, stride: w * 4, data: (0..w * h * 4).map(|i| (i * 7 % 251) as u8).collect() };
+        let moves = vec![crate::scroll::Move { x: 0, y: 4, w: 40, h: 12, dy: -3, dx: 0 }, crate::scroll::Move { x: 6, y: 2, w: 20, h: 5, dy: 0, dx: 4 }];
+        let rects = [crate::color::Rect { x: 0, y: 0, w: 40, h: 24 }, crate::color::Rect { x: 5, y: 3, w: 9, h: 7 }];
+        let tile = |r: &crate::color::Rect, data| Tile { x: r.x as u16, y: r.y as u16, w: r.w as u16, h: r.h as u16, data };
+        let mut wires = Vec::new();
+        for mode in [Mode::True, Mode::Color256, Mode::Color16, Mode::Gray16, Mode::Gray4, Mode::Mono] {
+            let p = crate::color::Reducer::new(mode).reduce_into(&img, Vec::new());
+            let tiles = rects.iter().map(|r| tile(r, crate::color::pack(&p, r.x, r.y, r.w, r.h))).collect();
+            wires.push(ToClient::Frame(Frame { id: 1, w: w as u16, h: h as u16, mode, moves: moves.clone(), palette: None, tiles, video: None }).encode());
+        }
+        let p = crate::color::Reducer::new(Mode::True).reduce_into(&img, Vec::new());
+        for wide in [false, true] {
+            let (fresh, changed, packed) = crate::color::Palette::default().pack(&p, &rects, true, wide);
+            let tiles = rects.iter().zip(packed).map(|(r, d)| tile(r, d)).collect();
+            wires.push(ToClient::Frame(Frame { id: 2, w: w as u16, h: h as u16, mode: Mode::True, moves: moves.clone(), palette: Some((fresh, changed)), tiles, video: None }).encode());
+        }
+        let rounds = std::env::var("SSHREMOTE_DAMAGE_ROUNDS").ok().and_then(|n| n.parse().ok()).unwrap_or(300);
+        let mut kept = Framebuffer::default();
+        for (k, p) in &wires {
+            let Ok(ToClient::Frame(whole)) = ToClient::decode(*k, p) else { panic!("a picture") };
+            assert!(Framebuffer::default().apply(&whole).is_ok());
+            for _ in 0..rounds {
+                let mut d = p.clone();
+                for _ in 0..1 + next() % 3 {
+                    let at = next() % (d.len() + 1);
+                    match next() % 4 {
+                        0 => d.truncate(at),
+                        1 if at < d.len() => d[at] = next() as u8,
+                        2 => d.insert(at, next() as u8),
+                        _ if at + 2 <= d.len() => d[at..at + 2].copy_from_slice(&((next() as u16) >> (next() % 16)).to_le_bytes()),
+                        _ => {}
+                    }
+                }
+                if let Ok(ToClient::Frame(f)) = ToClient::decode(*k, &d) {
+                    let _ = Framebuffer::default().apply(&f);
+                    let _ = kept.apply(&f);
+                }
+            }
+        }
+    }
+
     /// A camera listed after the screen is picked like a monitor: the viewer hears its size and
     /// gets its pictures. SSHREMOTE_EXE=... SSHREMOTE_TEST_CAMERA=1 cargo test -- --ignored
     /// a_camera_is_picked_like_a_monitor (GStreamer's videotestsrc)
