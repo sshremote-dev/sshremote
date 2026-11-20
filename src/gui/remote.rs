@@ -602,6 +602,11 @@ impl Remote {
         Ok(())
     }
 
+    /// When the connection next has statistics to keep or a ping to send.
+    pub(super) fn next_tick(&self) -> Duration {
+        self.ctl.next_tick()
+    }
+
     /// The connection kept going while its pane is not drawn: pictures, files and shells read,
     /// transfers fed, the link watched; keys held at the host let go.
     pub(super) fn background(&mut self, ctx: &egui::Context) -> Result<(), String> {

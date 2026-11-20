@@ -848,6 +848,27 @@ impl Workspace {
     /// due has the programs over the panes step aside, so the window shows again and draws it.
     pub(super) fn unseen(&mut self, ctx: &egui::Context) {
         self.follow_asked(ctx);
+        // Nothing of the window is drawn (minimized, or wholly covered on Wayland): its
+        // connections go on all the same, pictures paused, pings keeping them up (a host ends a
+        // session it hears nothing from for two minutes).
+        let mut soon = Duration::from_secs(1);
+        for p in &mut self.panes {
+            if let Some(t) = p.terms.as_mut() {
+                let _ = t.background(ctx);
+            }
+            match &mut p.state {
+                State::Shell(t) => {
+                    let _ = t.background(ctx);
+                }
+                State::Live(r) => {
+                    r.active = false;
+                    let _ = r.background(ctx);
+                    soon = soon.min(r.next_tick());
+                }
+                _ => {}
+            }
+        }
+        ctx.request_repaint_after(soon);
         if self.toasts.due() {
             for p in &mut self.panes {
                 if let State::Held(h) = &mut p.state {
