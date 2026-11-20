@@ -265,11 +265,21 @@ struct Inner {
     stream: AtomicPtr<c_void>,
     shared: Mutex<Shared>,
     changed: Condvar,
+    /// The agent's, once given (`Stream::wake_with`).
+    wake: OnceLock<super::Waker>,
 }
 
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tells whoever waits that something came: a frame, the pointer, the stream's end.
+    fn changed(&self) {
+        self.changed.notify_all();
+        if let Some(w) = self.wake.get() {
+            super::wake(w);
+        }
     }
 }
 
@@ -307,7 +317,7 @@ impl Stream {
                 (lib.thread_loop_destroy)(tl);
                 return Err(("PipeWire: the thread loop did not start".into(), true));
             }
-            let inner = Arc::new(Inner { lib, stream: AtomicPtr::new(std::ptr::null_mut()), shared: Mutex::default(), changed: Condvar::new() });
+            let inner = Arc::new(Inner { lib, stream: AtomicPtr::new(std::ptr::null_mut()), shared: Mutex::default(), changed: Condvar::new(), wake: OnceLock::new() });
             let mut me = Stream { lib, tl, ctx, core: std::ptr::null_mut(), stream: std::ptr::null_mut(), inner, hook: Box::new([0; 8]) };
             (lib.thread_loop_lock)(tl);
             let made = me.connect(fd, node);
@@ -392,6 +402,11 @@ impl Stream {
         self.inner.lock().pointer.clone()
     }
 
+    /// Has the agent woken as frames come and the pointer moves, from now on.
+    pub fn wake_with(&self, wake: &super::Waker) {
+        let _ = self.inner.wake.set(wake.clone());
+    }
+
     /// Why the stream stopped, once it has: it failed, or its source went away.
     pub fn stopped(&self) -> Option<String> {
         let s = self.inner.lock();
@@ -433,7 +448,8 @@ unsafe extern "C" fn on_state(data: P, _old: c_int, state: c_int, error: *const 
         3 => s.streaming = true,
         _ => {}
     }
-    inner.changed.notify_all();
+    drop(s);
+    inner.changed();
 }
 
 unsafe extern "C" fn on_param(data: P, id: u32, param: *const u8) {
@@ -445,7 +461,7 @@ unsafe extern "C" fn on_param(data: P, id: u32, param: *const u8) {
     let pod = unsafe { std::slice::from_raw_parts(param, 8 + std::ptr::read_unaligned(param as *const u32) as usize) };
     let Some(format) = parse_format(pod) else {
         inner.lock().failed = Some("PipeWire offered no picture format read here".into());
-        inner.changed.notify_all();
+        inner.changed();
         return;
     };
     inner.lock().format = Some(format);
@@ -576,7 +592,8 @@ unsafe fn copy_frame(inner: &Inner, sb: &SpaBuffer) {
     if let Some(old) = s.frame.replace(Frame { w, h, data: out, crop }) {
         s.spare.push(old.data);
     }
-    inner.changed.notify_all();
+    drop(s);
+    inner.changed();
 }
 
 /// # Safety
@@ -594,6 +611,10 @@ unsafe fn read_pointer(inner: &Inner, sb: &SpaBuffer) {
         moved = true;
     }
     s.moved |= moved;
+    drop(s);
+    if moved {
+        inner.changed();
+    }
 }
 
 struct Update {

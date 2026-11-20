@@ -482,9 +482,13 @@ fn serve_with(
         let longest = if outbox.busy() { 1 } else { 8 };
         // A capture that wakes the loop is not looked at every millisecond for a new picture.
         let shortest = if woken && due <= Instant::now() { longest } else { 1 };
-        let wait = due
+        let mut wait = due
             .saturating_duration_since(Instant::now())
             .clamp(Duration::from_millis(shortest), Duration::from_millis(longest));
+        // A pointer the viewer draws is looked at on time however the loop is woken.
+        if let Some(at) = pointer.next_look() {
+            wait = wait.min(at.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
+        }
         let mut msgs = Vec::new();
         let mut gone = false;
         match rx.recv_timeout(wait) {
@@ -1239,6 +1243,11 @@ impl PointerApart {
             send(enc, &ToClient::PointerAt(at))?;
         }
         Ok(())
+    }
+
+    /// When the pointer is next looked at, while the viewer draws it.
+    fn next_look(&self) -> Option<Instant> {
+        self.apart.then(|| self.due.unwrap_or_else(Instant::now))
     }
 
     fn moved(&mut self, to: (i32, i32), now: Instant) {

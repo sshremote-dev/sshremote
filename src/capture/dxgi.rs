@@ -33,9 +33,6 @@ pub enum Next {
     Picture,
 }
 
-/// Called from the watching thread as something changes.
-pub type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
-
 /// A monitor's duplication on a thread of its own.
 pub struct Watch {
     shared: Arc<Shared>,
@@ -46,7 +43,7 @@ pub struct Watch {
 
 struct Shared {
     state: Mutex<State>,
-    wake: Waker,
+    wake: super::Waker,
     /// The least time between two pictures read back, in milliseconds: the viewer's pace.
     gap: AtomicU32,
 }
@@ -67,7 +64,7 @@ const LOOK: u32 = 25;
 impl Watch {
     /// Duplicates the monitor at (`left`, `top`) on a new thread, which first takes the input
     /// desktop with `desktop` (duplication works only there).
-    pub fn open(left: i32, top: i32, wake: Waker, gap_ms: u32, desktop: fn() -> bool) -> Result<Watch, String> {
+    pub fn open(left: i32, top: i32, wake: super::Waker, gap_ms: u32, desktop: fn() -> bool) -> Result<Watch, String> {
         let shared = Arc::new(Shared { state: Mutex::default(), wake, gap: AtomicU32::new(gap_ms) });
         let (tx, rx) = mpsc::sync_channel(1);
         let s = shared.clone();
@@ -126,12 +123,6 @@ impl Drop for Watch {
 }
 
 impl Shared {
-    fn wake(&self) {
-        if let Some(w) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            w();
-        }
-    }
-
     fn run(&self, dup: &mut Dup) {
         let len = dup.size.0 * dup.size.1 * 4;
         let mut spare = vec![0u8; len];
@@ -153,7 +144,7 @@ impl Shared {
                     Err(Lost) => st.lost = true,
                 }
             }
-            self.wake();
+            super::wake(&self.wake);
             if matches!(got, Err(Lost)) {
                 return;
             }

@@ -33,6 +33,18 @@ pub mod windows;
 #[cfg(windows)]
 pub(crate) mod winlist;
 
+/// What a backend's own thread calls as a picture or the pointer changes (see
+/// `Capture::set_waker`): empty until the agent sets it.
+#[allow(dead_code)]
+pub type Waker = std::sync::Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+#[allow(dead_code)]
+fn wake(w: &Waker) {
+    if let Some(w) = w.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        w();
+    }
+}
+
 /// The pointer's picture, RGBA not premultiplied, and the pixel of it that points.
 pub struct Pointer {
     pub w: usize,

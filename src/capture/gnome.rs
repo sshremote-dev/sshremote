@@ -104,6 +104,8 @@ pub struct Gnome {
     helper: std::sync::OnceLock<Proxy<'static>>,
     /// What was typed last, text (true) or keys, and when (`settle`).
     last_typed: Option<(bool, std::time::Instant)>,
+    /// What the stream read calls as something comes (`Capture::set_waker`).
+    wake: super::Waker,
 }
 
 fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
@@ -249,9 +251,24 @@ pub(super) struct Pipe {
     p: gst::Pipeline,
     pub(super) sink: gst_app::AppSink,
     src: gst::Element,
+    woken: std::sync::OnceLock<()>,
 }
 
 impl Pipe {
+    /// Has the agent woken as samples come, from now on; they stay to be pulled.
+    pub(super) fn wake_with(&self, wake: &super::Waker) {
+        self.woken.get_or_init(|| {
+            let wake = wake.clone();
+            let callbacks = gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |_| {
+                    super::wake(&wake);
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build();
+            self.sink.set_callbacks(callbacks);
+        });
+    }
+
     /// The size the stream sends now, before any scaling here.
     fn source_size(&self) -> Option<(usize, usize)> {
         let caps = self.src.static_pad("src")?.current_caps()?;
@@ -292,7 +309,7 @@ pub(super) fn pipeline(source: &str, size: Option<(usize, usize)>) -> Result<Pip
     let sink =
         p.by_name("sink").and_then(|s| s.downcast::<gst_app::AppSink>().ok()).ok_or("GNOME capture sink missing")?;
     let src = p.by_name("src").ok_or("GNOME capture source missing")?;
-    let pipe = Pipe { p, sink, src };
+    let pipe = Pipe { p, sink, src, woken: std::sync::OnceLock::new() };
     pipe.p.set_state(gst::State::Playing).map_err(|e| format!("GNOME capture did not start: {e}"))?;
     Ok(pipe)
 }
@@ -474,6 +491,7 @@ impl Gnome {
             ended: false,
             helper: std::sync::OnceLock::new(),
             last_typed: None,
+            wake: Default::default(),
         })
     }
 
@@ -1155,7 +1173,19 @@ impl Capture for Gnome {
         (new, p.at.map(|(x, y)| (x - self.origin.0, y - self.origin.1)))
     }
 
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+        true
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        // Whichever reads the stream now wakes the agent as it sends something.
+        if let Some(pw) = &self.pw {
+            pw.wake_with(&self.wake);
+        }
+        if let Some(pipe) = &self.pipe {
+            pipe.wake_with(&self.wake);
+        }
         if self.pw.is_some() {
             return self.grab_own();
         }

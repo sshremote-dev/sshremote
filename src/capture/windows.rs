@@ -101,7 +101,7 @@ pub struct Gdi {
     /// A picture's buffer the agent is done with, for the next (see `Capture::recycle`).
     spare: Vec<u8>,
     /// What the duplication calls as something changes, and the least time between its pictures.
-    wake: super::dxgi::Waker,
+    wake: super::Waker,
     gap: u32,
     /// The whole area, copied from the screen to be made smaller, and what makes it so.
     full: Option<Dib>,
@@ -1060,8 +1060,8 @@ mod tests {
     }
 
     /// What the screen costs the agent while little changes on it, looked at as the agent's loop
-    /// looks (woken by the duplication, 30 frames a second), and that no look holds the loop up.
-    /// Only counts are printed; no picture is kept.
+    /// looks (woken by the duplication, 30 frames a second), and that no look after the first
+    /// (which fills new buffers) holds the loop up. Only counts are printed; no picture is kept.
     /// sshremote-test.exe --ignored --nocapture a_quiet_screen_costs_little
     #[test]
     #[ignore]
@@ -1099,7 +1099,9 @@ mod tests {
             }
             let t = Instant::now();
             let got = g.grab().expect("grab");
-            longest = longest.max(t.elapsed());
+            if pictures > 0 {
+                longest = longest.max(t.elapsed());
+            }
             if let Some(img) = got {
                 g.recycle(img);
                 pictures += 1;

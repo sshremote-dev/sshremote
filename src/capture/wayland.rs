@@ -41,6 +41,8 @@ pub struct Wayland {
     /// The viewer draws the pointer; the number of its picture last sent.
     apart: bool,
     sent_shape: u64,
+    /// What the stream read calls as something comes (`Capture::set_waker`).
+    wake: super::Waker,
 }
 
 // SAFETY: the pipeline and the portal's connection are used from the thread that holds them.
@@ -93,6 +95,7 @@ impl Wayland {
             again: true,
             apart: false,
             sent_shape: 0,
+            wake: Default::default(),
         })
     }
 
@@ -149,8 +152,18 @@ impl Capture for Wayland {
         (new, p.at)
     }
 
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+        true
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         let live = self.live.as_ref().ok_or("the screen sharing did not come back after its resolution changed")?;
+        // The stream read now (one opened again after a resolution change too) wakes the agent.
+        match &live.feed {
+            Feed::Own(s) => s.wake_with(&self.wake),
+            Feed::Gst(pipe) => pipe.wake_with(&self.wake),
+        }
         let fresh = match &live.feed {
             Feed::Gst(pipe) => match pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
                 Some(sample) => {
@@ -220,15 +233,23 @@ mod tests {
 
     /// The screen keeps coming after its first picture: keys typed into the focused terminal
     /// show in later ones (wlroots' portals stopped copying the screen once GStreamer held their
-    /// few buffers). In the desktop's session: SSHREMOTE_PORTAL_TEST=1 TESTS --ignored
-    /// the_portal_screen_keeps_coming
+    /// few buffers), and each wakes the agent. In the desktop's session: SSHREMOTE_PORTAL_TEST=1
+    /// TESTS --ignored the_portal_screen_keeps_coming (SSHREMOTE_PORTAL_GST=1: read by GStreamer)
     #[test]
     #[ignore]
     fn the_portal_screen_keeps_coming() {
         if std::env::var_os("SSHREMOTE_PORTAL_TEST").is_none() {
             return;
         }
+        if std::env::var_os("SSHREMOTE_PORTAL_GST").is_some() {
+            super::super::pw::give_up();
+        }
         let mut w = Wayland::open().expect("a portal");
+        let woken = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = woken.clone();
+        assert!(w.set_waker(Box::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })));
         let first = (0..150).find_map(|_| w.grab().unwrap().or_else(|| (std::thread::sleep(std::time::Duration::from_millis(20)), None).1)).expect("a picture");
         for c in "echo still-coming".chars() {
             w.input(Input::Key { keysym: crate::xk::of_char(c), mods: 0 }).unwrap();
@@ -244,6 +265,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(later > 0, "pictures after the first");
+        let gst = matches!(w.live.as_ref().map(|l| &l.feed), Some(Feed::Gst(_)));
+        println!("read by {}, woken {} times for {later} later pictures", if gst { "GStreamer" } else { "PipeWire here" }, woken.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(woken.load(std::sync::atomic::Ordering::Relaxed) > 0, "the stream woke the agent");
     }
 
     /// A portal's pointer kept apart (KDE Plasma sends it as metadata): its picture comes once
