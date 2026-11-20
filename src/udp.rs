@@ -233,9 +233,7 @@ struct Inner {
     me: u8,
     st: Mutex<State>,
     cv: Condvar,
-    /// Wakes the timers' own thread: something went out with none in flight before, so a
-    /// deadline nearer than the one it sleeps to may be due (its sockets' threads, asleep in a
-    /// read, are woken only by a packet).
+    /// Wakes the timers' own thread when a deadline nearer than the one it sleeps to may be due.
     timer: Condvar,
     /// Tests: one packet of the stream in this many is dropped on the way out (0: none).
     #[cfg(test)]
@@ -301,6 +299,7 @@ impl Inner {
         }
         st.phase = Phase::Done;
         self.cv.notify_all();
+        self.timer.notify_all();
     }
 
     fn send_ack(&self, st: &mut State) {
@@ -700,7 +699,8 @@ impl Inner {
         let mut st = self.lock();
         loop {
             let Some(next) = self.tick(&mut st, Instant::now()) else { return };
-            let wait = next.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            // At most as long as the sockets' threads sleep, so an end is seen as soon.
+            let wait = next.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_millis(200));
             st = self.timer.wait_timeout(st, wait).unwrap_or_else(|e| e.into_inner()).0;
         }
     }
