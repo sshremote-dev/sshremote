@@ -395,3 +395,83 @@ fn menus_remote() {
         save(&mut h, "panels");
     }
 }
+
+/// An upload and a folder's download cut off by a broken connection go on in the next one from
+/// where they were, as the workspace carries them over, and arrive whole.
+#[test]
+#[ignore]
+fn transfers_go_on_after_the_connection_breaks() {
+    let mut h = Harness::new(Vec2::new(800.0, 600.0));
+    let dir = std::env::temp_dir().join(format!("sshremote-goon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (src, there, here) = (dir.join("src"), dir.join("there"), dir.join("here"));
+    std::fs::create_dir_all(src.join("folder")).unwrap();
+    std::fs::create_dir_all(&there).unwrap();
+    std::fs::create_dir_all(&here).unwrap();
+    // Bytes that do not compress, so what crosses the link is what is counted.
+    let pattern = |n: usize, seed: u64| -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 32) as u8
+            })
+            .collect()
+    };
+    let big = pattern(24 << 20, 1);
+    std::fs::write(src.join("big.bin"), &big).unwrap();
+    let files = [("a.bin", pattern(3 << 20, 2)), ("b.bin", pattern(20 << 20, 3)), ("c.bin", pattern(1 << 20, 4))];
+    for (name, data) in &files {
+        std::fs::write(src.join("folder").join(name), data).unwrap();
+    }
+    let until = |h: &mut Harness, what: &str, done: &dyn Fn(&Remote) -> bool| {
+        for _ in 0..4000 {
+            h.frame(Vec::new()).unwrap();
+            if done(&h.r) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("{what} never happened");
+    };
+    // The connection breaks as the workspace sees it break, and is made again.
+    let again = |h: &mut Harness| {
+        let carry = h.r.take_carry().expect("transfers carried over");
+        h.r.close();
+        let opt = crate::parse_client(&["--gui".into(), "--local".into()]).unwrap();
+        let (sess, _tx, rx) = Session::connect(&opt).expect("a local agent");
+        h.r = Remote::new(sess, rx, Control::new(&opt, Mode::True), "test desktop".into(), None);
+        h.r.carry_on(carry);
+    };
+    until(&mut h, "the agent saying it goes on with transfers", &|r| r.resume.can);
+
+    h.r.upload_into(&[src.join("big.bin")], there.to_str().unwrap()).unwrap();
+    until(&mut h, "6 MB uploaded", &|r| r.uploads.front().is_some_and(|u| u.acked >= 6 << 20));
+    let had = h.r.uploads.front().unwrap().acked;
+    assert!(had < big.len() as u64, "still under way when it breaks");
+    again(&mut h);
+    // And again before the agent of the new connection said a word: still carried over.
+    again(&mut h);
+    until(&mut h, "the upload done", &|r| r.uploads.is_empty());
+    assert!(std::fs::read(there.join("big.bin")).unwrap() == big, "arrived whole and right");
+    assert!(!there.join("big.bin.part").exists());
+    let sent = h.r.sess.tx_bytes;
+    assert!(sent < big.len() as u64 - had + (1 << 20), "only the rest was sent again: {sent} bytes after {had}");
+
+    let cmd = crate::filewin::Cmd::Download { paths: vec![src.join("folder").to_string_lossy().into_owned()], to: here.clone() };
+    h.r.file_cmd(cmd).unwrap();
+    until(&mut h, "5 MB of b.bin downloaded", &|r| r.downloads.iter().any(|d| d.1.ends_with("b.bin") && r.inbox.received(d.0).is_some_and(|(got, _)| got >= 5 << 20)));
+    let rx_before = h.r.sess.rx();
+    again(&mut h);
+    until(&mut h, "the download done", &|r| r.downloads.is_empty() && r.resume.fetches.is_empty());
+    for (name, data) in &files {
+        assert!(std::fs::read(here.join("folder").join(name)).unwrap() == *data, "{name} arrived whole and right");
+        assert!(!here.join("folder").join(format!("{name}.part")).exists());
+    }
+    assert!(!here.join("folder").join("a (2).bin").exists(), "what had arrived is not fetched again");
+    let got = h.r.sess.rx();
+    assert!(got < (20 << 20) - (5 << 20) + (1 << 20) + (2 << 20), "only the rest came again: {got} bytes (first connection {rx_before})");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

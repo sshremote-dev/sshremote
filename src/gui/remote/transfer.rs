@@ -224,7 +224,8 @@ impl Remote {
         let id = self.next_upload;
         self.next_upload += 1;
         let path = path.to_path_buf();
-        self.uploads.push_back(Upload { id, name, dir, cancelled: false, error: None, path, file: None, size, sent: 0, acked: 0, ended: false });
+        let u = Upload { id, name, dir, cancelled: false, error: None, path, file: None, size, sent: 0, acked: 0, ended: false, stamp: None, from: None, asking: false };
+        self.uploads.push_back(u);
         Ok(())
     }
 
@@ -235,10 +236,24 @@ impl Remote {
         // Each file starts once the one before it is sent, so the host has one open at a time
         // however many were dropped.
         if self.uploads[i].file.is_none() {
+            let can_resume = self.resume.can;
             let u = &mut self.uploads[i];
             match std::fs::File::open(&u.path) {
-                Ok(f) => {
-                    u.size = f.metadata().map_or(u.size, |m| m.len());
+                Ok(mut f) => {
+                    let stamp = f.metadata().ok().map(|m| (m.len(), m.modified().ok()));
+                    // Cut off by a broken connection: the host is asked where to go on from,
+                    // if this is still the file that was being sent.
+                    // Kept while asked, should the connection break again before the answer.
+                    u.from = u.from.filter(|from| can_resume && stamp.is_some() && stamp == u.stamp && *from <= u.size);
+                    if let Some(from) = u.from
+                        && let Ok(tail) = crate::files::tail_sum(&mut f, from)
+                    {
+                        (u.file, u.asking) = (Some(f), true);
+                        let ask = ToAgent::FileResume { id: u.id, size: u.size, from, tail, dir: u.dir.clone().unwrap_or_default(), name: u.name.clone() };
+                        return self.send(ask);
+                    }
+                    (u.stamp, u.from) = (stamp, None);
+                    u.size = stamp.map_or(u.size, |s| s.0);
                     u.file = Some(f);
                     let start = ToAgent::FileStart { id: u.id, size: u.size, dir: u.dir.clone().unwrap_or_default(), name: u.name.clone() };
                     self.send(start)?;
@@ -257,7 +272,7 @@ impl Remote {
         let mut buf = vec![0u8; UPLOAD_CHUNK];
         loop {
             let u = &mut self.uploads[i];
-            if u.sent - u.acked.min(u.sent) >= UPLOAD_WINDOW {
+            if u.asking || u.sent - u.acked.min(u.sent) >= UPLOAD_WINDOW {
                 return Ok(());
             }
             let id = u.id;
@@ -320,8 +335,13 @@ impl Remote {
             Cmd::Upload { paths, to } => self.upload_into(&paths, &to)?,
             Cmd::Download { paths, to } => {
                 for path in paths {
-                    let tag = self.next_tag;
+                    let mut tag = self.next_tag;
                     self.next_tag += 1;
+                    // Followed to its end, to fetch again from where a broken connection cut it.
+                    if self.resume.can {
+                        tag |= crate::files::DONE_TAG;
+                        self.resume.follow(tag, &path);
+                    }
                     self.fetch_dirs.insert(tag, to.clone());
                     self.send(ToAgent::Fetch { tag, path })?;
                 }
@@ -347,6 +367,7 @@ impl Remote {
                 if let Some(&(_, ref name, tag)) = self.downloads.iter().find(|d| d.0 == id) {
                     let name = name.clone();
                     self.send(ToAgent::FetchCancel { id, tag })?;
+                    self.resume.done(tag);
                     self.inbox.end(id, false, "cancelled");
                     self.downloads.retain(|d| d.0 != id);
                     self.notify(&format!("{name}: download cancelled"));
@@ -433,6 +454,252 @@ impl Remote {
             _ => self.tex = Some(ctx.load_texture("remote", ColorImage::from_rgb([w, h], &self.fb.rgb), opts)),
         }
     }
+}
+
+impl Remote {
+    /// A download begins: into the folder its request chose.
+    pub(super) fn fetch_started(&mut self, id: u32, size: u64, tag: u32, name: String) -> Result<(), String> {
+        let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
+        let started = self.sess.fetch_start(&mut self.inbox, id, size, &dir, &name).map_err(|e| format!("connection lost: {e}"))?;
+        if let Some(crate::files::Note::Done { text, .. }) = started {
+            self.notify(&format!("{name}: {text}"));
+        } else {
+            self.resume.came_to(tag, &name, false);
+            self.downloads.push((id, name, tag));
+        }
+        Ok(())
+    }
+
+    /// What this agent can do. One that goes on with transfers keeps what arrives of uploads
+    /// when a connection breaks, and takes up those the connection before this one cut off.
+    pub(super) fn can(&mut self, bits: u32) -> Result<(), String> {
+        if bits & crate::proto::CAN_RESUME == 0 {
+            self.carried_end();
+            return Ok(());
+        }
+        self.resume.can = true;
+        self.send(ToAgent::Resumes)?;
+        let Some(mut c) = self.resume.carried.take() else { return Ok(()) };
+        let n = c.count();
+        self.uploads.extend(c.uploads.drain(..));
+        for mut a in std::mem::take(&mut c.fetches) {
+            let mut tail = [0; 32];
+            if let Some(k) = &a.kept {
+                match std::fs::File::open(&k.part).and_then(|mut f| crate::files::tail_sum(&mut f, a.from)) {
+                    Ok(t) => tail = t,
+                    Err(_) => {
+                        k.discard();
+                        (a.kept, a.from) = (None, 0);
+                    }
+                }
+            }
+            self.fetch_dirs.insert(a.tag, a.dir.clone());
+            let at = (!a.name.is_empty()).then(|| (a.name.clone(), a.from == u64::MAX));
+            self.resume.fetches.insert(a.tag, Fetching { path: a.path.clone(), at });
+            self.send(ToAgent::FetchFrom { tag: a.tag, path: a.path.clone(), name: a.name.clone(), from: a.from, tail })?;
+            if let Some(k) = a.kept.take() {
+                self.resume.waiting.push((a.tag, a.name.clone(), k));
+            }
+        }
+        self.notify(&format!("Going on with {n} {} the connection cut off", if n == 1 { "transfer" } else { "transfers" }));
+        Ok(())
+    }
+
+    /// The transfers carried from the connection before end: this agent cannot go on with them.
+    pub(super) fn carried_end(&mut self) {
+        if let Some(c) = self.resume.carried.take() {
+            let n = c.count();
+            self.notify(&format!("{n} {} the connection cut off could not go on: the host's SSH Remote is older; send {} again", if n == 1 { "transfer" } else { "transfers" }, if n == 1 { "it" } else { "them" }));
+        }
+    }
+
+    /// Where the host goes on with an upload the connection before cut off.
+    pub(super) fn file_from(&mut self, id: u32, from: u64) -> Result<(), String> {
+        use std::io::Seek;
+        let Some(u) = self.uploads.iter_mut().find(|u| u.id == id && u.asking) else { return Ok(()) };
+        (u.asking, u.from) = (false, None);
+        match u.file.as_mut().map(|f| f.seek(std::io::SeekFrom::Start(from))) {
+            Some(Ok(_)) if from <= u.size => (u.sent, u.acked) = (from, from),
+            _ => {
+                (u.error, u.ended, u.file) = (Some("it could not go on from where it was cut off".into()), true, None);
+                self.send(ToAgent::FileEnd { id })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The file a download fetched again had come to: on from the part kept here, or anew.
+    pub(super) fn fetch_at(&mut self, id: u32, size: u64, tag: u32, from: u64, name: String) -> Result<(), String> {
+        let kept = self.resume.waiting.iter().position(|(t, n, _)| *t == tag && *n == name).map(|i| self.resume.waiting.remove(i).2);
+        if from == 0 {
+            if let Some(k) = kept {
+                k.discard();
+            }
+            return self.fetch_started(id, size, tag, name);
+        }
+        // A file grown since, as it was up to there, goes on at its new size.
+        let kept = kept.map(|k| crate::files::Kept { size, ..k });
+        match kept {
+            Some(k) if self.inbox.take_up(id, &k, from) => {
+                self.resume.came_to(tag, &name, false);
+                self.downloads.push((id, name, tag));
+            }
+            k => {
+                if let Some(k) = k {
+                    k.discard();
+                }
+                self.send(ToAgent::FetchCancel { id, tag: 0 })?;
+                self.notify(&format!("{name} could not go on from where it was cut off"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The transfers under way, to go on with in the connection made after this one broke (if
+    /// its agent can); what arrived of downloads is kept here for that. Uploads that are part
+    /// of a paste or a terminal's drop end with the connection.
+    pub(in crate::gui) fn take_carry(&mut self) -> Option<Carry> {
+        // Broken again before the agent said it goes on with them: still to go on with.
+        if let Some(c) = self.resume.carried.take() {
+            return Some(c);
+        }
+        if !self.resume.can {
+            return None;
+        }
+        let mut kept: std::collections::HashMap<u32, crate::files::Kept> = self.inbox.keep_all().into_iter().collect();
+        let batch: Vec<u32> = self.pasting.iter().flat_map(|p| p.1.iter().copied()).chain(self.term_drops.iter().flat_map(|d| d.left.iter().copied())).collect();
+        let uploads: Vec<Upload> = std::mem::take(&mut self.uploads)
+            .into_iter()
+            .filter(|u| !u.cancelled && u.error.is_none() && !batch.contains(&u.id))
+            .map(|mut u| {
+                if !u.asking {
+                    u.from = (u.acked > 0 && u.stamp.is_some()).then_some(u.acked);
+                }
+                (u.file, u.sent, u.acked, u.ended, u.asking) = (None, 0, 0, false, false);
+                u
+            })
+            .collect();
+        let mut fetches = Vec::new();
+        for (tag, f) in std::mem::take(&mut self.resume.fetches) {
+            let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
+            let (name, from, part) = match f.at {
+                None => (String::new(), 0, None),
+                Some((name, true)) => (name, u64::MAX, None),
+                Some((name, false)) => {
+                    let id = self.downloads.iter().find(|d| d.2 == tag && d.1 == name).map(|d| d.0);
+                    match id.and_then(|id| kept.remove(&id)) {
+                        Some(k) if k.received > 0 => (name, k.received, Some(k)),
+                        k => {
+                            k.inspect(crate::files::Kept::discard);
+                            (name, 0, None)
+                        }
+                    }
+                }
+            };
+            fetches.push(Again { tag, path: f.path, dir, name, from, kept: part });
+        }
+        // Parts asked to go on with that the connection broke again before they came.
+        for (tag, name, k) in std::mem::take(&mut self.resume.waiting) {
+            match fetches.iter_mut().find(|a| a.tag == tag && a.name == name && a.kept.is_none() && a.from != u64::MAX) {
+                Some(a) => (a.from, a.kept) = (k.received, Some(k)),
+                None => k.discard(),
+            }
+        }
+        kept.into_values().for_each(|k| k.discard());
+        if uploads.is_empty() && fetches.is_empty() {
+            return None;
+        }
+        Some(Carry { uploads, fetches, next_upload: self.next_upload, next_tag: self.next_tag })
+    }
+
+    /// Takes on the transfers the connection before this one cut off; they go on once the agent
+    /// says it can.
+    pub(in crate::gui) fn carry_on(&mut self, c: Carry) {
+        self.next_upload = self.next_upload.max(c.next_upload);
+        self.next_tag = self.next_tag.max(c.next_tag);
+        self.resume.carried = Some(c);
+    }
+}
+
+/// Going on with the transfers a broken connection cut off.
+#[derive(Default)]
+pub(in crate::gui) struct Resume {
+    /// The agent goes on with them (`proto::CAN_RESUME`).
+    pub(super) can: bool,
+    /// Download requests followed, by tag, to be fetched again from where they were.
+    pub(super) fetches: std::collections::HashMap<u32, Fetching>,
+    /// Those of the connection before, until the agent says whether it goes on with them.
+    carried: Option<Carry>,
+    /// Parts kept here of downloads fetched again, until their file comes: tag, name, part.
+    waiting: Vec<(u32, String, crate::files::Kept)>,
+}
+
+impl Drop for Resume {
+    fn drop(&mut self) {
+        self.waiting.iter().for_each(|w| w.2.discard());
+    }
+}
+
+impl Resume {
+    pub(in crate::gui) fn follow(&mut self, tag: u32, path: &str) {
+        self.fetches.insert(tag, Fetching { path: path.to_string(), at: None });
+    }
+
+    /// The file a followed request has come to, and whether it arrived whole (or ended).
+    pub(in crate::gui) fn came_to(&mut self, tag: u32, name: &str, ended: bool) {
+        if let Some(f) = self.fetches.get_mut(&tag) {
+            f.at = Some((name.to_string(), ended));
+        }
+    }
+
+    /// All of a request is sent.
+    pub(in crate::gui) fn done(&mut self, tag: u32) {
+        self.fetches.remove(&tag);
+        self.waiting.retain(|(t, _, k)| {
+            if *t == tag {
+                k.discard();
+            }
+            *t != tag
+        });
+    }
+}
+
+/// A download request followed: the path asked for, and the file it came to (whether ended).
+pub(super) struct Fetching {
+    path: String,
+    at: Option<(String, bool)>,
+}
+
+/// The transfers a broken connection cut off, carried into the next one.
+pub(in crate::gui) struct Carry {
+    uploads: Vec<Upload>,
+    fetches: Vec<Again>,
+    next_upload: u32,
+    next_tag: u32,
+}
+
+impl Carry {
+    /// How many transfers it holds.
+    pub(in crate::gui) fn count(&self) -> usize {
+        self.uploads.len() + self.fetches.len()
+    }
+}
+
+impl Drop for Carry {
+    fn drop(&mut self) {
+        self.fetches.iter().filter_map(|a| a.kept.as_ref()).for_each(crate::files::Kept::discard);
+    }
+}
+
+/// A download request to fetch again: its tag, path and folder here, the file it came to (none
+/// yet: empty), how much of that is here (`u64::MAX`: all) and the part holding it.
+struct Again {
+    tag: u32,
+    path: String,
+    dir: std::path::PathBuf,
+    name: String,
+    from: u64,
+    kept: Option<crate::files::Kept>,
 }
 
 /// A drop on one of the session's terminals: its tab, the folder of this copy, the uploads still

@@ -6,7 +6,7 @@
 pub use crate::sys::{human, local_time};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::proto::{DirEntry, FileOp, ToClient};
@@ -188,9 +188,8 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
 /// Creates a new file named `name` in `dir`, or "name (2)" and so on: the name is claimed when
 /// the file is created, so two transfers at once cannot take the same one.
 fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, PathBuf)> {
-    let (stem, ext) = stem_ext(name);
     for n in 1..10_000 {
-        let path = if n == 1 { dir.join(name) } else { dir.join(format!("{stem} ({n}){ext}")) };
+        let path = nth_name(dir, name, n);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Ok((f, path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -242,50 +241,220 @@ impl Incoming {
     }
 }
 
+/// What arrived of a file whose transfer the connection broke off, kept to go on with.
+#[derive(Clone, Debug)]
+pub struct Kept {
+    pub part: PathBuf,
+    pub dir: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub received: u64,
+}
+
+/// The bytes before the point a transfer goes on from that both sides compare first.
+const TAIL: u64 = 64 << 10;
+
+/// The checksum of the up to 64 KB of `file` just before `at`: a part kept from a broken transfer
+/// is taken up again only where it ends as the file it is the start of does there.
+pub fn tail_sum(file: &mut File, at: u64) -> std::io::Result<[u8; 32]> {
+    use sha2::Digest;
+    let from = at.saturating_sub(TAIL);
+    file.seek(SeekFrom::Start(from))?;
+    let mut buf = vec![0; (at - from) as usize];
+    file.read_exact(&mut buf)?;
+    Ok(sha2::Sha256::digest(&buf).into())
+}
+
+fn tail_of(path: &Path, at: u64) -> Option<[u8; 32]> {
+    tail_sum(&mut File::open(path).ok()?, at).ok()
+}
+
+/// The `n`th name `create_free` tries for `name`: "name", then "name (2)" and so on.
+fn nth_name(dir: &Path, name: &str, n: u32) -> PathBuf {
+    let (stem, ext) = stem_ext(name);
+    if n == 1 { dir.join(name) } else { dir.join(format!("{stem} ({n}){ext}")) }
+}
+
+/// The files in `dir` that `create_free` could have named after `name`, up to a run of names
+/// not taken (past which it would not have gone).
+fn names_like(dir: &Path, name: &str) -> impl Iterator<Item = PathBuf> {
+    let (dir, name) = (dir.to_path_buf(), name.to_string());
+    let mut free = 0;
+    (1..10_000)
+        .map(move |n| nth_name(&dir, &name, n))
+        .take_while(move |p| {
+            free = if std::fs::symlink_metadata(p).is_ok() { 0 } else { free + 1 };
+            free < 50
+        })
+        .filter(|p| std::fs::symlink_metadata(p).is_ok())
+}
+
+/// A list of the parts kept for transfers that may yet go on, so that those that never do are
+/// not left for ever.
+fn kept_list() -> Option<PathBuf> {
+    // Tests keep out of the user's own settings.
+    if cfg!(test) {
+        return None;
+    }
+    crate::hosts::config_dir().map(|d| d.join("kept-parts"))
+}
+
+/// How long a kept part waits for its transfer to go on.
+const KEEP_FOR: std::time::Duration = std::time::Duration::from_secs(3 * 24 * 3600);
+
+fn note_kept(parts: &[PathBuf]) {
+    let Some(list) = kept_list().filter(|_| !parts.is_empty()) else { return };
+    let text: String = parts.iter().map(|p| format!("{}\n", p.display())).collect();
+    // Added to, never written over: sessions ending at once each keep theirs.
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open(&list).and_then(|mut f| f.write_all(text.as_bytes()));
+}
+
+/// Deletes the kept parts left alone for longer than `KEEP_FOR`, once a run.
+fn prune_kept() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(list) = kept_list() {
+            prune(&list);
+        }
+    });
+}
+
+fn prune(list: &Path) {
+    let Ok(text) = std::fs::read_to_string(list) else { return };
+    let mut left = String::new();
+    for line in text.lines().filter(|l| l.ends_with(PART)) {
+        let Ok(m) = std::fs::metadata(line) else { continue };
+        if m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > KEEP_FOR) {
+            let _ = std::fs::remove_file(line);
+        } else if !left.lines().any(|l| l == line) {
+            left.push_str(line);
+            left.push('\n');
+        }
+    }
+    let _ = std::fs::write(list, left);
+}
+
 /// Receiving side, writing under the local Downloads folder. A file is written as "name.part"
 /// and takes its name once whole, so a broken transfer never looks finished; one still open when
-/// the inbox goes (the connection ended) is deleted.
+/// the inbox goes (the connection ended) is deleted, unless `keep_broken` (the viewer goes on
+/// with it when it connects again).
 #[derive(Default)]
 pub struct Inbox {
     open: HashMap<u32, Incoming>,
+    pub keep_broken: bool,
 }
 
 impl Drop for Inbox {
     fn drop(&mut self) {
+        if self.keep_broken {
+            let (kept, empty): (Vec<Kept>, Vec<Kept>) = self.keep_all().into_iter().map(|(_, k)| k).partition(|k| k.received > 0);
+            empty.iter().for_each(Kept::discard);
+            note_kept(&kept.into_iter().map(|k| k.part).collect::<Vec<_>>());
+        }
         for (_, u) in self.open.drain() {
             u.discard();
         }
     }
 }
 
-impl Inbox {
-    pub fn start(&mut self, id: u32, size: u64, name: &str) -> Option<Note> {
-        self.start_in(id, size, &downloads(), name)
+impl Kept {
+    /// Deletes what arrived.
+    pub fn discard(&self) {
+        let _ = std::fs::remove_file(&self.part);
     }
+}
 
-    /// Like `start`, into `dir` instead of Downloads.
-    pub fn start_in(&mut self, id: u32, size: u64, dir: &Path, name: &str) -> Option<Note> {
-        let refuse = |text: String| Some(Note::Done { id, ok: false, text });
+impl Inbox {
+    /// The folder a file `name` (perhaps "sub/file") goes into under `dir`, made, and its name.
+    fn place(&self, dir: &Path, name: &str) -> Result<(PathBuf, String), String> {
         if self.open.len() >= MAX_OPEN {
-            return refuse("too many transfers at once".into());
+            return Err("too many transfers at once".into());
         }
         if name.len() > MAX_NAME || name.split(['/', '\\']).count() > MAX_DEPTH {
-            return refuse("the name is too long".into());
+            return Err("the name is too long".into());
         }
         let mut parts = clean_relative(name);
         let leaf = parts.pop().unwrap_or_else(|| "file".into());
         let mut dir = dir.to_path_buf();
         dir.extend(&parts);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            return refuse(format!("{}: {e}", dir.display()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        Ok((dir, leaf))
+    }
+
+    /// Receives file `id` of `size` bytes named `name` (perhaps "sub/file") under `dir`.
+    pub fn start_in(&mut self, id: u32, size: u64, dir: &Path, name: &str) -> Option<Note> {
+        let (dir, leaf) = match self.place(dir, name) {
+            Ok(p) => p,
+            Err(text) => return Some(Note::Done { id, ok: false, text }),
+        };
+        if self.keep_broken {
+            prune_kept();
         }
-        match create_free(&dir, &format!("{leaf}{PART}")) {
-            Ok((file, part)) => {
-                self.open.insert(id, Incoming { file, part, dir, name: leaf, size, received: 0, reported: 0 });
-                None
+        self.open_new(id, size, dir, leaf).err()
+    }
+
+    /// Receives `id` into a new "leaf.part" in `dir`.
+    fn open_new(&mut self, id: u32, size: u64, dir: PathBuf, leaf: String) -> Result<(), Note> {
+        let (file, part) = create_free(&dir, &format!("{leaf}{PART}")).map_err(|e| Note::Done { id, ok: false, text: e.to_string() })?;
+        self.open.insert(id, Incoming { file, part, dir, name: leaf, size, received: 0, reported: 0 });
+        Ok(())
+    }
+
+    /// An upload the connection broke off, sent again as `id` from `from` bytes: goes on in the
+    /// part kept of it under `dir` (one as long at least, ending there as `tail` says), and
+    /// answers where it goes on from; 0 when no part fits, in a new one. One that the connection
+    /// broke as it ended, already in place whole, is done.
+    pub fn resume_in(&mut self, id: u32, size: u64, dir: &Path, name: &str, from: u64, tail: [u8; 32]) -> Result<u64, Note> {
+        let (dir, leaf) = self.place(dir, name).map_err(|text| Note::Done { id, ok: false, text })?;
+        prune_kept();
+        let fits = |p: &Path, len_ok: &dyn Fn(u64) -> bool| {
+            std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && len_ok(m.len())) && tail_of(p, from) == Some(tail)
+        };
+        if from > 0 && from <= size {
+            let busy: Vec<&PathBuf> = self.open.values().map(|u| &u.part).collect();
+            let part = names_like(&dir, &format!("{leaf}{PART}")).find(|p| !busy.contains(&p) && fits(p, &|len| len >= from));
+            if let Some(part) = part
+                && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&part)
+                && file.set_len(from).is_ok()
+                && file.seek(SeekFrom::Start(from)).is_ok()
+            {
+                self.open.insert(id, Incoming { file, part, dir, name: leaf, size, received: from, reported: from });
+                return Ok(from);
             }
-            Err(e) => refuse(e.to_string()),
+            // All of it had been sent: the connection broke before the answer.
+            if from == size
+                && let Some(whole) = names_like(&dir, &leaf).find(|p| fits(p, &|len| len == size))
+            {
+                return Err(Note::Done { id, ok: true, text: whole.display().to_string() });
+            }
         }
+        self.open_new(id, size, dir, leaf).map(|_| 0)
+    }
+
+    /// Takes up a part this side kept as download `id`, going on at `from` (no further than it
+    /// got); false when it cannot be.
+    pub fn take_up(&mut self, id: u32, k: &Kept, from: u64) -> bool {
+        if from > k.received || from > k.size || self.open.len() >= MAX_OPEN {
+            return false;
+        }
+        let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&k.part) else { return false };
+        if file.set_len(from).is_err() || file.seek(SeekFrom::Start(from)).is_err() {
+            return false;
+        }
+        let u = Incoming { file, part: k.part.clone(), dir: k.dir.clone(), name: k.name.clone(), size: k.size, received: from, reported: from };
+        self.open.insert(id, u);
+        true
+    }
+
+    /// Every file being received, let go of with what arrived of it kept.
+    pub fn keep_all(&mut self) -> Vec<(u32, Kept)> {
+        self.open
+            .drain()
+            .map(|(id, u)| {
+                let Incoming { part, dir, name, size, received, .. } = u;
+                (id, Kept { part, dir, name, size, received })
+            })
+            .collect()
     }
 
     pub fn data(&mut self, id: u32, data: &[u8]) -> Option<Note> {
@@ -383,6 +552,20 @@ pub struct Outbox {
     queue: VecDeque<Queued>,
     next_id: u32,
     buf: Vec<u8>,
+    /// Requests fetched again after a broken connection (`fetch_from`), by tag.
+    again: HashMap<u32, Again>,
+}
+
+/// Where a request fetched again goes on: the file it had come to, in parts ("folder/sub/file"),
+/// what of it arrived (`u64::MAX`: all), and the checksum of what arrived last.
+struct Again {
+    name: Vec<String>,
+    from: u64,
+    tail: [u8; 32],
+}
+
+fn parts(name: &str) -> Vec<String> {
+    name.split('/').map(str::to_string).collect()
 }
 
 /// Every file under `dir`, with names relative to `base`; links are not followed.
@@ -417,10 +600,33 @@ impl Outbox {
         Vec::new()
     }
 
+    /// Fetches a request again that a broken connection cut off at file `name`, `from` bytes of
+    /// which arrived (`u64::MAX`: all of it): the files sent before it are left out, as is it
+    /// when whole; else it goes on from there if it still ends there as `tail` says.
+    pub fn fetch_from(&mut self, path: &str, tag: u32, name: &str, from: u64, tail: [u8; 32]) -> Vec<ToClient> {
+        self.again.insert(tag, Again { name: parts(name), from, tail });
+        self.fetch(path, tag)
+    }
+
+    /// Whether the file or folder `name` of request `tag` comes before where it is fetched again
+    /// from: files go in the order of their names' parts, a folder's before what follows it.
+    fn sent_before(&self, tag: u32, name: &str, folder: bool) -> bool {
+        let Some(a) = self.again.get(&tag) else { return false };
+        let p = parts(name);
+        if folder {
+            // A folder holding the file is opened; one wholly before it is passed over.
+            return !a.name.starts_with(&p) && p < a.name;
+        }
+        p < a.name || (p == a.name && a.from == u64::MAX)
+    }
+
     /// Says a request is complete once nothing of it is queued, if it asked to be told.
-    fn done_if_last(&self, tag: u32, out: &mut Vec<ToClient>) {
-        if tag & DONE_TAG != 0 && !self.queue.iter().any(|q| q.tag() == tag) {
-            out.push(ToClient::FetchDone { tag });
+    fn done_if_last(&mut self, tag: u32, out: &mut Vec<ToClient>) {
+        if !self.queue.iter().any(|q| q.tag() == tag) {
+            self.again.remove(&tag);
+            if tag & DONE_TAG != 0 {
+                out.push(ToClient::FetchDone { tag });
+            }
         }
     }
 
@@ -471,6 +677,9 @@ impl Outbox {
     /// Drops a download, or every queued file of its request when `tag` is not 0.
     pub fn cancel(&mut self, id: u32, tag: u32) -> Vec<ToClient> {
         let mut out = Vec::new();
+        if tag != 0 {
+            self.again.remove(&tag);
+        }
         self.queue.retain(|q| {
             let hit = match q {
                 Queued::File(o) => o.id == id || (tag != 0 && o.tag == tag),
@@ -498,6 +707,7 @@ impl Outbox {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn cancel_all(&mut self, why: &str) -> Vec<ToClient> {
         let mut out = Vec::new();
+        self.again.clear();
         let mut tags = Vec::new();
         for q in self.queue.drain(..) {
             if let Queued::File(o) = &q
@@ -533,19 +743,43 @@ impl Outbox {
                 None => break,
                 Some(Queued::Folder { .. }) => {
                     let Some(Queued::Folder { path, name, tag }) = self.queue.pop_front() else { unreachable!() };
-                    self.open_folder(&path, &name, tag);
+                    if !self.sent_before(tag, &name, true) {
+                        self.open_folder(&path, &name, tag);
+                    }
                     // An empty folder completes its request at once.
                     self.done_if_last(tag, &mut out);
                     continue;
                 }
-                Some(Queued::File(o)) => o,
+                // Fetched again: what was sent before is left out, and the first file sent ends
+                // what is left out.
+                Some(Queued::File(o)) if o.file.is_none() && self.again.contains_key(&o.tag) => {
+                    let (tag, name) = (o.tag, o.name.clone());
+                    if self.sent_before(tag, &name, false) {
+                        self.pop(&mut out);
+                        continue;
+                    }
+                    let a = self.again.remove(&tag).filter(|a| a.name == parts(&name));
+                    let Some(Queued::File(o)) = self.queue.front_mut() else { unreachable!() };
+                    (o, a)
+                }
+                Some(Queued::File(o)) => (o, None),
             };
+            let (o, again) = o;
             if o.file.is_none() {
                 match File::open(&o.path) {
-                    Ok(f) => {
+                    Ok(mut f) => {
                         o.size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                        o.file = Some(f);
-                        out.push(ToClient::FetchStart { id: o.id, size: o.size, tag: o.tag, name: o.name.clone() });
+                        // The file it stopped at goes on from there, if it still is as it was.
+                        let from = again.as_ref().filter(|a| a.from <= o.size && tail_sum(&mut f, a.from).is_ok_and(|t| t == a.tail)).map_or(0, |a| a.from);
+                        let at = f.seek(SeekFrom::Start(from));
+                        (o.sent, o.acked, o.file) = (from, from, Some(f));
+                        let (id, size, tag, name) = (o.id, o.size, o.tag, o.name.clone());
+                        out.push(if again.is_some() { ToClient::FetchAt { id, size, tag, from, name } } else { ToClient::FetchStart { id, size, tag, name } });
+                        if at.is_err() {
+                            out.push(ToClient::FetchEnd { id, ok: false, text: format!("{}: cannot be read", o.path.display()) });
+                            self.pop(&mut out);
+                            continue;
+                        }
                     }
                     Err(e) => {
                         out.push(ToClient::FetchEnd { id: o.id, ok: false, text: format!("{}: {e}", o.path.display()) });
@@ -852,6 +1086,148 @@ mod tests {
         assert_eq!((bytes, done), (100_002, 1));
         // A path that is not there is told at once, and so is its end.
         assert!(matches!(&out.fetch("/no/such/path", DONE_TAG | 8)[..], [ToClient::FetchEnd { ok: false, .. }, ToClient::FetchDone { tag }] if *tag == DONE_TAG | 8));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn keeping() -> Inbox {
+        let mut inbox = Inbox::default();
+        inbox.keep_broken = true;
+        inbox
+    }
+
+    fn bytes(n: usize, seed: u8) -> Vec<u8> {
+        (0..n).map(|i| (i as u32).wrapping_mul(2_654_435_761).to_le_bytes()[3] ^ seed).collect()
+    }
+
+    fn sum(data: &[u8], at: usize) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(&data[at.saturating_sub(TAIL as usize)..at]).into()
+    }
+
+    #[test]
+    fn a_broken_upload_goes_on_from_what_was_kept() {
+        let dir = std::env::temp_dir().join(format!("sshremote-resume-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = bytes(700_000, 1);
+        let mut inbox = keeping();
+        assert!(inbox.start_in(1, data.len() as u64, &dir, "sub/big.bin").is_none());
+        for c in data[..300_000].chunks(CHUNK) {
+            inbox.data(1, c);
+        }
+        // The connection breaks: what arrived stays, under its part's name.
+        drop(inbox);
+        let part = dir.join("sub").join("big.bin.part");
+        assert_eq!(std::fs::metadata(&part).unwrap().len(), 300_000);
+        // A part that does not end as the file does is not taken up: it starts again, anew.
+        let mut inbox = keeping();
+        assert_eq!(inbox.resume_in(2, data.len() as u64, &dir, "sub/big.bin", 200_000, sum(&bytes(700_000, 2), 200_000)).ok(), Some(0));
+        inbox.end(2, false, "called off");
+        // The viewer had word of 200 000 bytes: on from there, the rest after them.
+        assert_eq!(inbox.resume_in(3, data.len() as u64, &dir, "sub/big.bin", 200_000, sum(&data, 200_000)).ok(), Some(200_000));
+        assert_eq!(inbox.received(3), Some((200_000, 700_000)));
+        for c in data[200_000..].chunks(CHUNK) {
+            inbox.data(3, c);
+        }
+        let Some(Note::Done { ok: true, text, .. }) = inbox.end(3, true, "") else { panic!("not whole") };
+        assert_eq!(std::fs::read(&text).unwrap(), data);
+        assert!(!part.exists());
+        // Broken as it ended: the file whole in place already is the answer.
+        assert!(matches!(inbox.resume_in(4, data.len() as u64, &dir, "sub/big.bin", 700_000, sum(&data, 700_000)), Err(Note::Done { ok: true, text: t, .. }) if t == text));
+        // Not before the end, though: a file of that size there could be an older one.
+        assert_eq!(inbox.resume_in(7, data.len() as u64, &dir, "sub/big.bin", 200_000, sum(&data, 200_000)).ok(), Some(0));
+        inbox.end(7, false, "called off");
+        // Not kept unless the viewer goes on with it, nor when nothing arrived.
+        let mut inbox = Inbox::default();
+        inbox.start_in(5, 10, &dir, "gone.bin");
+        inbox.data(5, b"abc");
+        drop(inbox);
+        let mut inbox = keeping();
+        inbox.start_in(6, 10, &dir, "empty.bin");
+        drop(inbox);
+        assert!(!dir.join("gone.bin.part").exists() && !dir.join("empty.bin.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_kept_here_is_taken_up_again() {
+        let dir = std::env::temp_dir().join(format!("sshremote-resume-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = bytes(500_000, 3);
+        let mut inbox = Inbox::default();
+        inbox.start_in(1, data.len() as u64, &dir, "d.bin");
+        inbox.data(1, &data[..123_456]);
+        let kept = inbox.keep_all();
+        let [(1, k)] = &kept[..] else { panic!("{kept:?}") };
+        assert_eq!((k.received, k.size), (123_456, 500_000));
+        assert_eq!(tail_sum(&mut File::open(&k.part).unwrap(), k.received).unwrap(), sum(&data, 123_456));
+        // Further than what arrived it cannot go on from.
+        assert!(!inbox.take_up(2, k, 200_000));
+        assert!(inbox.take_up(2, k, 100_000));
+        inbox.data(2, &data[100_000..]);
+        let Some(Note::Done { ok: true, text, .. }) = inbox.end(2, true, "") else { panic!("not whole") };
+        assert_eq!(std::fs::read(text).unwrap(), data);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_fetched_again_leaves_out_what_arrived() {
+        let dir = std::env::temp_dir().join(format!("sshremote-resume-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("c")).unwrap();
+        std::fs::write(dir.join("a").join("1.bin"), b"one").unwrap();
+        let big = bytes(400_000, 4);
+        std::fs::write(dir.join("b.bin"), &big).unwrap();
+        std::fs::write(dir.join("c").join("2.bin"), b"two").unwrap();
+        let base = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let run = |out: &mut Outbox| {
+            let mut got: Vec<(String, u64, usize)> = Vec::new();
+            for _ in 0..20 {
+                for m in out.pump(1 << 20) {
+                    match m {
+                        ToClient::FetchStart { name, .. } => got.push((name, 0, 0)),
+                        ToClient::FetchAt { name, from, .. } => got.push((name, from, 0)),
+                        ToClient::FetchData { data, .. } => got.last_mut().unwrap().2 += data.len(),
+                        ToClient::FetchDone { .. } => return got,
+                        _ => {}
+                    }
+                }
+            }
+            panic!("never done: {got:?}");
+        };
+        // Cut off 150 000 bytes into b.bin: a/1.bin is left out, b.bin goes on, c/2.bin follows.
+        let mut out = Outbox::default();
+        out.fetch_from(dir.to_str().unwrap(), DONE_TAG | 1, &format!("{base}/b.bin"), 150_000, sum(&big, 150_000));
+        let b = format!("{base}/b.bin");
+        let c = format!("{base}/c/2.bin");
+        assert_eq!(run(&mut out), [(b.clone(), 150_000, 250_000), (c.clone(), 0, 3)]);
+        // Changed since: b.bin comes whole.
+        out.fetch_from(dir.to_str().unwrap(), DONE_TAG | 2, &b, 150_000, sum(&bytes(400_000, 5), 150_000));
+        assert_eq!(run(&mut out), [(b.clone(), 0, 400_000), (c.clone(), 0, 3)]);
+        // Cut off right after b.bin arrived whole.
+        out.fetch_from(dir.to_str().unwrap(), DONE_TAG | 3, &b, u64::MAX, [0; 32]);
+        assert_eq!(run(&mut out), [(c.clone(), 0, 3)]);
+        // Before anything came, all of it.
+        out.fetch_from(dir.to_str().unwrap(), DONE_TAG | 4, "", 0, [0; 32]);
+        assert_eq!(run(&mut out).len(), 3);
+        // A single file, once more from where it was.
+        out.fetch_from(dir.join("b.bin").to_str().unwrap(), DONE_TAG | 5, "b.bin", 399_999, sum(&big, 399_999));
+        assert_eq!(run(&mut out), [("b.bin".to_string(), 399_999, 1)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn kept_parts_left_alone_go_after_a_while() {
+        let dir = std::env::temp_dir().join(format!("sshremote-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new, list) = (dir.join("old.bin.part"), dir.join("new.bin.part"), dir.join("kept-parts"));
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::write(&new, b"y").unwrap();
+        File::options().write(true).open(&old).unwrap().set_modified(std::time::SystemTime::now() - KEEP_FOR * 2).unwrap();
+        std::fs::write(&list, format!("{}\n{}\n{}\n/not/there.part\n", old.display(), new.display(), new.display())).unwrap();
+        prune(&list);
+        assert!(!old.exists() && new.exists());
+        assert_eq!(std::fs::read_to_string(&list).unwrap(), format!("{}\n", new.display()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -35,6 +35,10 @@ pub const FORMAT_WIDE: u8 = 8;
 /// Every form this program reads.
 pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE;
 
+/// The agent goes on with a transfer the connection broke off (`ToAgent::FileResume`,
+/// `ToAgent::FetchFrom`), told in `ToClient::Can`.
+pub const CAN_RESUME: u32 = 1;
+
 pub struct Preset {
     pub name: &'static str,
     pub scale: u8,
@@ -153,6 +157,31 @@ pub enum ToAgent {
     FetchCancel {
         id: u32,
         tag: u32,
+    },
+    /// This viewer goes on with transfers a broken connection cut off: what arrived of an upload
+    /// is kept for it, not deleted.
+    Resumes,
+    /// An upload that a broken connection cut off, to go on with from `from` bytes, if the part
+    /// kept there ends with the bytes whose checksum is `tail` (`files::tail_sum`); answered with
+    /// `ToClient::FileFrom`, and only then is data sent.
+    FileResume {
+        id: u32,
+        size: u64,
+        from: u64,
+        tail: [u8; 32],
+        dir: String,
+        name: String,
+    },
+    /// A download that a broken connection cut off, fetched again: of `path`'s files those before
+    /// `name` (in the order they are sent) are left out, and `name` itself, here up to `from`
+    /// bytes ending with `tail`, goes on from there (`ToClient::FetchAt`); `from` is `u64::MAX`
+    /// when `name` arrived whole. Answered as `Fetch`.
+    FetchFrom {
+        tag: u32,
+        path: String,
+        name: String,
+        from: u64,
+        tail: [u8; 32],
     },
     /// Starts a shell on the remote host in a terminal of this size.
     TermOpen {
@@ -411,6 +440,23 @@ pub enum ToClient {
     /// [`crate::files::DONE_TAG`] set, so viewers that do not ask never see it.
     FetchDone {
         tag: u32,
+    },
+    /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
+    Can(u32),
+    /// Where a `FileResume` goes on from: what is kept there, or 0 when nothing is (data from the
+    /// start, into a new part).
+    FileFrom {
+        id: u32,
+        from: u64,
+    },
+    /// In place of `FetchStart` for the file a `FetchFrom` named: data follows from `from` (0: the
+    /// file is not the one begun, and comes whole).
+    FetchAt {
+        id: u32,
+        size: u64,
+        tag: u32,
+        from: u64,
+        name: String,
     },
     /// The remote host's monitors and which one is shown.
     Monitors {
@@ -729,6 +775,24 @@ impl ToAgent {
                 b.extend_from_slice(t.as_bytes());
                 50
             }
+            ToAgent::Resumes => 51,
+            ToAgent::FileResume { id, size, from, tail, dir, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(&from.to_le_bytes());
+                b.extend_from_slice(tail);
+                put_str(&mut b, dir);
+                put_str(&mut b, name);
+                52
+            }
+            ToAgent::FetchFrom { tag, path, name, from, tail } => {
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(&from.to_le_bytes());
+                b.extend_from_slice(tail);
+                put_str(&mut b, name);
+                put_str(&mut b, path);
+                53
+            }
             ToAgent::Pause(on) => {
                 b.push(*on as u8);
                 22
@@ -878,6 +942,20 @@ impl ToAgent {
             20 => ToAgent::Audio(c.u8()? != 0),
             21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             50 => ToAgent::End(String::from_utf8_lossy(c.rest()).into_owned()),
+            51 => ToAgent::Resumes,
+            52 => ToAgent::FileResume {
+                id: c.u32()?,
+                size: c.u64()?,
+                from: c.u64()?,
+                tail: c.take(32)?.try_into().unwrap(),
+                dir: c.str()?,
+                name: c.str()?,
+            },
+            53 => {
+                let (tag, from, tail) = (c.u32()?, c.u64()?, c.take(32)?.try_into().unwrap());
+                let (name, path) = (c.str()?, c.str()?);
+                ToAgent::FetchFrom { tag, path, name, from, tail }
+            }
             22 => ToAgent::Pause(c.u8()? != 0),
             23 => ToAgent::Snapshot,
             24 => ToAgent::FileStart { id: c.u32()?, size: c.u64()?, dir: c.str()?, name: c.str()? },
@@ -1069,6 +1147,23 @@ impl ToClient {
             ToClient::FetchDone { tag } => {
                 b.extend_from_slice(&tag.to_le_bytes());
                 126
+            }
+            ToClient::Can(bits) => {
+                b.extend_from_slice(&bits.to_le_bytes());
+                141
+            }
+            ToClient::FileFrom { id, from } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&from.to_le_bytes());
+                142
+            }
+            ToClient::FetchAt { id, size, tag, from, name } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(&from.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                143
             }
             ToClient::Audio(p) => {
                 b.extend_from_slice(p);
@@ -1342,6 +1437,15 @@ impl ToClient {
             116 => ToClient::Snapshot(c.rest().to_vec()),
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             126 => ToClient::FetchDone { tag: c.u32()? },
+            141 => ToClient::Can(c.u32()?),
+            142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
+            143 => ToClient::FetchAt {
+                id: c.u32()?,
+                size: c.u64()?,
+                tag: c.u32()?,
+                from: c.u64()?,
+                name: String::from_utf8_lossy(c.rest()).into_owned(),
+            },
             125 => ToClient::HelperInstalled { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             119 => ToClient::TermOutput { id: c.u32()?, data: c.rest().to_vec() },
             121 => {
@@ -1486,6 +1590,9 @@ mod tests {
             ToAgent::FileOp { op: FileOp::Rename, path: "/tmp/a".into(), arg: "b".into() },
             ToAgent::Fetch { tag: 5, path: "/x".into() },
             ToAgent::FetchCancel { id: 6, tag: 5 },
+            ToAgent::Resumes,
+            ToAgent::FileResume { id: 7, size: 1 << 33, from: 1 << 20, tail: [9; 32], dir: "/d".into(), name: "a/b.iso".into() },
+            ToAgent::FetchFrom { tag: 0x8000_0007, path: "/x".into(), name: "x/y.bin".into(), from: u64::MAX, tail: [0; 32] },
             ToAgent::TermOpen { id: 1, cols: 80, rows: 24 },
             ToAgent::TermInput { id: 1, data: b"ls\r".to_vec() },
             ToAgent::TermResize { id: 1, cols: 120, rows: 40 },
@@ -1520,6 +1627,9 @@ mod tests {
             ToClient::HelperInstalled { ok: true, text: "installed; sign out and in".into() },
             ToClient::FetchStart { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::FetchDone { tag: 0x8000_0005 },
+            ToClient::Can(crate::proto::CAN_RESUME),
+            ToClient::FileFrom { id: 7, from: 1 << 20 },
+            ToClient::FetchAt { id: 8, size: 1 << 34, tag: 0x8000_0007, from: 65536, name: "x/y.bin".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },
             ToClient::TermExit { id: 1, text: "exit 0".into() },
             ToClient::WindowList {

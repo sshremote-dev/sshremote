@@ -219,6 +219,8 @@ struct Pane {
     start: PaneStart,
     /// What the user chose in the connection that dropped, for the next one.
     prefs: Option<remote::Prefs>,
+    /// The transfers it cut off, to go on with in the next one.
+    carry: Option<remote::Carry>,
     /// A password typed in the sign-in dialog, kept in the password store once it works.
     keep: Option<(String, String)>,
     /// A program to start on the host once connected and show alone (`ToAgent::Launch`).
@@ -553,6 +555,7 @@ impl Workspace {
                 terms: None,
                 start,
                 prefs: None,
+                carry: None,
                 keep: None,
                 launch: None,
                 preset: self.opt.preset,
@@ -569,7 +572,7 @@ impl Workspace {
                     Some((kind, text)) => State::Held(Box::new(super::held::Held::start(kind.parse().unwrap_or(crate::apps::COMMAND), text))),
                     None => State::Down(Down::new(false, String::new())),
                 };
-                Pane { id, label, target, ssh_cmd, mode, terms: None, start, prefs: None, keep: None, launch: None, preset: self.opt.preset, state }
+                Pane { id, label, target, ssh_cmd, mode, terms: None, start, prefs: None, carry: None, keep: None, launch: None, preset: self.opt.preset, state }
             }
         };
         self.panes.push(pane);
@@ -1061,6 +1064,9 @@ impl Workspace {
         if let Some(prefs) = p.prefs.take() {
             result = result.and_then(|_| r.restore(prefs));
         }
+        if let Some(c) = p.carry.take() {
+            r.carry_on(c);
+        }
         if let Some((kind, text)) = p.launch.take() {
             result = result.and_then(|_| r.send(crate::proto::ToAgent::Launch { kind, text }));
         }
@@ -1113,6 +1119,7 @@ impl Workspace {
         if let State::Live(r) = &mut p.state {
             p.mode = r.mode();
             p.prefs = Some(r.prefs());
+            p.carry = r.take_carry();
             p.terms = r.take_terms().filter(|_| true).and_then(|mut t| t.keep_local().then_some(t));
             r.close();
         }
@@ -1374,7 +1381,7 @@ impl Workspace {
                     if let Some(t) = pane.terms.as_mut() {
                         let _ = t.background(&ctx);
                     }
-                    down_view(&mut child, *rect, d, &pane.label)
+                    down_view(&mut child, *rect, d, &pane.label, pane.carry.as_ref().map_or(0, remote::Carry::count))
                 } {
                     Some(DownAct::Close) => closing.push(*id),
                     // A shell that was reaching for the agent stays the shell it was.
@@ -1814,7 +1821,7 @@ enum DownAct {
 
 /// A pane connecting, or connecting again: a spinner and Cancel; once given up, why and
 /// Reconnect or Close.
-fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<DownAct> {
+fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str, carried: usize) -> Option<DownAct> {
     let mut act = None;
     ui.painter().rect_filled(rect, CornerRadius::ZERO, ui.visuals().panel_fill);
     let card = Rect::from_center_size(rect.center(), Vec2::new(rect.width().min(420.0), 170.0));
@@ -1827,6 +1834,9 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<Dow
         let secs = d.since.elapsed().as_secs();
         let sub = if d.attempt > 0 { format!("Attempt {}  ·  {secs} s", d.attempt + 1) } else { format!("{secs} s") };
         c.label(RichText::new(sub).small().weak());
+        if carried > 0 {
+            c.label(RichText::new(format!("{carried} {} on from where {} once connected", transfers(carried), if carried == 1 { "it was" } else { "they were" })).small());
+        }
         // What the computer said while it was reached: that someone there is asked, say.
         let note = d.rx.as_ref().map(|p| p.note.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
         if !note.is_empty() {
@@ -1845,6 +1855,9 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<Dow
         if !hint.is_empty() {
             c.label(RichText::new(hint).small().weak());
         }
+        if carried > 0 {
+            c.label(RichText::new(format!("Reconnect and {carried} {} on from where {}", transfers(carried), if carried == 1 { "it was" } else { "they were" })).small());
+        }
         c.add_space(8.0);
         c.horizontal(|ui| {
             if ui.add(theme::primary(format!("{}  Reconnect", ic::ARROW_CLOCKWISE))).clicked() {
@@ -1856,6 +1869,10 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str) -> Option<Dow
         });
     }
     act
+}
+
+fn transfers(n: usize) -> &'static str {
+    if n == 1 { "transfer goes" } else { "transfers go" }
 }
 
 /// The workspace driven as a user would, against the built-in test desktop and a local shell:

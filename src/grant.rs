@@ -63,6 +63,8 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::Fetch { .. }
         | ToAgent::FetchAck { .. }
         | ToAgent::FetchCancel { .. }
+        | ToAgent::FileResume { .. }
+        | ToAgent::FetchFrom { .. }
         | ToAgent::FileOp { .. }
         | ToAgent::PasteFiles { .. } => FILES,
         ToAgent::Audio(true) | ToAgent::Call(true) | ToAgent::Voice(_) => SOUND,

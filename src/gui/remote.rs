@@ -7,6 +7,7 @@ mod input;
 mod panels;
 mod toolbar;
 mod transfer;
+pub(super) use transfer::Carry;
 
 /// Windows or programs offered for sharing, or why there are none.
 type WindowList = Result<Vec<crate::capture::WindowInfo>, String>;
@@ -186,6 +187,8 @@ pub(super) struct Remote {
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
+    /// Going on with the transfers a broken connection cut off.
+    resume: transfer::Resume,
     /// Uploads and downloads finished since the last notice about them.
     sent: Settled,
     got: Settled,
@@ -207,6 +210,13 @@ struct Upload {
     sent: u64,
     acked: u64,
     ended: bool,
+    /// The file's size and time of change when it was first opened, to tell it is still the
+    /// file being sent when a broken connection's transfer goes on.
+    stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    /// Goes on from this many bytes the host has, once it says so (`ToClient::FileFrom`).
+    from: Option<u64>,
+    /// Asked the host where to go on from, and waits for the answer.
+    asking: bool,
 }
 
 /// Files that arrived whole, told as one notice once the transfers settle: a folder of a
@@ -371,6 +381,7 @@ impl Remote {
             files: None,
             fetch_dirs: Default::default(),
             next_tag: 1,
+            resume: Default::default(),
             sent: Settled::default(),
             got: Settled::default(),
             ssh_cmd,
@@ -653,7 +664,16 @@ impl Remote {
                 ctx.request_repaint();
                 return Ok(());
             }
-            match self.rx.try_recv() {
+            let ev = self.rx.try_recv();
+            // An agent that does not say first that it goes on with transfers cannot: those
+            // carried from the connection before end here.
+            if matches!(&ev, Ok(Ev::Net(m)) if !matches!(m, ToClient::Can(_))) {
+                self.carried_end();
+            }
+            match ev {
+                Ok(Ev::Net(ToClient::Can(bits))) => self.can(bits)?,
+                Ok(Ev::Net(ToClient::FileFrom { id, from })) => self.file_from(id, from)?,
+                Ok(Ev::Net(ToClient::FetchAt { id, size, tag, from, name })) => self.fetch_at(id, size, tag, from, name)?,
                 Ok(Ev::Net(ToClient::Frame(f))) => {
                     let resized = self.fb.apply(&f).map_err(|e| e.to_string())?;
                     if let Some(r) = self.recording.as_mut() {
@@ -705,6 +725,7 @@ impl Remote {
                     }
                 }
                 Ok(Ev::Net(ToClient::FetchDone { tag })) => {
+                    self.resume.done(tag);
                     if let Some((left, paths)) = self.clip_in.as_mut() {
                         left.retain(|t| *t != tag);
                         if left.is_empty() {
@@ -811,15 +832,7 @@ impl Remote {
                     }
                     None => self.notify(&text),
                 },
-                Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => {
-                    let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
-                    let started = self.sess.fetch_start(&mut self.inbox, id, size, &dir, &name).map_err(|e| format!("connection lost: {e}"))?;
-                    if let Some(crate::files::Note::Done { text, .. }) = started {
-                        self.notify(&format!("{name}: {text}"));
-                    } else {
-                        self.downloads.push((id, name, tag));
-                    }
-                }
+                Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => self.fetch_started(id, size, tag, name)?,
                 Ok(Ev::Net(ToClient::FetchData { id, data })) => match self
                     .sess
                     .fetch_data(&mut self.inbox, id, &data)
@@ -844,6 +857,7 @@ impl Remote {
                     let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
                     let tag = self.downloads.iter().find(|d| d.0 == id).map_or(0, |d| d.2);
                     self.downloads.retain(|d| d.0 != id);
+                    self.resume.came_to(tag, &name, true);
                     let for_clipboard = self.clip_in.as_ref().is_some_and(|(left, _)| left.contains(&tag));
                     match self.inbox.end(id, ok, &text) {
                         Some(crate::files::Note::Done { ok: true, .. }) if for_clipboard => {}
@@ -1117,6 +1131,10 @@ impl Remote {
 
     /// Ends the connection.
     pub(super) fn close(&mut self) {
+        // Closed with an upload under way: called off there, not kept to go on with.
+        for id in self.uploads.iter().filter(|u| u.file.is_some() && !u.ended).map(|u| u.id).collect::<Vec<_>>() {
+            let _ = self.sess.send(ToAgent::FileEnd { id });
+        }
         self.sess.close();
     }
 

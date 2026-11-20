@@ -120,19 +120,35 @@ fn files_as_user() -> Result<Option<crate::console_user::AsUser>, &'static str> 
     }
 }
 
+/// The folder an upload into `dir` goes to (empty: Downloads; a clipboard or drop batch) and its
+/// name there.
+fn upload_place(dir: &str, name: String) -> (std::path::PathBuf, String) {
+    if dir.is_empty() {
+        (crate::files::downloads(), name)
+    } else if let Some(batch) = dir.strip_prefix(crate::files::CLIPBOARD) {
+        (crate::files::clipboard_dir(batch), name)
+    } else if let Some(batch) = dir.strip_prefix(crate::files::DROP) {
+        // Named so that its path, typed at a prompt, is read as it is.
+        let name: Vec<String> = name.split(['/', '\\']).map(crate::files::typable).collect();
+        (crate::files::drop_dir(batch), name.join("/"))
+    } else {
+        (std::path::PathBuf::from(dir), name)
+    }
+}
+
 /// What a file request refused for `why` is answered with.
 fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
     let why = why.to_string();
     match m {
         ToAgent::ListDir { path } => vec![ToClient::DirList { path: path.clone(), entries: Vec::new(), error: why }],
-        ToAgent::Fetch { tag, .. } => {
+        ToAgent::Fetch { tag, .. } | ToAgent::FetchFrom { tag, .. } => {
             let mut out = vec![ToClient::FetchEnd { id: 0, ok: false, text: why }];
             if tag & crate::files::DONE_TAG != 0 {
                 out.push(ToClient::FetchDone { tag: *tag });
             }
             out
         }
-        ToAgent::FileStart { id, .. } | ToAgent::FileEnd { id } => vec![ToClient::FileDone { id: *id, ok: false, text: why }],
+        ToAgent::FileStart { id, .. } | ToAgent::FileResume { id, .. } | ToAgent::FileEnd { id } => vec![ToClient::FileDone { id: *id, ok: false, text: why }],
         ToAgent::FileOp { .. } => vec![ToClient::OpDone { ok: false, text: why }],
         _ => Vec::new(),
     }
@@ -352,6 +368,7 @@ fn serve_with(
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
+    send(enc, &ToClient::Can(crate::proto::CAN_RESUME)).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
     if cap.name() == "none"
@@ -557,7 +574,9 @@ fn serve_with(
             let _as_user = match &m {
                 ToAgent::ListDir { .. }
                 | ToAgent::Fetch { .. }
+                | ToAgent::FetchFrom { .. }
                 | ToAgent::FileStart { .. }
+                | ToAgent::FileResume { .. }
                 | ToAgent::FileEnd { .. }
                 | ToAgent::FileOp { .. }
                 | ToAgent::PasteFiles { .. } => {
@@ -731,19 +750,23 @@ fn serve_with(
                     }
                 }
                 ToAgent::FileStart { id, size, dir, name } => {
-                    let note = if dir.is_empty() {
-                        inbox.start(id, size, &name)
-                    } else if let Some(batch) = dir.strip_prefix(crate::files::CLIPBOARD) {
-                        inbox.start_in(id, size, &crate::files::clipboard_dir(batch), &name)
-                    } else if let Some(batch) = dir.strip_prefix(crate::files::DROP) {
-                        // Named so that its path, typed at a prompt, is read as it is.
-                        let name: Vec<String> = name.split(['/', '\\']).map(crate::files::typable).collect();
-                        inbox.start_in(id, size, &crate::files::drop_dir(batch), &name.join("/"))
-                    } else {
-                        inbox.start_in(id, size, std::path::Path::new(&dir), &name)
-                    };
-                    if let Some(m) = note {
+                    let (dir, name) = upload_place(&dir, name);
+                    if let Some(m) = inbox.start_in(id, size, &dir, &name) {
                         send(enc, &m.into_client()).map_err(io_err)?;
+                    }
+                }
+                ToAgent::Resumes => inbox.keep_broken = true,
+                ToAgent::FileResume { id, size, from, tail, dir, name } => {
+                    let (dir, name) = upload_place(&dir, name);
+                    let m = match inbox.resume_in(id, size, &dir, &name, from, tail) {
+                        Ok(from) => ToClient::FileFrom { id, from },
+                        Err(note) => note.into_client(),
+                    };
+                    send(enc, &m).map_err(io_err)?;
+                }
+                ToAgent::FetchFrom { tag, path, name, from, tail } => {
+                    for m in outbox.fetch_from(&path, tag, &name, from, tail) {
+                        send(enc, &m).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileData { id, data } => {
@@ -996,7 +1019,10 @@ fn serve_with(
                     terms = crate::pty::Terms::waking(poke.clone());
                 }
                 if taken & crate::grant::FILES != 0 {
+                    // What was under way is called off, not kept to go on with.
+                    let keep = std::mem::take(&mut inbox.keep_broken);
                     (inbox, outbox) = (Default::default(), Default::default());
+                    inbox.keep_broken = keep;
                 }
                 if taken & crate::grant::POWER != 0 {
                     host = crate::hostctl::HostCtl::default();

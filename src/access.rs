@@ -1418,8 +1418,8 @@ struct Frames {
 }
 
 /// What a viewer sends by itself: settings, acknowledgements, pings, pausing, refreshing,
-/// accessibility state and density.
-const AUTOMATIC: [u8; 8] = [1, 2, 7, 8, 18, 22, 36, 46];
+/// accessibility state, density, and transfers it resumes after a broken connection.
+const AUTOMATIC: [u8; 11] = [1, 2, 7, 8, 18, 22, 36, 46, 51, 52, 53];
 
 impl Frames {
     /// Follows `b`; true when a message it begins is the person's doing.

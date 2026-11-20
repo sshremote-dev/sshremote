@@ -11,6 +11,15 @@ pub(crate) enum Ev {}
 /// What the user chose in a connection; never made here.
 pub(super) enum Prefs {}
 
+/// Transfers a broken connection cut off; never made here.
+pub(super) enum Carry {}
+
+impl Carry {
+    pub(super) fn count(&self) -> usize {
+        match *self {}
+    }
+}
+
 pub(super) type Deferred = Box<dyn FnOnce(&mut Remote, &egui::Context) -> Result<(), String>>;
 
 pub(super) struct Remote {
@@ -80,6 +89,9 @@ impl Remote {
     pub(super) fn background(&mut self, _: &egui::Context) -> Result<(), String> {
         match self.never {}
     }
+    pub(super) fn next_tick(&self) -> std::time::Duration {
+        match self.never {}
+    }
     pub(super) fn prefs(&self) -> Prefs {
         match self.never {}
     }
@@ -93,6 +105,9 @@ impl Remote {
         match self.never {}
     }
     pub(super) fn restore(&mut self, _: Prefs) -> Result<(), String> {
+        match self.never {}
+    }
+    pub(super) fn take_carry(&mut self) -> Option<Carry> {
         match self.never {}
     }
     pub(super) fn notify(&mut self, _: &str) {
