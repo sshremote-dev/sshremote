@@ -60,6 +60,71 @@ pub struct X11 {
     looked: std::time::Instant,
     root_size: (usize, usize),
     atoms: Atoms,
+    /// A connection of its own waking the agent as the screen or the pointer's picture changes.
+    watch: Option<Watch>,
+}
+
+/// Ends the watching thread as the capture goes (within a quarter second).
+struct Watch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Watch {
+    /// Waits on a connection of its own for damage on the screen and a new pointer picture,
+    /// calling `wake` for each (at most every 2 ms), so the agent need not look every millisecond.
+    fn start(wake: Box<dyn Fn() + Send>) -> Result<Watch, String> {
+        use std::os::fd::AsRawFd;
+        use x11rb::protocol::xfixes;
+        let (conn, screen) = x11rb::connect(None).map_err(err)?;
+        let root = conn.setup().roots[screen].root;
+        conn.damage_query_version(1, 1).map_err(err)?.reply().map_err(err)?;
+        conn.xfixes_query_version(4, 0).map_err(err)?.reply().map_err(err)?;
+        let d = conn.generate_id().map_err(err)?;
+        conn.damage_create(d, root, damage::ReportLevel::NON_EMPTY).map_err(err)?;
+        conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR).map_err(err)?;
+        conn.flush().map_err(err)?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended = stop.clone();
+        std::thread::Builder::new()
+            .name("x11-watch".into())
+            .spawn(move || {
+                let fd = conn.stream().as_raw_fd();
+                while !ended.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut came = false;
+                    loop {
+                        match conn.poll_for_event() {
+                            Ok(Some(e)) => {
+                                // Told again only once what changed is taken off.
+                                if matches!(e, Event::DamageNotify(_)) {
+                                    let _ = conn.damage_subtract(d, x11rb::NONE, x11rb::NONE);
+                                }
+                                came = true;
+                            }
+                            Ok(None) => break,
+                            Err(_) => return,
+                        }
+                    }
+                    if came {
+                        if conn.flush().is_err() {
+                            return;
+                        }
+                        wake();
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        continue;
+                    }
+                    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                    if unsafe { libc::poll(&mut p, 1, 250) } < 0 || p.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Watch(stop))
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -166,6 +231,7 @@ impl X11 {
             looked: std::time::Instant::now(),
             root_size: (w, h),
             atoms,
+            watch: None,
         };
         x.screens = x.read_monitors().unwrap_or_default();
         if x.screens.is_empty() {
@@ -501,6 +567,15 @@ impl Capture for X11 {
     fn pointer_apart(&mut self, on: bool) -> bool {
         (self.apart, self.sent_shape, self.dirty) = (on, 0, true);
         true
+    }
+
+    fn set_waker(&mut self, wake: Box<dyn Fn() + Send>) -> bool {
+        // Without XDamage every look reads the whole screen: the agent looks at its own pace.
+        if self.damage.is_none() {
+            return false;
+        }
+        self.watch = Watch::start(wake).ok();
+        self.watch.is_some()
     }
 
     fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
