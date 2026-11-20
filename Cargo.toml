@@ -40,6 +40,17 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # OpenGL as well, for a Mac whose GPU has no Metal (a virtual machine, the oldest Macs).
 eframe = { optional = true, version = "0.37", default-features = false, features = ["glow"] }
+# The screen through ScreenCaptureKit and input through Core Graphics events (the objc2 family
+# winit and the clipboard bring on macOS already).
+objc2 = { optional = true, version = "0.6" }
+objc2-foundation = { optional = true, version = "0.3" }
+objc2-screen-capture-kit = { optional = true, version = "0.3" }
+objc2-core-media = { optional = true, version = "0.3" }
+objc2-core-video = { optional = true, version = "0.3" }
+objc2-core-graphics = { optional = true, version = "0.3" }
+objc2-core-foundation = { optional = true, version = "0.3" }
+block2 = { optional = true, version = "0.6" }
+dispatch2 = { optional = true, version = "0.3" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gstreamer = { optional = true, version = "0.25.4" }
@@ -69,7 +80,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media",
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows"]
+remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:eframe", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

@@ -23,6 +23,8 @@ mod wayland;
 mod wlinput;
 #[cfg(target_os = "linux")]
 mod wlrcopy;
+#[cfg(target_os = "macos")]
+mod mac;
 pub mod region;
 mod shrink;
 pub use shrink::Shrink;
@@ -283,6 +285,8 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         "auto" => linux_desktop(),
         #[cfg(windows)]
         "windows" | "auto" => Ok(Box::new(windows::Gdi::open()?)),
+        #[cfg(target_os = "macos")]
+        "mac" | "auto" => Ok(Box::new(mac::Mac::open()?)),
         _ => Err(format!("capture backend '{name}' is not available on this system")),
     }
 }
