@@ -223,8 +223,17 @@ fn spawn(exe: &Path, args: &[String]) -> std::io::Result<Started> {
     use std::os::unix::process::CommandExt;
     let pipe = || -> std::io::Result<(OwnedFd, OwnedFd)> {
         let mut p = [0; 2];
-        if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        #[cfg(target_os = "linux")]
+        let made = unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) };
+        // No pipe2 there (macOS): closed on exec once made.
+        #[cfg(not(target_os = "linux"))]
+        let made = unsafe { libc::pipe(p.as_mut_ptr()) };
+        if made != 0 {
             return Err(std::io::Error::last_os_error());
+        }
+        #[cfg(not(target_os = "linux"))]
+        for fd in p {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         }
         Ok(unsafe { (OwnedFd::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) })
     };

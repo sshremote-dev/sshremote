@@ -99,7 +99,14 @@ fn restart() -> Result<(), String> {
     if out.status.success() { Ok(()) } else { Err(format!("the computer did not restart: {}", String::from_utf8_lossy(&out.stderr).trim())) }
 }
 
-#[cfg(not(windows))]
+/// As the Apple menu's Restart: open programs are asked to quit first.
+#[cfg(target_os = "macos")]
+fn restart() -> Result<(), String> {
+    let out = std::process::Command::new("osascript").args(["-e", "tell application \"loginwindow\" to «event aevtrrst»"]).output().map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err(format!("the computer did not restart: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn restart() -> Result<(), String> {
     let out = std::process::Command::new("systemctl").arg("reboot").output().map_err(|e| e.to_string())?;
     if out.status.success() { Ok(()) } else { Err(format!("the computer did not restart: {}", String::from_utf8_lossy(&out.stderr).trim())) }
@@ -119,8 +126,15 @@ fn lock() -> Result<(), String> {
     }
 }
 
+/// Locks the screen as the display going to sleep does (macOS asks for the password then).
+#[cfg(target_os = "macos")]
+fn lock() -> Result<(), String> {
+    let out = std::process::Command::new("pmset").arg("displaysleepnow").output().map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err("the screen could not be locked here".into()) }
+}
+
 /// Locks the desktop session's screen through its screen saver, as GNOME and others offer it.
-#[cfg(not(windows))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn lock() -> Result<(), String> {
     crate::capture::ensure_session_env();
     let call = |dest: &str, path: &str, method: &str| {

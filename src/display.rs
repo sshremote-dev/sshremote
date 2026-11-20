@@ -12,9 +12,11 @@ pub struct Modes {
 }
 
 /// Smaller than this is no desktop to work in.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const SMALLEST: (u16, u16) = (640, 480);
 
 /// The resolutions once each, largest first.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn tidy(mut list: Vec<(u16, u16)>) -> Vec<(u16, u16)> {
     list.retain(|&(w, h)| w >= SMALLEST.0 && h >= SMALLEST.1);
     list.sort_by_key(|&(w, h)| std::cmp::Reverse((w as u32 * h as u32, w)));
@@ -40,6 +42,27 @@ enum Way {
     Cosmic,
 }
 
+/// None yet elsewhere (macOS): no screen is set there.
+#[cfg(not(any(windows, target_os = "linux")))]
+impl Way {
+    fn find(_backend: &str) -> Option<Way> {
+        None
+    }
+
+    fn screens(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    fn modes(&self, _id: &str) -> Option<Modes> {
+        match *self {}
+    }
+
+    fn set(&self, _id: &str, _w: u16, _h: u16) -> Result<(), String> {
+        match *self {}
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 impl Way {
     /// For the capture backend named `backend`, where this desktop lets its screens be set.
     fn find(backend: &str) -> Option<Way> {
@@ -765,6 +788,7 @@ mod tests {
     /// This computer's screens and their resolutions, nothing set: cargo test -- --ignored --nocapture screens_here
     #[test]
     #[ignore]
+    #[cfg(any(windows, target_os = "linux"))]
     fn screens_here_are_listed() {
         #[cfg(windows)]
         let (way, ids) = (Way::Windows, (1..=4).map(|i| format!("DISPLAY{i}")).collect::<Vec<_>>());
@@ -783,6 +807,7 @@ mod tests {
     /// session ends: SSHREMOTE_TEST_SET_SCREEN=1 cargo test -- --ignored --nocapture screen_here_is_set
     #[test]
     #[ignore]
+    #[cfg(any(windows, target_os = "linux"))]
     fn screen_here_is_set_and_set_back() {
         // It changes the screen of whoever runs it: only when asked by name, never in a run of all.
         if std::env::var_os("SSHREMOTE_TEST_SET_SCREEN").is_none() {

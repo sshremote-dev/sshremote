@@ -30,6 +30,7 @@ pub fn launch(kind: u8, text: &str) -> Result<String, String> {
 
 /// As `launch`, the program asked to start minimized where a program can be (Windows): one held in
 /// a pane is put there before it is seen, not first shown where it puts itself.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn launch_minimized(kind: u8, text: &str) -> Result<String, String> {
     launch_as(kind, text, true)
 }

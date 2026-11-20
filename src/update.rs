@@ -33,6 +33,9 @@ fn file_name() -> Option<&'static str> {
         Some("sshremote-windows-x86_64.exe")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("sshremote-linux-x86_64")
+    } else if cfg!(target_os = "macos") {
+        // One program for Intel and Apple silicon.
+        Some("sshremote-macos")
     } else {
         None
     }
@@ -151,11 +154,11 @@ mod tests {
 
     #[test]
     fn a_list_offers_this_systems_file_only_when_newer() {
-        let list = br#"{"version":"0.30.1","files":[{"name":"sshremote-windows-x86_64.exe","size":10,"sha256":"AB"},{"name":"sshremote-linux-x86_64","size":20,"sha256":"CD"}]}"#;
+        let list = br#"{"version":"0.30.1","files":[{"name":"sshremote-windows-x86_64.exe","size":10,"sha256":"AB"},{"name":"sshremote-linux-x86_64","size":20,"sha256":"CD"},{"name":"sshremote-macos","size":30,"sha256":"EF"}]}"#;
         let r = release_in(list, "https://sshremote.dev/download/index.json", "0.25.12").unwrap().unwrap();
         assert_eq!(r.version, "0.30.1");
         assert!(r.url.starts_with("https://sshremote.dev/download/sshremote-"), "{}", r.url);
-        let (size, sum) = if cfg!(windows) { (10, "ab") } else { (20, "cd") };
+        let (size, sum) = if cfg!(windows) { (10, "ab") } else if cfg!(target_os = "macos") { (30, "ef") } else { (20, "cd") };
         assert_eq!((r.size, r.sha256.as_str()), (size, sum));
         assert_eq!(release_in(list, "x/index.json", "0.30.1").unwrap(), None);
         assert!(release_in(br#"{"version":"9.0.0","files":[]}"#, "x/index.json", "0.1.0").is_err());

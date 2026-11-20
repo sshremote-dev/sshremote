@@ -577,8 +577,9 @@ fn sys_now() -> Now {
     (cpu, ram, disk, format!("{:02}:{:02}", t.wHour, t.wMinute))
 }
 
-#[cfg(unix)]
-fn sys_now() -> Now {
+/// Busy and total CPU time so far, and memory used and in all (bytes), from /proc.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn cpu_ram() -> (Option<(u64, u64)>, Option<(f64, f64)>) {
     let cpu = std::fs::read_to_string("/proc/stat").ok().and_then(|s| {
         let v: Vec<u64> = s.lines().next()?.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
         let total: u64 = v.iter().sum();
@@ -590,10 +591,46 @@ fn sys_now() -> Now {
         let (total, avail) = (kb("MemTotal:")?, kb("MemAvailable:")?);
         Some(((total - avail) * 1024.0, total * 1024.0))
     });
+    (cpu, ram)
+}
+
+/// The same from the Mach kernel's counts; memory used as Activity Monitor counts it (programs'
+/// own, wired and compressed).
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn cpu_ram() -> (Option<(u64, u64)>, Option<(f64, f64)>) {
+    // SAFETY: each out-structure is the one its flavour fills, with its count; sysctl gets a u64.
+    unsafe {
+        let host = libc::mach_host_self();
+        let mut load: libc::host_cpu_load_info = std::mem::zeroed();
+        let mut n = libc::HOST_CPU_LOAD_INFO_COUNT;
+        let cpu = (libc::host_statistics(host, libc::HOST_CPU_LOAD_INFO, &mut load as *mut _ as libc::host_info_t, &mut n) == 0).then(|| {
+            let total: u64 = load.cpu_ticks.iter().map(|&t| t as u64).sum();
+            (total - load.cpu_ticks[libc::CPU_STATE_IDLE as usize] as u64, total)
+        });
+        let (mut all, mut len) = (0u64, std::mem::size_of::<u64>());
+        let all = (libc::sysctlbyname(c"hw.memsize".as_ptr(), &mut all as *mut u64 as *mut libc::c_void, &mut len, std::ptr::null_mut(), 0) == 0).then_some(all as f64);
+        let mut vm: libc::vm_statistics64 = std::mem::zeroed();
+        let mut n = libc::HOST_VM_INFO64_COUNT;
+        let ram = all.filter(|_| libc::host_statistics64(host, libc::HOST_VM_INFO64, &mut vm as *mut _ as libc::host_info64_t, &mut n) == 0).map(|all| {
+            let page = libc::vm_page_size as f64;
+            let (internal, purgeable, wired, compressed) = (vm.internal_page_count, vm.purgeable_count, vm.wire_count, vm.compressor_page_count);
+            let used = (internal as f64 - purgeable as f64 + wired as f64 + compressed as f64) * page;
+            (used.clamp(0.0, all), all)
+        });
+        (cpu, ram)
+    }
+}
+
+#[cfg(unix)]
+fn sys_now() -> Now {
+    let (cpu, ram) = cpu_ram();
+    // macOS keeps what fills up on its data volume, the system on a sealed one.
+    let root = if cfg!(target_os = "macos") { c"/System/Volumes/Data" } else { c"/" };
     // SAFETY: a zero-ended path and a zeroed statvfs to fill.
     let disk = unsafe {
         let mut st: libc::statvfs = std::mem::zeroed();
-        (libc::statvfs(c"/".as_ptr(), &mut st) == 0).then(|| {
+        (libc::statvfs(root.as_ptr(), &mut st) == 0).then(|| {
             let f = st.f_frsize as f64;
             ((st.f_blocks - st.f_bfree) as f64 * f, st.f_blocks as f64 * f)
         })

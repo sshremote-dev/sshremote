@@ -1,5 +1,7 @@
 //! Rectangles for sharing part of a screen: which parts of the shared windows
 //! show, and greying out the rest of a frame.
+// Not all of it shares windows yet on macOS.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use super::{Image, Pixels};
 

@@ -316,6 +316,7 @@ pub const UI_DISABLED: u8 = 2;
 pub const UI_CHECKED: u8 = 4;
 pub const UI_SELECTED: u8 = 8;
 pub const UI_EXPANDED: u8 = 16;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub const UI_EDITABLE: u8 = 32;
 
 #[derive(Debug, PartialEq, Clone, Copy)]

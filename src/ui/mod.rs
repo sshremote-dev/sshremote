@@ -1,6 +1,8 @@
 //! The window in front as a short list of elements an AI agent can read and
 //! operate by number (accessibility: UI Automation on Windows, AT-SPI on Linux),
 //! so it needs a screenshot only for what has no text.
+// None of it reads macOS's yet.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 #[cfg(not(any(windows, target_os = "linux")))]
 use crate::proto::UiAction;
