@@ -2,7 +2,9 @@
 //! the window), its signature checked with the registry's key under a namespace of its own, and
 //! the file for this system, checked against the list, put in place of this program when asked.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "macos"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 const INDEX: &str = "https://sshremote.dev/download/index.json";
 const NAMESPACE: &str = "sshremote-release";
@@ -34,8 +36,8 @@ fn file_name() -> Option<&'static str> {
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("sshremote-linux-x86_64")
     } else if cfg!(target_os = "macos") {
-        // One program for Intel and Apple silicon.
-        Some("sshremote-macos")
+        // The app, zipped: one program for Intel and Apple silicon, signed as a whole.
+        Some("sshremote-macos.zip")
     } else {
         None
     }
@@ -74,12 +76,97 @@ pub fn install(r: &Release) -> Result<PathBuf, String> {
     if data.len() as u64 != r.size || sum != r.sha256 {
         return Err(format!("the download of {} is not the file the list names; nothing was changed", r.version));
     }
-    place(&exe, &data)?;
-    Ok(exe)
+    #[cfg(target_os = "macos")]
+    return mac::place(&exe, &data).map(|_| exe);
+    #[cfg(not(target_os = "macos"))]
+    {
+        place(&exe, &data)?;
+        Ok(exe)
+    }
+}
+
+/// macOS: the release is the app zipped. The app this program runs from is swapped for the new
+/// one whole (its signature covers all of it); a program run on its own takes the new one's.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+
+    /// The app `exe` is in (`X.app/Contents/MacOS/exe`), if it is in one.
+    fn bundle(exe: &Path) -> Option<PathBuf> {
+        let app = exe.parent()?.parent()?.parent()?;
+        (app.extension().is_some_and(|e| e == "app") && exe.parent()?.ends_with("Contents/MacOS")).then(|| app.to_path_buf())
+    }
+
+    /// Writes the zip's entries under `to`, with their permissions; none may reach outside it.
+    fn unzip(data: &[u8], to: &Path) -> Result<(), String> {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("the download is no zip ({e})"))?;
+        for i in 0..z.len() {
+            let mut f = z.by_index(i).map_err(|e| e.to_string())?;
+            let Some(rel) = f.enclosed_name() else { return Err(format!("{} would land outside the app", f.name().unwrap_or_default())) };
+            // macOS's own archiver keeps file metadata apart; nothing of the app is in it.
+            if rel.starts_with("__MACOSX") {
+                continue;
+            }
+            let path = to.join(rel);
+            if f.is_dir() {
+                std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            let mut bytes = Vec::with_capacity(f.size() as usize);
+            f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(mode) = f.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o777));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn place(exe: &Path, data: &[u8]) -> Result<(), String> {
+        let home = bundle(exe);
+        let dir = home.as_deref().and_then(Path::parent).or_else(|| exe.parent()).ok_or("no folder for this program")?;
+        let unpacked = dir.join(".sshremote-update");
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let written = |e: String| format!("this program's folder cannot be written ({}: {e}); get the new version from sshremote.dev", dir.display());
+        std::fs::create_dir_all(&unpacked).map_err(|e| written(e.to_string()))?;
+        let done = (|| {
+            unzip(data, &unpacked).map_err(written)?;
+            let new_app = std::fs::read_dir(&unpacked)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|e| e == "app"))
+                .ok_or("the download holds no app")?;
+            match &home {
+                // The app as a whole: the one running moves aside, keeps running, and goes.
+                Some(app) => {
+                    let old = unpacked.join("old.app");
+                    std::fs::rename(app, &old).map_err(|e| format!("this app could not be moved aside ({e})"))?;
+                    if let Err(e) = std::fs::rename(&new_app, app) {
+                        let _ = std::fs::rename(&old, app);
+                        return Err(format!("the new version could not be put in place ({e})"));
+                    }
+                    Ok(())
+                }
+                None => {
+                    let new = new_app.join("Contents/MacOS/sshremote");
+                    std::fs::rename(&new, exe).map_err(|e| format!("the new version could not be put in place ({e})"))
+                }
+            }
+        })();
+        let _ = std::fs::remove_dir_all(&unpacked);
+        done
+    }
 }
 
 /// Writes `data` beside `exe` and swaps it in. Windows lets a running program be renamed but not
 /// overwritten, so the one running moves aside (`tidy` removes it at the next start).
+#[cfg(not(target_os = "macos"))]
 fn place(exe: &Path, data: &[u8]) -> Result<(), String> {
     let dir = exe.parent().ok_or("no folder for this program")?;
     let new = dir.join(".sshremote-update.new");
@@ -154,7 +241,7 @@ mod tests {
 
     #[test]
     fn a_list_offers_this_systems_file_only_when_newer() {
-        let list = br#"{"version":"0.30.1","files":[{"name":"sshremote-windows-x86_64.exe","size":10,"sha256":"AB"},{"name":"sshremote-linux-x86_64","size":20,"sha256":"CD"},{"name":"sshremote-macos","size":30,"sha256":"EF"}]}"#;
+        let list = br#"{"version":"0.30.1","files":[{"name":"sshremote-windows-x86_64.exe","size":10,"sha256":"AB"},{"name":"sshremote-linux-x86_64","size":20,"sha256":"CD"},{"name":"sshremote-macos.zip","size":30,"sha256":"EF"}]}"#;
         let r = release_in(list, "https://sshremote.dev/download/index.json", "0.25.12").unwrap().unwrap();
         assert_eq!(r.version, "0.30.1");
         assert!(r.url.starts_with("https://sshremote.dev/download/sshremote-"), "{}", r.url);
@@ -165,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn a_new_version_takes_the_programs_place() {
         let dir = std::env::temp_dir().join(format!("sshremote-update-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -175,6 +263,38 @@ mod tests {
         assert!(!dir.join(".sshremote-update.new").exists());
         #[cfg(windows)]
         assert_eq!(std::fs::read(aside(&exe)).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// macOS: the zipped app takes the place of the app this program runs from, whole and
+    /// still runnable; a program on its own takes the new one's program.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_new_app_takes_the_apps_place() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let exe_opts = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        zip.start_file("SSH Remote.app/Contents/MacOS/sshremote", exe_opts).unwrap();
+        zip.write_all(b"new").unwrap();
+        zip.start_file("SSH Remote.app/Contents/Info.plist", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"<plist/>").unwrap();
+        let data = zip.finish().unwrap().into_inner();
+        let dir = std::env::temp_dir().join(format!("sshremote-update-mac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = dir.join("SSH Remote.app/Contents/MacOS/sshremote");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(dir.join("SSH Remote.app/Contents/stale"), b"x").unwrap();
+        mac::place(&exe, &data).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!dir.join("SSH Remote.app/Contents/stale").exists(), "the app replaced whole");
+        assert!(!dir.join(".sshremote-update").exists());
+        let alone = dir.join("sshremote");
+        std::fs::write(&alone, b"old").unwrap();
+        mac::place(&alone, &data).unwrap();
+        assert_eq!(std::fs::read(&alone).unwrap(), b"new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
