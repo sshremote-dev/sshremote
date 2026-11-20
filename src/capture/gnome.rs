@@ -913,6 +913,11 @@ mod tests {
         assert!(g.pointer().0.is_none(), "the same picture is not sent again");
         g.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
         assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
+        // Moved by so much (the mouse for games), and back.
+        g.input(Input::MoveBy { dx: 40, dy: -30 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((540, 370)) || (pause(), false).1), "moved by 40, -30: {:?}", g.pointer().1);
+        g.input(Input::MoveBy { dx: -40, dy: 30 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "and back");
         let still = next(&mut g).unwrap_or(without);
         let bare = around(&still, (490, 390));
         // Put back into the pictures, it is drawn where it is.
