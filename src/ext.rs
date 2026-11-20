@@ -755,8 +755,13 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return std::fs::read(url).map_err(|e| e.to_string());
     }
+    let proxy = crate::proxy::current();
     let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-fsSL", "--max-time", "120", "--proto", "=https,http", url]);
+    cmd.args(["-fsSL", "--max-time", "120", "--proto", "=https,http"]);
+    if let Some(p) = &proxy {
+        cmd.args(["--proxy", &p.url()]);
+    }
+    cmd.arg(url);
     crate::sys::quiet(&mut cmd);
     let out = match cmd.output() {
         Ok(out) => out,
@@ -764,6 +769,10 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut w = std::process::Command::new("wget");
             w.args(["-q", "-O", "-", "--timeout=120", url]);
+            // wget speaks only to HTTP proxies.
+            if let Some(p) = proxy.filter(|p| p.kind == crate::proxy::Kind::Http) {
+                w.env("https_proxy", p.url()).env("http_proxy", p.url());
+            }
             crate::sys::quiet(&mut w);
             w.output().map_err(|_| "neither curl nor wget is installed to fetch with".to_string())?
         }

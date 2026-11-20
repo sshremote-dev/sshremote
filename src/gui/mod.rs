@@ -246,6 +246,9 @@ struct Form {
     capture: String,
     /// What Connect opens: a terminal, the screen or the files; remembered.
     mode: PaneMode,
+    /// The proxy being typed in Settings, and what trying it said (in the background).
+    proxy: String,
+    proxy_said: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
 /// A connection being made in the background, and what its agent said before it answered.
@@ -426,6 +429,8 @@ impl Form {
                 opt.capture.clone()
             },
             mode: crate::hosts::setting("connect_mode").and_then(|k| PaneMode::from_key(&k)).unwrap_or(PaneMode::Terminal),
+            proxy: crate::proxy::current().map(|p| p.url()).unwrap_or_default(),
+            proxy_said: Default::default(),
         }
     }
 }
@@ -1705,7 +1710,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1761,7 +1766,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

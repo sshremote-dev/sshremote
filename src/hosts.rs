@@ -165,7 +165,14 @@ fn read_lines(name: &str) -> Vec<String> {
 fn write_lines(name: &str, lines: &[String]) {
     if let Some(d) = config_dir() {
         let _ = std::fs::create_dir_all(&d);
-        let _ = std::fs::write(d.join(name), lines.iter().map(|l| format!("{l}\n")).collect::<String>());
+        let f = d.join(name);
+        let _ = std::fs::write(&f, lines.iter().map(|l| format!("{l}\n")).collect::<String>());
+        // Its user's alone: settings may hold a proxy's password.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
@@ -185,6 +192,13 @@ pub fn ago(when: u64) -> String {
 pub fn setting(key: &str) -> Option<String> {
     let prefix = format!("{key}=");
     with_settings(|lines| lines.iter().find_map(|l| l.strip_prefix(&prefix).map(str::to_string)))
+}
+
+/// A preference as the file has it now, past what this process read before (another one may
+/// have changed it: the command line, the window, for a service that runs on).
+pub fn setting_now(key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    read_lines("settings.txt").iter().find_map(|l| l.strip_prefix(&prefix).map(str::to_string))
 }
 
 /// Sets a preference; the file is written at once, so a crash loses nothing.

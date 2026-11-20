@@ -294,6 +294,57 @@ impl App {
                     crate::hosts::set_setting("straight_paths", if on { "yes" } else { "no" });
                 }
             });
+            // Networks that let nothing out but through a proxy.
+            kit::row(ui, "Proxy", |ui| {
+                ui.add(kit::field(&mut self.form.proxy, "socks5://host:1080 or http://host:8080").desired_width(300.0))
+                    .on_hover_text("The relay (computers by ID), updates and extensions are reached through it. One that wants a name and password: http://name:password@host:8080. SSH keeps its own settings (ProxyCommand). Empty: straight.");
+                let set = crate::hosts::setting("proxy").unwrap_or_default();
+                let typed = self.form.proxy.trim().to_string();
+                let parsed = (!typed.is_empty()).then(|| crate::proxy::Proxy::parse(&typed));
+                let ok = !matches!(parsed, Some(Err(_)));
+                let url = match &parsed {
+                    Some(Ok(p)) => p.url(),
+                    _ => String::new(),
+                };
+                if ui.add_enabled(ok && url != set, kit::secondary("Use")).on_disabled_hover_text(match &parsed {
+                    Some(Err(e)) => e.clone(),
+                    _ => "In use".to_string(),
+                }).clicked()
+                {
+                    crate::hosts::set_setting("proxy", &url);
+                    self.form.proxy = url.clone();
+                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(if url.is_empty() { "Straight from now on".into() } else { "Through it from now on".into() }));
+                    // Remote access by ID here too, which a service reads from its own settings.
+                    #[cfg(feature = "remote")]
+                    if let Ok(Some(mut c)) = crate::access::stored()
+                        && c.proxy != url
+                    {
+                        c.proxy = url;
+                        if let Err(e) = crate::access::save(&c) {
+                            *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(format!("Kept for this window; remote access by ID keeps its own until saved as administrator ({e})")));
+                        }
+                    }
+                }
+                #[cfg(feature = "remote")]
+                if !set.is_empty() && ui.add(kit::ghost("Try")).on_hover_text("Reaches the relay through it").clicked() {
+                    let said = self.form.proxy_said.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let relay = crate::access::relay();
+                        let r = crate::access::dial(&relay).map(|_| format!("Reached the relay {relay} through it")).map_err(|e| e.to_string());
+                        *said.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                        ctx.request_repaint();
+                    });
+                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok("Trying\u{2026}".into()));
+                }
+            });
+            if let Some(said) = self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                let (text, colour) = match said {
+                    Ok(t) => (t, ui.visuals().weak_text_color()),
+                    Err(e) => (e, super::bad()),
+                };
+                ui.add(egui::Label::new(RichText::new(text).size(12.0).color(colour)).wrap());
+            }
             kit::row(ui, "Passwords", |ui| {
                 let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember the passwords typed, in the system's password store"));
                 if r.changed() {

@@ -64,6 +64,9 @@ pub struct Config {
     pub idle: u32,
     /// Devices let in without the two-step code (each for `TRUST_DAYS` from when it was trusted).
     pub trusted: Vec<Trusted>,
+    /// The proxy the relay is reached through (`proxy::Proxy`'s URL); empty: straight. Kept
+    /// here for a service that runs without the person's own settings.
+    pub proxy: String,
 }
 
 /// A device a viewer came in from with the two-step code and asked to be trusted on.
@@ -203,7 +206,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>() })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -237,6 +240,7 @@ impl Config {
             cameras: v.get("cameras").and_then(|x| x.as_bool()).unwrap_or(false),
             idle: v.get("idle").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             trusted: v.get("trusted").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Trusted::from_json).collect()).unwrap_or_default(),
+            proxy: s("proxy").unwrap_or_default(),
         })
     }
 }
@@ -378,6 +382,7 @@ pub fn fresh() -> Config {
         cameras: false,
         idle: 0,
         trusted: Vec::new(),
+        proxy: String::new(),
     }
 }
 
@@ -963,16 +968,8 @@ static WAY: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 pub fn dial(relay: &str) -> io::Result<TcpStream> {
     let explicit = relay.trim().rsplit_once(':').is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok());
     let (host, port) = relay_addr(relay);
-    let direct = |port: u16| -> io::Result<TcpStream> {
-        let mut last = io::Error::other("no address");
-        for a in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))? {
-            match TcpStream::connect_timeout(&a, Duration::from_secs(4)) {
-                Ok(s) => return Ok(s),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
-    };
+    // Through the proxy, when one is set.
+    let direct = |port: u16| crate::proxy::connect(&host, port, Duration::from_secs(4));
     if explicit {
         return direct(port);
     }
@@ -1362,7 +1359,8 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         None => crate::totp::check(&cfg.totp, code),
     };
     let totp = (!cfg.totp.is_empty()).then_some(&two_step as crate::net::TwoStep);
-    let punch = (relayed && cfg.punch).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
+    // Through a proxy everything goes its way: no straight path around it.
+    let punch = (relayed && cfg.punch && crate::proxy::current().is_none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
     let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str());
     let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
     // A request without a password: one at a time, and a breath after the last, so nobody can
@@ -1934,6 +1932,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             (false, 0) => "on, viewers give the code of the authenticator app with the password".to_string(),
             (false, n) => format!("on, viewers give the code with the password, but for {n} trusted {} (remote-access trusted)", if n == 1 { "device" } else { "devices" }),
         });
+        if let Some(p) = crate::proxy::current() {
+            println!("proxy:    the relay is reached through {}", p.shown());
+        }
         println!("idle:     {}", if c.idle == 0 { "a session goes on however long the viewer does nothing".to_string() } else { format!("a session ends after {} minutes without input from its viewer", c.idle) });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
@@ -1973,6 +1974,19 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         Some("passwords") => {
             c.passwords = args.get(1).and_then(|w| Passwords::from_word(w)).ok_or("usage: sshremote remote-access passwords lasting|one-time|both")?;
             save(&c)?;
+            show(&c);
+            Ok(())
+        }
+        // The proxy the relay is reached through, for remote access and this person's viewers.
+        Some("proxy") => {
+            let url = match args.get(1).map(String::as_str) {
+                Some("off" | "none") => String::new(),
+                Some(u) => crate::proxy::Proxy::parse(u).map(|p| p.url())?,
+                None => return Err("usage: sshremote remote-access proxy socks5://HOST:PORT | http://[NAME:PASSWORD@]HOST:PORT | off".into()),
+            };
+            c.proxy = url.clone();
+            save(&c)?;
+            crate::hosts::set_setting("proxy", &url);
             show(&c);
             Ok(())
         }
@@ -2164,7 +2178,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 
