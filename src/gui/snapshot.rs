@@ -348,6 +348,11 @@ mod pictures {
     #[test]
     #[ignore]
     fn menus_home() {
+        // A newer version offered over the home screen.
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);
+        app.update.offer(crate::update::Release { version: "9.9.9".into(), url: String::new(), size: 0, sha256: String::new() });
+        Shot::new("home", Vec2::new(960.0, 620.0), true, |ui| app.home(ui)).save("home_update");
         for dark in [true, false] {
             let opt = crate::parse_client(&["--gui".into()]).unwrap();
             let mut app = crate::gui::App::new(crate::gui::Form::from(&opt), None, "", None);

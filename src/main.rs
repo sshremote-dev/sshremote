@@ -56,6 +56,7 @@ mod lan;
 mod keygrab;
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 mod keys;
+mod update;
 mod modules;
 mod options;
 #[cfg(feature = "gui")]
@@ -136,6 +137,7 @@ usage: sshremote                       open the window: connect screen, recent h
                                   roll-back ID returns to the version before the last update
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --version             which version this is
+       sshremote update [--check]      put the newer version from sshremote.dev in place of this one
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|log|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
                                 straight|lan|direct|requests|cameras on|off|passwords lasting|one-time|both|one-time|
@@ -493,6 +495,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "--stats" | "terminal" => Err(NO_WINDOWS.into()),
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
+        "update" => update::cli(&args[1..]),
         "module" => modules::cli(&args[1..]),
         "here" => here::cli(),
         // Computers nearby with remote access on, and waking one by its network card.

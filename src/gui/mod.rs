@@ -348,6 +348,8 @@ pub struct App {
     #[cfg(windows)]
     told_tray: bool,
     error: Option<String>,
+    /// A newer version: looked for in the background, offered over the home screen.
+    update: home::Update,
     budget: Option<f64>,
     /// System keys taken from Windows while a session is in front.
     grabbed: Option<mpsc::Receiver<(u32, bool)>>,
@@ -468,6 +470,10 @@ fn boot(native: eframe::NativeOptions, make: impl FnOnce(&eframe::CreationContex
     let r = eframe::run_native("sshremote", native, Box::new(move |cc| Ok(Box::new(make(cc)))))
         .map_err(|e| e.to_string());
     crate::exthost::stop_all();
+    // Updated and asked to start again: the new version, once this one has let go of everything.
+    if let Some(exe) = home::RESTART.get() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
     r
 }
 
@@ -738,7 +744,10 @@ impl App {
         let grabbed = None;
         let ctx = cc.egui_ctx.clone();
         crate::exthost::start(move || ctx.request_repaint());
-        App::new(form, budget, open, grabbed)
+        let mut app = App::new(form, budget, open, grabbed);
+        crate::update::tidy();
+        app.update.look(&cc.egui_ctx);
+        app
     }
 
     /// The app on its home screen; `open` as `--open` gives it, `grabbed` the system keys caught.
@@ -770,6 +779,7 @@ impl App {
             #[cfg(windows)]
             told_tray: false,
             error: None,
+            update: home::Update::default(),
             budget,
             grabbed,
             focus_host: true,

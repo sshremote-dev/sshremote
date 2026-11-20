@@ -50,6 +50,7 @@ impl App {
             let mut l = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
             egui::ScrollArea::vertical().id_salt("this-computer").auto_shrink([false, false]).show(&mut l, |ui| self.this_computer(ui));
             let mut r = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Min)));
+            self.update_banner(&mut r);
             self.error_banner(&mut r);
             self.going_out(&mut r, &mut go);
         });
@@ -60,6 +61,54 @@ impl App {
         self.computer_sheet(&ctx);
         self.access_sheet(&ctx);
         self.settings_window(&ctx);
+    }
+
+    /// A newer version, over the right column: put in place when asked, then started again.
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        self.update.poll();
+        let u = &mut self.update;
+        let Some(r) = u.found.clone().filter(|_| !u.dismissed) else { return };
+        let ours = env!("CARGO_PKG_VERSION");
+        let (mut update, mut later, mut restart) = (false, false, false);
+        egui::Frame::new()
+            .fill(ACCENT.gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.5)))
+            .corner_radius(CornerRadius::same(theme::R_MD))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::DOWNLOAD).size(16.0).color(ACCENT));
+                    let text = match (&u.done, &u.failed, u.installing.is_some()) {
+                        (Some(_), _, _) => format!("Updated to {}: start it again to use it.", r.version),
+                        (_, Some(e), _) => format!("The update to {} did not go in: {e}", r.version),
+                        (_, _, true) => format!("Getting {}\u{2026}", r.version),
+                        _ => format!("SSH Remote {} is out (this is {ours}).", r.version),
+                    };
+                    ui.add(egui::Label::new(RichText::new(text).color(ui.visuals().strong_text_color())).wrap());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if u.done.is_some() {
+                            restart = ui.add(kit::secondary("Start again")).on_hover_text("Ends this window's connections and opens the new version").clicked();
+                        } else if u.installing.is_none() {
+                            later = ui.add(kit::ghost("Later")).clicked();
+                            update = ui.add(kit::secondary("Update")).on_hover_text("Puts the new version in place of this program, checked against sshremote.dev's signed list").clicked();
+                        }
+                    });
+                });
+            });
+        ui.add_space(10.0);
+        if later {
+            u.dismissed = true;
+        }
+        if update {
+            u.install(ui.ctx(), r);
+        }
+        if restart && let Some(exe) = u.done.clone() {
+            let _ = RESTART.set(exe);
+            self.quit_session();
+            self.quitting = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     /// What went wrong last, over the right column, until dismissed or another thing is done.
@@ -443,3 +492,74 @@ fn with_port(host: &str, port: &str) -> String {
     if at.contains(':') { format!("{user}[{at}]:{port}") } else { format!("{user}{at}:{port}") }
 }
 
+/// The program to start once this one has closed, after an update.
+pub(super) static RESTART: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// A newer version: looked for once a day (unless the setting `updates` is `off`), then got and
+/// put in place on a thread of its own.
+#[derive(Default)]
+pub(super) struct Update {
+    looking: Option<mpsc::Receiver<Result<Option<crate::update::Release>, String>>>,
+    found: Option<crate::update::Release>,
+    installing: Option<mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    done: Option<std::path::PathBuf>,
+    failed: Option<String>,
+    dismissed: bool,
+}
+
+impl Update {
+    /// Pictures: a newer version as if it had been found.
+    #[cfg(test)]
+    pub(in crate::gui) fn offer(&mut self, r: crate::update::Release) {
+        self.found = Some(r);
+    }
+
+    pub(super) fn look(&mut self, ctx: &egui::Context) {
+        if crate::hosts::setting("updates").is_some_and(|v| v == "off") {
+            return;
+        }
+        let last = crate::hosts::setting("update_checked").and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+        if crate::sys::now_secs().saturating_sub(last) < 86_400 {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::update::check());
+            ctx.request_repaint();
+        });
+        self.looking = Some(rx);
+    }
+
+    fn poll(&mut self) {
+        if let Some(rx) = &self.looking
+            && let Ok(got) = rx.try_recv()
+        {
+            self.looking = None;
+            // Looked at again tomorrow; a network that failed tries again at the next start.
+            if let Ok(found) = got {
+                crate::hosts::set_setting("update_checked", &crate::sys::now_secs().to_string());
+                self.found = found;
+            }
+        }
+        if let Some(rx) = &self.installing
+            && let Ok(got) = rx.try_recv()
+        {
+            self.installing = None;
+            match got {
+                Ok(exe) => self.done = Some(exe),
+                Err(e) => self.failed = Some(e),
+            }
+        }
+    }
+
+    fn install(&mut self, ctx: &egui::Context, r: crate::update::Release) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::update::install(&r));
+            ctx.request_repaint();
+        });
+        (self.installing, self.failed) = (Some(rx), None);
+    }
+}

@@ -320,6 +320,14 @@ impl App {
                 ui.hyperlink_to("sshremote.dev", "https://sshremote.dev");
                 ui.hyperlink_to("Documentation", "https://sshremote.dev/docs.html");
             });
+            let mut on = crate::hosts::setting("updates").is_none_or(|v| v != "off");
+            if ui
+                .checkbox(&mut on, "Look for a newer version once a day")
+                .on_hover_text("Reads sshremote.dev's signed list of downloads; a newer version is offered on the home screen, never put in place unasked")
+                .changed()
+            {
+                crate::hosts::set_setting("updates", if on { "on" } else { "off" });
+            }
         });
         if cfg!(windows) {
             ui.add_space(kit::GAP);

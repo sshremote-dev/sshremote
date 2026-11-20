@@ -748,7 +748,7 @@ pub fn registry_url() -> String {
 
 /// Fetches with the system's curl (on Windows 10 and later, Linux and macOS alike); file paths
 /// and file:// URLs are read directly.
-fn fetch(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if let Some(p) = url.strip_prefix("file://") {
         return std::fs::read(p.trim_start_matches('/').replace("%20", " ")).or_else(|_| std::fs::read(p)).map_err(|e| e.to_string());
     }
@@ -786,7 +786,7 @@ fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
 }
 
 /// Checks `data` against an ssh signature by `key` in `namespace`.
-fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
+pub(crate) fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
     // In this user's own settings folder: in the shared temp folder another user could put
     // their own allowed signers in its place.
     let base = crate::hosts::config_dir().ok_or("no settings folder")?;
