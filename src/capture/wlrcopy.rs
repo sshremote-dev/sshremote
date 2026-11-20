@@ -822,9 +822,26 @@ mod tests {
             assert!(lo.0 as f64 <= b.0 && b.0 <= hi.0 as f64 + 1.0 && lo.1 as f64 <= b.1 && b.1 <= hi.1 as f64 + 1.0, "monitor {i}: not where it was sent");
             assert!((near(a, lo) || near(b, lo)) && (near(a, hi) || near(b, hi)), "monitor {i}: the picture changed away from the pointer");
         }
-        // Back on the first monitor, where the other tests type.
+        // Back on the first monitor, where the other tests type; moved by so much (the mouse for
+        // games), it is where moving there would have put it.
         w.select(0).unwrap();
         let (mw, mh) = w.desktop_size();
+        let (a, b) = ((mw as f64 * 0.3, mh as f64 * 0.5), (mw as f64 * 0.3 + 90.0, mh as f64 * 0.5 + 70.0));
+        w.input(Input::Move { x: a.0, y: a.1 }).unwrap();
+        let before = settled(&mut w);
+        w.input(Input::MoveBy { dx: 90, dy: 70 }).unwrap();
+        let after = settled(&mut w);
+        let (mut lo, mut hi) = ((usize::MAX, usize::MAX), (0, 0));
+        for y in 0..after.h {
+            for x in 0..after.w {
+                let o = y * after.stride + x * 4;
+                if before.data[o..o + 3] != after.data[o..o + 3] {
+                    (lo, hi) = ((lo.0.min(x), lo.1.min(y)), (hi.0.max(x), hi.1.max(y)));
+                }
+            }
+        }
+        eprintln!("moved by 90, 70 from {a:?}: picture changed in {lo:?}..{hi:?}");
+        assert!(lo.0 as f64 <= b.0 && b.0 <= hi.0 as f64 + 1.0 && lo.1 as f64 <= b.1 && b.1 <= hi.1 as f64 + 1.0, "not moved by so much");
         w.input(Input::Move { x: mw as f64 / 2.0, y: mh as f64 / 2.0 }).unwrap();
     }
 }

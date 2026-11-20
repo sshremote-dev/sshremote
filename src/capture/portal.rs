@@ -246,6 +246,7 @@ impl Portal {
             Input::HScroll { steps } => self.axis(1, steps),
             Input::KeyState { keysym, down } => self.keysym(keysym, down),
             Input::SecureAttention => Ok(()),
+            Input::MoveBy { dx, dy } => self.notify("NotifyPointerMotion", &(ObjectPath::from(&self.session), Self::none(), dx as f64, dy as f64)),
             Input::Key { keysym, mods } => {
                 let held: Vec<u32> = [(MOD_CTRL, 29), (MOD_SHIFT, 42), (MOD_ALT, 56), (MOD_SUPER, 125)]
                     .into_iter()

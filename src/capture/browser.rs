@@ -849,6 +849,8 @@ impl Capture for Browser {
                 self.key(keysym, false, mods)
             }
             Input::SecureAttention => Ok(()),
+            // A page has no pointer of its own to move by so much.
+            Input::MoveBy { .. } => Ok(()),
         }
     }
 }

@@ -45,6 +45,7 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         ToAgent::Key { .. }
         | ToAgent::KeyState { .. }
         | ToAgent::Pointer { .. }
+        | ToAgent::PointerBy { .. }
         | ToAgent::Button { .. }
         | ToAgent::Scroll { .. }
         | ToAgent::HScroll { .. }

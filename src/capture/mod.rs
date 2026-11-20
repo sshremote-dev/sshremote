@@ -59,6 +59,8 @@ pub enum Input {
     Key { keysym: u32, mods: u8 },
     KeyState { keysym: u32, down: bool },
     Move { x: f64, y: f64 },
+    /// Moved by this much, in the host's pixels (as a mouse moves, not to a place).
+    MoveBy { dx: i32, dy: i32 },
     Button { button: u8, pressed: bool },
     Scroll { steps: i32 },
     HScroll { steps: i32 },

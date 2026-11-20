@@ -540,6 +540,13 @@ impl Remote {
                     ui.checkbox(&mut self.view_only, "View only").on_hover_text("Watch without sending keys, clicks or the wheel");
                 }
                 ui.checkbox(&mut self.share_clipboard, "Share clipboard").on_hover_text("Copied text goes both ways");
+                if !self.mirror && !self.web && ui.checkbox(&mut self.games, "Mouse for games").on_hover_text("The pointer is held in this window and its movement goes to the host, for games that turn with the mouse. Click the picture to hold it; Ctrl+Alt lets it go").changed() {
+                    // Held at once, from the menu: Ctrl+Alt or this again lets it go.
+                    self.games_held = self.games;
+                    if self.games {
+                        self.notify("The mouse is held for the game: Ctrl+Alt lets it go");
+                    }
+                }
                 if crate::modules::on("sound") {
                     sound_clicked = ui.checkbox(&mut sound, "Sound (about 8 KB/s)").clicked();
                 }

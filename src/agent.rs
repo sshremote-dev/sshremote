@@ -732,6 +732,7 @@ fn serve_with(
                     report(cap.input(Input::Move { x: sx, y: sy }));
                     pointer.moved((sx as i32, sy as i32), Instant::now());
                 }
+                ToAgent::PointerBy { dx, dy } => report(cap.input(Input::MoveBy { dx: dx as i32, dy: dy as i32 })),
                 ToAgent::Button { button, pressed } => {
                     held.button(button, pressed);
                     // A click the shared window does not take: say once in a while how to get out.

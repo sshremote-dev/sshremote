@@ -191,6 +191,12 @@ pub(super) struct Remote {
     resume: transfer::Resume,
     /// The computer's address, asked to trust this one (`ToAgent::TrustMe`).
     trust_for: Option<String>,
+    /// The mouse for games: on (`games`), holding the pointer now (`games_held`, until Ctrl+Alt), as
+    /// the window was last told (`grab_set`), and movement not yet a whole pixel.
+    pub(super) games: bool,
+    games_held: bool,
+    grab_set: bool,
+    moved_by: Vec2,
     /// Uploads and downloads finished since the last notice about them.
     sent: Settled,
     got: Settled,
@@ -272,6 +278,7 @@ pub(super) struct Prefs {
     term_h: f32,
     monitor: Option<u8>,
     paused: bool,
+    games: bool,
 }
 
 /// The picture quality chosen: adapting to the link, a preset, or settings of the user's own.
@@ -385,6 +392,10 @@ impl Remote {
             next_tag: 1,
             resume: Default::default(),
             trust_for: None,
+            games: false,
+            games_held: false,
+            grab_set: false,
+            moved_by: Vec2::ZERO,
             sent: Settled::default(),
             got: Settled::default(),
             ssh_cmd,
@@ -605,6 +616,7 @@ impl Remote {
         } else {
             self.input(&ctx, shown, &ui_rects)?;
         }
+        self.hold_pointer(&ctx, shown.filter(|_| keys && !term_keys))?;
         // Full screen on or off (F11 is the host's here).
         if self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter)) {
             self.full_toggle = true;
@@ -1298,6 +1310,7 @@ impl Remote {
             term_h: self.term_h,
             monitor: self.chosen_monitor,
             paused: self.user_paused,
+            games: self.games,
         }
     }
 
@@ -1307,6 +1320,8 @@ impl Remote {
         (self.view_only, self.fit, self.fill_full) = (p.view_only, p.fit, p.fill_full);
         (self.share_clipboard, self.grab_keys) = (p.share_clipboard, p.grab_keys);
         (self.chat_w, self.term_h) = (p.chat_w, p.term_h);
+        // On again, held at the next click on the picture.
+        self.games = p.games;
         match p.quality {
             Quality::Auto => {
                 if self.ctl.auto.is_none() {

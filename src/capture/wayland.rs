@@ -311,6 +311,11 @@ mod tests {
         assert!(w.pointer().0.is_none(), "the same picture is not sent again");
         w.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
         assert!((0..150).any(|_| w.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
+        // Moved by so much (the mouse for games), and back.
+        w.input(Input::MoveBy { dx: 40, dy: -30 }).unwrap();
+        assert!((0..150).any(|_| w.pointer().1 == Some((540, 370)) || (pause(), false).1), "moved by 40, -30: {:?}", w.pointer().1);
+        w.input(Input::MoveBy { dx: -40, dy: 30 }).unwrap();
+        assert!((0..150).any(|_| w.pointer().1 == Some((500, 400)) || (pause(), false).1), "and back");
         w.again = true;
         let still = next(&mut w).expect("a picture");
         let bare = around(&still, (490, 390));

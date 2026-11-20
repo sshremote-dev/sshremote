@@ -881,6 +881,8 @@ impl Capture for Gdi {
                 let ny = ((self.origin.1 as f64 + y - vy) * 65535.0 / (vh - 1.0)) as i32;
                 seq.push(mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0));
             }
+            // Relative: what games that read raw movement take.
+            Input::MoveBy { dx, dy } => seq.push(mouse(MOUSEEVENTF_MOVE, dx, dy, 0)),
             Input::Button { button, pressed } => {
                 let flags = match (button, pressed) {
                     (1, true) => MOUSEEVENTF_LEFTDOWN,

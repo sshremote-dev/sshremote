@@ -1339,6 +1339,7 @@ impl Capture for Gnome {
             }
             Input::Scroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(0u32, steps)),
             Input::HScroll { steps } => notify!(self, "NotifyPointerAxisDiscrete", &(1u32, steps)),
+            Input::MoveBy { dx, dy } => notify!(self, "NotifyPointerMotionRelative", &(dx as f64, dy as f64)),
             Input::KeyState { keysym, down } => {
                 self.settle(false);
                 notify!(self, "NotifyKeyboardKeysym", &(keysym, down))

@@ -81,6 +81,12 @@ pub enum ToAgent {
         x: u16,
         y: u16,
     },
+    /// The pointer moved by this much, as the mouse moved here (games that turn with the mouse
+    /// read the movement, not where the pointer is).
+    PointerBy {
+        dx: i16,
+        dy: i16,
+    },
     Button {
         button: u8,
         pressed: bool,
@@ -690,6 +696,11 @@ impl ToAgent {
                 b.push(*mods);
                 3
             }
+            ToAgent::PointerBy { dx, dy } => {
+                b.extend_from_slice(&dx.to_le_bytes());
+                b.extend_from_slice(&dy.to_le_bytes());
+                56
+            }
             ToAgent::Pointer { x, y } => {
                 b.extend_from_slice(&x.to_le_bytes());
                 b.extend_from_slice(&y.to_le_bytes());
@@ -931,6 +942,7 @@ impl ToAgent {
             2 => ToAgent::Ack(c.u32()?),
             3 => ToAgent::Key { keysym: c.u32()?, mods: c.u8()? },
             4 => ToAgent::Pointer { x: c.u16()?, y: c.u16()? },
+            56 => ToAgent::PointerBy { dx: c.u16()? as i16, dy: c.u16()? as i16 },
             5 => ToAgent::Button { button: c.u8()?, pressed: c.u8()? != 0 },
             6 => ToAgent::Scroll { steps: c.u8()? as i8 },
             7 => ToAgent::Refresh,
@@ -1615,6 +1627,7 @@ mod tests {
             ToAgent::Fetch { tag: 5, path: "/x".into() },
             ToAgent::FetchCancel { id: 6, tag: 5 },
             ToAgent::Resumes,
+            ToAgent::PointerBy { dx: -7, dy: 300 },
             ToAgent::TrustMe,
             ToAgent::TrustToken("ab12".into()),
             ToAgent::FileResume { id: 7, size: 1 << 33, from: 1 << 20, tail: [9; 32], dir: "/d".into(), name: "a/b.iso".into() },

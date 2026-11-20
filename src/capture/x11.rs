@@ -697,6 +697,11 @@ impl Capture for X11 {
                 }
             }
             Input::SecureAttention => {}
+            // XTest moves it by so much when told the motion is relative.
+            Input::MoveBy { dx, dy } => {
+                let (dx, dy) = (dx.clamp(-32768, 32767) as i16, dy.clamp(-32768, 32767) as i16);
+                self.conn.xtest_fake_input(xproto::MOTION_NOTIFY_EVENT, 1, 0, x11rb::NONE, dx, dy, 0).map_err(err)?;
+            }
         }
         self.conn.flush().map_err(err)?;
         Ok(())
@@ -724,6 +729,10 @@ mod tests {
         let p = x.conn.query_pointer(x.root).unwrap().reply().unwrap();
         let (ox, oy) = x.origin();
         assert_eq!((p.root_x as i32 - ox, p.root_y as i32 - oy), (33, 44));
+        // Moved by so much, as a mouse for games moves it.
+        x.input(Input::MoveBy { dx: 10, dy: -4 }).unwrap();
+        let p = x.conn.query_pointer(x.root).unwrap().reply().unwrap();
+        assert_eq!((p.root_x as i32 - ox, p.root_y as i32 - oy), (43, 40));
         // A character no key makes is typed through a key mapped for it.
         let (code, _) = x.keycode(xk_unicode('한')).unwrap();
         assert!(x.keys.find(xk_unicode('한')).is_none() && code >= x.keys.min);

@@ -475,3 +475,48 @@ fn transfers_go_on_after_the_connection_breaks() {
     assert!(got < (20 << 20) - (5 << 20) + (1 << 20) + (2 << 20), "only the rest came again: {got} bytes (first connection {rx_before})");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The mouse for games: the window holds the pointer, the mouse's movement moves the host's by
+/// as much (whole pixels, the rest kept for the next), Ctrl+Alt lets it go, and a click on the
+/// picture holds it again without reaching the host.
+#[test]
+#[ignore]
+fn the_mouse_for_games_moves_the_host_pointer_by_its_movement() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    h.frame(Vec::new()).unwrap();
+    let pic = h.r.last_shown.expect("the picture");
+    let wait = |h: &mut Harness, what: &str, ok: &dyn Fn(&Remote) -> bool| {
+        for _ in 0..200 {
+            h.frame(Vec::new()).unwrap();
+            if ok(&h.r) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("{what}: host pointer {:?}", h.r.host_pointer);
+    };
+    h.frame(vec![Event::PointerMoved(pic.center())]).unwrap();
+    let start = h.r.host_pointer.expect("placed");
+    h.r.games = true;
+    h.r.games_held = true;
+    h.frame(Vec::new()).unwrap();
+    assert!(h.r.grab_set, "held");
+    // Moves here are no place there any more; the movement is.
+    h.frame(vec![Event::PointerMoved(pic.min + Vec2::splat(5.0)), Event::MouseMoved(Vec2::new(30.4, -20.0)), Event::MouseMoved(Vec2::new(0.7, 0.0))]).unwrap();
+    let want = (start.0 + 31, start.1 - 20);
+    wait(&mut h, "moved by 31, -20", &|r| r.host_pointer == Some(want));
+    assert!((h.r.moved_by.x - 0.1).abs() < 0.01, "the rest kept");
+    // Ctrl+Alt lets it go; a click on the picture holds it again, and goes no further.
+    h.frame(vec![Event::ModifiersChanged(egui::Modifiers { ctrl: true, alt: true, ..Default::default() })]).unwrap();
+    h.frame(vec![Event::ModifiersChanged(egui::Modifiers::NONE)]).unwrap();
+    assert!(!h.r.games_held && !h.r.grab_set, "let go");
+    let press = |pressed| Event::PointerButton { pos: pic.center(), button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    h.frame(vec![Event::PointerMoved(pic.center()), press(true)]).unwrap();
+    assert!(h.r.games_held, "held again by the click");
+    h.frame(vec![press(false)]).unwrap();
+    assert!(h.r.grab_set);
+    // Turned off: the window lets it go.
+    h.r.games = false;
+    h.frame(Vec::new()).unwrap();
+    assert!(!h.r.grab_set && !h.r.games_held);
+}

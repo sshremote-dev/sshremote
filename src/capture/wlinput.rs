@@ -303,6 +303,11 @@ impl WlInput {
                 }
             }
             Input::SecureAttention => {}
+            Input::MoveBy { dx, dy } => {
+                let p = pointer()?;
+                p.motion(t, dx as f64, dy as f64);
+                p.frame();
+            }
         }
         self.conn.flush().map_err(|e| e.to_string())
     }

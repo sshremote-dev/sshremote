@@ -107,6 +107,7 @@ impl Remote {
     pub(in crate::gui) fn input(&mut self, ctx: &egui::Context, shown: Option<Rect>, ui_rects: &[Rect]) -> Result<(), String> {
         let (events, focused) = ctx.input(|i| (i.events.clone(), i.focused));
         if !focused {
+            self.games_held = false;
             return self.release_all();
         }
         // Pointer events over any of this window's own controls (toolbar, menus, panels) stay here.
@@ -135,6 +136,32 @@ impl Remote {
                     self.notify("Choosing a window cancelled");
                 }
                 continue;
+            }
+            // The mouse for games: its movement goes as it is, never where the pointer is here;
+            // Ctrl+Alt lets it go, and a click on the picture holds it again.
+            if self.games && !local {
+                match &e {
+                    Event::MouseMoved(d) if self.grab_set => {
+                        self.moved_by += *d;
+                        continue;
+                    }
+                    Event::PointerMoved(_) if self.grab_set => continue,
+                    Event::ModifiersChanged(m) | Event::Key { modifiers: m, .. } if self.games_held && m.ctrl && m.alt => {
+                        self.games_held = false;
+                        self.notify("The mouse is yours again: click the picture to hold it for the game");
+                    }
+                    Event::PointerButton { pos, pressed: true, .. } if !self.games_held && shown.is_some_and(|r| r.contains(*pos)) && !over_toolbar(*pos) => {
+                        self.games_held = true;
+                        self.notify("The mouse is held for the game: Ctrl+Alt lets it go");
+                        continue;
+                    }
+                    Event::PointerButton { pos: _, button, pressed, modifiers } if self.grab_set => {
+                        self.sync_mods(*modifiers)?;
+                        self.send(ToAgent::Button { button: button_number(*button), pressed: *pressed })?;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             match e {
                 // Full screen here: the host does not see this one key.
@@ -245,13 +272,7 @@ impl Remote {
                         self.host_pointer = Some((p.0 as i16, p.1 as i16));
                         self.send(ToAgent::Pointer { x: p.0, y: p.1 })?;
                     }
-                    let b = match button {
-                        egui::PointerButton::Primary => 1,
-                        egui::PointerButton::Middle => 2,
-                        egui::PointerButton::Secondary => 3,
-                        egui::PointerButton::Extra1 => 8,
-                        egui::PointerButton::Extra2 => 9,
-                    };
+                    let b = button_number(button);
                     self.send(ToAgent::Button { button: b, pressed })?;
                     if self.click_pick && b == 1 && pressed {
                         self.pick_pressed = true;
@@ -291,6 +312,42 @@ impl Remote {
                 _ => {}
             }
         }
+        // The movement in whole pixels, the rest added to the next.
+        let (dx, dy) = (self.moved_by.x.trunc(), self.moved_by.y.trunc());
+        if dx != 0.0 || dy != 0.0 {
+            self.moved_by -= Vec2::new(dx, dy);
+            self.send(ToAgent::PointerBy { dx: dx.clamp(-32768.0, 32767.0) as i16, dy: dy.clamp(-32768.0, 32767.0) as i16 })?;
+        }
+        Ok(())
+    }
+
+    /// The window holds the pointer while the mouse is for the game (`shown`: the picture, when
+    /// its keys go to the host): hidden and kept in the window, where only its movement counts.
+    /// Wayland locks it in place; elsewhere it is kept in the window and put back in the middle.
+    pub(in crate::gui) fn hold_pointer(&mut self, ctx: &egui::Context, shown: Option<Rect>) -> Result<(), String> {
+        let hold = self.games && self.games_held && shown.is_some();
+        if !hold {
+            self.games_held &= self.games;
+            self.moved_by = Vec2::ZERO;
+        }
+        let locks = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("WINIT_UNIX_BACKEND").ok().is_none_or(|b| b != "x11");
+        if hold != self.grab_set {
+            self.grab_set = hold;
+            let grab = match (hold, locks) {
+                (false, _) => egui::CursorGrab::None,
+                (true, true) => egui::CursorGrab::Locked,
+                (true, false) => egui::CursorGrab::Confined,
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(grab));
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!hold));
+        }
+        if let Some(r) = shown.filter(|_| hold) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            // Kept from the window's edges, where it would stop.
+            if !locks && ctx.input(|i| i.pointer.latest_pos()).is_none_or(|p| (p - r.center()).length() > r.size().min_elem() / 4.0) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(r.center()));
+            }
+        }
         Ok(())
     }
 
@@ -318,5 +375,16 @@ impl Remote {
                 Ok(())
             }
         }
+    }
+}
+
+/// The host's number for a mouse button.
+fn button_number(b: egui::PointerButton) -> u8 {
+    match b {
+        egui::PointerButton::Primary => 1,
+        egui::PointerButton::Middle => 2,
+        egui::PointerButton::Secondary => 3,
+        egui::PointerButton::Extra1 => 8,
+        egui::PointerButton::Extra2 => 9,
     }
 }

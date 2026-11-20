@@ -179,6 +179,9 @@ impl Capture for Synthetic {
     fn input(&mut self, ev: Input) -> Result<(), String> {
         match ev {
             Input::Move { x, y } => self.pointer = ((x as usize).min(W - 1), (y as usize).min(H - 1)),
+            Input::MoveBy { dx, dy } => {
+                self.pointer = ((self.pointer.0 as i64 + dx as i64).clamp(0, W as i64 - 1) as usize, (self.pointer.1 as i64 + dy as i64).clamp(0, H as i64 - 1) as usize);
+            }
             Input::Button { pressed: true, .. } => self.clicks += 1,
             Input::Key { keysym: xk::BACKSPACE, .. } => {
                 self.typed.pop();
