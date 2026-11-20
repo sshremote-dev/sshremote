@@ -33,6 +33,7 @@ sign() { # FILE NAMESPACE: FILE.sig beside it, then the check the program makes
     scp -q "$1" "$SIGN_HOST:sshremote-sign/index.json"
     ssh "$SIGN_HOST" "ssh-keygen -q -Y sign -f $SIGN_KEY -n $2 sshremote-sign/index.json"
     scp -q "$SIGN_HOST:sshremote-sign/index.json.sig" "$1.sig"
+    chmod 644 "$1.sig"
     # Unix shells take rm, Windows' cmd rmdir.
     ssh "$SIGN_HOST" "rm -rf sshremote-sign || rmdir /s /q sshremote-sign" >/dev/null 2>&1 || true
   else
