@@ -796,16 +796,19 @@ pub(crate) fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -
     std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
     let signers = dir.join("allowed_signers");
     let sig_file = dir.join("index.sig");
+    let data_file = dir.join("index");
     let r = (|| {
         std::fs::write(&signers, format!("{SIGNER_ID} namespaces=\"{namespace}\" {key}
 ")).map_err(|e| e.to_string())?;
         std::fs::write(&sig_file, sig).map_err(|e| e.to_string())?;
+        std::fs::write(&data_file, data).map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new("ssh-keygen");
         cmd.args(["-Y", "verify", "-I", SIGNER_ID, "-n", namespace, "-f"]).arg(&signers).arg("-s").arg(&sig_file);
-        cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        // What is checked comes from a file: Windows' ssh-keygen waits for ever on a pipe.
+        let input = std::fs::File::open(&data_file).map_err(|e| e.to_string())?;
+        cmd.stdin(input).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
         crate::sys::quiet(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("ssh-keygen (OpenSSH) is needed to check the registry: {e}"))?;
-        child.stdin.take().ok_or("ssh-keygen")?.write_all(data).map_err(|e| e.to_string())?;
+        let child = cmd.spawn().map_err(|e| format!("ssh-keygen (OpenSSH) is needed to check the registry: {e}"))?;
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if out.status.success() {
             Ok(())
@@ -815,6 +818,7 @@ pub(crate) fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -
     })();
     let _ = std::fs::remove_file(&signers);
     let _ = std::fs::remove_file(&sig_file);
+    let _ = std::fs::remove_file(&data_file);
     let _ = std::fs::remove_dir(&dir);
     r
 }
