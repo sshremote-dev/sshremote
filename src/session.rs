@@ -43,7 +43,11 @@ impl<R: Read> Read for Counting<R> {
 
 pub struct Session {
     link: Link,
-    writer: Option<BufWriter<Box<dyn Write + Send>>>,
+    /// Shared with the thread that keeps a quiet session up (`keep_up`).
+    writer: Arc<Mutex<Option<BufWriter<Box<dyn Write + Send>>>>>,
+    /// When something was last sent (seconds since the session began).
+    sent_at: Arc<AtomicU64>,
+    started: Instant,
     errlog: Arc<Mutex<Vec<u8>>>,
     rx_bytes: Arc<AtomicU64>,
     pub tx_bytes: u64,
@@ -226,7 +230,9 @@ impl Session {
         }
         let mut sess = Session {
             link,
-            writer: Some(BufWriter::new(writer)),
+            writer: Arc::new(Mutex::new(Some(BufWriter::new(writer)))),
+            sent_at: Arc::new(AtomicU64::new(0)),
+            started: Instant::now(),
             errlog,
             rx_bytes,
             tx_bytes: 0,
@@ -234,6 +240,7 @@ impl Session {
             backend: String::new(),
             waker,
         };
+        sess.keep_up();
         // What comes before the hello is said (the person at the screen is asked, which may take
         // them a minute) and waited past.
         let mut until = Instant::now() + Duration::from_secs(60);
@@ -272,9 +279,39 @@ impl Session {
     pub fn send(&mut self, m: ToAgent) -> io::Result<()> {
         let (k, p) = m.encode();
         self.tx_bytes += 5 + p.len() as u64;
-        let w = self.writer.as_mut().ok_or_else(|| io::Error::other("closed"))?;
+        self.sent_at.store(self.link_age(), Ordering::Relaxed);
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let w = writer.as_mut().ok_or_else(|| io::Error::other("closed"))?;
         write_msg(w, k, &p)?;
         w.flush()
+    }
+
+    fn link_age(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Pings a session that has sent nothing for a while, from a thread of its own: a window
+    /// not drawn (minimized) runs no frames to ping from, and the agent ends a session it hears
+    /// nothing from for two minutes. Ends with the session.
+    fn keep_up(&self) {
+        let (writer, sent_at, started) = (Arc::downgrade(&self.writer), self.sent_at.clone(), self.started);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(15));
+                let Some(writer) = writer.upgrade() else { return };
+                let mut writer = writer.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(w) = writer.as_mut() else { return };
+                let now = started.elapsed().as_secs();
+                if now.saturating_sub(sent_at.load(Ordering::Relaxed)) < 45 {
+                    continue;
+                }
+                let (k, p) = ToAgent::Ping(0).encode();
+                if write_msg(w, k, &p).and_then(|_| w.flush()).is_err() {
+                    return;
+                }
+                sent_at.store(now, Ordering::Relaxed);
+            }
+        });
     }
 
     /// A re-announced desktop (another monitor or shared area): the new size and backend.
@@ -325,7 +362,7 @@ impl Session {
     }
 
     pub fn close(&mut self) {
-        self.writer = None;
+        *self.writer.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.link.close();
     }
 }
