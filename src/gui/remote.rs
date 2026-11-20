@@ -189,6 +189,8 @@ pub(super) struct Remote {
     next_tag: u32,
     /// Going on with the transfers a broken connection cut off.
     resume: transfer::Resume,
+    /// The computer's address, asked to trust this one (`ToAgent::TrustMe`).
+    trust_for: Option<String>,
     /// Uploads and downloads finished since the last notice about them.
     sent: Settled,
     got: Settled,
@@ -382,6 +384,7 @@ impl Remote {
             fetch_dirs: Default::default(),
             next_tag: 1,
             resume: Default::default(),
+            trust_for: None,
             sent: Settled::default(),
             got: Settled::default(),
             ssh_cmd,
@@ -672,6 +675,7 @@ impl Remote {
             }
             match ev {
                 Ok(Ev::Net(ToClient::Can(bits))) => self.can(bits)?,
+                Ok(Ev::Net(ToClient::Trusted(token))) => self.trusted(token),
                 Ok(Ev::Net(ToClient::FileFrom { id, from })) => self.file_from(id, from)?,
                 Ok(Ev::Net(ToClient::FetchAt { id, size, tag, from, name })) => self.fetch_at(id, size, tag, from, name)?,
                 Ok(Ev::Net(ToClient::Frame(f))) => {
@@ -1127,6 +1131,21 @@ impl Remote {
     /// The round trip to the host in milliseconds.
     pub(super) fn rtt(&self) -> f32 {
         self.ctl.rtt as f32
+    }
+
+    /// Asks the computer at `address` to let this one in without the two-step code from now on.
+    pub(super) fn ask_trust(&mut self, address: String) -> Result<(), String> {
+        self.trust_for = Some(address);
+        self.send(ToAgent::TrustMe)
+    }
+
+    /// The computer trusts this one: its token is kept for the next connections.
+    fn trusted(&mut self, token: String) {
+        let Some(address) = self.trust_for.take() else { return };
+        match crate::vault::set(&crate::vault::trust_name(&address), &token) {
+            Ok(()) => self.notify(&format!("That computer will not ask for the code here for {} days", crate::access::TRUST_DAYS)),
+            Err(e) => self.notify(&format!("This computer could not be trusted there: {e}")),
+        }
     }
 
     /// Ends the connection.

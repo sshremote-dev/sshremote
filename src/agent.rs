@@ -136,6 +136,9 @@ fn upload_place(dir: &str, name: String) -> (std::path::PathBuf, String) {
     }
 }
 
+/// The token this agent may hand a viewer that asks to be trusted (`ToAgent::TrustToken`).
+static TRUST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// What a file request refused for `why` is answered with.
 fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
     let why = why.to_string();
@@ -402,10 +405,18 @@ fn serve_with(
     thread::spawn(move || {
         let mut input = BufReader::new(input);
         let mut told = std::collections::HashSet::new();
+        let mut first = true;
         loop {
             match read_msg(&mut input) {
                 Ok(Some((k, p))) => match ToAgent::decode(k, &p) {
+                    // Only as the remote access service's first word, never the viewer's.
+                    Ok(ToAgent::TrustToken(t)) => {
+                        if std::mem::take(&mut first) && by_id() && !t.is_empty() {
+                            *TRUST.lock().unwrap_or_else(|e| e.into_inner()) = Some(t);
+                        }
+                    }
                     Ok(m) => {
+                        first = false;
                         if tx.send(Heard::Msg(m)).is_err() {
                             break;
                         }
@@ -756,6 +767,12 @@ fn serve_with(
                     }
                 }
                 ToAgent::Resumes => inbox.keep_broken = true,
+                ToAgent::TrustMe => {
+                    if let Some(t) = TRUST.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        send(enc, &ToClient::Trusted(t)).map_err(io_err)?;
+                    }
+                }
+                ToAgent::TrustToken(_) => {}
                 ToAgent::FileResume { id, size, from, tail, dir, name } => {
                     let (dir, name) = upload_place(&dir, name);
                     let m = match inbox.resume_in(id, size, &dir, &name, from, tail) {

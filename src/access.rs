@@ -62,6 +62,100 @@ pub struct Config {
     pub cameras: bool,
     /// Minutes without input from a viewer after which its session ends; 0: never.
     pub idle: u32,
+    /// Devices let in without the two-step code (each for `TRUST_DAYS` from when it was trusted).
+    pub trusted: Vec<Trusted>,
+}
+
+/// A device a viewer came in from with the two-step code and asked to be trusted on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trusted {
+    /// The checksum of the token it was given (the token itself stays with the device).
+    pub hash: String,
+    /// When it was trusted, and when it last came in by its token (0: not yet, so it may never
+    /// have got it).
+    pub at: u64,
+    pub used: u64,
+    /// Where it came from then.
+    pub from: String,
+}
+
+/// How long a trusted device comes in without the two-step code.
+pub const TRUST_DAYS: u64 = 90;
+/// Devices trusted at most; for a new one, the oldest that never came back goes, else the oldest.
+const TRUST_MOST: usize = 32;
+/// How long a device trusted waits to come back by its token before it is taken for one that
+/// never got it.
+const TRUST_PENDING: u64 = 86_400;
+
+impl Trusted {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "hash": self.hash, "at": self.at, "used": self.used, "from": self.from })
+    }
+
+    fn from_json(v: &serde_json::Value) -> Option<Trusted> {
+        let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        Some(Trusted { hash: v.get("hash")?.as_str()?.to_string(), at: n("at"), used: n("used"), from: v.get("from").and_then(|x| x.as_str()).unwrap_or("").to_string() })
+    }
+
+    /// Still trusted: not past `TRUST_DAYS`, nor a day past being trusted without coming back.
+    pub fn current(&self) -> bool {
+        let age = crate::sys::now_secs().saturating_sub(self.at);
+        age < TRUST_DAYS * 86_400 && (self.used != 0 || age < TRUST_PENDING)
+    }
+}
+
+/// A token's checksum with the two-step secret: a new secret trusts no device of the old one.
+fn token_hash(secret: &str, token: &str) -> String {
+    use sha2::Digest;
+    crate::sys::hex(&sha2::Sha256::digest(format!("{secret}\n{}", token.trim()).as_bytes()))
+}
+
+impl Config {
+    /// The devices still trusted.
+    pub fn trusted_now(&self) -> impl Iterator<Item = &Trusted> {
+        self.trusted.iter().filter(|t| t.current())
+    }
+
+    /// Whether `token` is a trusted device's.
+    fn trusts(&self, token: &str) -> bool {
+        let h = token_hash(&self.totp, token);
+        !self.totp.is_empty() && !token.trim().is_empty() && self.trusted_now().any(|t| t.hash == h)
+    }
+}
+
+/// Changes the stored settings as they are now, one change at a time in this process (the
+/// sessions' threads each write some), keeping them when `change` says so.
+fn edit(change: impl FnOnce(&mut Config) -> bool) {
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut c = load();
+    if change(&mut c) {
+        let _ = save(&c);
+    }
+}
+
+/// Trusts the device given `token` from now on (it came in with the two-step code).
+fn trust_device(token: &str, from: &str) {
+    edit(|c| {
+        if c.totp.is_empty() {
+            return false;
+        }
+        c.trusted.retain(Trusted::current);
+        while c.trusted.len() >= TRUST_MOST {
+            let i = c.trusted.iter().position(|t| t.used == 0).unwrap_or(0);
+            c.trusted.remove(i);
+        }
+        c.trusted.push(Trusted { hash: token_hash(&c.totp, token), at: crate::sys::now_secs(), used: 0, from: from.to_string() });
+        true
+    });
+}
+
+/// Notes that the device with `token` came in now.
+fn trusted_came(token: &str) {
+    edit(|c| {
+        let h = token_hash(&c.totp, token);
+        c.trusted.iter_mut().find(|t| t.hash == h).map(|t| t.used = crate::sys::now_secs()).is_some()
+    });
 }
 
 /// Which passwords remote access takes.
@@ -109,7 +203,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>() })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -142,6 +236,7 @@ impl Config {
             relay_key: s("relay_key").unwrap_or_default(),
             cameras: v.get("cameras").and_then(|x| x.as_bool()).unwrap_or(false),
             idle: v.get("idle").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            trusted: v.get("trusted").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Trusted::from_json).collect()).unwrap_or_default(),
         })
     }
 }
@@ -282,6 +377,7 @@ pub fn fresh() -> Config {
         relay_key: String::new(),
         cameras: false,
         idle: 0,
+        trusted: Vec::new(),
     }
 }
 
@@ -794,6 +890,8 @@ struct Welcome {
     relay: String,
     came: Came,
     from: Option<std::net::IpAddr>,
+    /// The token of the trusted device it came in from, in place of the two-step code.
+    token: Option<String>,
 }
 
 enum Came {
@@ -803,13 +901,13 @@ enum Came {
 }
 
 impl Welcome {
-    fn new(c: &Config, came: &crate::net::Came, from: Option<std::net::IpAddr>) -> Welcome {
+    fn new(c: &Config, came: &crate::net::Came, from: Option<std::net::IpAddr>, token: Option<String>) -> Welcome {
         let came = match came {
             crate::net::Came::Lasting => Came::Lasting(c.password.clone()),
             crate::net::Came::OneTime => Came::OneTime(c.one_time.clone()),
             crate::net::Came::Request(_) => Came::Request,
         };
-        Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from }
+        Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from, token }
     }
 
     /// Whether the settings `c` would still let it in.
@@ -818,6 +916,9 @@ impl Welcome {
             && c.id == self.id
             && c.relay == self.relay
             && comes_from(&c.from, self.from)
+            // One in by a trusted device's token goes when it is no longer trusted (two-step
+            // sign-in off, nothing to be trusted for, it stays).
+            && self.token.as_ref().is_none_or(|t| c.totp.is_empty() || c.trusts(t))
             && match &self.came {
                 Came::Lasting(p) => c.passwords.lasting() && *p == c.password,
                 Came::OneTime(p) => c.passwords.one_time() && *p == c.one_time,
@@ -1056,6 +1157,7 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
             if let Some(k) = &now {
                 (cfg.ask, cfg.allow, cfg.punch, cfg.passwords, cfg.requests) = (k.ask, k.allow, k.punch, k.passwords, k.requests);
                 cfg.totp.clone_from(&k.totp);
+                cfg.trusted.clone_from(&k.trusted);
                 cfg.one_time.clone_from(&k.one_time);
                 cfg.from.clone_from(&k.from);
                 // Those the new settings would not let in go now.
@@ -1226,7 +1328,10 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     // The exchange runs at the viewer's pace with nobody waiting on it; only checking its proof
     // of the password takes the turn, after the delay wrong ones have earned.
     let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
+    // The first check is of the password, the next of the two-step code.
+    let checks = std::cell::Cell::new(0);
     let judge = |check: &mut dyn FnMut() -> bool| -> io::Result<bool> {
+        let what = if checks.replace(checks.get() + 1) == 0 { "a wrong password" } else { "a wrong two-step code" };
         if guard.locked() {
             return Err(io::Error::other("no passwords taken now"));
         }
@@ -1242,11 +1347,21 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
             guard.passed()
         } else {
             guard.failed();
-            note_visit(serde_json::json!({ "refused": "a wrong password", "at": crate::sys::now_secs(), "from": from_text }));
+            note_visit(serde_json::json!({ "refused": what, "at": crate::sys::now_secs(), "from": from_text }));
         }
         Ok(right)
     };
-    let totp = (!cfg.totp.is_empty()).then_some(cfg.totp.as_str());
+    // The two-step code, or the token of a device trusted to come in without it.
+    let by_device = std::cell::RefCell::new(None::<String>);
+    let two_step = |code: &str| match code.strip_prefix(crate::net::TRUST_MARK) {
+        Some(token) if cfg.trusts(token) => {
+            *by_device.borrow_mut() = Some(token.to_string());
+            true
+        }
+        Some(_) => false,
+        None => crate::totp::check(&cfg.totp, code),
+    };
+    let totp = (!cfg.totp.is_empty()).then_some(&two_step as crate::net::TwoStep);
     let punch = (relayed && cfg.punch).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
     let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str());
     let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
@@ -1292,13 +1407,25 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         crate::net::Came::OneTime => "with a one-time password",
         crate::net::Came::Request(_) => "by asking, at the screen",
     };
-    let how = if cfg.totp.is_empty() { how.to_string() } else { format!("{how} and the two-step code") };
+    let by_device = by_device.into_inner();
+    let how = match &by_device {
+        _ if cfg.totp.is_empty() => how.to_string(),
+        Some(token) => {
+            trusted_came(token);
+            format!("{how}, from a trusted device")
+        }
+        None => format!("{how} and the two-step code"),
+    };
+    // One who gave the code may ask to be trusted for next time: the agent has a token to give.
+    let token = (!cfg.totp.is_empty() && by_device.is_none() && code.is_none()).then(|| crate::sys::hex(&crate::sys::random(32)));
+    let trust_offer = token.map(|t| (t, from_text.clone().unwrap_or_default()));
+    let by_device = by_device.filter(|_| !cfg.totp.is_empty());
     let (at, ender) = (crate::sys::now_secs(), w.ender());
     note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { "through the relay" } else { "on this network" } }));
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from), w.ender()));
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from, by_device), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
-    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle);
+    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle, trust_offer);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     let path = match ender.straight() {
         Some(a) => format!("straight from {}", a.ip()),
@@ -1397,11 +1524,13 @@ fn one_time_used(used: &str) {
         if ONE_TIME_IN.load(Ordering::Acquire) > 0 {
             return;
         }
-        let mut c = load();
-        if c.one_time == used {
-            c.one_time = crate::net::new_one_time();
-            let _ = save(&c);
-        }
+        edit(|c| {
+            let new = c.one_time == used;
+            if new {
+                c.one_time = crate::net::new_one_time();
+            }
+            new
+        });
     });
 }
 
@@ -1415,11 +1544,14 @@ struct Frames {
     head: [u8; 5],
     have: usize,
     left: usize,
+    /// The viewer asked to be trusted (`ToAgent::TrustMe`).
+    trust_me: bool,
 }
 
 /// What a viewer sends by itself: settings, acknowledgements, pings, pausing, refreshing,
-/// accessibility state, density, and transfers it resumes after a broken connection.
-const AUTOMATIC: [u8; 11] = [1, 2, 7, 8, 18, 22, 36, 46, 51, 52, 53];
+/// accessibility state, density, transfers it resumes after a broken connection, and asking to
+/// be trusted.
+const AUTOMATIC: [u8; 12] = [1, 2, 7, 8, 18, 22, 36, 46, 51, 52, 53, 54];
 
 impl Frames {
     /// Follows `b`; true when a message it begins is the person's doing.
@@ -1438,6 +1570,7 @@ impl Frames {
                 self.have = 0;
                 self.left = u32::from_le_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]) as usize;
                 person |= !AUTOMATIC.contains(&self.head[0]);
+                self.trust_me |= self.head[0] == crate::proto::KIND_TRUST_ME;
             }
         }
         person
@@ -1448,7 +1581,16 @@ impl Frames {
     }
 }
 
-fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter, grant: u8, code: Option<&str>, cameras: bool, idle: u32) -> Result<(), String> {
+/// `trust`: a token for the agent to give the viewer if it asks to be trusted, and where it is.
+fn serve_viewer(
+    mut r: crate::net::SealedReader,
+    mut w: crate::net::SealedWriter,
+    grant: u8,
+    code: Option<&str>,
+    cameras: bool,
+    idle: u32,
+    mut trust: Option<(String, String)>,
+) -> Result<(), String> {
     // The session's own pings come every second; two minutes of nothing means it is gone.
     let ender = w.ender();
     ender.set_idle_limit(Duration::from_secs(120));
@@ -1468,8 +1610,13 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     crate::sys::tie(&child);
-    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    // Before anything of the viewer's, always (so the viewer's own can never be taken for it):
+    // the token the agent may hand out, if any.
+    let (k, p) = crate::proto::ToAgent::TrustToken(trust.as_ref().map(|t| t.0.clone()).unwrap_or_default()).encode();
+    crate::proto::write_msg(&mut stdin, k, &p).map_err(|e| e.to_string())?;
+
     // The viewer's stream as it goes in, followed message by message; the last time the person
     // did something there.
     let input = Arc::new(Mutex::new((stdin, Frames::default(), std::time::Instant::now())));
@@ -1517,6 +1664,12 @@ fn serve_viewer(mut r: crate::net::SealedReader, mut w: crate::net::SealedWriter
                 let mut i = input.lock().unwrap_or_else(|e| e.into_inner());
                 if i.1.feed(&buf[..n]) {
                     i.2 = std::time::Instant::now();
+                }
+                // Trusted, pending until it comes back by the token the agent gives it.
+                if std::mem::take(&mut i.1.trust_me)
+                    && let Some((token, from)) = trust.take()
+                {
+                    trust_device(&token, &from);
                 }
                 if i.0.write_all(&buf[..n]).and_then(|_| i.0.flush()).is_err() {
                     break;
@@ -1775,6 +1928,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             (false, true) => "not found, but computers on this network may come straight in",
             (false, false) => "not found by computers on this network",
         });
+        let trusted = c.trusted_now().count();
+        println!("two-step: {}", match (c.totp.is_empty(), trusted) {
+            (true, _) => "off, the password is enough".to_string(),
+            (false, 0) => "on, viewers give the code of the authenticator app with the password".to_string(),
+            (false, n) => format!("on, viewers give the code with the password, but for {n} trusted {} (remote-access trusted)", if n == 1 { "device" } else { "devices" }),
+        });
         println!("idle:     {}", if c.idle == 0 { "a session goes on however long the viewer does nothing".to_string() } else { format!("a session ends after {} minutes without input from its viewer", c.idle) });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
         println!("service:  {}", if service_installed() { "installed (starts it with the computer)" } else { "not installed (on while sshremote's window is open)" });
@@ -1826,6 +1985,24 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             };
             save(&c)?;
             show(&c);
+            Ok(())
+        }
+        // Devices let in without the two-step code, and forgetting them.
+        Some("trusted") => {
+            if args.get(1).map(String::as_str) == Some("forget") {
+                c.trusted.clear();
+                save(&c)?;
+                println!("no device is trusted now: each gives the code again");
+                return Ok(());
+            }
+            let now: Vec<&Trusted> = c.trusted_now().collect();
+            if now.is_empty() {
+                println!("no trusted devices: every viewer gives the two-step code");
+            }
+            for t in now {
+                let last = if t.used == 0 { "not back by it yet".to_string() } else { format!("last in {}", crate::sys::local_time(t.used)) };
+                println!("from {} since {}, {last} (until {})", if t.from.is_empty() { "?" } else { &t.from }, crate::sys::local_time(t.at), crate::sys::local_time(t.at + TRUST_DAYS * 86_400));
+            }
             Ok(())
         }
         // Who came in by the ID and who was turned away, newest first.
@@ -1987,7 +2164,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
     }
 }
 
@@ -2017,6 +2194,9 @@ mod tests {
         assert!(!f.between());
         assert!(!f.feed(c));
         assert!(f.between());
+        assert!(!f.trust_me);
+        f.feed(&msg(ToAgent::TrustMe));
+        assert!(f.trust_me, "asking to be trusted is seen");
     }
 
     #[test]
@@ -2213,6 +2393,51 @@ mod tests {
         assert_eq!(c.grant(), crate::grant::ASK | crate::grant::CONTROL | crate::grant::FILES);
         c.password = "abc".into();
         assert!(save(&c).is_err(), "too short");
+        TEST_DIR.with(|t| *t.borrow_mut() = None);
+    }
+
+    /// A device trusted with the two-step code comes in by its token until its days are up, or
+    /// until two-step sign-in is set up anew; the list is kept with the settings.
+    #[test]
+    fn trusted_devices_come_in_until_their_time_or_a_new_secret() {
+        let d = std::env::temp_dir().join(format!("sshremote-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        TEST_DIR.with(|t| *t.borrow_mut() = Some(d.clone()));
+        let mut c = load();
+        c.totp = crate::totp::new_secret();
+        save(&c).unwrap();
+        trust_device("abc123", "203.0.113.7");
+        let c = load();
+        assert!(c.trusts("abc123") && !c.trusts("abc124") && !c.trusts(""));
+        assert_eq!(c.trusted_now().map(|t| t.from.as_str()).collect::<Vec<_>>(), ["203.0.113.7"]);
+        assert!(!c.trusted[0].hash.contains("abc123"), "only its checksum is kept");
+        // Past its days.
+        let mut old = c.clone();
+        old.trusted[0].at -= TRUST_DAYS * 86_400;
+        assert!(!old.trusts("abc123"));
+        // Set up anew, or off.
+        let mut anew = c.clone();
+        anew.totp = crate::totp::new_secret();
+        assert!(!anew.trusts("abc123"));
+        anew.totp.clear();
+        assert!(!anew.trusts("abc123"));
+        // One that never came back by its token is let go after a day.
+        let mut gone = c.clone();
+        gone.trusted[0].at -= TRUST_PENDING;
+        assert!(!gone.trusts("abc123"));
+        trusted_came("abc123");
+        let mut back = load();
+        assert!(back.trusted[0].used > 0);
+        back.trusted[0].at -= TRUST_PENDING;
+        assert!(back.trusts("abc123"), "one that came back stays");
+        // Never more than so many: those that never came back go first.
+        for n in 0..TRUST_MOST + 3 {
+            trust_device(&format!("t{n}"), "");
+        }
+        let c = load();
+        assert_eq!(c.trusted.len(), TRUST_MOST);
+        assert!(c.trusts(&format!("t{}", TRUST_MOST + 2)) && c.trusts("abc123") && !c.trusts("t0"));
+        let _ = std::fs::remove_dir_all(&d);
         TEST_DIR.with(|t| *t.borrow_mut() = None);
     }
 }

@@ -415,10 +415,30 @@ impl App {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(kit::danger("Turn off", false)).clicked() {
                                         cfg.totp.clear();
+                                        cfg.trusted.clear();
                                         changed = true;
                                     }
                                 });
                             });
+                            // Devices let in without the code, which can be forgotten here.
+                            let trusted: Vec<&crate::access::Trusted> = cfg.trusted_now().collect();
+                            if !trusted.is_empty() {
+                                let mut forget = false;
+                                ui.horizontal(|ui| {
+                                    let n = trusted.len();
+                                    let latest = trusted.iter().map(|t| t.used).max().unwrap_or(0);
+                                    let last = if latest == 0 { String::new() } else { format!("; the last came {}", crate::sys::local_time(latest)) };
+                                    ui.label(RichText::new(format!("{n} trusted {} come in without the code (each for {} days){last}", if n == 1 { "device may" } else { "devices may" }, crate::access::TRUST_DAYS)).size(12.5))
+                                        .on_hover_text(trusted.iter().map(|t| format!("from {}, since {}{}", if t.from.is_empty() { "?" } else { &t.from }, crate::sys::local_time(t.at), if t.used == 0 { ", not back yet" } else { "" })).collect::<Vec<_>>().join("\n"));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        forget = ui.add(kit::ghost("Forget them")).on_hover_text("They give the code again next time").clicked();
+                                    });
+                                });
+                                if forget {
+                                    cfg.trusted.clear();
+                                    changed = true;
+                                }
+                            }
                         } else if let Some(secret) = self.access.totp_new.clone() {
                             ui.add(egui::Label::new(RichText::new("In your authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Aegis…), add an account by its setup key:").size(12.5)).wrap());
                             ui.horizontal(|ui| {
@@ -439,6 +459,7 @@ impl App {
                                     let ok = crate::totp::check(&secret, &self.access.totp_code);
                                     if ui.add_enabled(ok, kit::secondary("Turn on")).on_disabled_hover_text("Type the six digits the app shows").clicked() {
                                         cfg.totp = secret.clone();
+                                        cfg.trusted.clear();
                                         (self.access.totp_new, self.access.totp_code) = (None, String::new());
                                         changed = true;
                                     }

@@ -861,6 +861,65 @@ mod tests {
         assert!(f.w > 0, "a picture of it");
     }
 
+    /// A device that came in by ID with the two-step code and asked to be trusted is given a
+    /// token, and comes in by it next time without the code; another token is a wrong code.
+    /// Against remote access running by ID: SSHR_TRUST_ADDR=sshremote://ID@RELAY
+    /// SSHR_TRUST_PW=... SSHR_TRUST_SECRET=... cargo test -- --ignored a_trusted_device
+    #[test]
+    #[ignore]
+    fn a_trusted_device_comes_in_without_the_code() {
+        use crate::net::{CODE_SEP, NOT_TRUSTED, TRUST_MARK};
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let addr = crate::net::Address::parse(&var("SSHR_TRUST_ADDR")).expect("an address");
+        let (pw, secret) = (var("SSHR_TRUST_PW"), var("SSHR_TRUST_SECRET"));
+        let open = |password: String| Session::open(&Target::Direct { addr: addr.clone(), password }, true).map(|(s, _, rx)| (s, rx));
+        assert!(open(pw.clone()).err().is_some_and(|e| e.contains(crate::net::CODE_WANTED)), "the code is wanted");
+        let (mut sess, rx) = open(format!("{pw}{CODE_SEP}{}", crate::totp::now(&secret))).expect("in with the code");
+        sess.send(ToAgent::TrustMe).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let token = loop {
+            assert!(Instant::now() < until, "no token came");
+            if let Ok(Ev::Net(ToClient::Trusted(t))) = rx.recv_timeout(Duration::from_millis(200)) {
+                break t;
+            }
+        };
+        assert_eq!(token.len(), 64);
+        sess.close();
+        drop((sess, rx));
+        std::thread::sleep(Duration::from_secs(1));
+        let (mut sess, _rx) = open(format!("{pw}{CODE_SEP}{TRUST_MARK}{token}")).expect("in by the token, without the code");
+        sess.close();
+        assert_eq!(open(format!("{pw}{CODE_SEP}{TRUST_MARK}{}", "0".repeat(64))).err(), Some(NOT_TRUSTED.to_string()), "another token is not taken, and said so");
+        // Kept in the password store, it is given by itself; forgotten there while in by it
+        // (SSHR_TRUST_CFG: the computer's settings folder), out; one no longer trusted there is
+        // forgotten here, and the code asked for.
+        if crate::vault::backend().is_some() {
+            // The relay takes about five calls a minute from one address.
+            std::thread::sleep(Duration::from_secs(61));
+            let name = crate::vault::trust_name(&crate::access::address(&addr.id, &addr.relay));
+            crate::vault::set(&name, &token).unwrap();
+            let (mut sess, rx) = open(pw.clone()).expect("in with the password alone, by the token kept");
+            if let Ok(cfg) = std::env::var("SSHR_TRUST_CFG") {
+                let exe = std::env::var("SSHREMOTE_EXE").expect("set SSHREMOTE_EXE");
+                let out = std::process::Command::new(exe).args(["remote-access", "trusted", "forget"]).env("XDG_CONFIG_HOME", cfg).output().unwrap();
+                assert!(out.status.success());
+                let until = Instant::now() + Duration::from_secs(15);
+                loop {
+                    assert!(Instant::now() < until, "still in after the device was forgotten");
+                    if let Ok(Ev::Closed(_) | Ev::Net(ToClient::Error(_))) = rx.recv_timeout(Duration::from_millis(200)) {
+                        break;
+                    }
+                }
+            }
+            sess.close();
+            drop(rx);
+            std::thread::sleep(Duration::from_secs(1));
+            crate::vault::set(&name, &"1".repeat(64)).unwrap();
+            assert_eq!(open(pw.clone()).err(), Some(NOT_TRUSTED.to_string()));
+            assert_eq!(crate::vault::get(&name), None, "forgotten");
+        }
+    }
+
     /// A computer whose screen cannot be shared keeps the rest of the session: it says so, and
     /// its files and terminal work. SSHREMOTE_EXE=target/debug/sshremote cargo test -- --ignored
     /// no_screen_leaves_the_rest

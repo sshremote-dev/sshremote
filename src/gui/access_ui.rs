@@ -27,6 +27,9 @@ pub(super) struct AccessUi {
     pub(super) looked: Option<std::time::Instant>,
     /// The service: installed, running, and running this program file; looked up in the background.
     pub(super) service: Shared<Option<Service>>,
+    /// The settings read again in the background (remote access writes some of them itself).
+    #[cfg(feature = "remote")]
+    pub(super) fresh: Shared<Option<Option<crate::access::Config>>>,
     pub(super) service_looked: Option<std::time::Instant>,
     /// Why the stored settings could not be read or kept, shown instead of an ID.
     #[cfg(feature = "remote")]
@@ -75,6 +78,8 @@ fn in_background<T: Send + 'static>(slot: &Shared<Option<T>>, busy: &'static std
 static ONLINE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "remote")]
 static SERVICE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "remote")]
+static FRESH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl App {
     /// The settings kept, read once (a fresh ID kept at once, so the ID shown is the one others
@@ -99,11 +104,20 @@ impl App {
                 Err(e) => a.problem = Some(e),
             }
         }
-        let cfg = a.cfg.clone()?;
         if a.service_looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10)) {
             a.service_looked = Some(std::time::Instant::now());
+            // Read again now and then: remote access writes some of them itself.
+            if a.cfg.is_some() {
+                in_background(&a.fresh, &FRESH_BUSY, ctx, || access::stored().ok().flatten());
+            }
             in_background(&a.service, &SERVICE_BUSY, ctx, || Service { known: true, installed: access::service_installed(), runs: access::service_runs(), this: access::service_is_this() });
         }
+        if let Some(Some(c)) = a.fresh.lock().unwrap_or_else(|e| e.into_inner()).take()
+            && a.cfg.is_some()
+        {
+            a.cfg = Some(c);
+        }
+        let cfg = a.cfg.clone()?;
         // The relay's view of this ID, asked again every 5 s while it is shown.
         if cfg.enabled && a.looked.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
             a.looked = Some(std::time::Instant::now());
@@ -144,7 +158,17 @@ impl App {
 
     /// Keeps changed remote access settings; the relay is asked again about the new ones.
     #[cfg(feature = "remote")]
-    pub(super) fn save_access(&mut self, cfg: crate::access::Config) {
+    pub(super) fn save_access(&mut self, mut cfg: crate::access::Config) {
+        // What remote access itself wrote since this window read them (devices trusted, a new
+        // one-time password) stays, unless changed here.
+        if let (Some(was), Ok(Some(now))) = (self.access.cfg.as_ref(), crate::access::stored()) {
+            if cfg.trusted == was.trusted {
+                cfg.trusted = now.trusted;
+            }
+            if cfg.one_time == was.one_time {
+                cfg.one_time = now.one_time;
+            }
+        }
         match crate::access::save(&cfg) {
             Ok(()) => {
                 self.access.cfg = Some(cfg);

@@ -483,8 +483,16 @@ impl Read for SealedReader {
 const CONFIRM: &[u8] = b"sshremote/1 ready";
 /// Said instead of CONFIRM by a computer that also wants the code of an authenticator app.
 const CODE_PLEASE: &[u8] = b"sshremote/1 code?";
+/// Said to a device whose trust token the computer no longer takes (CONFIRM's length).
+const UNTRUSTED: &[u8] = b"sshremote/1 trust";
+/// What a viewer is told when the computer no longer trusts this device: the code is wanted.
+pub const NOT_TRUSTED: &str = "that computer no longer trusts this device: give the code of its authenticator app with the password";
 /// Joins the two-step code to the password a viewer is given: "password", SEP, "123456".
 pub const CODE_SEP: char = '\u{1f}';
+/// Begins what a trusted device gives in place of the two-step code: its token follows.
+pub const TRUST_MARK: char = '\u{1e}';
+/// The most a viewer's answer to the two-step question may hold.
+const TRUST_MOST_LEN: usize = 256;
 /// What a viewer is told when the computer wants a code it was not given.
 pub const CODE_WANTED: &str = "the computer asks for the code of its authenticator app, with the password";
 
@@ -506,8 +514,13 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> i
 /// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
 fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
     let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None } };
-    handshake_side(stream, side, judge, totp, punch).map(|(r, w, _)| (r, w))
+    let check = |code: &str| totp.is_some_and(|secret| crate::totp::check(secret, code));
+    handshake_side(stream, side, judge, totp.map(|_| &check as TwoStep), punch).map(|(r, w, _)| (r, w))
 }
+
+/// Checks what a viewer gives for two-step sign-in: the authenticator app's code, or a trusted
+/// device's token after `TRUST_MARK`.
+pub type TwoStep<'a> = &'a dyn Fn(&str) -> bool;
 
 /// Which side of the exchange, with what it knows: the viewer the password it was given (none:
 /// it asks to be let in), the agent the passwords it takes and whether it takes such requests
@@ -527,7 +540,7 @@ pub enum Came {
     Request(String),
 }
 
-fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
+fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoStep>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
     let closer = stream.try_clone()?;
     let result = handshake_on(stream, side, judge, totp, punch);
     if result.is_err() {
@@ -602,7 +615,7 @@ pub fn new_one_time() -> String {
     format!("{}-{}", &c[..4], &c[4..])
 }
 
-fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
+fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoStep>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
     let viewer = matches!(side, Side::Viewer(_));
     // A viewer may be given the two-step code with the password.
     let (password, code) = match side {
@@ -827,6 +840,9 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             w.flush()?;
             extend(VERDICT_LIMIT);
             r.read_exact(&mut got).map_err(|e| refused(e, "wrong code (the password was right)"))?;
+            if got == UNTRUSTED {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_TRUSTED));
+            }
         }
     } else if let Came::Request(_) = &came {
         // No password to check (and no guess to count): the request is taken or not, and the
@@ -854,13 +870,27 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<&str>,
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
         }
         // Two-step: the code is checked in turn too, and a wrong one counts as a wrong password.
-        if let Some(secret) = totp {
+        if let Some(check) = totp {
             w.write_all(CODE_PLEASE)?;
             w.flush()?;
+            // Room for a trusted device's token, longer than a code.
+            r.limit = TRUST_MOST_LEN;
             let ct = r.stream_frame()?;
             deadline.store(u64::MAX, Ordering::Release);
-            let right = judge(&mut || r.open(&ct).is_ok_and(|c| crate::totp::check(secret, &String::from_utf8_lossy(&c))))?;
+            let token = std::cell::Cell::new(false);
+            let right = judge(&mut || {
+                r.open(&ct).is_ok_and(|c| {
+                    let c = String::from_utf8_lossy(&c);
+                    token.set(c.starts_with(TRUST_MARK));
+                    check(&c)
+                })
+            })?;
             extend(HANDSHAKE_LIMIT);
+            // A token checked and not taken is said so: the device forgets it (a busy computer
+            // or a broken line says nothing, and it keeps it).
+            if !right && token.get() {
+                let _ = w.write_all(UNTRUSTED).and_then(|_| w.flush());
+            }
             if !right {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
             }
@@ -902,11 +932,11 @@ pub fn handshake_agent_passwords(
     permanent: Option<&str>,
     one_time: Option<&str>,
     requests: Option<&dyn Fn() -> bool>,
-    totp: Option<&str>,
+    two_step: Option<TwoStep>,
     judge: Judge,
     punch: Option<Punch>,
 ) -> io::Result<(SealedReader, SealedWriter, Came)> {
-    handshake_side(stream, Side::Agent { permanent, one_time, requests }, judge, totp, punch)
+    handshake_side(stream, Side::Agent { permanent, one_time, requests }, judge, two_step, punch)
 }
 
 /// A judge that checks at once.
@@ -1314,6 +1344,30 @@ mod tests {
         let code = crate::totp::now(&secret);
         assert!(viewer(format!("pw for both{CODE_SEP}{code}"), serve(secret.clone())).is_ok());
         assert!(viewer(format!("wrong pw{CODE_SEP}{code}"), serve(secret)).is_err_and(|e| e.contains("wrong password")));
+    }
+
+    /// A trusted device's token stands in for the code; any other, or none, does not.
+    #[test]
+    fn a_trusted_device_gives_its_token_for_the_code() {
+        let secret = crate::totp::new_secret();
+        let serve = |secret: String| {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = l.local_addr().unwrap();
+            thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let check = |c: &str| c.strip_prefix(TRUST_MARK).map_or_else(|| crate::totp::check(&secret, c), |t| t == "7e".repeat(32));
+                let _ = handshake_agent_passwords(s, Some("pw for both"), None, None, Some(&check), &now, None);
+            });
+            at
+        };
+        let viewer = |pw: String, at| handshake(TcpStream::connect(at).unwrap(), &pw, true, &now).map(|_| ()).map_err(|e| e.to_string());
+        let token = "7e".repeat(32);
+        assert!(viewer(format!("pw for both{CODE_SEP}{TRUST_MARK}{token}"), serve(secret.clone())).is_ok(), "a token as long as those given");
+        assert_eq!(viewer(format!("pw for both{CODE_SEP}{TRUST_MARK}other"), serve(secret.clone())), Err(NOT_TRUSTED.to_string()), "told so, to forget it");
+        assert!(viewer(format!("pw for both{CODE_SEP}000000"), serve(secret.clone())).is_err_and(|e| e.contains("wrong code")) || crate::totp::check(&secret, "000000"));
+        assert!(viewer(format!("wrong pw{CODE_SEP}{TRUST_MARK}{token}"), serve(secret.clone())).is_err_and(|e| e.contains("wrong password")));
+        let code = crate::totp::now(&secret);
+        assert!(viewer(format!("pw for both{CODE_SEP}{code}"), serve(secret)).is_ok(), "the code still does");
     }
 
     /// The agent takes the lasting password, the one-time one, or both, and says which came in;

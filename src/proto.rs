@@ -35,6 +35,9 @@ pub const FORMAT_WIDE: u8 = 8;
 /// Every form this program reads.
 pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE;
 
+/// `ToAgent::TrustMe`'s kind, which remote access looks for in the viewer's stream.
+pub const KIND_TRUST_ME: u8 = 54;
+
 /// The agent goes on with a transfer the connection broke off (`ToAgent::FileResume`,
 /// `ToAgent::FetchFrom`), told in `ToClient::Can`.
 pub const CAN_RESUME: u32 = 1;
@@ -172,6 +175,12 @@ pub enum ToAgent {
         dir: String,
         name: String,
     },
+    /// This viewer would be let in without the two-step code from now on: the agent answers
+    /// with `ToClient::Trusted` when it was given a token to hand out for that.
+    TrustMe,
+    /// What an agent for a session by ID hands out for `TrustMe`, given by the remote access
+    /// service as the first message, before the viewer's (later ones are passed over).
+    TrustToken(String),
     /// A download that a broken connection cut off, fetched again: of `path`'s files those before
     /// `name` (in the order they are sent) are left out, and `name` itself, here up to `from`
     /// bytes ending with `tail`, goes on from there (`ToClient::FetchAt`); `from` is `u64::MAX`
@@ -441,6 +450,9 @@ pub enum ToClient {
     FetchDone {
         tag: u32,
     },
+    /// The token by which the computer lets this device in without the two-step code (for
+    /// `access::TRUST_DAYS`), answering `ToAgent::TrustMe`.
+    Trusted(String),
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
     /// Where a `FileResume` goes on from: what is kept there, or 0 when nothing is (data from the
@@ -776,6 +788,11 @@ impl ToAgent {
                 50
             }
             ToAgent::Resumes => 51,
+            ToAgent::TrustMe => KIND_TRUST_ME,
+            ToAgent::TrustToken(t) => {
+                b.extend_from_slice(t.as_bytes());
+                55
+            }
             ToAgent::FileResume { id, size, from, tail, dir, name } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
@@ -943,6 +960,8 @@ impl ToAgent {
             21 => ToAgent::Chat(String::from_utf8_lossy(c.rest()).into_owned()),
             50 => ToAgent::End(String::from_utf8_lossy(c.rest()).into_owned()),
             51 => ToAgent::Resumes,
+            KIND_TRUST_ME => ToAgent::TrustMe,
+            55 => ToAgent::TrustToken(String::from_utf8_lossy(c.rest()).into_owned()),
             52 => ToAgent::FileResume {
                 id: c.u32()?,
                 size: c.u64()?,
@@ -1151,6 +1170,10 @@ impl ToClient {
             ToClient::Can(bits) => {
                 b.extend_from_slice(&bits.to_le_bytes());
                 141
+            }
+            ToClient::Trusted(t) => {
+                b.extend_from_slice(t.as_bytes());
+                144
             }
             ToClient::FileFrom { id, from } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -1438,6 +1461,7 @@ impl ToClient {
             117 => ToClient::OpDone { ok: c.u8()? != 0, text: String::from_utf8_lossy(c.rest()).into_owned() },
             126 => ToClient::FetchDone { tag: c.u32()? },
             141 => ToClient::Can(c.u32()?),
+            144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
             143 => ToClient::FetchAt {
                 id: c.u32()?,
@@ -1591,6 +1615,8 @@ mod tests {
             ToAgent::Fetch { tag: 5, path: "/x".into() },
             ToAgent::FetchCancel { id: 6, tag: 5 },
             ToAgent::Resumes,
+            ToAgent::TrustMe,
+            ToAgent::TrustToken("ab12".into()),
             ToAgent::FileResume { id: 7, size: 1 << 33, from: 1 << 20, tail: [9; 32], dir: "/d".into(), name: "a/b.iso".into() },
             ToAgent::FetchFrom { tag: 0x8000_0007, path: "/x".into(), name: "x/y.bin".into(), from: u64::MAX, tail: [0; 32] },
             ToAgent::TermOpen { id: 1, cols: 80, rows: 24 },
@@ -1628,6 +1654,7 @@ mod tests {
             ToClient::FetchStart { id: 3, size: 4, tag: 5, name: "d/y".into() },
             ToClient::FetchDone { tag: 0x8000_0005 },
             ToClient::Can(crate::proto::CAN_RESUME),
+            ToClient::Trusted("cd34".into()),
             ToClient::FileFrom { id: 7, from: 1 << 20 },
             ToClient::FetchAt { id: 8, size: 1 << 34, tag: 0x8000_0007, from: 65536, name: "x/y.bin".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },

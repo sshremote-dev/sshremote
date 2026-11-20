@@ -292,10 +292,22 @@ pub fn set(host: &str, secret: &str) -> Result<(), String> {
     sys::set(host, secret)
 }
 
+/// What a computer by ID gave this one to come in without its two-step code, kept beside its
+/// password under this name.
+pub fn trust_name(host: &str) -> String {
+    format!("{host}{TRUSTED}")
+}
+
+const TRUSTED: &str = " trusted";
+
+/// Removes a saved password, and the trust that computer gave with it.
 pub fn delete(host: &str) -> Result<(), String> {
     forget_list();
     if let Some(old) = crate::computers::older_name(host) {
         let _ = sys::delete(&old);
+    }
+    if !host.ends_with(TRUSTED) && list_all().iter().any(|h| *h == trust_name(host)) {
+        let _ = sys::delete(&trust_name(host));
     }
     sys::delete(host)
 }
@@ -310,6 +322,10 @@ pub fn has(host: &str) -> bool {
 /// Hosts with a saved password, asked of the store once and kept until a password is saved or
 /// removed (the store can be slow, and terminal tabs ask on every ssh tab).
 pub fn list() -> Vec<String> {
+    list_all().into_iter().filter(|h| !h.ends_with(TRUSTED)).collect()
+}
+
+fn list_all() -> Vec<String> {
     if backend().is_none() {
         return Vec::new();
     }

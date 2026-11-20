@@ -26,6 +26,8 @@ pub(super) struct SignIn {
     /// The computer wants its authenticator app's code too, typed here.
     wants_code: bool,
     code: String,
+    /// Asks that computer to let this one in without the code from now on.
+    trust: bool,
 }
 
 pub(super) enum Answer {
@@ -74,6 +76,8 @@ impl SignIn {
                 focused: false,
                 wants_code,
                 code: String::new(),
+                // Off until chosen; the choice is kept for the next time.
+                trust: crate::hosts::setting("trust_devices").is_some_and(|v| v == "yes"),
             });
         }
         let Target::Ssh { host, port, args, .. } = target else { return None };
@@ -97,13 +101,14 @@ impl SignIn {
             focused: false,
             wants_code: false,
             code: String::new(),
+            trust: false,
         })
     }
 
     /// The dialog; an answer once one of its buttons is used.
     pub fn show(&mut self, ctx: &egui::Context, target: &Target) -> Option<Answer> {
         let by_id = self.by_id.is_some();
-        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, if self.wants_code { 300.0 } else if by_id { 240.0 } else { 330.0 }));
+        let (modal, fit) = super::modal(ctx, "sign-in", egui::Vec2::new(460.0, if self.wants_code { 330.0 } else if by_id { 240.0 } else { 330.0 }));
         let mut answer = None;
         let r = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
@@ -138,7 +143,18 @@ impl SignIn {
             let code = self.wants_code.then(|| {
                 ui.add_space(4.0);
                 ui.label("The code your authenticator app shows now");
-                ui.add(egui::TextEdit::singleline(&mut self.code).hint_text("six digits").desired_width(140.0))
+                let field = ui.add(egui::TextEdit::singleline(&mut self.code).hint_text("six digits").desired_width(140.0));
+                // The token it gives is kept in the password store, so only with one.
+                #[cfg(feature = "remote")]
+                if crate::vault::backend().is_some()
+                    && ui
+                        .checkbox(&mut self.trust, format!("Do not ask for the code on this computer for {} days", crate::access::TRUST_DAYS))
+                        .on_hover_text("That computer gives this one a token, kept in the system's password store; its password is still asked. It can forget this computer at any time.")
+                        .changed()
+                {
+                    crate::hosts::set_setting("trust_devices", if self.trust { "yes" } else { "no" });
+                }
+                field
             });
             // The keyboard starts here, once; after that it stays where the user puts it.
             if !self.focused {
@@ -212,6 +228,11 @@ impl SignIn {
             _ => self.by_id.clone()?,
         };
         Some((name, self.password.clone()))
+    }
+
+    /// The computer's address, when this one is to ask it to be trusted once in.
+    pub fn trust_for(&self) -> Option<String> {
+        (self.wants_code && self.trust && !self.code.trim().is_empty() && crate::vault::backend().is_some()).then(|| self.by_id.clone()).flatten()
     }
 
     /// The target with what was typed: the password (or passphrase) and the key.

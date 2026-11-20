@@ -64,7 +64,26 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             .find(|c| c.id() == Some(addr.id.as_str()))
             .map(|c| c.direct.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect())
             .unwrap_or_default();
-        let (r, w) = crate::net::connect_via(addr, password, &direct)?;
+        // A device the computer trusts gives its token where the two-step code is asked.
+        let trust = crate::vault::trust_name(&crate::access::address(&addr.id, &addr.relay));
+        let token = crate::vault::get(&trust).filter(|t| !t.trim().is_empty());
+        let given = match &token {
+            Some(t) => format!("{}{}{}{t}", password.split(crate::net::CODE_SEP).next().unwrap_or(""), crate::net::CODE_SEP, crate::net::TRUST_MARK),
+            None => password.clone(),
+        };
+        let (r, w) = match crate::net::connect_via(addr, &given, &direct) {
+            // Trusted no longer (its time is up, or it was forgotten there): the code typed
+            // goes instead, else it is asked.
+            Err(e) if token.is_some() && e == crate::net::NOT_TRUSTED => {
+                let _ = crate::vault::delete(&trust);
+                let typed = password.split_once(crate::net::CODE_SEP).is_some_and(|(_, c)| !c.trim().is_empty());
+                if !typed {
+                    return Err(e);
+                }
+                crate::net::connect_via(addr, password, &direct)?
+            }
+            r => r?,
+        };
         let ender = Some(w.ender());
         return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, ender });
     }

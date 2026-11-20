@@ -223,6 +223,8 @@ struct Pane {
     carry: Option<remote::Carry>,
     /// A password typed in the sign-in dialog, kept in the password store once it works.
     keep: Option<(String, String)>,
+    /// The computer (its address) to ask to trust this one once in, as chosen there.
+    trust: Option<String>,
     /// A program to start on the host once connected and show alone (`ToAgent::Launch`).
     launch: Option<(u8, String)>,
     /// The screen quality chosen when it was opened (None: adapts to the connection).
@@ -557,6 +559,7 @@ impl Workspace {
                 prefs: None,
                 carry: None,
                 keep: None,
+                trust: None,
                 launch: None,
                 preset: self.opt.preset,
                 state: State::Shell(Box::new(crate::termwin::TermWindow::single(profile))),
@@ -572,7 +575,7 @@ impl Workspace {
                     Some((kind, text)) => State::Held(Box::new(super::held::Held::start(kind.parse().unwrap_or(crate::apps::COMMAND), text))),
                     None => State::Down(Down::new(false, String::new())),
                 };
-                Pane { id, label, target, ssh_cmd, mode, terms: None, start, prefs: None, carry: None, keep: None, launch: None, preset: self.opt.preset, state }
+                Pane { id, label, target, ssh_cmd, mode, terms: None, start, prefs: None, carry: None, keep: None, trust: None, launch: None, preset: self.opt.preset, state }
             }
         };
         self.panes.push(pane);
@@ -1023,9 +1026,9 @@ impl Workspace {
         let Some(s) = &mut self.signin else { return };
         match s.show(ctx, &target) {
             Some(super::signin::Answer::Connect(t)) => {
-                let keep = s.keep(&t);
+                let (keep, trust) = (s.keep(&t), s.trust_for());
                 let p = &mut self.panes[i];
-                p.keep = keep;
+                (p.keep, p.trust) = (keep, trust);
                 p.target = t;
                 p.state = State::Down(Down::new(false, String::new()));
                 self.signin = None;
@@ -1069,6 +1072,9 @@ impl Workspace {
         }
         if let Some((kind, text)) = p.launch.take() {
             result = result.and_then(|_| r.send(crate::proto::ToAgent::Launch { kind, text }));
+        }
+        if let Some(address) = p.trust.take() {
+            result = result.and_then(|_| r.ask_trust(address));
         }
         if again {
             r.notify("Connected again");
