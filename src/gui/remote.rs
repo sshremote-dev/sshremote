@@ -175,6 +175,8 @@ pub(super) struct Remote {
     click_pick: bool,
     /// Where the remote picture was drawn last, to tell when the pointer is over it.
     last_shown: Option<Rect>,
+    /// Enough of the background showed around the picture last time for it to move there.
+    backdrop_shows: bool,
     /// The picture's place in egui's keyboard focus, held while its keys go to the host.
     keys_id: egui::Id,
     /// That click has been pressed on the picture (the release of the click that opened the mode does not count).
@@ -294,6 +296,7 @@ impl Remote {
             sharing: (0, String::new()),
             click_pick: false,
             last_shown: None,
+            backdrop_shows: true,
             keys_id: egui::Id::unique(("remote-keys", NEXT_KEYS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))),
             pick_pressed: false,
             pick_at: None,
@@ -490,9 +493,10 @@ impl Remote {
         let ppp = ctx.pixels_per_point();
         ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         // Around the picture (scaled down, or of another shape), the background layers show, as
-        // behind the terminals but still: moving, they had the window drawn up to 40 times a
-        // second under a still screen (each frame of them made on the CPU); black when there are none.
-        super::look::backdrop(ui, area, Color32::BLACK, false);
+        // behind the terminals; black when there are none. They move only where a tenth of the
+        // pane or more shows them: hidden, moving layers had the window drawn up to 40 times a
+        // second under a still screen (each of their frames made on the CPU).
+        super::look::backdrop(ui, area, Color32::BLACK, self.backdrop_shows);
         let inline = self.term_inline && self.terms.is_some();
         // Side panels, as in an editor: the chat on the right, the terminal along the bottom; the
         // picture takes what is left, so both can be used while watching.
@@ -537,6 +541,8 @@ impl Remote {
         // Files dropped on the picture are uploaded; those dropped on the terminal were its own.
         self.take_drops(&ctx)?;
         self.last_shown = shown;
+        let covered = shown.filter(|r| r.intersects(pic_area)).map_or(0.0, |r| r.intersect(pic_area).area());
+        self.backdrop_shows = pic_area.area() - covered >= pic_area.area() * 0.1;
         let chat_rect = match chat_area {
             Some(r) => self.chat_panel(ui, r)?,
             None => None,
