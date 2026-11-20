@@ -230,6 +230,11 @@ impl Settled {
     fn due(&self) -> bool {
         self.at.is_some_and(|t| t.elapsed() > Duration::from_millis(800))
     }
+
+    /// How soon `due` turns true, for the window to be drawn then.
+    fn due_in(&self) -> Option<Duration> {
+        self.at.map(|t| Duration::from_millis(810).saturating_sub(t.elapsed()))
+    }
 }
 
 /// Unacknowledged upload bytes; more would only queue in ssh and delay the screen.
@@ -542,7 +547,12 @@ impl Remote {
         self.take_drops(&ctx)?;
         self.last_shown = shown;
         let covered = shown.filter(|r| r.intersects(pic_area)).map_or(0.0, |r| r.intersect(pic_area).area());
-        self.backdrop_shows = pic_area.area() - covered >= pic_area.area() * 0.1;
+        let shows = pic_area.area() - covered >= pic_area.area() * 0.1;
+        // Come into sight: moving from the next frame, not the next one a still screen has.
+        if shows && !self.backdrop_shows {
+            ctx.request_repaint();
+        }
+        self.backdrop_shows = shows;
         let chat_rect = match chat_area {
             Some(r) => self.chat_panel(ui, r)?,
             None => None,
@@ -585,8 +595,10 @@ impl Remote {
         if self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter)) {
             self.full_toggle = true;
         }
-        // Network messages wake the window themselves; this only keeps statistics and pings going.
-        ctx.request_repaint_after(self.ctl.next_tick());
+        // Network messages wake the window themselves; this keeps statistics and pings going, and
+        // what waits for a moment (the notice of files that arrived, a new size for the capture).
+        let soon = [self.sent.due_in(), self.got.due_in(), self.view_changed.map(|t| Duration::from_millis(260).saturating_sub(t.elapsed()))];
+        ctx.request_repaint_after(soon.into_iter().flatten().fold(self.ctl.next_tick(), Duration::min));
         Ok(())
     }
 

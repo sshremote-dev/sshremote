@@ -714,7 +714,6 @@ impl Control {
         }
     }
 
-    /// Once a second: refresh the statistics, ping, and let auto pick a preset.
     /// How soon `tick` has work: each second while pictures come or a ping is out; on a still
     /// screen not before the next ping.
     pub fn next_tick(&self) -> Duration {
@@ -725,6 +724,7 @@ impl Control {
         at.saturating_duration_since(Instant::now()).max(Duration::from_millis(10))
     }
 
+    /// Once a second: refresh the statistics, ping, and let auto pick a preset.
     /// Returns true when the statistics changed; settings changes are sent here.
     pub fn tick(&mut self, sess: &mut Session) -> io::Result<bool> {
         let dt = self.stat_at.elapsed().as_secs_f64();
