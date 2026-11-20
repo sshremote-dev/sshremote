@@ -21,6 +21,9 @@ pub struct Proxy {
     pub login: Option<(String, String)>,
 }
 
+/// The password as shown.
+const HIDDEN: &str = "***";
+
 /// The longest the proxy may take to open the way.
 const OPEN_LIMIT: Duration = Duration::from_secs(15);
 
@@ -71,6 +74,9 @@ impl Proxy {
             // [v6]:port
             Some(v6) => {
                 let (h, after) = v6.split_once(']').ok_or("an IPv6 address needs its closing ]")?;
+                if !after.is_empty() && !after.starts_with(':') {
+                    return Err(format!("{after} after the IPv6 address is no port"));
+                }
                 (h.to_string(), after.strip_prefix(':').map(|p| p.parse::<u16>().map_err(|_| format!("{p} is no port"))).transpose()?)
             }
             None => match place.rsplit_once(':') {
@@ -94,6 +100,17 @@ impl Proxy {
         self.written(false)
     }
 
+    /// Typed back as shown (the password as ***), the password it had `before` stays.
+    pub fn keeping(mut self, before: Option<&Proxy>) -> Proxy {
+        if let (Some((name, pw)), Some(Proxy { login: Some((was_name, was_pw)), .. })) = (&mut self.login, before)
+            && pw == HIDDEN
+            && name == was_name
+        {
+            *pw = was_pw.clone();
+        }
+        self
+    }
+
     fn written(&self, whole: bool) -> String {
         let scheme = match (self.kind, whole) {
             (Kind::Socks5, true) => "socks5h",
@@ -102,7 +119,7 @@ impl Proxy {
         };
         let login = match &self.login {
             Some((n, p)) if whole || p.is_empty() => format!("{}:{}@", escape(n), escape(p)),
-            Some((n, _)) => format!("{}:***@", escape(n)),
+            Some((n, _)) => format!("{}:{HIDDEN}@", escape(n)),
             None => String::new(),
         };
         let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
@@ -244,12 +261,18 @@ impl Proxy {
 }
 
 /// The proxy set for this program, if any: the person's own setting, else the one remote access
-/// keeps (which a service run as SYSTEM reads: it has no person's settings).
-pub fn current() -> Option<Proxy> {
+/// keeps (which a service run as SYSTEM reads: it has no person's settings). One that cannot be
+/// read is an error, never a way around it.
+pub fn current() -> Result<Option<Proxy>, String> {
     let set = crate::hosts::setting_now("proxy").filter(|p| !p.trim().is_empty());
     #[cfg(feature = "remote")]
     let set = set.or_else(|| crate::access::stored().ok().flatten().map(|c| c.proxy).filter(|p| !p.trim().is_empty()));
-    Proxy::parse(&set?).ok()
+    set.map(|s| Proxy::parse(&s).map_err(|e| format!("the proxy set cannot be used ({e})"))).transpose()
+}
+
+/// Whether nothing is to go through a proxy (one that cannot be read counts as set).
+pub fn none() -> bool {
+    matches!(current(), Ok(None))
 }
 
 /// Whether `host` is this computer, reached without the proxy.
@@ -260,7 +283,9 @@ fn here(host: &str) -> bool {
 /// A connection to `host`:`port`: through the proxy when one is set (this computer itself
 /// straight), else straight.
 pub fn connect(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
-    if let Some(p) = current().filter(|_| !here(host)) {
+    if !here(host)
+        && let Some(p) = current().map_err(io::Error::other)?
+    {
         return p.connect(host, port, timeout);
     }
     let mut last = io::Error::other("no address");
@@ -287,6 +312,10 @@ mod tests {
         assert_eq!(p.login, Some(("me@work".into(), "p:ss".into())));
         assert_eq!(p.url(), "http://me%40work:p%3Ass@10.0.0.1:3128");
         assert_eq!(p.shown(), "http://me%40work:***@10.0.0.1:3128");
+        // Shown in Settings without its password, and used again as it was.
+        assert_eq!(Proxy::parse(&p.shown()).unwrap().keeping(Some(&p)), p);
+        assert_eq!(Proxy::parse("http://you:***@10.0.0.1:3128").unwrap().keeping(Some(&p)).login, Some(("you".into(), "***".into())));
+        assert!(Proxy::parse("socks5://[::1]x").is_err());
         assert_eq!(Proxy::parse("socks5h://[::1]:9050").unwrap().url(), "socks5h://[::1]:9050");
         assert!(here("localhost") && here("127.0.0.1") && here("[::1]") && !here("sshremote.dev") && !here("192.168.1.2"));
         assert!(Proxy::parse("https://p:443").is_err() && Proxy::parse("ftp://p").is_err() && Proxy::parse("p:1080").is_err() && Proxy::parse("http://p:x").is_err());
@@ -313,7 +342,7 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut c, _) = l.accept().unwrap();
-            let mut byte = |c: &mut TcpStream, n: usize| {
+            let byte = |c: &mut TcpStream, n: usize| {
                 let mut b = vec![0u8; n];
                 c.read_exact(&mut b).unwrap();
                 b

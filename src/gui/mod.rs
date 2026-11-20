@@ -246,8 +246,10 @@ struct Form {
     capture: String,
     /// What Connect opens: a terminal, the screen or the files; remembered.
     mode: PaneMode,
-    /// The proxy being typed in Settings, and what trying it said (in the background).
+    /// The proxy being typed in Settings (its password shown as ***), the one in use, and what
+    /// trying it said (in the background).
     proxy: String,
+    proxy_set: Result<String, String>,
     proxy_said: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
@@ -429,7 +431,8 @@ impl Form {
                 opt.capture.clone()
             },
             mode: crate::hosts::setting("connect_mode").and_then(|k| PaneMode::from_key(&k)).unwrap_or(PaneMode::Terminal),
-            proxy: crate::proxy::current().map(|p| p.url()).unwrap_or_default(),
+            proxy: crate::proxy::current().ok().flatten().map(|p| p.shown()).unwrap_or_default(),
+            proxy_set: crate::proxy::current().map(|p| p.map(|p| p.url()).unwrap_or_default()),
             proxy_said: Default::default(),
         }
     }

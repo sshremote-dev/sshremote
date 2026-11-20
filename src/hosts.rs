@@ -166,8 +166,19 @@ fn write_lines(name: &str, lines: &[String]) {
     if let Some(d) = config_dir() {
         let _ = std::fs::create_dir_all(&d);
         let f = d.join(name);
-        let _ = std::fs::write(&f, lines.iter().map(|l| format!("{l}\n")).collect::<String>());
-        // Its user's alone: settings may hold a proxy's password.
+        // Whole or not at all (a reader never meets half a file), and its user's alone from the
+        // start: settings may hold a proxy's password.
+        let tmp = d.join(format!("{name}.{}.new", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        if o.open(&tmp).and_then(|mut h| std::io::Write::write_all(&mut h, text.as_bytes())).and_then(|_| std::fs::rename(&tmp, &f)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::write(&f, text);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -201,10 +212,13 @@ pub fn setting_now(key: &str) -> Option<String> {
     read_lines("settings.txt").iter().find_map(|l| l.strip_prefix(&prefix).map(str::to_string))
 }
 
-/// Sets a preference; the file is written at once, so a crash loses nothing.
+/// Sets a preference; the file is written at once, so a crash loses nothing. The others are
+/// taken as the file has them now: another process (the command line, a second window) may have
+/// changed one since this one read them, and writing the old ones back would undo that.
 pub fn set_setting(key: &str, value: &str) {
     let prefix = format!("{key}=");
     with_settings(|lines| {
+        *lines = read_lines("settings.txt");
         lines.retain(|l| !l.starts_with(&prefix));
         lines.push(format!("{prefix}{value}"));
         write_lines("settings.txt", lines);
@@ -214,6 +228,7 @@ pub fn set_setting(key: &str, value: &str) {
 /// Forgets the preferences whose line starts with `prefix` ("key=" for one key).
 pub fn remove_settings(prefix: &str) {
     with_settings(|lines| {
+        *lines = read_lines("settings.txt");
         let before = lines.len();
         lines.retain(|l| !l.starts_with(prefix));
         if lines.len() != before {

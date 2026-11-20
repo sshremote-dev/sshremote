@@ -144,9 +144,15 @@ fn open(sealed: &Value, passphrase: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "wrong passphrase".to_string())
 }
 
+/// Settings lines that hold a password (a proxy's), kept out of a backup's open part.
+fn secret_setting(line: &str) -> bool {
+    line.strip_prefix("proxy=").and_then(|u| crate::proxy::Proxy::parse(u).ok()).is_some_and(|p| p.login.is_some_and(|(_, pw)| !pw.is_empty()))
+}
+
 /// The backup as JSON; with a passphrase the saved passwords are included, encrypted.
 pub fn create(passphrase: Option<&str>) -> String {
     let mut files = serde_json::Map::new();
+    let mut secret_settings = Vec::new();
     if let Some(dir) = crate::hosts::config_dir()
         && let Ok(rd) = std::fs::read_dir(dir)
     {
@@ -155,8 +161,13 @@ pub fn create(passphrase: Option<&str>) -> String {
             // The crash report is this computer's own, not a setting.
             if (name.ends_with(".txt") || name == "computers.json")
                 && name != "crash.txt"
-                && let Ok(text) = std::fs::read_to_string(e.path())
+                && let Ok(mut text) = std::fs::read_to_string(e.path())
             {
+                if name == "settings.txt" {
+                    let (secret, open): (Vec<&str>, Vec<&str>) = text.lines().partition(|l| secret_setting(l));
+                    secret_settings = secret.into_iter().map(Value::from).collect();
+                    text = open.iter().map(|l| format!("{l}\n")).collect();
+                }
                 files.insert(name, Value::String(text));
             }
         }
@@ -175,7 +186,7 @@ pub fn create(passphrase: Option<&str>) -> String {
             .collect();
         let files: serde_json::Map<String, Value> =
             ssh_files().into_iter().map(|(name, data)| (name, Value::String(B64.encode(data)))).collect();
-        let secrets = json!({ "passwords": passwords, "ssh": files, "encoding": "base64" });
+        let secrets = json!({ "passwords": passwords, "ssh": files, "encoding": "base64", "settings": secret_settings });
         out["secrets"] = seal(secrets.to_string().as_bytes(), p);
     }
     serde_json::to_string_pretty(&out).expect("json")
@@ -244,7 +255,12 @@ pub fn save(passphrase: Option<&str>) -> Result<PathBuf, String> {
     for n in 1..100 {
         let name = if n == 1 { format!("sshremote-backup-{stamp}.json") } else { format!("sshremote-backup-{stamp} ({n}).json") };
         let path = dir.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        // Its user's alone, like the settings it holds.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        match o.open(&path) {
             Ok(mut f) => {
                 std::io::Write::write_all(&mut f, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
                 return Ok(path);
@@ -264,7 +280,7 @@ pub fn auto() {
     if path.exists() || std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(&path, create(None));
+    let _ = write_private(&path, create(None).as_bytes());
     let mut old: Vec<PathBuf> = list_in(&dir);
     if old.len() > KEEP_AUTO {
         old.sort();
@@ -381,7 +397,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
             } else {
                 union(text, &here)
             };
-            std::fs::write(dir.join(name), merged).map_err(|e| e.to_string())?;
+            write_private(&dir.join(name), merged.as_bytes())?;
             if name == "settings.txt" {
                 // At once: the next setting saved would otherwise write the cached old ones back.
                 crate::hosts::reload_settings();
@@ -426,6 +442,12 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
                 let secrets: Value = serde_json::from_slice(plain).map_err(|_| "damaged backup")?;
                 let list = secrets["passwords"].as_object().cloned().unwrap_or_default();
                 passwords.extend(list.iter().filter_map(|(h, s)| Some((h.clone(), s.as_str()?.to_string()))));
+                // Settings with a password in them (a proxy's), as the open ones: the backup's win.
+                for line in secrets["settings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    if let Some((k, v)) = line.split_once('=') {
+                        crate::hosts::set_setting(k, v);
+                    }
+                }
                 // Backups made before config and known_hosts were kept apart still hold them:
                 // those are restored above on their own terms, never replaced from here.
                 let files: Vec<(String, Value)> = secrets["ssh"]
@@ -579,10 +601,27 @@ mod tests {
         for var in vars {
             unsafe { std::env::set_var(var, &home) };
         }
+        let settings = crate::hosts::config_dir().unwrap().join("settings.txt");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "theme=dark\nproxy=http://me:s3cret@10.0.0.1:3128\n").unwrap();
         let file = home.join("b.json");
         std::fs::write(&file, create(Some("correct horse"))).unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(!text.contains("PRIVATE KEY"), "keys are only stored encrypted");
+        assert!(!text.contains("s3cret") && text.contains("theme=dark"), "a proxy's password is only stored encrypted");
+        let open = home.join("open.json");
+        std::fs::write(&open, create(None)).unwrap();
+        assert!(!std::fs::read_to_string(&open).unwrap().contains("s3cret"));
+        // Without the passphrase the proxy here stays; with it the backup's comes back.
+        std::fs::write(&settings, "proxy=socks5h://10.0.0.2:1080\n").unwrap();
+        restore(&open, None, false, false).unwrap();
+        let now = std::fs::read_to_string(&settings).unwrap();
+        assert!(now.contains("proxy=socks5h://10.0.0.2:1080") && now.contains("theme=dark"), "{now}");
+        restore(&file, Some("correct horse"), false, false).unwrap();
+        let now = std::fs::read_to_string(&settings).unwrap();
+        assert!(now.contains("proxy=http://me:s3cret@10.0.0.1:3128") && !now.contains("10.0.0.2"), "{now}");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&settings).unwrap().permissions()) & 0o777, 0o600);
         std::fs::remove_file(ssh.join("id_ed25519")).unwrap();
         std::fs::remove_dir_all(ssh.join("sub")).unwrap();
         assert!(restore(&file, Some("wrong pass"), false, true).is_err());

@@ -1378,7 +1378,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     };
     let totp = (!cfg.totp.is_empty()).then_some(&two_step as crate::net::TwoStep);
     // Through a proxy everything goes its way: no straight path around it.
-    let punch = (relayed && cfg.punch && crate::proxy::current().is_none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
+    let punch = (relayed && cfg.punch && crate::proxy::none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
     let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str());
     let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
     // A request without a password: one at a time, and a breath after the last, so nobody can
@@ -1950,8 +1950,10 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             (false, 0) => "on, viewers give the code of the authenticator app with the password".to_string(),
             (false, n) => format!("on, viewers give the code with the password, but for {n} trusted {} (remote-access trusted)", if n == 1 { "device" } else { "devices" }),
         });
-        if let Some(p) = crate::proxy::current() {
-            println!("proxy:    the relay is reached through {}", p.shown());
+        match crate::proxy::current() {
+            Ok(Some(p)) => println!("proxy:    the relay is reached through {}", p.shown()),
+            Ok(None) => {}
+            Err(e) => println!("proxy:    {e}: the relay is not reached"),
         }
         if c.record {
             println!("record:   sessions by ID are recorded in {}", recordings_dir().map(|d| d.display().to_string()).unwrap_or_default());

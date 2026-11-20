@@ -755,11 +755,15 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return std::fs::read(url).map_err(|e| e.to_string());
     }
-    let proxy = crate::proxy::current();
+    let proxy = crate::proxy::current()?;
     let mut cmd = std::process::Command::new("curl");
     cmd.args(["-fsSL", "--max-time", "120", "--proto", "=https,http"]);
+    // In its environment, which only this user sees: on its command line `ps` shows the password.
     if let Some(p) = &proxy {
-        cmd.args(["--proxy", &p.url()]);
+        for v in ["https_proxy", "HTTPS_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            cmd.env(v, p.url());
+        }
+        cmd.env_remove("no_proxy").env_remove("NO_PROXY");
     }
     cmd.arg(url);
     crate::sys::quiet(&mut cmd);
@@ -769,9 +773,12 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut w = std::process::Command::new("wget");
             w.args(["-q", "-O", "-", "--timeout=120", url]);
-            // wget speaks only to HTTP proxies.
-            if let Some(p) = proxy.filter(|p| p.kind == crate::proxy::Kind::Http) {
-                w.env("https_proxy", p.url()).env("http_proxy", p.url());
+            if let Some(p) = proxy {
+                // wget speaks only to HTTP proxies: past a SOCKS one it would go straight.
+                if p.kind != crate::proxy::Kind::Http {
+                    return Err("curl is needed to fetch through a SOCKS proxy".into());
+                }
+                w.env("https_proxy", p.url()).env("http_proxy", p.url()).env_remove("no_proxy").env_remove("NO_PROXY");
             }
             crate::sys::quiet(&mut w);
             w.output().map_err(|_| "neither curl nor wget is installed to fetch with".to_string())?

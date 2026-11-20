@@ -297,36 +297,42 @@ impl App {
             // Networks that let nothing out but through a proxy.
             kit::row(ui, "Proxy", |ui| {
                 ui.add(kit::field(&mut self.form.proxy, "socks5://host:1080 or http://host:8080").desired_width(300.0))
-                    .on_hover_text("The relay (computers by ID), updates and extensions are reached through it. One that wants a name and password: http://name:password@host:8080. SSH keeps its own settings (ProxyCommand). Empty: straight.");
-                let set = crate::hosts::setting("proxy").unwrap_or_default();
+                    .on_hover_text("The relay (computers by ID), updates and extensions are reached through it. One that wants a name and password: http://name:password@host:8080 (shown with *** for the password). SSH keeps its own settings (ProxyCommand). Empty: straight.");
+                let set = self.form.proxy_set.clone();
+                let before = set.as_ref().ok().and_then(|u| crate::proxy::Proxy::parse(u).ok());
                 let typed = self.form.proxy.trim().to_string();
-                let parsed = (!typed.is_empty()).then(|| crate::proxy::Proxy::parse(&typed));
+                let parsed = (!typed.is_empty()).then(|| crate::proxy::Proxy::parse(&typed).map(|p| p.keeping(before.as_ref())));
                 let ok = !matches!(parsed, Some(Err(_)));
                 let url = match &parsed {
                     Some(Ok(p)) => p.url(),
                     _ => String::new(),
                 };
-                if ui.add_enabled(ok && url != set, kit::secondary("Use")).on_disabled_hover_text(match &parsed {
+                if ui.add_enabled(ok && set.as_ref() != Ok(&url), kit::secondary("Use")).on_disabled_hover_text(match &parsed {
                     Some(Err(e)) => e.clone(),
                     _ => "In use".to_string(),
                 }).clicked()
                 {
                     crate::hosts::set_setting("proxy", &url);
-                    self.form.proxy = url.clone();
-                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(if url.is_empty() { "Straight from now on".into() } else { "Through it from now on".into() }));
+                    self.form.proxy = parsed.and_then(Result::ok).map(|p| p.shown()).unwrap_or_default();
+                    #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
+                    let mut said = Ok(if url.is_empty() { "Straight from now on".to_string() } else { "Through it from now on".to_string() });
                     // Remote access by ID here too, which a service reads from its own settings.
                     #[cfg(feature = "remote")]
-                    if let Ok(Some(mut c)) = crate::access::stored()
-                        && c.proxy != url
-                    {
-                        c.proxy = url;
-                        if let Err(e) = crate::access::save(&c) {
-                            *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(format!("Kept for this window; remote access by ID keeps its own until saved as administrator ({e})")));
+                    match crate::access::stored() {
+                        Ok(Some(mut c)) if c.proxy != url => {
+                            c.proxy = url.clone();
+                            if let Err(e) = crate::access::save(&c) {
+                                said = Err(format!("In use for this person; remote access by ID keeps its own until saved as administrator ({e})"));
+                            }
                         }
+                        Ok(_) => {}
+                        Err(e) => said = Err(format!("In use for this person; remote access by ID keeps its own: as administrator, sshremote remote-access proxy URL ({e})")),
                     }
+                    self.form.proxy_set = Ok(url);
+                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(said);
                 }
                 #[cfg(feature = "remote")]
-                if !set.is_empty() && ui.add(kit::ghost("Try")).on_hover_text("Reaches the relay through it").clicked() {
+                if set.as_ref().is_ok_and(|s| !s.is_empty()) && ui.add(kit::ghost("Try")).on_hover_text("Reaches the relay through it").clicked() {
                     let said = self.form.proxy_said.clone();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
@@ -338,7 +344,8 @@ impl App {
                     *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok("Trying\u{2026}".into()));
                 }
             });
-            if let Some(said) = self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let said = self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(said) = said.or_else(|| self.form.proxy_set.clone().err().map(Err)) {
                 let (text, colour) = match said {
                     Ok(t) => (t, ui.visuals().weak_text_color()),
                     Err(e) => (e, super::bad()),

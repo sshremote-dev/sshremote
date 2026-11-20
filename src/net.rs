@@ -1006,7 +1006,7 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     // relay is on this computer (the web page's gateway beside it gains nothing from one).
     let local = s.peer_addr().is_ok_and(|a| a.ip().is_loopback());
     // Nor through a proxy: everything goes its way then.
-    let punch = (straight_paths() && !local && !lost_lately(&addr.id) && crate::proxy::current().is_none()).then(|| Punch { viewer: true, relay: addr.relay.clone(), id: addr.id.clone() });
+    let punch = (straight_paths() && !local && !lost_lately(&addr.id) && crate::proxy::none()).then(|| Punch { viewer: true, relay: addr.relay.clone(), id: addr.id.clone() });
     let pair = handshake_2fa(s, password, true, &now, None, punch).map_err(|e| e.to_string())?;
     // The agent answers a ping every second: two minutes of nothing is a dead path (a network
     // change, a NAT mapping dropped), and the viewer reconnects instead of freezing.
