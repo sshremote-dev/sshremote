@@ -1098,6 +1098,7 @@ fn serve_with(
             waited = true;
             fresh = true;
             due = now + Duration::from_millis(34);
+            spares.push(plane.data);
             continue;
         }
         waited = false;

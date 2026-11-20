@@ -148,10 +148,16 @@ impl Shared {
             if matches!(got, Err(Lost)) {
                 return;
             }
-            // Changes meanwhile gather into the next picture: none is lost by waiting.
+            // Changes meanwhile gather into the next picture: none is lost by waiting. Slept in
+            // short steps, so a Watch dropped meanwhile is not kept waiting for a slow viewer's gap.
             if matches!(got, Ok(Next::Picture)) {
-                let gap = Duration::from_millis(self.gap.load(Ordering::Relaxed) as u64);
-                std::thread::sleep(gap.saturating_sub(dup.got.elapsed()));
+                let until = dup.got + Duration::from_millis(self.gap.load(Ordering::Relaxed) as u64);
+                while let Some(left) = until.checked_duration_since(Instant::now()).filter(|l| !l.is_zero()) {
+                    if self.state.lock().unwrap_or_else(|e| e.into_inner()).stop {
+                        return;
+                    }
+                    std::thread::sleep(left.min(Duration::from_millis(10)));
+                }
             }
         }
     }
