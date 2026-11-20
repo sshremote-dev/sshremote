@@ -110,6 +110,23 @@ pub struct Capture {
     _keep: Box<dyn std::any::Any>,
 }
 
+impl Capture {
+    /// The same packets, `wake` called as each comes, for a loop that waits rather than looks.
+    pub fn waking(self, wake: Arc<dyn Fn() + Send + Sync>) -> Capture {
+        let (tx, rx) = mpsc::channel();
+        let from = self.packets;
+        std::thread::spawn(move || {
+            while let Ok(p) = from.recv() {
+                if tx.send(p).is_err() {
+                    return;
+                }
+                wake();
+            }
+        });
+        Capture { packets: rx, _keep: self._keep }
+    }
+}
+
 /// Windows: loopback recording of the default output device through WASAPI.
 #[cfg(windows)]
 pub fn capture() -> Result<Capture, String> {

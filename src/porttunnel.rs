@@ -233,9 +233,23 @@ pub struct Ports {
     open: HashMap<u32, Sender<Vec<u8>>>,
     /// Bounded: a connection that reads faster than the viewer takes waits, and so does its sender.
     events: Option<(mpsc::SyncSender<ToClient>, Receiver<ToClient>)>,
+    /// Called as a connection has something, for a loop that waits rather than looks.
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The last pump left some of what was read for the next turn.
+    more: bool,
 }
 
 impl Ports {
+    /// Connections whose news calls `wake` as it comes.
+    pub fn waking(wake: Arc<dyn Fn() + Send + Sync>) -> Ports {
+        Ports { wake: Some(wake), ..Ports::default() }
+    }
+
+    /// What was read waits for the next turn, which should come at once.
+    pub fn busy(&self) -> bool {
+        self.more
+    }
+
     fn events(&mut self) -> &mpsc::SyncSender<ToClient> {
         &self.events.get_or_insert_with(|| mpsc::sync_channel(64)).0
     }
@@ -245,7 +259,14 @@ impl Ports {
     pub fn open(&mut self, id: u32, host: String, port: u16) {
         let (wtx, wrx) = mpsc::channel::<Vec<u8>>();
         self.open.insert(id, wtx);
-        let tx = self.events().clone();
+        let events = self.events().clone();
+        let wake = self.wake.clone();
+        // Whether it could go (the agent may have ended).
+        let tx = move |m: ToClient| {
+            let sent = events.send(m).is_ok();
+            wake.iter().for_each(|w| w());
+            sent
+        };
         std::thread::spawn(move || {
             use std::net::ToSocketAddrs;
             let reached = (host.as_str(), port)
@@ -256,11 +277,11 @@ impl Ports {
             let s = match reached {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(ToClient::PortOpened { id, ok: false, text: format!("{host}:{port}: {e}") });
+                    let _ = tx(ToClient::PortOpened { id, ok: false, text: format!("{host}:{port}: {e}") });
                     return;
                 }
             };
-            let _ = tx.send(ToClient::PortOpened { id, ok: true, text: String::new() });
+            let _ = tx(ToClient::PortOpened { id, ok: true, text: String::new() });
             let Ok(mut reading) = s.try_clone() else { return };
             std::thread::spawn(move || write_out(s, wrx));
             let mut buf = vec![0u8; CHUNK];
@@ -268,13 +289,13 @@ impl Ports {
                 match reading.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tx.send(ToClient::PortData { id, data: buf[..n].to_vec() }).is_err() {
+                        if !tx(ToClient::PortData { id, data: buf[..n].to_vec() }) {
                             return;
                         }
                     }
                 }
             }
-            let _ = tx.send(ToClient::PortClosed { id });
+            let _ = tx(ToClient::PortClosed { id });
         });
     }
 
@@ -290,6 +311,7 @@ impl Ports {
 
     /// What the connections read, up to about `most` bytes this turn, so the screen keeps its share.
     pub fn pump(&mut self, most: usize) -> Vec<ToClient> {
+        self.more = false;
         let Some((_, rx)) = self.events.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
         let mut size = 0;
@@ -303,6 +325,7 @@ impl Ports {
             }
             out.push(m);
         }
+        self.more = size >= most;
         out
     }
 }

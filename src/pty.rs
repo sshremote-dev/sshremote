@@ -48,16 +48,24 @@ impl Input {
 #[derive(Default)]
 pub struct Terms {
     open: HashMap<u32, Shell>,
+    /// Called as output comes, for a loop that waits rather than looks.
+    wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Terms {
+    /// Shells whose output calls `wake` as it comes.
+    pub fn waking(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Terms {
+        Terms { open: HashMap::new(), wake: Some(wake) }
+    }
+
     /// Starts a shell; returns a message to send if it failed.
     pub fn open(&mut self, id: u32, cols: u16, rows: u16) -> Option<ToClient> {
         match sys::spawn(cols.max(2), rows.max(1), None, &[]) {
             Ok((input, output, handle)) => {
                 // Bounded, so a flood of output waits for the reader instead of filling memory.
                 let (tx, rx) = mpsc::sync_channel(64);
-                std::thread::spawn(move || read_loop(output, tx, Box::new(|| {})));
+                let wake = self.wake.clone();
+                std::thread::spawn(move || read_loop(output, tx, Box::new(move || wake.iter().for_each(|w| w()))));
                 self.open.insert(id, Shell { input: Input::new(input), out: rx, sys: handle });
                 None
             }

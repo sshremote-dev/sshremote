@@ -185,14 +185,15 @@ pub fn code_arg() -> String {
     code().map(|c| format!(" --code {c}")).unwrap_or_default()
 }
 
-/// Serves on stdin/stdout, or on the named pipes a Windows relay created.
-/// What the agent's loop hears: a message from the viewer, a picture ready, the viewer gone.
+/// What the agent's loop hears: a message from the viewer, something to send, the viewer gone.
 enum Heard {
     Msg(ToAgent),
-    Picture,
+    /// Something came to send: a picture, a shell's output, a connection's data, sound.
+    Wake,
     Gone,
 }
 
+/// Serves on stdin/stdout, or on the named pipes a Windows relay created.
 pub fn run(backend: &str, pipe: Option<&str>) -> Result<(), String> {
     let backend = starting(backend);
     #[cfg(windows)]
@@ -363,12 +364,19 @@ fn serve_with(
     }
 
     let (tx, rx) = mpsc::channel::<Heard>();
-    // A capture that says when a picture comes lets the loop wait for it instead of looking.
+    // A capture that says when a picture comes lets the loop wait for it instead of looking; so
+    // do shells, forwarded connections and sound, or they would wait for the loop's next look.
     let woken = {
         let tx = tx.clone();
         cap.set_waker(Box::new(move || {
-            let _ = tx.send(Heard::Picture);
+            let _ = tx.send(Heard::Wake);
         }))
+    };
+    let poke: std::sync::Arc<dyn Fn() + Send + Sync> = {
+        let tx = tx.clone();
+        std::sync::Arc::new(move || {
+            let _ = tx.send(Heard::Wake);
+        })
     };
     // Why the viewer's stream ended, when it ended badly, for the viewer to see.
     let (why_tx, why) = mpsc::channel::<String>();
@@ -437,7 +445,7 @@ fn serve_with(
     }
     let mut clip = crate::clip::Clip::with_files();
     let mut inbox = crate::files::Inbox::default();
-    let mut terms = crate::pty::Terms::default();
+    let mut terms = crate::pty::Terms::waking(poke.clone());
     let mut ui = crate::ui::Ui::new();
     // When the viewer was last told its click fell outside the shared window (not before boot:
     // an `Instant` a minute back does not exist on a Windows host up for less than that).
@@ -456,7 +464,7 @@ fn serve_with(
     // The computer itself: its own keyboard and mouse, its screen, locking as the viewer leaves.
     let mut host = crate::hostctl::HostCtl::default();
     // Connections for the viewer's forwarded ports.
-    let mut ports = crate::porttunnel::Ports::default();
+    let mut ports = crate::porttunnel::Ports::waking(poke.clone());
     // A voice call: ringing (None) or answered, with the microphone here and a player for theirs.
     let mut call: Option<Option<(Option<crate::audio::Capture>, Option<crate::audio::Player>)>> = None;
     let mut pending = String::new();
@@ -479,7 +487,7 @@ fn serve_with(
         // Everything queued in the last turn goes out before waiting.
         enc.flush().map_err(io_err)?;
         // A download in progress keeps the loop turning; otherwise wait for input or the next frame.
-        let longest = if outbox.busy() { 1 } else { 8 };
+        let longest = if outbox.busy() || ports.busy() { 1 } else { 8 };
         // A capture that wakes the loop is not looked at every millisecond for a new picture.
         let shortest = if woken && due <= Instant::now() { longest } else { 1 };
         let mut wait = due
@@ -493,13 +501,13 @@ fn serve_with(
         let mut gone = false;
         match rx.recv_timeout(wait) {
             Ok(Heard::Msg(m)) => msgs.push(m),
-            Ok(Heard::Picture) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Heard::Wake) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(Heard::Gone) | Err(_) => gone = true,
         }
         for h in rx.try_iter() {
             match h {
                 Heard::Msg(m) => msgs.push(m),
-                Heard::Picture => {}
+                Heard::Wake => {}
                 Heard::Gone => gone = true,
             }
         }
@@ -772,7 +780,7 @@ fn serve_with(
                     sound = None;
                     if on {
                         match crate::audio::capture() {
-                            Ok(c) => sound = Some(c),
+                            Ok(c) => sound = Some(c.waking(poke.clone())),
                             Err(e) => send(enc, &ToClient::Notice(format!("Sound: {e}"))).map_err(io_err)?,
                         }
                     }
@@ -946,7 +954,7 @@ fn serve_with(
         for text in chat.replies() {
             // The call answered here: the microphone and the speakers here join it.
             if text == crate::chat::ANSWER && call.is_some() {
-                let mic = crate::audio::microphone().map_err(|e| send(enc, &ToClient::Notice(format!("The microphone there: {e}")))).ok();
+                let mic = crate::audio::microphone().map(|m| m.waking(poke.clone())).map_err(|e| send(enc, &ToClient::Notice(format!("The microphone there: {e}")))).ok();
                 let player = crate::audio::Player::new().map_err(|e| send(enc, &ToClient::Notice(format!("The speakers there: {e}")))).ok();
                 call = Some(Some((mic, player)));
                 send(enc, &ToClient::CallState(crate::chat::CALL_TALKING)).map_err(io_err)?;
@@ -979,7 +987,7 @@ fn serve_with(
                     }
                 }
                 if taken & crate::grant::TERMINAL != 0 {
-                    terms = crate::pty::Terms::default();
+                    terms = crate::pty::Terms::waking(poke.clone());
                 }
                 if taken & crate::grant::FILES != 0 {
                     (inbox, outbox) = (Default::default(), Default::default());
@@ -988,7 +996,7 @@ fn serve_with(
                     host = crate::hostctl::HostCtl::default();
                 }
                 if taken & crate::grant::PORTS != 0 {
-                    ports = crate::porttunnel::Ports::default();
+                    ports = crate::porttunnel::Ports::waking(poke.clone());
                 }
                 send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
                 send(enc, &ToClient::Notice(format!("The person at that computer now lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
