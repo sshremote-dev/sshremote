@@ -1586,9 +1586,9 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         assert!(after_film < 200 && after_photo < 200, "the viewer's picture was the host's: {after_film} and {after_photo} pixels differ");
     }
 
-    /// A window shared alone shows the menus it opens: Shift+F10 in it opens its context menu, and
-    /// the shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
-    /// window with a context menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,
+    /// A window shared alone shows the menus it opens: F10 in it opens its main menu, and the
+    /// shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
+    /// window with a main menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,
     /// SSHREMOTE_GNOME_AGENT as above).
     #[test]
     #[ignore]
@@ -1626,8 +1626,9 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         assert!(frames(&mut sess, &mut fb, 20, &|w, h| (w, h) != screen), "the window alone");
         frames(&mut sess, &mut fb, 2, &|_, _| false);
         let before = (fb.w, fb.h, fb.rgb.clone());
-        // Its context menu, as Shift+F10 opens it (the keyboard's right click).
-        sess.send(ToAgent::Key { keysym: crate::xk::F1 + 9, mods: crate::proto::MOD_SHIFT }).unwrap();
+        // Its main menu, as F10 opens it (GNOME 50's text editor opens no context menu on an
+        // empty page, by Shift+F10 or a right click).
+        sess.send(ToAgent::Key { keysym: crate::xk::F1 + 9, mods: 0 }).unwrap();
         frames(&mut sess, &mut fb, 3, &|_, _| false);
         a_picture(&fb, "window-menu");
         let grew = (fb.w, fb.h) != (before.0, before.1);
