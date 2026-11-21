@@ -1186,7 +1186,8 @@ fn serve_with(
         let Some(img) = last.as_ref().filter(|i| (i.w, i.h) == size) else {
             continue;
         };
-        if !fresh && prev.is_some() {
+        // A film gone still is looked at once more, to send its pixels losslessly.
+        if !fresh && prev.is_some() && !vid.quiet() {
             continue;
         }
         fresh = false;
@@ -1256,8 +1257,11 @@ fn serve_with(
             (Some(p), true) => video::changed_tiles(p, img),
             _ => rects.clone(),
         };
+        // A whole new picture (a start, a refresh) is no change of the screen: it makes no film,
+        // and shows a film playing as one.
+        let watched = if whole { vid.region.map(|r| vec![r]).unwrap_or_default() } else { watched };
         prev_img = grey.then(|| Image { w: img.w, h: img.h, stride: img.stride, data: img.data.clone() });
-        if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &watched, scrolled, &|r| crate::color::rich(img, r)) {
+        if let video::Event::Ended(r) = vid.observe(plane.w, plane.h, &watched, scrolled, &|r| crate::color::rich(img, r), &|r| crate::color::photo_cell(img, r)) {
             // Its pixels went as a film: they go again losslessly, tile by tile, but for the
             // tiles this frame sends whole anyway.
             let inside = |c: &crate::color::Rect, t: &crate::color::Rect| c.x <= t.x && c.y <= t.y && c.x + c.w >= t.x + t.w && c.y + c.h >= t.y + t.h;

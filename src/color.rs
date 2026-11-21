@@ -551,6 +551,22 @@ pub fn rich(img: &Image, r: &Rect) -> bool {
     many * 2 > samples
 }
 
+/// A quicker look at one small area (a cell of 64x64): whether 64 of its pixels, spread evenly,
+/// have no colour that covers a quarter of them, as in a photograph.
+pub fn photo_cell(img: &Image, r: &Rect) -> bool {
+    if r.w < 8 || r.h < 8 || r.x + r.w > img.w || r.y + r.h > img.h {
+        return false;
+    }
+    let mut keys = [0u32; 64];
+    for (k, key) in keys.iter_mut().enumerate() {
+        let (x, y) = (r.x + r.w * (2 * (k % 8) + 1) / 16, r.y + r.h * (2 * (k / 8) + 1) / 16);
+        let px = &img.data[y * img.stride + x * 4..][..3];
+        *key = (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32;
+    }
+    keys.sort_unstable();
+    keys.chunk_by(|a, b| a == b).map(<[u32]>::len).max().unwrap_or(0) * 4 < keys.len()
+}
+
 /// The viewer's copy of the agent's `Palette`.
 #[derive(Clone)]
 pub struct Colours {
@@ -742,6 +758,19 @@ mod tests {
     fn plane(mode: Mode, w: usize, h: usize, f: impl Fn(usize) -> u8) -> Plane {
         let data = (0..w * h * mode.bpp()).map(f).collect();
         Plane { w, h, mode, data }
+    }
+
+    #[test]
+    fn a_photograph_cell_is_told_from_text() {
+        let (w, h) = (128, 64);
+        let noisy = (0..w * h * 4).map(|i| ((i as u64).wrapping_mul(2_654_435_761) >> 11) as u8).collect();
+        let photo = Image { w, h, stride: w * 4, data: noisy };
+        // Dark letters on a light page: the page covers most of it.
+        let text = Image { w, h, stride: w * 4, data: (0..w * h * 4).map(|i| if (i / 4) % 7 == 0 { 20 } else { 240 }).collect() };
+        let cell = Rect { x: 64, y: 0, w: 64, h: 64 };
+        assert!(photo_cell(&photo, &cell));
+        assert!(!photo_cell(&text, &cell));
+        assert!(!photo_cell(&photo, &Rect { x: 100, y: 0, w: 64, h: 64 }), "out of the picture");
     }
 
     #[test]

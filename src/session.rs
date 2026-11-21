@@ -1500,6 +1500,92 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         assert!(differ < 200, "the viewer's picture was the host's: {differ} pixels differ");
     }
 
+    /// A film that stops, and a photograph shown once, end on the viewer exactly as on the host:
+    /// sent as a film from their first frame, then losslessly once still. In a GNOME session on
+    /// SSHREMOTE_GNOME_HOST, programs started there through SSHREMOTE_GNOME_RUN (a command prefix
+    /// that puts them in the session) and the agent SSHREMOTE_GNOME_AGENT.
+    #[test]
+    #[ignore]
+    fn a_gnome_film_ends_exact() {
+        use crate::proto::{FORMATS, Settings, ToAgent};
+        let (Ok(host), Ok(run), Ok(agent)) = (std::env::var("SSHREMOTE_GNOME_HOST"), std::env::var("SSHREMOTE_GNOME_RUN"), std::env::var("SSHREMOTE_GNOME_AGENT")) else { return };
+        // A photograph panned for three seconds after a wait, then still; then another, still.
+        let film = [
+            "import gi, glob, math",
+            "gi.require_version(\"Gtk\", \"3.0\")",
+            "from gi.repository import Gtk, GLib, GdkPixbuf",
+            "p = GdkPixbuf.Pixbuf.new_from_file_at_scale(sorted(glob.glob(\"/usr/share/backgrounds/*.jpg\"))[0], 1600, 1000, True)",
+            "w = Gtk.Window(title=\"film\")",
+            "w.set_default_size(900, 560)",
+            "a = Gtk.Image()",
+            "w.add(a)",
+            "f = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 840, 520)",
+            "n = [0]",
+            "def show(k):",
+            "    s = 0.8 + 0.1 * math.sin(k / 20.0)",
+            "    p.scale(f, 0, 0, 840, 520, -40 - 3 * k, -30 - 2 * k, s, s, GdkPixbuf.InterpType.BILINEAR)",
+            "    a.set_from_pixbuf(f)",
+            "def tick():",
+            "    n[0] += 1",
+            "    show(n[0])",
+            "    return n[0] < 90",
+            "show(0)",
+            "GLib.timeout_add(3000, lambda: GLib.timeout_add(33, tick) and False)",
+            "GLib.timeout_add(13000, lambda: show(20) or False)",
+            "w.connect(\"destroy\", Gtk.main_quit)",
+            "w.show_all()",
+            "w.present()",
+            "Gtk.main()",
+        ]
+        .join("\n");
+        let opened = std::process::Command::new("ssh").arg(&host).arg(format!("{run} setsid timeout 40 python3 -c '{film}' > /dev/null 2>&1 < /dev/null &")).status();
+        assert!(opened.is_ok_and(|s| s.success()), "the film opens");
+        std::thread::sleep(Duration::from_secs(1));
+        let target = Target::Ssh { host: host.clone(), port: None, args: Vec::new(), remote: format!("{run} {agent} --agent"), capture: "gnome".into(), password: None, unattended: true };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let (w, h) = sess.desk;
+        sess.send(ToAgent::Settings(Settings { view_w: w, view_h: h, scale: 100, mode: crate::color::Mode::True, fps: 30, formats: FORMATS })).unwrap();
+        let mut fb = Framebuffer::default();
+        // Frames for `ms`, applied: how many carried film, and the picture before the first whole one.
+        let take = |sess: &mut Session, fb: &mut Framebuffer, ms: u64, last: bool| -> (usize, Option<Vec<u8>>) {
+            let (mut films, mut before_whole) = (0, None);
+            let until = Instant::now() + Duration::from_millis(ms);
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                        films += f.video.is_some() as usize;
+                        if last && f.covered() == fb.w * fb.h && before_whole.is_none() {
+                            before_whole = Some(fb.rgb.clone());
+                        }
+                        fb.apply(&f).unwrap();
+                    }
+                    Ok(Ev::Closed(e)) => panic!("the agent ended: {e}"),
+                    _ => {}
+                }
+            }
+            (films, before_whole)
+        };
+        let exact = |sess: &mut Session, fb: &mut Framebuffer| {
+            sess.send(ToAgent::Refresh).unwrap();
+            let (_, before) = take(sess, fb, 2500, true);
+            let before = before.unwrap_or_else(|| panic!("a whole new picture ({}x{} viewer)\n{}", fb.w, fb.h, sess.log()));
+            before.as_chunks::<3>().0.iter().zip(fb.rgb.as_chunks::<3>().0).filter(|(a, b)| a != b).count()
+        };
+        // The film plays from 2 s after the window opened for 3 s, then stays still.
+        let (films, _) = take(&mut sess, &mut fb, 6500, false);
+        let after_film = exact(&mut sess, &mut fb);
+        // Then another photograph, once, and still.
+        let (shown, _) = take(&mut sess, &mut fb, 5000, false);
+        let after_photo = exact(&mut sess, &mut fb);
+        // The window closes by itself (its timeout).
+        sess.close();
+        println!("film frames {films}, photograph frames {shown}; pixels differing after the film {after_film}, after the photograph {after_photo}");
+        assert!(films > 10, "the film went as one: {films} frames");
+        assert!(shown >= 1, "the photograph went first as a film's frame");
+        assert!(after_film < 200 && after_photo < 200, "the viewer's picture was the host's: {after_film} and {after_photo} pixels differ");
+    }
+
     /// A window shared alone shows the menus it opens: Shift+F10 in it opens its context menu, and
     /// the shared picture shows it. Needs SSHREMOTE_GNOME_HOST with the helper running and a
     /// window with a context menu (a text editor) focused there (and SSHREMOTE_GNOME_ENV,

@@ -20,6 +20,12 @@ const MIN_TILES: usize = 25;
 /// Fewest tiles that make a region at once when they changed in two frames in a row (about
 /// 256x256 pixels): a film's first frames would otherwise each go losslessly, a large burst.
 const FAST_TILES: usize = 64;
+/// Fewest tiles of a photograph-like area that make a region from its very first change (about
+/// 512x256 pixels): its first frame alone would cost hundreds of kilobytes losslessly, when a film
+/// starts there. Were it a still picture, it is sent losslessly once it has been quiet a while.
+const FIRST_TILES: usize = 128;
+/// The cells looked at for a photograph in a change, CELL x CELL pixels (2x2 tiles).
+const CELL: usize = 2 * TILE;
 /// Changes further apart than this are not frame after frame: the heat starts over.
 const GAP: Duration = Duration::from_millis(400);
 const QUIET: Duration = Duration::from_millis(1200);
@@ -68,19 +74,23 @@ impl Video {
     /// scroll uncovered (`scrolled`) are new text, not a film, and heat nothing. `rich` says
     /// whether an area now looks like a photograph: only such an area becomes a region, and a
     /// region that stops looking like one ends at once, since text and drawings cost little
-    /// losslessly and blur in a film.
-    pub fn observe(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool) -> Event {
-        self.observe_at(w, h, rects, scrolled, rich, Instant::now())
+    /// losslessly and blur in a film. `cell` is a quicker look at one CELL-sized cell, to find a
+    /// photograph within a larger change.
+    pub fn observe(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool, cell: &dyn Fn(&Rect) -> bool) -> Event {
+        self.observe_at(w, h, rects, scrolled, rich, cell, Instant::now())
     }
 
-    fn observe_at(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool, now: Instant) -> Event {
+    #[allow(clippy::too_many_arguments)]
+    fn observe_at(&mut self, w: usize, h: usize, rects: &[Rect], scrolled: bool, rich: &dyn Fn(&Rect) -> bool, cell: &dyn Fn(&Rect) -> bool, now: Instant) -> Event {
         if (w, h) != self.size {
             self.reset();
             self.size = (w, h);
             (self.cols, self.rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
             self.heat = vec![0; self.cols * self.rows];
         }
-        if self.last_seen.replace(now).is_some_and(|t| now.duration_since(t) > GAP) {
+        // The first picture since a start or a new size is the whole screen shown, never a film.
+        let before = self.last_seen.replace(now);
+        if before.is_some_and(|t| now.duration_since(t) > GAP) {
             self.heat.fill(0);
         }
         let mut changed = vec![false; self.heat.len()];
@@ -94,14 +104,14 @@ impl Video {
         if let Some(reg) = self.region
             && rects.iter().any(|r| overlaps(r, &reg))
         {
-            self.last_change = Instant::now();
+            self.last_change = now;
         }
         for (heat, &c) in self.heat.iter_mut().zip(&changed) {
             *heat = (*heat << 1) | c as u8;
         }
         if let Some(reg) = self.region {
             let plain = rects.iter().any(|r| overlaps(r, &reg)) && !rich(&reg);
-            if plain || self.last_change.elapsed() > QUIET {
+            if plain || now.saturating_duration_since(self.last_change) > QUIET {
                 self.region = None;
                 self.enc = None;
                 // Heat only decays on processed frames; start the area cold so it is not taken back at once.
@@ -127,8 +137,36 @@ impl Video {
             (hot.len() * 2 >= (x1 - x0) * (y1 - y0)).then_some((x0, x1, y0, y1))
         };
         let box_of = |(x0, x1, y0, y1): (usize, usize, usize, usize)| Rect { x: x0 * TILE, y: y0 * TILE, w: ((x1 * TILE).min(w) - x0 * TILE), h: ((y1 * TILE).min(h) - y0 * TILE) };
+        // A photograph changed at once, maybe with a page around it: the cells of it that look
+        // like one, never (almost) the whole screen.
+        let first = || {
+            if before.is_none() || tiles(&|heat| heat & 1 == 1).len() < FIRST_TILES {
+                return None;
+            }
+            let (cols, rows) = (self.cols, self.rows);
+            let changed = |tx: usize, ty: usize| tx < cols && ty < rows && self.heat[ty * cols + tx] & 1 == 1;
+            let mut photo = Vec::new();
+            for cy in 0..rows.div_ceil(2) {
+                for cx in 0..cols.div_ceil(2) {
+                    let (tx, ty) = (cx * 2, cy * 2);
+                    if [(0, 0), (1, 0), (0, 1), (1, 1)].iter().any(|(dx, dy)| changed(tx + dx, ty + dy))
+                        && cell(&Rect { x: cx * CELL, y: cy * CELL, w: CELL.min(w - cx * CELL), h: CELL.min(h - cy * CELL) })
+                    {
+                        photo.extend([(tx, ty), (tx + 1, ty), (tx, ty + 1), (tx + 1, ty + 1)].into_iter().filter(|&(x, y)| x < cols && y < rows));
+                    }
+                }
+            }
+            // A cell only partly over the photograph is not taken for one: what changed within a
+            // cell around them is the rest of it, or a film's edges would go losslessly each frame.
+            let (x0, x1, y0, y1) = dense(&photo, FIRST_TILES)?;
+            let (ex0, ex1, ey0, ey1) = (x0.saturating_sub(2), (x1 + 2).min(cols), y0.saturating_sub(2), (y1 + 2).min(rows));
+            let near = (ey0..ey1).flat_map(|ty| (ex0..ex1).map(move |tx| (tx, ty))).filter(|&(tx, ty)| changed(tx, ty));
+            let b = near.fold((x0, x1, y0, y1), |b, (tx, ty)| (b.0.min(tx), b.1.max(tx + 1), b.2.min(ty), b.3.max(ty + 1)));
+            Some(b).filter(|b| (b.1 - b.0) * (b.3 - b.2) * 4 < cols * rows * 3)
+        };
         let Some((x0, x1, y0, y1)) = dense(&tiles(&|heat| heat.count_ones() >= HOT), MIN_TILES)
             .or_else(|| dense(&tiles(&|heat| heat & 3 == 3), FAST_TILES))
+            .or_else(first)
             .filter(|b| rich(&box_of(*b)))
         else {
             return Event::None;
@@ -139,7 +177,7 @@ impl Video {
             return Event::None;
         }
         self.region = Some(Rect { x: x0 * TILE, y: y0 * TILE, w: rw, h: rh });
-        self.last_change = Instant::now();
+        self.last_change = now;
         Event::None
     }
 
@@ -171,6 +209,12 @@ impl Video {
         yuv.read_bgra8(BgraSliceU8::new(&self.crop, (r.w, r.h)));
         let enc = self.enc.as_mut().unwrap();
         Ok(enc.encode(&*yuv).map_err(|e| e.to_string())?.to_vec())
+    }
+
+    /// Whether the region has been still long enough to end, though no new picture came to say
+    /// so: a film paused, a photograph shown once.
+    pub fn quiet(&self) -> bool {
+        self.region.is_some() && self.last_change.elapsed() > QUIET
     }
 
     /// Asks for a key frame, as after the viewer lost its picture.
@@ -274,7 +318,7 @@ mod tests {
         let mut v = Video::new();
         let busy = [Rect { x: 64, y: 64, w: 256, h: 192 }];
         for _ in 0..8 {
-            v.observe(w, h, &busy, false, &|_| true);
+            v.observe(w, h, &busy, false, &|_| true, &|_| true);
         }
         let r = v.region.expect("region");
         assert_eq!((r.x, r.y, r.w, r.h), (64, 64, 256, 192));
@@ -290,21 +334,60 @@ mod tests {
     }
 
     #[test]
-    fn a_large_area_changing_twice_in_a_row_is_a_film_at_once() {
+    fn a_large_photo_like_change_is_a_film_at_once() {
         let (w, h) = (1280, 800);
         let film = [Rect { x: 200, y: 160, w: 854, h: 480 }];
         let t = Instant::now();
+        // The screen first shown, then the film.
+        let shown = |v: &mut Video| _ = v.observe_at(w, h, &[], false, &|_| true, &|_| true, t - Duration::from_secs(1));
         let mut v = Video::new();
-        v.observe_at(w, h, &film, false, &|_| true, t);
+        shown(&mut v);
+        v.observe_at(w, h, &film, false, &|_| true, &|_| true, t);
+        assert!(v.region.is_some(), "from its first frame");
+        // A smaller one, from its second.
+        let mut v = Video::new();
+        let small = [Rect { x: 200, y: 160, w: 320, h: 256 }];
+        v.observe_at(w, h, &small, false, &|_| true, &|_| true, t);
         assert!(v.region.is_none());
-        v.observe_at(w, h, &film, false, &|_| true, t + Duration::from_millis(33));
+        v.observe_at(w, h, &small, false, &|_| true, &|_| true, t + Duration::from_millis(33));
+        assert!(v.region.is_some());
+        // Still, it ends: its pixels go again losslessly.
+        let mut v = Video::new();
+        shown(&mut v);
+        v.observe_at(w, h, &film, false, &|_| true, &|_| true, t);
+        assert!(matches!(v.observe_at(w, h, &[], false, &|_| true, &|_| true, t + Duration::from_millis(600)), Event::None));
+        assert!(matches!(v.observe_at(w, h, &[], false, &|_| true, &|_| true, t + QUIET + Duration::from_millis(100)), Event::Ended(_)));
+        // A photograph shown with the page around it: the photograph alone.
+        let mut v = Video::new();
+        let page = [Rect { x: 0, y: 0, w: 1280, h: 700 }];
+        let photo = |r: &Rect| r.x >= 192 && r.y >= 128 && r.x + r.w <= 1088 && r.y + r.h <= 640;
+        shown(&mut v);
+        v.observe_at(w, h, &page, false, &|_| true, &photo, t);
+        let r = v.region.expect("the photograph");
+        // All of it, and what changed within a cell around it.
+        assert!(r.x <= 192 && r.y <= 128 && r.x + r.w >= 1088 && r.y + r.h >= 640, "{r:?}");
+        assert!(r.x >= 128 && r.y >= 64 && r.x + r.w <= 1152 && r.y + r.h <= 704, "{r:?}");
+        // A page of text alone is not.
+        let mut v = Video::new();
+        v.observe_at(w, h, &page, false, &|_| true, &|_| false, t);
+        assert!(v.region.is_none());
+        // The whole screen first shown is not, even with a photograph in it.
+        let mut v = Video::new();
+        v.observe_at(w, h, &[Rect { x: 0, y: 0, w, h }], false, &|_| true, &photo, t);
+        assert!(v.region.is_none());
+        // Later, the whole screen changing to show one is.
+        v.observe_at(w, h, &[Rect { x: 0, y: 0, w, h }], false, &|_| true, &photo, t + Duration::from_secs(3));
+        assert!(v.region.is_some());
+        let mut v = Video::new();
+        v.observe_at(w, h, &film, false, &|_| true, &|_| true, t);
+        v.observe_at(w, h, &film, false, &|_| true, &|_| true, t + Duration::from_millis(33));
         assert!(v.region.is_some());
         // Text over it ends it at once, to be sent losslessly.
-        assert!(matches!(v.observe_at(w, h, &film, false, &|_| false, t + Duration::from_millis(66)), Event::Ended(_)));
+        assert!(matches!(v.observe_at(w, h, &film, false, &|_| false, &|_| false, t + Duration::from_millis(66)), Event::Ended(_)));
         // A window drawn twice as it opens is no film.
         let mut v = Video::new();
-        v.observe_at(w, h, &film, false, &|_| false, t);
-        v.observe_at(w, h, &film, false, &|_| false, t + Duration::from_millis(33));
+        v.observe_at(w, h, &film, false, &|_| false, &|_| false, t);
+        v.observe_at(w, h, &film, false, &|_| false, &|_| false, t + Duration::from_millis(33));
         assert!(v.region.is_none());
     }
 
@@ -315,12 +398,12 @@ mod tests {
         let t = Instant::now();
         let mut v = Video::new();
         for i in 0..10 {
-            v.observe_at(w, h, &page, false, &|_| true, t + Duration::from_secs(2 * i));
+            v.observe_at(w, h, &page, false, &|_| true, &|_| true, t + Duration::from_secs(2 * i));
         }
         assert!(v.region.is_none());
         let strip = [Rect { x: 40, y: 750, w: 1200, h: 50 }];
         for i in 0..20 {
-            v.observe_at(w, h, &strip, true, &|_| true, t + Duration::from_secs(30) + Duration::from_millis(100 * i));
+            v.observe_at(w, h, &strip, true, &|_| true, &|_| true, t + Duration::from_secs(30) + Duration::from_millis(100 * i));
         }
         assert!(v.region.is_none());
     }
