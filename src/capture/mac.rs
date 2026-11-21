@@ -275,11 +275,11 @@ impl Mac {
         unsafe { self.content.displays() }.iter().find(|d| unsafe { d.displayID() } == id)
     }
 
-    /// The pictures' size: the viewer's, never more than the display's own pixels.
+    /// The pictures' size: the viewer's, as the agent asked for it (pictures of another size are
+    /// never sent), never more than the display's own pixels.
     fn size(&self) -> (usize, usize) {
-        let (dw, dh) = self.display().pixels;
-        let k = (self.target.0 as f64 / dw as f64).min(self.target.1 as f64 / dh as f64).min(1.0);
-        (((dw as f64 * k) as usize).max(2) & !1, ((dh as f64 * k) as usize).max(2) & !1)
+        let (w, h) = self.display().pixels;
+        (self.target.0.clamp(2, w.max(2)), self.target.1.clamp(2, h.max(2)))
     }
 
     fn restart(&mut self) -> Result<(), String> {

@@ -914,6 +914,32 @@ mod tests {
         assert!(f.w > 0, "a picture of it");
     }
 
+    /// A Mac shown to a viewer whose size is no even fraction of its screen: pictures come, of
+    /// the size asked for. As the app allowed to record the screen: SSHREMOTE_EXE=...
+    /// SSHREMOTE_MAC_TEST=1 cargo test -- --ignored a_mac_is_shown_at_any_view_size
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn a_mac_is_shown_at_any_view_size() {
+        if std::env::var_os("SSHREMOTE_MAC_TEST").is_none() {
+            return;
+        }
+        let target = Target::Local { capture: "mac".into() };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        assert_eq!(sess.backend, "mac", "{}", sess.log());
+        let s = crate::proto::Settings { view_w: 1001, view_h: 777, scale: 100, mode: crate::color::Mode::True, fps: 15, formats: crate::proto::FORMATS };
+        sess.send(ToAgent::Settings(s)).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let f = loop {
+            assert!(Instant::now() < until, "no picture came");
+            if let Ok(Ev::Net(ToClient::Frame(f))) = rx.recv_timeout(Duration::from_millis(200)) {
+                break f;
+            }
+        };
+        println!("screen {}x{}, picture {}x{}", sess.desk.0, sess.desk.1, f.w, f.h);
+        sess.close();
+    }
+
     /// A device that came in by ID with the two-step code and asked to be trusted is given a
     /// token, and comes in by it next time without the code; another token is a wrong code.
     /// Against remote access running by ID: SSHR_TRUST_ADDR=sshremote://ID@RELAY
