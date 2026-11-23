@@ -263,8 +263,9 @@ as text (accessibility tree) and act on its controls, with screenshots only when
 For a PC on Wi-Fi or behind NAT with no fixed address: turn on **Remote access by ID** on the left
 of the home window. It shows a lasting 9-digit ID and a password (show, copy, a new one); its
 settings sheet sets your own password, the relay, a new ID and **Start with the computer**, which
-installs the service (Windows, also at the sign-in screen) or a systemd user unit (Linux). On the
-other side, type the ID in the address field, give the password and open the screen or files.
+installs the service (Windows, also at the sign-in screen), a launch agent (macOS, also at the
+login window once an administrator allows it) or a systemd user unit (Linux). On the other side,
+type the ID in the address field, give the password and open the screen or files.
 
 ```sh
 sshremote remote-access            # this computer's ID, password and state
@@ -273,6 +274,7 @@ sshremote remote-access ask on|off               # the person here lets each vie
 sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
 sshremote remote-access straight|lan|direct on|off  # past the relay; found nearby; straight in nearby
 sshremote remote-access service start|stop       # the service, without removing it
+sshremote remote-access login-window on|off      # macOS: reachable before anyone signs in
 sshremote remote-access viewers | end N          # who is connected now; end one
 sshremote remote-access passwords lasting|one-time|both  # which passwords viewers may give
 sshremote remote-access one-time                 # a new one-time password now
