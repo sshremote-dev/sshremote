@@ -1,6 +1,6 @@
 [package]
 name = "sshremote"
-version = "0.25.23"
+version = "0.25.24"
 edition = "2024"
 description = "Remote control over SSH, in a terminal or a window"
 license = "MIT"
