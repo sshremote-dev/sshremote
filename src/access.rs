@@ -441,6 +441,26 @@ pub fn relay() -> String {
     stored().ok().flatten().map_or_else(default_relay, |c| c.relay)
 }
 
+/// macOS: what the login window's copy of remote access (run as root there, with the settings of
+/// the person who set it up) writes is handed to that person, who could not read or change it
+/// otherwise.
+fn hand_back(p: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        if let Some(owner) = crate::hosts::config_dir().and_then(|d| std::fs::metadata(d).ok())
+            && owner.uid() != 0
+        {
+            let _ = std::os::unix::fs::chown(p, Some(owner.uid()), Some(owner.gid()));
+        }
+    }
+    let _ = p;
+}
+
 pub fn save(c: &Config) -> Result<(), String> {
     if c.password.trim().chars().count() < 8 {
         return Err("The password needs at least 8 characters".into());
@@ -468,7 +488,9 @@ pub fn save(c: &Config) -> Result<(), String> {
                 h.sync_all()
             })
             .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))
+        std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))?;
+        hand_back(&f);
+        Ok(())
     }
 }
 
@@ -591,6 +613,7 @@ pub fn publish_state(said: &mut String) {
     let _ = f.parent().map(std::fs::create_dir_all);
     let tmp = f.with_extension("new");
     if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
+        hand_back(&f);
         *said = now;
     }
 }
@@ -682,6 +705,7 @@ fn note_visit(v: serde_json::Value) {
     }
     if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&f) {
         let _ = writeln!(out, "{v}");
+        hand_back(&f);
     }
 }
 
@@ -1994,6 +2018,60 @@ fn unit_file() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+/// macOS: the system's launch agent that runs remote access at the login window, as root, with
+/// the settings of the person who set it up there.
+#[cfg(target_os = "macos")]
+const LOGIN_WINDOW_PLIST: &str = "/Library/LaunchAgents/dev.sshremote.loginwindow.plist";
+
+/// Puts the login window's launch agent in place or takes it away, as root: directly when this
+/// runs as root, else through macOS's own question for an administrator's password.
+#[cfg(target_os = "macos")]
+pub fn login_window(on: bool) -> Result<(), String> {
+    let f = std::path::Path::new(LOGIN_WINDOW_PLIST);
+    let script = if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let base = crate::hosts::config_dir().and_then(|d| d.parent().map(PathBuf::from)).ok_or("no settings folder")?;
+        let xml = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>dev.sshremote.loginwindow</string>\n<key>ProgramArguments</key><array><string>{}</string><string>remote-access</string><string>run</string><string>--service</string></array>\n<key>EnvironmentVariables</key><dict><key>XDG_CONFIG_HOME</key><string>{}</string></dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>LimitLoadToSessionType</key><string>LoginWindow</string>\n<key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
+            xml(&exe.display().to_string()),
+            xml(&base.display().to_string())
+        );
+        // Already so (an update, a second install): nothing to ask for.
+        if std::fs::read_to_string(f).is_ok_and(|t| t == plist) {
+            return Ok(());
+        }
+        let tmp = std::env::temp_dir().join(format!("dev.sshremote.loginwindow-{}.plist", std::process::id()));
+        // It goes into a shell line between single quotes (and that into AppleScript's quotes).
+        if tmp.display().to_string().contains(['\'', '"', '\\', '\n']) {
+            return Err(format!("{}: no place for the setting that can be passed on safely", tmp.display()));
+        }
+        std::fs::write(&tmp, plist).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        format!("/usr/bin/install -o root -g wheel -m 644 '{}' '{}'", tmp.display(), f.display())
+    } else {
+        if !f.exists() {
+            return Ok(());
+        }
+        format!("/bin/rm -f '{}'", f.display())
+    };
+    // SAFETY: geteuid cannot fail.
+    let out = if unsafe { libc::geteuid() } == 0 {
+        Command::new("/bin/sh").args(["-c", &script]).output()
+    } else {
+        let what = if on { "be reachable at the login window, before anyone signs in" } else { "no longer be reachable at the login window" };
+        Command::new("osascript").args(["-e", &format!("do shell script \"{script}\" with prompt \"SSH Remote wants to {what}.\" with administrator privileges")]).output()
+    }
+    .map_err(|e| e.to_string())?;
+    if on {
+        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("dev.sshremote.loginwindow-{}.plist", std::process::id())));
+    }
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("the login window was not set up: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn unit_file() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
@@ -2019,7 +2097,12 @@ pub fn install_service() -> Result<(), String> {
         std::fs::write(&f, plist).map_err(|e| e.to_string())?;
         let _ = launchctl(&["bootout", &launchd_target()]);
         // SAFETY: getuid cannot fail.
-        return launchctl(&["bootstrap", &format!("gui/{}", unsafe { libc::getuid() }), &f.display().to_string()]);
+        launchctl(&["bootstrap", &format!("gui/{}", unsafe { libc::getuid() }), &f.display().to_string()])?;
+        // Before anyone signs in too, where an administrator lets it (the rest works without).
+        if let Err(e) = login_window(true) {
+            eprintln!("{e}");
+        }
+        return Ok(());
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -2101,7 +2184,7 @@ pub fn uninstall_service() -> Result<(), String> {
         if let Some(f) = unit_file() {
             let _ = std::fs::remove_file(f);
         }
-        return Ok(());
+        return login_window(false);
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -2367,6 +2450,11 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("uninstall") => uninstall_service(),
+        #[cfg(target_os = "macos")]
+        Some("login-window") => match args.get(1).map(String::as_str) {
+            Some(w @ ("on" | "off")) => login_window(w == "on").map(|()| println!("at the login window: {w}")),
+            _ => Err("usage: sshremote remote-access login-window on|off".into()),
+        },
         // `--service`: run by the service or unit itself; otherwise it leaves remote access to a
         // service that runs it. `--parent PID`: ends with that process (a window that started it).
         Some("run") => {
@@ -2405,7 +2493,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | login-window on|off (macOS) | service start|stop]".into()),
     }
 }
 
