@@ -940,6 +940,87 @@ mod tests {
         sess.close();
     }
 
+    /// A Mac shown to a viewer of any size, its sound started, one of its windows shown alone and
+    /// the whole screen again: as the app allowed to record the screen. SSHREMOTE_EXE=...
+    /// SSHREMOTE_MAC_TEST=1 cargo test -- --ignored a_mac_is_shown_heard_and_shared
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn a_mac_is_shown_heard_and_shared() {
+        if std::env::var_os("SSHREMOTE_MAC_TEST").is_none() {
+            return;
+        }
+        let target = Target::Local { capture: "mac".into() };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let wait = |want: &dyn Fn(&ToClient) -> bool, what: &str| -> ToClient {
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                if let Ok(Ev::Net(m)) = rx.recv_timeout(Duration::from_millis(200)) {
+                    if let ToClient::Notice(n) = &m {
+                        println!("notice: {n}");
+                    }
+                    if want(&m) {
+                        return m;
+                    }
+                }
+            }
+            panic!("no {what} in time");
+        };
+        assert_eq!(sess.backend, "mac", "{}", sess.log());
+        let (w, h) = sess.desk;
+        // A view whose size is no even fraction of the screen's.
+        let s = crate::proto::Settings { view_w: 1001, view_h: 777, scale: 100, mode: crate::color::Mode::True, fps: 15, formats: crate::proto::FORMATS };
+        sess.send(ToAgent::Settings(s)).unwrap();
+        let ToClient::Frame(f) = wait(&|m| matches!(m, ToClient::Frame(_)), "picture") else { unreachable!() };
+        sess.send(ToAgent::Ack(f.id)).unwrap();
+        println!("screen {w}x{h}, first picture {}x{}", f.w, f.h);
+        // SSHREMOTE_MAC_SILENT=1 on a Mac with no sound device.
+        if std::env::var_os("SSHREMOTE_MAC_SILENT").is_none() {
+            sess.send(ToAgent::Audio(true)).unwrap();
+            // The sound starts aside (macOS gives up on a stream after 15 s); pictures go on, asked
+            // for anew twice a second as the screen may not change.
+            let asked = Instant::now();
+            let (mut heard, mut first, mut pictures, mut refreshed) = (0, None, 0, asked);
+            while asked.elapsed() < Duration::from_secs(40) && first.is_none_or(|t: Instant| t.elapsed() < Duration::from_secs(3)) {
+                if refreshed.elapsed() > Duration::from_millis(500) {
+                    refreshed = Instant::now();
+                    sess.send(ToAgent::Refresh).unwrap();
+                }
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ev::Net(ToClient::Audio(_))) => {
+                        heard += 1;
+                        first.get_or_insert_with(Instant::now);
+                    }
+                    Ok(Ev::Net(ToClient::Frame(f))) => {
+                        pictures += 1;
+                        sess.send(ToAgent::Ack(f.id)).unwrap();
+                    }
+                    Ok(Ev::Net(ToClient::Notice(n))) => panic!("sound: {n} (pictures meanwhile: {pictures})"),
+                    _ => {}
+                }
+            }
+            println!("sound: first packet after {:?}, {heard} packets in all, pictures meanwhile {pictures}", first.map(|t| t - asked));
+            assert!(heard > 0, "no sound in 40 s");
+            assert!(pictures > 0, "no pictures while the sound started");
+            sess.send(ToAgent::Audio(false)).unwrap();
+        }
+        sess.send(ToAgent::ListWindows).unwrap();
+        let ToClient::WindowList { list, error } = wait(&|m| matches!(m, ToClient::WindowList { .. }), "window list") else { unreachable!() };
+        println!("windows: {:?} {error}", list.iter().map(|w| format!("{} / {} {}x{}", w.app, w.title, w.w, w.h)).collect::<Vec<_>>());
+        let Some(win) = list.first() else { return };
+        sess.send(ToAgent::Share(crate::shared::Share::Window(win.id))).unwrap();
+        let m = wait(&|m| matches!(m, ToClient::Sharing { .. }), "sharing");
+        println!("{m:?}");
+        let ToClient::Hello { w: ww, h: wh, .. } = wait(&|m| matches!(m, ToClient::Hello { .. }), "the window's size") else { unreachable!() };
+        assert!((ww as i32 - win.w as i32).abs() <= 2 && (wh as i32 - win.h as i32).abs() <= 2, "{ww}x{wh} for {}x{}", win.w, win.h);
+        let ToClient::Frame(f) = wait(&|m| matches!(m, ToClient::Frame(f) if f.w > 0), "the window's picture") else { unreachable!() };
+        println!("window {ww}x{wh}, picture {}x{}", f.w, f.h);
+        sess.send(ToAgent::Share(crate::shared::Share::Screen)).unwrap();
+        let ToClient::Hello { w: back, .. } = wait(&|m| matches!(m, ToClient::Hello { .. }), "the screen's size again") else { unreachable!() };
+        assert_eq!(back, w);
+        sess.close();
+    }
+
     /// A device that came in by ID with the two-step code and asked to be trusted is given a
     /// token, and comes in by it next time without the code; another token is a wrong code.
     /// Against remote access running by ID: SSHR_TRUST_ADDR=sshremote://ID@RELAY

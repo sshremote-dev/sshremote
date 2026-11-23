@@ -25,6 +25,8 @@ mod wlinput;
 mod wlrcopy;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+pub(crate) use mac::sound as mac_sound;
 pub mod region;
 mod shrink;
 pub use shrink::Shrink;

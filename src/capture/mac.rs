@@ -1,7 +1,10 @@
-//! macOS: the screen through ScreenCaptureKit, input as Core Graphics events. Both need the
-//! person's yes, once, in System Settings > Privacy & Security (Screen & System Audio Recording,
-//! and Accessibility): macOS asks for it the first time, and the viewer is told where it is.
+//! macOS: the screen (or one window, or one program's windows) and its sound through
+//! ScreenCaptureKit, input as Core Graphics events. Both need the person's yes, once, in System
+//! Settings > Privacy & Security (Screen & System Audio Recording, and Accessibility): macOS asks
+//! for it the first time, and the viewer is told where it is.
 
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -9,29 +12,34 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
-use objc2_core_foundation::{CFRetained, CGPoint};
+use objc2_core_foundation::{CFDictionary, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGEventField, CGEventFlags, CGEventSource,
     CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess,
-    CGRequestScreenCaptureAccess, CGScrollEventUnit,
+    CGRectMakeWithDictionaryRepresentation, CGRequestScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo,
+    CGWindowListOption,
 };
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_media::{CMAudioFormatDescriptionGetStreamBasicDescription, CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
 };
-use objc2_foundation::{NSArray, NSError};
-use objc2_screen_capture_kit::{SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCDisplay, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
+    SCStreamOutputType, SCWindow,
+};
 
-use super::{Capture, Image, Input, Monitor, Waker};
+use super::{Capture, Image, Input, Monitor, Share, WindowInfo, Waker};
 use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 use crate::xk;
 
 /// Where to allow what the screen and the input need, as System Settings names it.
 const SCREEN_CONSENT: &str = "This Mac has not let SSH Remote record its screen: allow it in System Settings > Privacy & Security > Screen & System Audio Recording, then connect again.";
 const INPUT_CONSENT: &str = "This Mac has not let SSH Remote control it: allow it in System Settings > Privacy & Security > Accessibility; the screen is shown meanwhile.";
+const NO_METAL: &str = "This Mac draws without Metal graphics (a virtual machine with no graphics card of its own), where showing one window or program alone crashes its window server: only the whole screen can be shared.";
 
 /// The newest picture the stream gave, and who to wake for it.
 struct Latest {
@@ -95,6 +103,140 @@ impl Output {
     }
 }
 
+/// Who takes the sound: interleaved samples, their rate and their channels.
+type Hear = Mutex<Box<dyn FnMut(&[f32], u32, usize) + Send>>;
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and nothing here is unsafe to call.
+    #[unsafe(super(NSObject))]
+    #[name = "SshRemoteSoundOutput"]
+    #[ivars = Hear]
+    struct SoundOutput;
+
+    unsafe impl NSObjectProtocol for SoundOutput {}
+
+    unsafe impl SCStreamOutput for SoundOutput {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        unsafe fn stream_did_output(&self, _stream: &SCStream, buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
+            if kind == SCStreamOutputType::Audio
+                && let Some((pcm, rate, ch)) = samples(buffer)
+            {
+                (self.ivars().lock().unwrap_or_else(|e| e.into_inner()))(&pcm, rate, ch);
+            }
+        }
+    }
+);
+
+impl SoundOutput {
+    fn new(hear: Hear) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(hear);
+        // SAFETY: NSObject's init on a fresh instance.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// A sound sample's frames as interleaved 32-bit floats, their rate and channels; ScreenCaptureKit
+/// gives each channel after the other.
+fn samples(buffer: &CMSampleBuffer) -> Option<(Vec<f32>, u32, usize)> {
+    const LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
+    const FLOAT: u32 = 1;
+    const NON_INTERLEAVED: u32 = 1 << 5;
+    // SAFETY: getters of a valid sample, its bytes copied out within their length.
+    unsafe {
+        let format = buffer.format_description()?;
+        let a = CMAudioFormatDescriptionGetStreamBasicDescription(&format).as_ref()?;
+        let ch = a.mChannelsPerFrame as usize;
+        if a.mFormatID != LINEAR_PCM || a.mFormatFlags & FLOAT == 0 || a.mBitsPerChannel != 32 || ch == 0 {
+            return None;
+        }
+        let frames = buffer.num_samples().max(0) as usize;
+        let block = buffer.data_buffer()?;
+        let mut raw = vec![0f32; block.data_length() / 4];
+        if raw.is_empty() || block.copy_data_bytes(0, raw.len() * 4, NonNull::new(raw.as_mut_ptr().cast())?) != 0 {
+            return None;
+        }
+        if a.mFormatFlags & NON_INTERLEAVED == 0 {
+            raw.truncate(frames * ch);
+            return Some((raw, a.mSampleRate as u32, ch));
+        }
+        let plane = raw.len() / ch;
+        let frames = frames.min(plane);
+        let mut out = Vec::with_capacity(frames * ch);
+        for i in 0..frames {
+            out.extend((0..ch).map(|c| raw[c * plane + i]));
+        }
+        Some((out, a.mSampleRate as u32, ch))
+    }
+}
+
+/// This Mac's sound, as it plays, handed to `hear` until what this returns is dropped: a stream
+/// of the main display that takes nothing but its sound (macOS 13 and later; allowed with the
+/// screen, as Screen & System Audio Recording). The sound this program plays itself is left out.
+pub fn sound(hear: Box<dyn FnMut(&[f32], u32, usize) + Send>) -> Result<Box<dyn std::any::Any>, String> {
+    // The pictures it must have are the smallest and slowest there are.
+    let c = config((2, 2), 1, None);
+    // SAFETY: a fresh configuration, set before the stream takes it.
+    unsafe {
+        c.setCapturesAudio(true);
+        c.setExcludesCurrentProcessAudio(true);
+        c.setSampleRate(48_000);
+        c.setChannelCount(2);
+    }
+    listen(hear, &c, false)
+}
+
+/// A stream of the main display with settings `c` whose sound goes to `hear` (and pictures, when
+/// `seen`, nowhere).
+fn listen(hear: Box<dyn FnMut(&[f32], u32, usize) + Send>, c: &SCStreamConfiguration, seen: bool) -> Result<Box<dyn std::any::Any>, String> {
+    if !objc2::available!(macos = 13.0) {
+        return Err("sound is taken from macOS 13 on".into());
+    }
+    if !CGPreflightScreenCaptureAccess() {
+        return Err(SCREEN_CONSENT.into());
+    }
+    let content = shareable()?;
+    let main = CGMainDisplayID();
+    // SAFETY: reading the displays the content lists.
+    let display = unsafe { content.displays() }.iter().find(|d| unsafe { d.displayID() } == main).ok_or("this Mac shows no display")?;
+    // SAFETY: a fresh filter for one stream, started once with a handler called once.
+    unsafe {
+        let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new());
+        let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, c, None);
+        let output = SoundOutput::new(Mutex::new(hear));
+        let queue = DispatchQueue::new("dev.sshremote.sound", None);
+        let kinds: &[SCStreamOutputType] = if seen { &[SCStreamOutputType::Audio, SCStreamOutputType::Screen] } else { &[SCStreamOutputType::Audio] };
+        for &kind in kinds {
+            stream
+                .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), kind, Some(&queue))
+                .map_err(|e| format!("the sound could not be taken: {}", e.localizedDescription()))?;
+        }
+        let (tx, rx) = mpsc::channel();
+        let done = RcBlock::new(move |error: *mut NSError| {
+            let _ = tx.send((!error.is_null()).then(|| said(error)));
+        });
+        stream.startCaptureWithCompletionHandler(Some(&done));
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(None) => Ok(Box::new(Heard { stream, _output: output, _queue: queue })),
+            Ok(Some(e)) => Err(format!("the sound did not start: {e}")),
+            Err(_) => Err("the sound did not start in time".into()),
+        }
+    }
+}
+
+/// The sound's stream, ended when dropped.
+struct Heard {
+    stream: Retained<SCStream>,
+    _output: Retained<SoundOutput>,
+    _queue: dispatch2::DispatchRetained<DispatchQueue>,
+}
+
+impl Drop for Heard {
+    fn drop(&mut self) {
+        // SAFETY: stopping a started stream; nothing waits for the answer.
+        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+    }
+}
+
 /// Objective-C objects handed from the thread that made them to the one that waits.
 struct Sent<T>(T);
 // SAFETY: they are only passed on, never used by two threads at once.
@@ -102,7 +244,7 @@ unsafe impl<T> Send for Sent<T> {}
 
 fn said(e: *mut NSError) -> String {
     // SAFETY: a non-null NSError from the system, read here only.
-    unsafe { e.as_ref() }.map(|e| e.localizedDescription().to_string()).unwrap_or_else(|| "it did not say why".into())
+    unsafe { e.as_ref() }.map(|e| format!("{} ({} {})", e.localizedDescription(), e.domain(), e.code())).unwrap_or_else(|| "it did not say why".into())
 }
 
 /// What can be shared now: the displays, after the person allowed it (the first ask shows the
@@ -151,7 +293,9 @@ impl Drop for Live {
     }
 }
 
-fn config(size: (usize, usize), fps: u8) -> Retained<SCStreamConfiguration> {
+/// A stream's settings: its pictures' size and rate, and the part of the display they show
+/// (points from the display's corner; all of it when None).
+fn config(size: (usize, usize), fps: u8, part: Option<CGRect>) -> Retained<SCStreamConfiguration> {
     // SAFETY: a fresh configuration, set before any stream takes it.
     unsafe {
         let c = SCStreamConfiguration::new();
@@ -162,16 +306,18 @@ fn config(size: (usize, usize), fps: u8) -> Retained<SCStreamConfiguration> {
         c.setShowsCursor(true);
         c.setMinimumFrameInterval(CMTime::new(1, fps.clamp(1, 60) as i32));
         c.setQueueDepth(4);
+        if let Some(r) = part {
+            c.setSourceRect(r);
+        }
         c
     }
 }
 
-fn start(display: &SCDisplay, size: (usize, usize), fps: u8, latest: Arc<Latest>) -> Result<Live, String> {
+fn start(filter: &SCContentFilter, settings: &SCStreamConfiguration, latest: Arc<Latest>) -> Result<Live, String> {
     // SAFETY: Objective-C calls on objects made here, the stream started once with a handler
     // called once.
     unsafe {
-        let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), display, &NSArray::new());
-        let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config(size, fps), None);
+        let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), filter, settings, None);
         let output = Output::new(latest);
         let queue = DispatchQueue::new("dev.sshremote.screen", None);
         stream
@@ -194,7 +340,138 @@ fn start(display: &SCDisplay, size: (usize, usize), fps: u8, latest: Arc<Latest>
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     // ApplicationServices (HIServices): whether this program may post input, asking if not.
-    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    // A program's accessibility element, its attributes and actions: to bring a window forward.
+    fn AXUIElementCreateApplication(pid: i32) -> *const c_void;
+    fn AXUIElementSetAttributeValue(element: *const c_void, attribute: *const c_void, value: *const c_void) -> i32;
+    fn AXUIElementCopyAttributeValue(element: *const c_void, attribute: *const c_void, value: *mut *const c_void) -> i32;
+    fn AXUIElementPerformAction(element: *const c_void, action: *const c_void) -> i32;
+    // The window server's number of a window's element (what window managers use for it).
+    fn _AXUIElementGetWindow(element: *const c_void, id: *mut u32) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
+}
+
+#[link(name = "Metal", kind = "framework")]
+unsafe extern "C" {
+    // The Mac's graphics device for Metal; none where macOS draws without one.
+    fn MTLCreateSystemDefaultDevice() -> *mut AnyObject;
+}
+
+/// Whether this Mac draws with Metal. Without it (virtual machines with no graphics card of their
+/// own) the window server composes in software, and a stream of one program's windows makes it
+/// abort (seen on macOS 26 in VMware: an assertion in CA::OGL::Context::push_surface).
+fn metal() -> bool {
+    static METAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // SAFETY: the device made here (or none) is owned and released at once.
+    *METAL.get_or_init(|| unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }.is_some())
+}
+
+/// Brings a program forward, and its window `id` in front of its others; nothing happens where
+/// this program may not control the Mac.
+fn raise(pid: i32, id: Option<u32>) {
+    let name = |s: &str| Retained::into_raw(NSString::from_str(s)) as *const c_void;
+    // SAFETY: an element made and released here; the attribute names and values are retained
+    // NSStrings and NSNumbers (toll-free bridged to the CF types taken), released after.
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return;
+        }
+        let (front, windows, raise) = (name("AXFrontmost"), name("AXWindows"), name("AXRaise"));
+        let yes = Retained::into_raw(NSNumber::new_bool(true)) as *const c_void;
+        AXUIElementSetAttributeValue(app, front, yes);
+        let mut list: *const c_void = std::ptr::null();
+        if let Some(id) = id
+            && AXUIElementCopyAttributeValue(app, windows, &mut list) == 0
+            && !list.is_null()
+        {
+            let list = &*(list as *const NSArray<AnyObject>);
+            for w in list.iter() {
+                let mut n = 0u32;
+                let w = Retained::as_ptr(&w) as *const c_void;
+                if _AXUIElementGetWindow(w, &mut n) == 0 && n == id {
+                    AXUIElementPerformAction(w, raise);
+                    break;
+                }
+            }
+            CFRelease(list as *const NSArray<AnyObject> as *const c_void);
+        }
+        for p in [front, windows, raise, yes] {
+            CFRelease(p);
+        }
+        CFRelease(app);
+    }
+}
+
+/// A window as the window server lists it: its number, its program's process and name, its
+/// title, its layer (0 for ordinary windows) and where it is, in points.
+#[derive(Clone, Debug)]
+struct Win {
+    id: u32,
+    pid: i32,
+    app: String,
+    title: String,
+    layer: i64,
+    rect: CGRect,
+}
+
+impl Win {
+    fn contains(&self, p: CGPoint) -> bool {
+        let r = &self.rect;
+        p.x >= r.origin.x && p.y >= r.origin.y && p.x < r.origin.x + r.size.width && p.y < r.origin.y + r.size.height
+    }
+}
+
+/// The windows on screen, front to back; or only window `only`, wherever it is.
+fn listed(only: Option<u32>) -> Vec<Win> {
+    let option = match only {
+        Some(_) => CGWindowListOption::OptionIncludingWindow,
+        None => CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+    };
+    let Some(list) = CGWindowListCopyWindowInfo(option, only.unwrap_or(0)) else { return Vec::new() };
+    // SAFETY: an array of dictionaries, toll-free bridged to Foundation's, read while it lives.
+    let list = unsafe { &*(CFRetained::as_ptr(&list).as_ptr() as *const NSArray<NSDictionary<NSString, AnyObject>>) };
+    let mut out = Vec::new();
+    for d in list.iter() {
+        let get = |k: &str| d.objectForKey(&NSString::from_str(k));
+        let num = |k: &str| get(k).and_then(|o| o.downcast::<NSNumber>().ok());
+        let text = |k: &str| get(k).and_then(|o| o.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let (Some(id), Some(pid), Some(bounds)) = (num("kCGWindowNumber"), num("kCGWindowOwnerPID"), get("kCGWindowBounds")) else {
+            continue;
+        };
+        let mut rect = CGRect::default();
+        // SAFETY: the bounds are a dictionary, read here only.
+        if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&*(Retained::as_ptr(&bounds) as *const CFDictionary)), &mut rect) }
+            || num("kCGWindowAlpha").is_some_and(|a| a.doubleValue() <= 0.0)
+        {
+            continue;
+        }
+        let layer = num("kCGWindowLayer").map_or(0, |l| l.longLongValue());
+        out.push(Win { id: id.unsignedIntValue(), pid: pid.intValue(), app: text("kCGWindowOwnerName"), title: text("kCGWindowName"), layer, rect });
+    }
+    out
+}
+
+/// What is shown: the whole display, one window with its program's menus and dialogs over it
+/// (cut to the window), or every window of one program.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Scope {
+    Screen,
+    Window { id: u32, pid: i32 },
+    App { pid: i32 },
+}
+
+impl Scope {
+    fn pid(self) -> Option<i32> {
+        match self {
+            Scope::Screen => None,
+            Scope::Window { pid, .. } | Scope::App { pid } => Some(pid),
+        }
+    }
 }
 
 /// Whether input may be posted; the first time it may not, macOS's own question is shown.
@@ -211,6 +488,14 @@ pub struct Mac {
     content: Retained<SCShareableContent>,
     displays: Vec<Display>,
     current: usize,
+    /// What is shown, and where: the display, or the window's part of it.
+    scope: Scope,
+    area: Display,
+    /// When the shared window's place was last looked at; whether it closed since.
+    looked: Instant,
+    ended: bool,
+    /// The windows on screen as last listed (for where clicks land), and when.
+    seen: (Instant, Vec<Win>),
     target: (usize, usize),
     fps: u8,
     live: Option<Live>,
@@ -248,11 +533,17 @@ impl Mac {
         // The main display first, then left to right.
         displays.sort_by(|a, b| (a.id != main).cmp(&(b.id != main)).then(a.at.0.total_cmp(&b.at.0)));
         let target = displays[0].pixels;
+        let area = displays[0].clone();
         let latest = Arc::new(Latest { frame: Mutex::new(None), fresh: AtomicBool::new(false), wake: Default::default() });
         let mut mac = Mac {
             content,
             displays,
             current: 0,
+            scope: Scope::Screen,
+            area,
+            looked: Instant::now(),
+            ended: false,
+            seen: (Instant::now(), Vec::new()),
             target,
             fps: 30,
             live: None,
@@ -275,29 +566,131 @@ impl Mac {
         unsafe { self.content.displays() }.iter().find(|d| unsafe { d.displayID() } == id)
     }
 
-    /// The pictures' size: the viewer's, as the agent asked for it (pictures of another size are
-    /// never sent), never more than the display's own pixels.
+    /// The pictures' size: the viewer's, never more than what is shown has pixels.
     fn size(&self) -> (usize, usize) {
-        let (w, h) = self.display().pixels;
+        let (w, h) = self.area.pixels;
         (self.target.0.clamp(2, w.max(2)), self.target.1.clamp(2, h.max(2)))
+    }
+
+    /// The window's part of the display, in points from the display's corner.
+    fn part(&self) -> Option<CGRect> {
+        let (d, a) = (self.display(), &self.area);
+        matches!(self.scope, Scope::Window { .. })
+            .then(|| CGRect::new(CGPoint::new(a.at.0 - d.at.0, a.at.1 - d.at.1), CGSize::new(a.points.0, a.points.1)))
     }
 
     fn restart(&mut self) -> Result<(), String> {
         self.live = None;
         let d = self.sc_display().ok_or("that display is gone")?;
-        self.live = Some(start(&d, self.size(), self.fps, self.latest.clone())?);
+        // SAFETY: a filter made from the display and program the content lists.
+        let filter = unsafe {
+            match self.scope.pid() {
+                None => SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &d, &NSArray::new()),
+                Some(pid) => {
+                    let app: Retained<SCRunningApplication> =
+                        self.content.applications().iter().find(|a| a.processID() == pid).ok_or("that program is gone")?;
+                    SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+                        SCContentFilter::alloc(),
+                        &d,
+                        &NSArray::from_retained_slice(&[app]),
+                        &NSArray::<SCWindow>::new(),
+                    )
+                }
+            }
+        };
+        self.live = Some(start(&filter, &config(self.size(), self.fps, self.part()), self.latest.clone())?);
         Ok(())
     }
 
-    /// New settings for the running stream (its size, its rate).
+    /// New settings for the running stream (its size, its rate, the window's part).
     fn reconfigure(&mut self) {
         self.resized = Some(Instant::now());
         if let Some(l) = &self.live {
             // SAFETY: a fresh configuration given to the running stream.
-            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.size(), self.fps), None) };
+            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.size(), self.fps, self.part()), None) };
         }
     }
 
+    /// The part of its display a window covers, as a display of its own (points and pixels);
+    /// None when it is on none of them.
+    fn area_of(&self, rect: CGRect) -> Option<(usize, Display)> {
+        let (cx, cy) = (rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
+        let inside = |d: &Display| cx >= d.at.0 && cy >= d.at.1 && cx < d.at.0 + d.points.0 && cy < d.at.1 + d.points.1;
+        let i = self.displays.iter().position(inside)?;
+        let d = &self.displays[i];
+        let (x0, y0) = (rect.origin.x.max(d.at.0), rect.origin.y.max(d.at.1));
+        let (x1, y1) = ((rect.origin.x + rect.size.width).min(d.at.0 + d.points.0), (rect.origin.y + rect.size.height).min(d.at.1 + d.points.1));
+        let (kx, ky) = (d.pixels.0 as f64 / d.points.0, d.pixels.1 as f64 / d.points.1);
+        let points = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+        let pixels = (((points.0 * kx).round() as usize).max(2), ((points.1 * ky).round() as usize).max(2));
+        Some((i, Display { id: d.id, at: (x0, y0), points, pixels }))
+    }
+
+    /// Shows something else; the whole screen again if that fails.
+    fn show(&mut self, scope: Scope, current: usize, area: Display) -> Result<(), String> {
+        (self.scope, self.current, self.area) = (scope, current, area);
+        (self.resized, self.hands.inside) = (Some(Instant::now()), true);
+        if let Err(e) = self.restart() {
+            (self.scope, self.area) = (Scope::Screen, self.display().clone());
+            let _ = self.restart();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Follows the shared window where it moves or as it is resized, and the whole screen again
+    /// once it or its program is gone.
+    fn follow(&mut self) {
+        if self.scope == Scope::Screen || self.looked.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.looked = Instant::now();
+        let gone = match self.scope {
+            Scope::Window { id, .. } => match listed(Some(id)).into_iter().find(|w| w.id == id).and_then(|w| self.area_of(w.rect)) {
+                Some((i, area)) => {
+                    let a = &self.area;
+                    let moved = (a.at.0 - area.at.0).abs() + (a.at.1 - area.at.1).abs() + (a.points.0 - area.points.0).abs() + (a.points.1 - area.points.1).abs() > 0.5;
+                    if i != self.current {
+                        let _ = self.show(self.scope, i, area);
+                    } else if moved {
+                        self.area = area;
+                        self.reconfigure();
+                    }
+                    false
+                }
+                None => true,
+            },
+            // SAFETY: asking whether a process is there, sending it nothing.
+            Scope::App { pid } => unsafe { libc::kill(pid, 0) != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) },
+            Scope::Screen => false,
+        };
+        if gone {
+            let d = self.display().clone();
+            let _ = self.show(Scope::Screen, self.current, d);
+            self.ended = true;
+        }
+    }
+
+    /// The windows on screen, listed again when the last list is older than a tenth of a second.
+    fn windows_now(&mut self) -> &[Win] {
+        if self.seen.0.elapsed() > Duration::from_millis(100) || self.seen.1.is_empty() {
+            self.seen = (Instant::now(), listed(None));
+        }
+        &self.seen.1
+    }
+
+    /// Whether a point (in points) lands on the shared program's windows, not on another's over them.
+    fn lands_inside(&mut self, p: CGPoint) -> bool {
+        let Some(pid) = self.scope.pid() else { return true };
+        // The window server's own (shadows, overlays) take no clicks.
+        self.windows_now().iter().find(|w| w.contains(p) && w.app != "Window Server").is_some_and(|w| w.pid == pid)
+    }
+
+    /// Whether the keys typed now go to the shared program: it is the one in front.
+    fn keys_go_inside(&mut self) -> bool {
+        let Some(pid) = self.scope.pid() else { return true };
+        self.windows_now().iter().find(|w| w.layer == 0).is_some_and(|w| w.pid == pid)
+    }
 }
 
 /// Input as Core Graphics events: where the pointer was sent (points) and the buttons held there,
@@ -312,6 +705,8 @@ struct Hands {
     mods: Vec<u32>,
     asked: bool,
     notice: Option<String>,
+    /// Whether the pointer is over the shared windows (while some are shared).
+    inside: bool,
 }
 
 impl Display {
@@ -620,9 +1015,10 @@ impl Capture for Mac {
             return Ok(());
         }
         let was = self.current;
-        self.current = index;
-        if let Err(e) = self.restart() {
+        let d = self.displays[index].clone();
+        if let Err(e) = self.show(Scope::Screen, index, d) {
             self.current = was;
+            self.area = self.display().clone();
             let _ = self.restart();
             return Err(e);
         }
@@ -630,12 +1026,80 @@ impl Capture for Mac {
     }
 
     fn desktop_size(&self) -> (usize, usize) {
-        self.display().pixels
+        self.area.pixels
     }
 
     fn origin(&self) -> (i32, i32) {
+        let a = &self.area;
+        ((a.at.0 * a.pixels.0 as f64 / a.points.0) as i32, (a.at.1 * a.pixels.1 as f64 / a.points.1) as i32)
+    }
+
+    fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+        if !metal() {
+            return Err(NO_METAL.into());
+        }
+        let me = std::process::id() as i32;
         let d = self.display();
-        ((d.at.0 * d.pixels.0 as f64 / d.points.0) as i32, (d.at.1 * d.pixels.1 as f64 / d.points.1) as i32)
+        let k = d.pixels.0 as f64 / d.points.0;
+        Ok(listed(None)
+            .into_iter()
+            .filter(|w| w.layer == 0 && w.pid != me && !w.app.is_empty() && w.rect.size.width >= 40.0 && w.rect.size.height >= 40.0)
+            .map(|w| WindowInfo {
+                id: w.id as u64,
+                title: if w.title.is_empty() { w.app.clone() } else { w.title },
+                app: w.app,
+                w: (w.rect.size.width * k).round().min(u16::MAX as f64) as u16,
+                h: (w.rect.size.height * k).round().min(u16::MAX as f64) as u16,
+            })
+            .collect())
+    }
+
+    fn share(&mut self, scope: Share) -> Result<String, String> {
+        let win = match scope {
+            Share::Screen => {
+                let d = self.display().clone();
+                self.show(Scope::Screen, self.current, d)?;
+                return Ok("the whole screen".into());
+            }
+            _ if !metal() => return Err(NO_METAL.into()),
+            Share::Window(id) | Share::App(id) => listed(Some(id as u32)).into_iter().find(|w| w.id as u64 == id),
+            Share::ActiveWindow | Share::ActiveApp => {
+                let me = std::process::id() as i32;
+                listed(None).into_iter().find(|w| w.layer == 0 && w.pid != me)
+            }
+        };
+        let win = win.ok_or("that window is gone")?;
+        // Programs started since are listed too.
+        self.content = shareable()?;
+        let (i, area) = self.area_of(win.rect).ok_or("that window is on no display")?;
+        let (next, text) = if matches!(scope, Share::App(_) | Share::ActiveApp) {
+            let d = self.displays[i].clone();
+            ((Scope::App { pid: win.pid }, d), format!("every window of {}", win.app))
+        } else {
+            let title = if win.title.is_empty() { &win.app } else { &win.title };
+            ((Scope::Window { id: win.id, pid: win.pid }, area), format!("the window \"{title}\""))
+        };
+        self.show(next.0, i, next.1)?;
+        self.ended = false;
+        raise(win.pid, matches!(next.0, Scope::Window { .. }).then_some(win.id));
+        Ok(text)
+    }
+
+    fn poll_share(&mut self) -> Option<Result<(u8, String), String>> {
+        std::mem::take(&mut self.ended).then(|| Ok((0, "the whole screen, as the shared window closed".into())))
+    }
+
+    fn shared_window(&self) -> Option<u64> {
+        match self.scope {
+            Scope::Window { id, .. } => Some(id as u64),
+            _ => None,
+        }
+    }
+
+    fn shared_app(&self) -> Option<String> {
+        let pid = self.scope.pid()?;
+        // SAFETY: reading the listed programs.
+        unsafe { self.content.applications() }.iter().find(|a| unsafe { a.processID() } == pid).map(|a| unsafe { a.applicationName() }.to_string())
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
@@ -664,6 +1128,7 @@ impl Capture for Mac {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        self.follow();
         if !self.latest.fresh.swap(false, Ordering::AcqRel) {
             return Ok(None);
         }
@@ -687,8 +1152,21 @@ impl Capture for Mac {
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
-        let d = self.display().clone();
-        self.hands.input(&d, ev)
+        let a = self.area.clone();
+        if self.scope != Scope::Screen {
+            // Only the shared windows take clicks and keys.
+            match &ev {
+                Input::Move { x, y } => self.hands.inside = self.lands_inside(a.point(*x, *y)),
+                Input::Button { pressed: true, .. } if !self.hands.inside => return Err(super::OUTSIDE.into()),
+                Input::MoveBy { .. } => return Err(super::WHOLE_SCREEN_MOUSE.into()),
+                Input::Scroll { .. } | Input::HScroll { .. } if !self.hands.inside => return Ok(()),
+                Input::Key { .. } | Input::KeyState { down: true, .. } if !self.keys_go_inside() => {
+                    return Err("keys go only to the shared window; click it first".into());
+                }
+                _ => {}
+            }
+        }
+        self.hands.input(&a, ev)
     }
 
     fn commit_text(&mut self, text: &str) -> bool {
@@ -747,6 +1225,57 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let by = here();
         assert!(by.x > at.x && by.y < at.y, "moved by: {:.0},{:.0}", by.x, by.y);
+    }
+
+    #[test]
+    #[ignore]
+    fn a_mac_sound_starts() {
+        let audio = |c: Retained<SCStreamConfiguration>, on: bool| {
+            // SAFETY: setting a fresh configuration.
+            unsafe { c.setCapturesAudio(on) };
+            c
+        };
+        let tries: Vec<(&str, Retained<SCStreamConfiguration>, bool)> = vec![
+            ("pictures 640x360 30/s", audio(config((640, 360), 30, None), false), true),
+            ("pictures 64x64 1/s", audio(config((64, 64), 1, None), false), true),
+            ("pictures 2x2 1/s", audio(config((2, 2), 1, None), false), true),
+            ("sound, pictures 640x360 30/s", audio(config((640, 360), 30, None), true), true),
+            ("sound alone 640x360", audio(config((640, 360), 30, None), true), false),
+        ];
+        for (name, c, seen) in tries {
+            let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let m = n.clone();
+            let r = listen(Box::new(move |_, _, _| _ = m.fetch_add(1, Ordering::Relaxed)), &c, seen);
+            std::thread::sleep(Duration::from_secs(2));
+            println!("{name}: {:?}, sound buffers {}", r.as_ref().map(|_| ()), n.load(Ordering::Relaxed));
+        }
+        let r = sound(Box::new(|_, _, _| {}));
+        println!("sound(): {:?}", r.as_ref().map(|_| ()));
+    }
+
+    /// What can be read of the screen from here (run at the login window as root, in its
+    /// context): ScreenCaptureKit's list and Core Graphics' own picture of the main display.
+    #[test]
+    #[ignore]
+    #[allow(deprecated)]
+    fn the_screen_as_seen_from_here() {
+        println!("uid {}, screen recording allowed {}, may post {}, metal {}", unsafe { libc::getuid() }, CGPreflightScreenCaptureAccess(), may_post(&mut true), metal());
+        match shareable() {
+            Ok(c) => println!("ScreenCaptureKit: {} displays, {} windows", unsafe { c.displays() }.len(), unsafe { c.windows() }.len()),
+            Err(e) => println!("ScreenCaptureKit: {e}"),
+        }
+        let id = CGMainDisplayID();
+        match objc2_core_graphics::CGDisplayCreateImage(id) {
+            Some(img) => {
+                let (w, h) = (objc2_core_graphics::CGImage::width(Some(&img)), objc2_core_graphics::CGImage::height(Some(&img)));
+                let data = objc2_core_graphics::CGImage::data_provider(Some(&img)).and_then(|p| objc2_core_graphics::CGDataProvider::data(Some(&p)));
+                let lit = data.map(|d| d.to_vec().iter().filter(|&&b| b > 16).count()).unwrap_or(0);
+                println!("CGDisplayCreateImage: {w}x{h}, {lit} bytes above black");
+            }
+            None => println!("CGDisplayCreateImage: none"),
+        }
+        let windows = listed(None);
+        println!("windows listed: {} ({:?})", windows.len(), windows.iter().take(6).map(|w| format!("{}:{}", w.app, w.layer)).collect::<Vec<_>>());
     }
 
     /// The pointer and the keys driven, nothing recorded: run where macOS lets this program

@@ -1093,6 +1093,10 @@ fn serve_with(
                 send(enc, &ToClient::Audio(p)).map_err(io_err)?;
             }
         }
+        if let Some(e) = sound.as_ref().and_then(|c| c.failed.try_recv().ok()) {
+            sound = None;
+            send(enc, &ToClient::Notice(format!("Sound: {e}"))).map_err(io_err)?;
+        }
         for m in terms.poll() {
             send(enc, &m).map_err(io_err)?;
         }

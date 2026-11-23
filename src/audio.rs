@@ -93,10 +93,10 @@ pub fn microphone() -> Result<Capture, String> {
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Capture { packets: rx, _keep: Box::new(stream) })
+    Ok(Capture { packets: rx, failed: mpsc::channel().1, _keep: Box::new(stream) })
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn encoder() -> Result<opus::Encoder, String> {
     let mut e =
         opus::Encoder::new(RATE, opus::Channels::Stereo, opus::Application::Audio).map_err(|e| e.to_string())?;
@@ -107,6 +107,8 @@ fn encoder() -> Result<opus::Encoder, String> {
 /// The host's sound as Opus packets; capture stops when this is dropped.
 pub struct Capture {
     pub packets: Receiver<Vec<u8>>,
+    /// Why the sound never started, when that is known only after (a Mac's starts aside).
+    pub failed: Receiver<String>,
     _keep: Box<dyn std::any::Any>,
 }
 
@@ -123,7 +125,7 @@ impl Capture {
                 wake();
             }
         });
-        Capture { packets: rx, _keep: self._keep }
+        Capture { packets: rx, failed: self.failed, _keep: self._keep }
     }
 }
 
@@ -156,7 +158,7 @@ pub fn capture() -> Result<Capture, String> {
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Capture { packets: rx, _keep: Box::new(stream) })
+    Ok(Capture { packets: rx, failed: mpsc::channel().1, _keep: Box::new(stream) })
 }
 
 /// Linux: the default sink's monitor through PulseAudio or PipeWire, encoded by GStreamer.
@@ -194,10 +196,41 @@ pub fn capture() -> Result<Capture, String> {
             let _ = self.0.set_state(gst::State::Null);
         }
     }
-    Ok(Capture { packets: rx, _keep: Box::new(Stop(p)) })
+    Ok(Capture { packets: rx, failed: mpsc::channel().1, _keep: Box::new(Stop(p)) })
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// macOS: what the Mac plays, through ScreenCaptureKit.
+#[cfg(target_os = "macos")]
+pub fn capture() -> Result<Capture, String> {
+    let (tx, rx) = mpsc::channel();
+    let mut enc = encoder()?;
+    let mut rs: Option<Resampler> = None;
+    let mut pcm: Vec<f32> = Vec::new();
+    let hear = Box::new(move |data: &[f32], rate: u32, ch: usize| {
+        let rs = rs.get_or_insert_with(|| Resampler::new(rate, RATE, ch));
+        rs.push(data, &mut pcm);
+        while pcm.len() >= FRAME * 2 {
+            if let Ok(p) = enc.encode_vec_float(&pcm[..FRAME * 2], 4000) {
+                let _ = tx.send(p);
+            }
+            pcm.drain(..FRAME * 2);
+        }
+    });
+    // macOS may take seconds to start the stream, or never answer: it starts aside, so the
+    // pictures never wait for it, and runs until the capture is dropped.
+    let (failed_tx, failed) = mpsc::channel();
+    let (stop, stopped) = mpsc::channel::<()>();
+    std::thread::spawn(move || match crate::capture::mac_sound(hear) {
+        Ok(keep) => {
+            let _ = stopped.recv();
+            drop(keep);
+        }
+        Err(e) => _ = failed_tx.send(e),
+    });
+    Ok(Capture { packets: rx, failed, _keep: Box::new(stop) })
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn capture() -> Result<Capture, String> {
     Err("sound capture is not available on this system".into())
 }
