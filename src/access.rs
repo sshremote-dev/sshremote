@@ -2464,6 +2464,11 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             // Older units lack `--service`: systemd names the process it started itself (248+).
             let unit_started = std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|p| p == std::process::id().to_string());
             let service = args.iter().any(|a| a == "--service") || unit_started;
+            // At a Mac's login window just after start-up: launchd starts it again, by then inside.
+            #[cfg(target_os = "macos")]
+            if service && crate::capture::outside_the_login_window() {
+                return Err("the login window's screen is not up yet".into());
+            }
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", crate::computers::spaced(&c.id), c.relay);
             // The service says how it stands, for the icon in the notification area.

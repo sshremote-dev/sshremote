@@ -806,6 +806,18 @@ fn before_sign_in() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
+/// Whether this runs at the login window but outside its screen session: started by launchd just
+/// after start-up, before WindowServer made that session, it never sees a display there.
+pub fn outside_the_login_window() -> bool {
+    if !before_sign_in() {
+        return false;
+    }
+    let (mut ids, mut n) = ([0u32; 16], 0u32);
+    // SAFETY: room for 16 displays; their count is written back (none if it fails).
+    unsafe { objc2_core_graphics::CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+    objc2_core_graphics::CGSessionCopyCurrentDictionary().is_none() || n == 0
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     // The old ways to post the pointer, its buttons and the wheel (taken at the login window).
