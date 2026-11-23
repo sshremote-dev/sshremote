@@ -168,6 +168,17 @@ fn refused(m: &ToAgent, why: &str) -> Vec<ToClient> {
     }
 }
 
+/// A Mac's login window: the agent a viewer by ID gets there runs as root with nobody signed in,
+/// so no shells, files or programs are handed out (they would be root's).
+#[cfg(target_os = "macos")]
+fn mac_signed_out() -> bool {
+    // SAFETY: getuid cannot fail.
+    by_id() && unsafe { libc::getuid() } == 0
+}
+
+#[cfg(target_os = "macos")]
+const MAC_NOBODY: &str = "Nobody is signed in at that Mac: its terminals, files, programs and chat open once someone signs in.";
+
 /// The viewer came by this computer's remote access ID (rather than over ssh as its owner).
 static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// What such a viewer may do, and whether the person at the screen is asked first (`grant`).
@@ -299,6 +310,16 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
     let mut allowed = crate::grant::ALL;
     if by_id() {
         allowed = grant() & crate::grant::ALL;
+        // A Mac's login window has nobody to ask or tell (and a window of this program would
+        // show over it).
+        #[cfg(target_os = "macos")]
+        if mac_signed_out() && grant() & crate::grant::ASK != 0 {
+            return Err("Nobody is signed in at that Mac to let you in.".into());
+        }
+        #[cfg(target_os = "macos")]
+        let tell = !mac_signed_out();
+        #[cfg(not(target_os = "macos"))]
+        let tell = true;
         if grant() & crate::grant::ASK != 0 {
             // Asked before the screen is opened: nothing of it is seen until then.
             send(enc, &ToClient::Notice(crate::chat::WAITING.into())).and_then(|()| enc.flush()).map_err(|e| e.to_string())?;
@@ -310,7 +331,9 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         } else {
             // Someone who came by this computer's ID is made known to the person at the screen,
             // who can end it (nobody signed in: nobody to tell).
-            let _ = chat.notice(allowed);
+            if tell {
+                let _ = chat.notice(allowed);
+            }
         }
     }
     // A screen that cannot be shared leaves the rest of the session: terminals, files, clipboard.
@@ -598,6 +621,36 @@ fn serve_with(
                 if told_off & need == 0 {
                     told_off |= need;
                     send(enc, &ToClient::Notice(why)).map_err(io_err)?;
+                }
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            if mac_signed_out()
+                && matches!(
+                    m,
+                    ToAgent::ListDir { .. }
+                        | ToAgent::Fetch { .. }
+                        | ToAgent::FetchFrom { .. }
+                        | ToAgent::FileStart { .. }
+                        | ToAgent::FileData { .. }
+                        | ToAgent::FileResume { .. }
+                        | ToAgent::FileEnd { .. }
+                        | ToAgent::FileOp { .. }
+                        | ToAgent::PasteFiles { .. }
+                        | ToAgent::TermOpen { .. }
+                        | ToAgent::Launch { .. }
+                        | ToAgent::Chat(_)
+                        | ToAgent::Call(_)
+                )
+            {
+                for r in refused(&m, MAC_NOBODY) {
+                    send(enc, &r).map_err(io_err)?;
+                }
+                match m {
+                    ToAgent::TermOpen { id, .. } => send(enc, &ToClient::TermExit { id, text: MAC_NOBODY.into() }).map_err(io_err)?,
+                    ToAgent::Launch { .. } | ToAgent::PasteFiles { .. } | ToAgent::Chat(_) => send(enc, &ToClient::Notice(MAC_NOBODY.into())).map_err(io_err)?,
+                    ToAgent::Call(_) => send(enc, &ToClient::CallState(crate::chat::CALL_ENDED)).map_err(io_err)?,
+                    _ => {}
                 }
                 continue;
             }
