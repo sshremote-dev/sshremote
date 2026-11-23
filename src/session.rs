@@ -1021,6 +1021,93 @@ mod tests {
         sess.close();
     }
 
+    /// The login window driven by a viewer (run there by a LoginWindow launch agent, as the app):
+    /// the pointer goes where it is sent, and an x typed into the password field shows on the
+    /// screen and goes again with Delete (nothing else is typed, nothing is clicked).
+    /// SSHREMOTE_EXE=... SSHREMOTE_MAC_TEST=1 cargo test -- --ignored a_mac_login_window_is_driven
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    #[allow(deprecated)]
+    fn a_mac_login_window_is_driven() {
+        use objc2_core_graphics::{CGDataProvider, CGDisplayCreateImage, CGEvent, CGImage, CGMainDisplayID};
+        if std::env::var_os("SSHREMOTE_MAC_TEST").is_none() {
+            return;
+        }
+        let target = Target::Local { capture: "mac".into() };
+        let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
+        let (w, h) = sess.desk;
+        // The picture at the screen's own size: the viewer's pixels are the screen's.
+        let s = crate::proto::Settings { view_w: w, view_h: h, scale: 100, mode: crate::color::Mode::True, fps: 15, formats: crate::proto::FORMATS };
+        sess.send(ToAgent::Settings(s)).unwrap();
+        let f = loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Ev::Net(ToClient::Frame(f))) => break f,
+                Ok(_) => {}
+                Err(_) => panic!("no picture in time"),
+            }
+        };
+        sess.send(ToAgent::Ack(f.id)).unwrap();
+        let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).expect("where the pointer is");
+        let was = here();
+        let (x, y) = (w / 3, h / 4);
+        sess.send(ToAgent::Pointer { x, y }).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let at = here();
+        let shot = || {
+            let data = CGDisplayCreateImage(CGMainDisplayID()).and_then(|i| CGImage::data_provider(Some(&i))).and_then(|p| CGDataProvider::data(Some(&p)));
+            data.map(|d| d.to_vec()).unwrap_or_default()
+        };
+        let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(p, q)| p.abs_diff(**q) > 24).count();
+        // Several pictures before, as the caret blinks: what follows is set against the closest.
+        let before: Vec<Vec<u8>> = (0..4)
+            .map(|_| {
+                std::thread::sleep(Duration::from_millis(150));
+                shot()
+            })
+            .collect();
+        let least = |s: &[u8]| before.iter().map(|b| differ(b, s)).min().unwrap_or(0);
+        // An x and Delete three ways: as a viewer types them, as keys held and let go, and from
+        // here the old way (to tell the agent's part from the login window's).
+        let mut tried = |how: &str| {
+            let mut key = |keysym: u32| match how {
+                "typed" => sess.send(ToAgent::Key { keysym, mods: 0 }).unwrap(),
+                "held" => {
+                    sess.send(ToAgent::KeyState { keysym, down: true }).unwrap();
+                    std::thread::sleep(Duration::from_millis(80));
+                    sess.send(ToAgent::KeyState { keysym, down: false }).unwrap();
+                }
+                _ => {
+                    let code = if keysym == crate::xk::BACKSPACE { 0x33 } else { 0x07 };
+                    for down in [true, false] {
+                        let _ = objc2_core_graphics::CGPostKeyboardEvent(0, code, down);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            };
+            key('x' as u32);
+            std::thread::sleep(Duration::from_millis(600));
+            let typed = least(&shot());
+            key(crate::xk::BACKSPACE);
+            std::thread::sleep(Duration::from_millis(600));
+            let taken = least(&shot());
+            println!("{how}: x changed {typed}, Delete left {taken}");
+            (typed, taken)
+        };
+        let ways: Vec<(i64, i64)> = ["typed", "held", "here"].iter().map(|h| tried(h)).map(|(a, b)| (a as i64, b as i64)).collect();
+        sess.send(ToAgent::Pointer { x: was.x as u16, y: was.y as u16 }).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        while let Ok(m) = rx.try_recv() {
+            if let Ev::Net(ToClient::Notice(n)) = m {
+                println!("notice: {n}");
+            }
+        }
+        sess.close();
+        println!("pointer {:.0},{:.0} sent to {x},{y}, at {:.0},{:.0}", was.x, was.y, at.x, at.y);
+        assert!((at.x - x as f64).abs() < 3.0 && (at.y - y as f64).abs() < 3.0, "the pointer did not go there");
+        assert!(ways[..2].iter().all(|&(t, k)| t > 200 && k < 50), "the x was not typed and taken back");
+    }
+
     /// A device that came in by ID with the two-step code and asked to be trusted is given a
     /// token, and comes in by it next time without the code; another token is a wrong code.
     /// Against remote access running by ID: SSHR_TRUST_ADDR=sshremote://ID@RELAY

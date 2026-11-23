@@ -59,21 +59,86 @@ impl Latest {
                 return;
             }
             let (w, h, stride) = (CVPixelBufferGetWidth(&pixels), CVPixelBufferGetHeight(&pixels), CVPixelBufferGetBytesPerRow(&pixels));
-            let base = CVPixelBufferGetBaseAddress(&pixels) as *const u8;
-            if !base.is_null() && w > 0 && h > 0 && stride >= w * 4 {
-                let src = std::slice::from_raw_parts(base, stride * h);
-                let mut slot = self.frame.lock().unwrap_or_else(|e| e.into_inner());
-                // The last picture's buffer when the agent has not taken it: no new one each time.
-                let mut data = slot.take().map(|i| i.data).unwrap_or_default();
-                data.clear();
-                data.extend_from_slice(src);
-                *slot = Some(Image { w, h, stride, data });
-                self.fresh.store(true, Ordering::Release);
-            }
+            self.put(CVPixelBufferGetBaseAddress(&pixels) as *const u8, w, h, stride);
             CVPixelBufferUnlockBaseAddress(&pixels, CVPixelBufferLockFlags::ReadOnly);
         }
         super::wake(&self.wake);
     }
+
+    /// Keeps a picture of `h` rows `stride` bytes apart at `base`, while it is locked.
+    unsafe fn put(&self, base: *const u8, w: usize, h: usize, stride: usize) {
+        if base.is_null() || w == 0 || h == 0 || stride < w * 4 {
+            return;
+        }
+        // SAFETY: the caller holds the pixels locked, `stride * h` bytes from `base`.
+        let src = unsafe { std::slice::from_raw_parts(base, stride * h) };
+        let mut slot = self.frame.lock().unwrap_or_else(|e| e.into_inner());
+        // The last picture's buffer when the agent has not taken it: no new one each time.
+        let mut data = slot.take().map(|i| i.data).unwrap_or_default();
+        data.clear();
+        data.extend_from_slice(src);
+        *slot = Some(Image { w, h, stride, data });
+        self.fresh.store(true, Ordering::Release);
+    }
+}
+
+/// A display's pictures at the login window, taken a few times a second: ScreenCaptureKit's
+/// streams came black there or failed, and Core Graphics' display streams came black, while its
+/// still pictures of the display showed the login window every time.
+struct Drawn {
+    stop: Arc<AtomicBool>,
+    taker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Drawn {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.taker.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Starts taking display `id`'s pictures at `size`, at most `fps` a second (15 at most: each is a
+/// whole screen read again), passing on only those that differ from the one before.
+#[allow(deprecated)]
+fn draw(id: u32, size: (usize, usize), fps: u8, latest: Arc<Latest>) -> Result<Drawn, String> {
+    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayCreateImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality};
+    if CGDisplayCreateImage(id).is_none() {
+        return Err("the login window's screen could not be read".into());
+    }
+    let (w, h) = (size.0.max(2), size.1.max(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let halt = stop.clone();
+    let every = Duration::from_secs_f64(1.0 / fps.clamp(1, 15) as f64);
+    let taker = std::thread::Builder::new()
+        .name("login-window-pictures".into())
+        .spawn(move || {
+            let space = CGColorSpace::new_device_rgb();
+            let (mut pixels, mut last) = (vec![0u8; w * 4 * h], Vec::new());
+            while !halt.load(Ordering::Acquire) {
+                let began = Instant::now();
+                if let Some(img) = CGDisplayCreateImage(id) {
+                    // SAFETY: a context drawing into `pixels`, `w * 4` bytes a row, gone before they are read.
+                    let drawn = unsafe {
+                        CGBitmapContextCreate(pixels.as_mut_ptr().cast(), w, h, 8, w * 4, space.as_deref(), CGImageAlphaInfo::NoneSkipFirst.0 | CGImageByteOrderInfo::Order32Little.0)
+                    }
+                    .map(|c| {
+                        CGContext::set_interpolation_quality(Some(&c), CGInterpolationQuality::Medium);
+                        CGContext::draw_image(Some(&c), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), Some(&img));
+                    });
+                    if drawn.is_some() && pixels != last {
+                        // SAFETY: `pixels` holds `h` rows of `w * 4` bytes.
+                        unsafe { latest.put(pixels.as_ptr(), w, h, w * 4) };
+                        super::wake(&latest.wake);
+                        last.clone_from(&pixels);
+                    }
+                }
+                std::thread::sleep(every.saturating_sub(began.elapsed()));
+            }
+        })
+        .map_err(|e| format!("the login window's screen could not be read: {e}"))?;
+    Ok(Drawn { stop, taker: Some(taker) })
 }
 
 define_class!(
@@ -485,7 +550,8 @@ fn may_post(asked: &mut bool) -> bool {
 }
 
 pub struct Mac {
-    content: Retained<SCShareableContent>,
+    /// What ScreenCaptureKit lists; none at the login window, where it may list nothing.
+    content: Option<Retained<SCShareableContent>>,
     displays: Vec<Display>,
     current: usize,
     /// What is shown, and where: the display, or the window's part of it.
@@ -499,6 +565,7 @@ pub struct Mac {
     target: (usize, usize),
     fps: u8,
     live: Option<Live>,
+    drawn: Option<Drawn>,
     latest: Arc<Latest>,
     hands: Hands,
     /// When the stream was last given a new size: pictures of the old one still come a while.
@@ -511,14 +578,23 @@ impl Mac {
             // The system's question (once; then System Settings has it).
             CGRequestScreenCaptureAccess();
         }
-        let content = shareable()?;
+        // Just after start-up ScreenCaptureKit lists nothing at the login window: Core Graphics'
+        // own list there, as its pictures are taken by Core Graphics too.
+        let content = if before_sign_in() { None } else { Some(shareable()?) };
         let main = CGMainDisplayID();
-        // SAFETY: reading the displays the content lists.
-        let mut displays: Vec<Display> = unsafe { content.displays() }
-            .iter()
-            .map(|d| {
-                // SAFETY: plain getters of a listed display.
-                let (id, frame) = unsafe { (d.displayID(), d.frame()) };
+        let listed: Vec<(u32, CGRect)> = match &content {
+            // SAFETY: reading the displays the content lists, with their plain getters.
+            Some(c) => unsafe { c.displays() }.iter().map(|d| unsafe { (d.displayID(), d.frame()) }).collect(),
+            None => {
+                let (mut ids, mut n) = ([0u32; 16], 0u32);
+                // SAFETY: room for 16 displays; their count is written back.
+                unsafe { objc2_core_graphics::CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+                ids[..(n as usize).min(16)].iter().map(|&id| (id, CGDisplayBounds(id))).collect()
+            }
+        };
+        let mut displays: Vec<Display> = listed
+            .into_iter()
+            .map(|(id, frame)| {
                 let mode = CGDisplayCopyDisplayMode(id);
                 let pixels = (CGDisplayMode::pixel_width(mode.as_deref()), CGDisplayMode::pixel_height(mode.as_deref()));
                 let points = (frame.size.width, frame.size.height);
@@ -547,6 +623,7 @@ impl Mac {
             target,
             fps: 30,
             live: None,
+            drawn: None,
             latest,
             hands: Hands::default(),
             resized: None,
@@ -563,7 +640,7 @@ impl Mac {
     fn sc_display(&self) -> Option<Retained<SCDisplay>> {
         let id = self.display().id;
         // SAFETY: reading the listed displays.
-        unsafe { self.content.displays() }.iter().find(|d| unsafe { d.displayID() } == id)
+        unsafe { self.content.as_ref()?.displays() }.iter().find(|d| unsafe { d.displayID() } == id)
     }
 
     /// The pictures' size: the viewer's, never more than what is shown has pixels.
@@ -581,6 +658,11 @@ impl Mac {
 
     fn restart(&mut self) -> Result<(), String> {
         self.live = None;
+        self.drawn = None;
+        if before_sign_in() && self.scope == Scope::Screen {
+            self.drawn = Some(draw(self.display().id, self.size(), self.fps, self.latest.clone())?);
+            return Ok(());
+        }
         let d = self.sc_display().ok_or("that display is gone")?;
         // SAFETY: a filter made from the display and program the content lists.
         let filter = unsafe {
@@ -588,7 +670,7 @@ impl Mac {
                 None => SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &d, &NSArray::new()),
                 Some(pid) => {
                     let app: Retained<SCRunningApplication> =
-                        self.content.applications().iter().find(|a| a.processID() == pid).ok_or("that program is gone")?;
+                        self.content.as_ref().ok_or("no program can be shown alone here")?.applications().iter().find(|a| a.processID() == pid).ok_or("that program is gone")?;
                     SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
                         SCContentFilter::alloc(),
                         &d,
@@ -605,6 +687,13 @@ impl Mac {
     /// New settings for the running stream (its size, its rate, the window's part).
     fn reconfigure(&mut self) {
         self.resized = Some(Instant::now());
+        // The login window's pictures are taken at the size they started with: started again.
+        if self.drawn.is_some() {
+            if let Err(e) = self.restart() {
+                eprintln!("sshremote: {e}");
+            }
+            return;
+        }
         if let Some(l) = &self.live {
             // SAFETY: a fresh configuration given to the running stream.
             unsafe { l.stream.updateConfiguration_completionHandler(&config(self.size(), self.fps, self.part()), None) };
@@ -707,6 +796,21 @@ struct Hands {
     notice: Option<String>,
     /// Whether the pointer is over the shared windows (while some are shared).
     inside: bool,
+    source: Option<CFRetained<CGEventSource>>,
+}
+
+/// Whether this runs at the login window (as root, started there by its launch agent): events
+/// posted there the usual way are dropped or hang, while the old calls are taken.
+fn before_sign_in() -> bool {
+    // SAFETY: getuid cannot fail.
+    unsafe { libc::getuid() == 0 }
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    // The old ways to post the pointer, its buttons and the wheel (taken at the login window).
+    fn CGPostMouseEvent(at: CGPoint, update: libc::boolean_t, buttons: u32, first: libc::boolean_t, ...) -> i32;
+    fn CGPostScrollWheelEvent(wheels: u32, first: i32, ...) -> i32;
 }
 
 impl Display {
@@ -744,6 +848,23 @@ impl Hands {
         f
     }
 
+    /// The one source the events come from (as the keyboard and mouse here: what they post is
+    /// held as theirs), made once rather than for every event.
+    fn source(&mut self) -> Option<CFRetained<CGEventSource>> {
+        if self.source.is_none() {
+            self.source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        }
+        self.source.clone()
+    }
+
+    /// The pointer and its buttons as they are now, the old way.
+    fn old_mouse(&mut self) -> Result<(), String> {
+        let b = |held: bool| held as libc::boolean_t;
+        // SAFETY: three buttons' states follow, as said: left, right, middle.
+        unsafe { CGPostMouseEvent(self.at, 1, 3, b(self.held[0]), b(self.held[2]), b(self.held[1])) };
+        Ok(())
+    }
+
     fn post(&mut self, e: Option<CFRetained<CGEvent>>) -> Result<(), String> {
         let e = e.ok_or("the event could not be made")?;
         if !may_post(&mut self.asked) {
@@ -757,7 +878,7 @@ impl Hands {
     }
 
     fn mouse(&mut self, kind: CGEventType, button: CGMouseButton, clicks: i64) -> Result<(), String> {
-        let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        let src = self.source();
         let e = CGEvent::new_mouse_event(src.as_deref(), kind, self.at, button);
         if let Some(e) = &e {
             CGEvent::set_flags(Some(e), self.flags());
@@ -780,7 +901,11 @@ impl Hands {
             [_, true, ..] | [.., true, _] | [.., true] => (CGEventType::OtherMouseDragged, CGMouseButton::Center),
             _ => (CGEventType::MouseMoved, CGMouseButton::Left),
         };
-        let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        if before_sign_in() {
+            let _ = objc2_core_graphics::CGWarpMouseCursorPosition(at);
+            return self.old_mouse();
+        }
+        let src = self.source();
         let e = CGEvent::new_mouse_event(src.as_deref(), kind, at, button);
         if let (Some(e), Some((dx, dy))) = (&e, by) {
             // Games read the movement, not the place.
@@ -801,6 +926,9 @@ impl Hands {
             _ => return Ok(()),
         };
         self.held[slot] = pressed;
+        if before_sign_in() {
+            return self.old_mouse();
+        }
         let kind = match (slot, pressed) {
             (0, true) => CGEventType::LeftMouseDown,
             (0, false) => CGEventType::LeftMouseUp,
@@ -823,14 +951,39 @@ impl Hands {
     }
 
     fn scroll(&mut self, vertical: i32, horizontal: i32) -> Result<(), String> {
-        let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        if before_sign_in() {
+            // SAFETY: two wheels' steps follow, as said.
+            unsafe { CGPostScrollWheelEvent(2, -vertical, -horizontal) };
+            return Ok(());
+        }
+        let src = self.source();
         // Up and left are positive here; the viewer's steps go down and right.
         let e = CGEvent::new_scroll_wheel_event2(src.as_deref(), CGScrollEventUnit::Line, 2, -vertical, -horizontal, 0);
         self.post(e)
     }
 
     fn key(&mut self, code: u16, down: bool, flags: CGEventFlags) -> Result<(), String> {
-        let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        if before_sign_in() {
+            // The old call takes no flags: modifiers asked for and not held go down around the key.
+            let held = self.flags();
+            let extra: Vec<u16> = [(CGEventFlags::MaskShift, 0x38), (CGEventFlags::MaskControl, 0x3b), (CGEventFlags::MaskAlternate, 0x3a), (CGEventFlags::MaskCommand, 0x37)]
+                .into_iter()
+                .filter(|&(f, _)| flags.contains(f) && !held.contains(f))
+                .map(|(_, c)| c)
+                .collect();
+            #[allow(deprecated)]
+            {
+                if down {
+                    extra.iter().for_each(|&c| _ = objc2_core_graphics::CGPostKeyboardEvent(0, c, true));
+                }
+                let _ = objc2_core_graphics::CGPostKeyboardEvent(0, code, down);
+                if !down {
+                    extra.iter().rev().for_each(|&c| _ = objc2_core_graphics::CGPostKeyboardEvent(0, c, false));
+                }
+            }
+            return Ok(());
+        }
+        let src = self.source();
         let e = CGEvent::new_keyboard_event(src.as_deref(), code, down);
         if let Some(e) = &e {
             CGEvent::set_flags(Some(e), flags);
@@ -840,10 +993,14 @@ impl Hands {
 
     /// Text where no key types it: one key event carrying it, as input methods send theirs.
     fn text(&mut self, text: &str) -> Result<(), String> {
+        // The old calls carry key codes only.
+        if before_sign_in() {
+            return Ok(());
+        }
         let units: Vec<u16> = text.encode_utf16().collect();
         for chunk in units.chunks(16) {
             for down in [true, false] {
-                let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+                let src = self.source();
                 let e = CGEvent::new_keyboard_event(src.as_deref(), 0, down);
                 if let Some(e) = &e {
                     // SAFETY: the units outlive the call, their count given.
@@ -1070,7 +1227,7 @@ impl Capture for Mac {
         };
         let win = win.ok_or("that window is gone")?;
         // Programs started since are listed too.
-        self.content = shareable()?;
+        self.content = Some(shareable()?);
         let (i, area) = self.area_of(win.rect).ok_or("that window is on no display")?;
         let (next, text) = if matches!(scope, Share::App(_) | Share::ActiveApp) {
             let d = self.displays[i].clone();
@@ -1099,7 +1256,7 @@ impl Capture for Mac {
     fn shared_app(&self) -> Option<String> {
         let pid = self.scope.pid()?;
         // SAFETY: reading the listed programs.
-        unsafe { self.content.applications() }.iter().find(|a| unsafe { a.processID() } == pid).map(|a| unsafe { a.applicationName() }.to_string())
+        unsafe { self.content.as_ref()?.applications() }.iter().find(|a| unsafe { a.processID() } == pid).map(|a| unsafe { a.applicationName() }.to_string())
     }
 
     fn set_target(&mut self, w: usize, h: usize) -> Result<(), String> {
@@ -1253,29 +1410,152 @@ mod tests {
         println!("sound(): {:?}", r.as_ref().map(|_| ()));
     }
 
-    /// What can be read of the screen from here (run at the login window as root, in its
-    /// context): ScreenCaptureKit's list and Core Graphics' own picture of the main display.
+    /// What can be read of the screen and how input can be posted from here (run at the login
+    /// window by a LoginWindow launch agent, as the app): each way in a process of its own, as
+    /// some hang there for good (making a mouse event with an event source did).
     #[test]
     #[ignore]
-    #[allow(deprecated)]
     fn the_screen_as_seen_from_here() {
-        println!("uid {}, screen recording allowed {}, may post {}, metal {}", unsafe { libc::getuid() }, CGPreflightScreenCaptureAccess(), may_post(&mut true), metal());
-        match shareable() {
-            Ok(c) => println!("ScreenCaptureKit: {} displays, {} windows", unsafe { c.displays() }.len(), unsafe { c.windows() }.len()),
-            Err(e) => println!("ScreenCaptureKit: {e}"),
+        if let Ok(way) = std::env::var("SSHREMOTE_MAC_WAY") {
+            return way_from_here(&way);
         }
-        let id = CGMainDisplayID();
-        match objc2_core_graphics::CGDisplayCreateImage(id) {
-            Some(img) => {
-                let (w, h) = (objc2_core_graphics::CGImage::width(Some(&img)), objc2_core_graphics::CGImage::height(Some(&img)));
-                let data = objc2_core_graphics::CGImage::data_provider(Some(&img)).and_then(|p| objc2_core_graphics::CGDataProvider::data(Some(&p)));
-                let lit = data.map(|d| d.to_vec().iter().filter(|&&b| b > 16).count()).unwrap_or(0);
-                println!("CGDisplayCreateImage: {w}x{h}, {lit} bytes above black");
+        println!(
+            "uid {}, screen recording allowed {}, accessibility {}, event posting {}, metal {}",
+            unsafe { libc::getuid() },
+            CGPreflightScreenCaptureAccess(),
+            may_post(&mut true),
+            objc2_core_graphics::CGPreflightPostEventAccess(),
+            metal()
+        );
+        for way in [
+            "list", "capture", "image", "windows", "warp", "move", "move-legacy", "type-legacy",
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", "--nocapture", "capture::mac::tests::the_screen_as_seen_from_here"])
+                .env("SSHREMOTE_MAC_WAY", way)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let until = Instant::now() + Duration::from_secs(20);
+            let done = loop {
+                if child.try_wait().unwrap().is_some() {
+                    break true;
+                }
+                if Instant::now() > until {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            let mut out = String::new();
+            let _ = std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out);
+            let said: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("way: ")).collect();
+            println!("{way}: {}{}", said.join("; "), if done { "" } else { " (hung, ended after 20 s)" });
+        }
+    }
+
+    #[allow(deprecated)]
+    fn way_from_here(way: &str) {
+        let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).unwrap_or(CGPoint { x: -1.0, y: -1.0 });
+        match way {
+            "list" => match shareable() {
+                Ok(c) => println!("way: {} displays, {} windows", unsafe { c.displays() }.len(), unsafe { c.windows() }.len()),
+                Err(e) => println!("way: {e}"),
+            },
+            "capture" => match Mac::open() {
+                Ok(mut m) => {
+                    let until = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < until {
+                        match m.grab() {
+                            Ok(Some(img)) => {
+                                let lit = img.data.iter().filter(|&&b| b > 16).count();
+                                return println!("way: picture {}x{}, {lit} bytes above black", img.w, img.h);
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                            Err(e) => return println!("way: {e}"),
+                        }
+                    }
+                    println!("way: no picture in 5 s");
+                }
+                Err(e) => println!("way: {e}"),
+            },
+            "image" => match objc2_core_graphics::CGDisplayCreateImage(CGMainDisplayID()) {
+                Some(img) => {
+                    let (w, h) = (objc2_core_graphics::CGImage::width(Some(&img)), objc2_core_graphics::CGImage::height(Some(&img)));
+                    let data = objc2_core_graphics::CGImage::data_provider(Some(&img)).and_then(|p| objc2_core_graphics::CGDataProvider::data(Some(&p)));
+                    let lit = data.map(|d| d.to_vec().iter().filter(|&&b| b > 16).count()).unwrap_or(0);
+                    println!("way: {w}x{h}, {lit} bytes above black");
+                }
+                None => println!("way: none"),
+            },
+            "windows" => {
+                let windows = listed(None);
+                println!("way: {} ({:?})", windows.len(), windows.iter().take(6).map(|w| format!("{}:{}", w.app, w.layer)).collect::<Vec<_>>());
             }
-            None => println!("CGDisplayCreateImage: none"),
+            "move" => {
+                let was = here();
+                let to = CGPoint { x: was.x - 40.0, y: was.y + 30.0 };
+                let e = CGEvent::new_mouse_event(None, CGEventType::MouseMoved, to, CGMouseButton::Left);
+                CGEvent::post(CGEventTapLocation::HIDEventTap, e.as_deref());
+                std::thread::sleep(Duration::from_millis(300));
+                let at = here();
+                let back = CGEvent::new_mouse_event(None, CGEventType::MouseMoved, was, CGMouseButton::Left);
+                CGEvent::post(CGEventTapLocation::HIDEventTap, back.as_deref());
+                println!("way: from {:.0},{:.0} sent to {:.0},{:.0}, at {:.0},{:.0}", was.x, was.y, to.x, to.y, at.x, at.y);
+            }
+            "move-legacy" => {
+                let was = here();
+                let to = CGPoint { x: was.x - 40.0, y: was.y + 30.0 };
+                // SAFETY: one button's state follows, as said.
+                let r = unsafe { CGPostMouseEvent(to, 1, 1, 0) };
+                std::thread::sleep(Duration::from_millis(300));
+                let at = here();
+                let _ = unsafe { CGPostMouseEvent(was, 1, 1, 0) };
+                println!("way: {r}, from {:.0},{:.0} sent to {:.0},{:.0}, at {:.0},{:.0}", was.x, was.y, to.x, to.y, at.x, at.y);
+            }
+            "warp" => {
+                let was = here();
+                let to = CGPoint { x: was.x - 40.0, y: was.y + 30.0 };
+                let r = objc2_core_graphics::CGWarpMouseCursorPosition(to);
+                std::thread::sleep(Duration::from_millis(300));
+                let at = here();
+                let _ = objc2_core_graphics::CGWarpMouseCursorPosition(was);
+                println!("way: {r:?}, from {:.0},{:.0} sent to {:.0},{:.0}, at {:.0},{:.0}", was.x, was.y, to.x, to.y, at.x, at.y);
+            }
+            // An x typed where the keys go and taken back, seen on the screen: what is shown then
+            // differs from every picture before (the caret blinks), and no longer once it is gone.
+            "type-legacy" => {
+                let shot = || {
+                    let img = objc2_core_graphics::CGDisplayCreateImage(CGMainDisplayID());
+                    let data = img.and_then(|i| objc2_core_graphics::CGImage::data_provider(Some(&i))).and_then(|p| objc2_core_graphics::CGDataProvider::data(Some(&p)));
+                    data.map(|d| d.to_vec()).unwrap_or_default()
+                };
+                let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 24).count();
+                let key = |code: u16| {
+                    for down in [true, false] {
+                        let _ = objc2_core_graphics::CGPostKeyboardEvent(0, code, down);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    std::thread::sleep(Duration::from_millis(400));
+                };
+                let before: Vec<Vec<u8>> = (0..4)
+                    .map(|_| {
+                        let s = shot();
+                        std::thread::sleep(Duration::from_millis(150));
+                        s
+                    })
+                    .collect();
+                key(0x07);
+                let typed = shot();
+                key(0x33);
+                let taken = shot();
+                let least = |s: &[u8]| before.iter().map(|b| differ(b, s)).min().unwrap_or(0);
+                println!("way: changed {} after x, {} after Delete (blinking alone {})", least(&typed), least(&taken), differ(&before[0], &before[2]));
+            }
+            _ => {}
         }
-        let windows = listed(None);
-        println!("windows listed: {} ({:?})", windows.len(), windows.iter().take(6).map(|w| format!("{}:{}", w.app, w.layer)).collect::<Vec<_>>());
     }
 
     /// The pointer and the keys driven, nothing recorded: run where macOS lets this program
