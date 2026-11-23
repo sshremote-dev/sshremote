@@ -570,6 +570,7 @@ pub struct Mac {
     hands: Hands,
     /// When the stream was last given a new size: pictures of the old one still come a while.
     resized: Option<Instant>,
+    shrink: super::Shrink,
 }
 
 impl Mac {
@@ -627,6 +628,7 @@ impl Mac {
             latest,
             hands: Hands::default(),
             resized: None,
+            shrink: super::Shrink::default(),
         };
         mac.restart()?;
         Ok(mac)
@@ -647,6 +649,12 @@ impl Mac {
     fn size(&self) -> (usize, usize) {
         let (w, h) = self.area.pixels;
         (self.target.0.clamp(2, w.max(2)), self.target.1.clamp(2, h.max(2)))
+    }
+
+    /// The size the stream is asked for: without Metal its pictures come black at any size but
+    /// what is shown has, so they are made smaller here instead.
+    fn stream_size(&self) -> (usize, usize) {
+        if metal() { self.size() } else { (self.area.pixels.0.max(2), self.area.pixels.1.max(2)) }
     }
 
     /// The window's part of the display, in points from the display's corner.
@@ -680,7 +688,7 @@ impl Mac {
                 }
             }
         };
-        self.live = Some(start(&filter, &config(self.size(), self.fps, self.part()), self.latest.clone())?);
+        self.live = Some(start(&filter, &config(self.stream_size(), self.fps, self.part()), self.latest.clone())?);
         Ok(())
     }
 
@@ -696,7 +704,7 @@ impl Mac {
         }
         if let Some(l) = &self.live {
             // SAFETY: a fresh configuration given to the running stream.
-            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.size(), self.fps, self.part()), None) };
+            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.stream_size(), self.fps, self.part()), None) };
         }
     }
 
@@ -1301,15 +1309,18 @@ impl Capture for Mac {
         if !self.latest.fresh.swap(false, Ordering::AcqRel) {
             return Ok(None);
         }
-        let img = self.latest.frame.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(img) = self.latest.frame.lock().unwrap_or_else(|e| e.into_inner()).take() else { return Ok(None) };
+        let (want, asked) = (self.size(), if self.drawn.is_some() { self.size() } else { self.stream_size() });
         // Pictures of the size before a change, still on their way, are passed over.
-        if let Some(i) = &img
-            && (i.w, i.h) != self.size()
-            && self.resized.is_some_and(|t| t.elapsed() < Duration::from_secs(1))
-        {
+        if (img.w, img.h) != asked && self.resized.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return Ok(None);
         }
-        Ok(img)
+        if (img.w, img.h) == want || (img.w, img.h) != asked {
+            return Ok(Some(img));
+        }
+        let small = self.shrink.image(&img.data, img.w, img.h, img.stride, want.0, want.1);
+        self.recycle(img);
+        Ok(Some(small))
     }
 
     fn recycle(&mut self, img: Image) {
@@ -1394,6 +1405,36 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let by = here();
         assert!(by.x > at.x && by.y < at.y, "moved by: {:.0},{:.0}", by.x, by.y);
+    }
+
+    /// The screen at the display's size and smaller, as the stream is changed and as it starts
+    /// so: never black (it was at every smaller size on a Mac without Metal).
+    #[test]
+    #[ignore]
+    fn a_mac_screen_is_scaled() {
+        let lit = |m: &mut Mac, what: &str| {
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut last = None;
+            while Instant::now() < until {
+                if let Ok(Some(img)) = m.grab() {
+                    let n = img.data.chunks(img.stride).flat_map(|r| &r[..img.w * 4]).filter(|&&b| b > 16).count();
+                    last = Some((img.w, img.h, n));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let (w, h, n) = last.unwrap_or_else(|| panic!("{what}: no picture"));
+            println!("{what}: {w}x{h}, {n} of {} bytes above black", w * h * 4);
+            assert!(n > w * h, "{what}: black");
+            (w, h)
+        };
+        let mut m = Mac::open().unwrap();
+        lit(&mut m, "the display's size");
+        for size in [(1001, 563), (960, 540)] {
+            m.set_target(size.0, size.1).unwrap();
+            assert_eq!(lit(&mut m, &format!("{size:?}, changed")), size);
+            m.restart().unwrap();
+            assert_eq!(lit(&mut m, &format!("{size:?}, started so")), size);
+        }
     }
 
     #[test]
