@@ -8,25 +8,23 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, FontId, Rect};
-use zbus::blocking::{Connection, Proxy};
+use zbus::{Connection, Proxy};
 
 const DEST: &str = "io.github.thinkbigx.SshRemote.Windows";
 const PATH: &str = "/io/github/thinkbigx/SshRemote/Windows";
 
-fn proxy() -> Option<Proxy<'static>> {
+fn conn() -> Option<&'static Connection> {
     static CONN: std::sync::OnceLock<Option<Connection>> = std::sync::OnceLock::new();
-    let conn = CONN
-        .get_or_init(|| zbus::blocking::connection::Builder::session().ok()?.method_timeout(Duration::from_millis(500)).build().ok())
-        .as_ref()?;
-    Proxy::new(conn, DEST, PATH, DEST).ok()
+    CONN.get_or_init(|| zbus::block_on(zbus::connection::Builder::session().method_timeout(Duration::from_millis(500)).build()).ok()).as_ref()
 }
 
 fn call<B, R>(method: &str, body: &B) -> Option<R>
 where
-    B: zbus::export::serde::Serialize + zbus::zvariant::DynamicType,
-    R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
+    B: zbus::export::serde::Serialize + zbus::DynamicType,
+    R: for<'d> zbus::wire::DynamicDeserialize<'d>,
 {
-    proxy()?.call(method, body).ok()
+    let conn = conn()?;
+    zbus::block_on(async { Proxy::new(conn, DEST, PATH, DEST).await?.call(method, body).await }).ok()
 }
 
 /// A GNOME session on Wayland whose helper holds windows (one from before this version is brought
@@ -38,9 +36,12 @@ pub(in crate::gui) fn here() -> bool {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return false;
         }
-        let Some(p) = proxy() else { return false };
-        let introspect = zbus::blocking::fdo::IntrospectableProxy::builder(p.connection()).destination(DEST).and_then(|b| b.path(PATH)).and_then(|b| b.build());
-        let Some(xml) = introspect.ok().and_then(|i| i.introspect().ok()) else { return false };
+        let Some(conn) = conn() else { return false };
+        let xml = zbus::block_on(async {
+            let i = zbus::fdo::IntrospectableProxy::builder(conn).destination(DEST).path(PATH).build().await.ok()?;
+            i.introspect().await.ok()
+        });
+        let Some(xml) = xml else { return false };
         // One from before asking held windows to close is brought up to date too.
         if !xml.contains("\"Close\"") {
             crate::capture::gnome_helper_update();

@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, RawFd};
 
-use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::{ObjectPath, OwnedFd, OwnedObjectPath, OwnedValue, Value};
+use futures_util::StreamExt;
+use zbus::{Connection, ObjectPath, OwnedFd, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 
 const DEST: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
@@ -49,24 +49,24 @@ fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
 }
 
 /// Calls a portal method that answers through a Request object, and waits for the answer.
-fn request<B>(
+async fn request<B>(
     conn: &Connection,
     iface: &str,
     method: &str,
     token: &str,
     body: &B,
-) -> Result<HashMap<String, OwnedValue>, String>
+) -> Result<HashMap<String, OwnedVariant>, String>
 where
-    B: zbus::export::serde::ser::Serialize + zbus::zvariant::DynamicType,
+    B: zbus::export::serde::ser::Serialize + zbus::DynamicType,
 {
     let sender = conn.unique_name().ok_or("no bus name")?.trim_start_matches(':').replace('.', "_");
     let path = format!("{PATH}/request/{sender}/{token}");
-    let req = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request").map_err(err(method))?;
-    let mut answers = req.receive_signal("Response").map_err(err(method))?;
-    let p = Proxy::new(conn, DEST, PATH, iface).map_err(err(method))?;
-    let _: OwnedObjectPath = p.call(method, body).map_err(err(method))?;
-    let msg = answers.next().ok_or("the screen-sharing portal went away")?;
-    let (code, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(err(method))?;
+    let req = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request").await.map_err(err(method))?;
+    let mut answers = req.receive_signal("Response").await.map_err(err(method))?;
+    let p = Proxy::new(conn, DEST, PATH, iface).await.map_err(err(method))?;
+    let _: OwnedObjectPath = p.call(method, body).await.map_err(err(method))?;
+    let msg = answers.next().await.ok_or("the screen-sharing portal went away")?;
+    let (code, results): (u32, HashMap<String, OwnedVariant>) = msg.body().deserialize().map_err(err(method))?;
     match code {
         0 => Ok(results),
         1 => Err("the choice was cancelled on the SSH host's screen".into()),
@@ -74,8 +74,8 @@ where
     }
 }
 
-fn options(token: &str) -> HashMap<&'static str, Value<'_>> {
-    HashMap::from([("handle_token", Value::from(token))])
+fn options(token: &str) -> HashMap<&'static str, Variant<'_>> {
+    HashMap::from([("handle_token", Variant::from(token))])
 }
 
 /// Shows the dialog on the remote screen and waits until someone picks a window or a screen there.
@@ -103,26 +103,30 @@ pub fn screen(restore: Option<&str>) -> Result<Portal, String> {
 /// A portal session sharing `types` (1 a monitor, 2 a window), with input unless `screen_only`,
 /// and the pointer as metadata when `apart` and the desktop sends it so.
 fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<Portal, String> {
-    let conn = Connection::session().map_err(err("connection"))?;
+    zbus::block_on(start_on(types, restore, input, apart))
+}
+
+async fn start_on(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<Portal, String> {
+    let conn = Connection::session().await.map_err(err("connection"))?;
     let tag = std::process::id();
     let t = |n: u32| format!("sshremote{tag}_{n}{}", if input { "" } else { "v" });
     let iface = if input { RD } else { SC };
 
     let (t1, s1) = (t(1), format!("sshremotesession{tag}{}", if input { "" } else { "v" }));
     let mut o = options(&t1);
-    o.insert("session_handle_token", Value::from(s1.as_str()));
-    let r = request(&conn, iface, "CreateSession", &t1, &(o,))?;
+    o.insert("session_handle_token", Variant::from(s1.as_str()));
+    let r = request(&conn, iface, "CreateSession", &t1, &(o,)).await?;
     let session: String =
         r.get("session_handle").and_then(|v| String::try_from(v.clone()).ok()).ok_or("no portal session")?;
     let session = OwnedObjectPath::try_from(session).map_err(|e| e.to_string())?;
     let sp = ObjectPath::from(&session);
     // Kept until revoked (2), so later sessions need no one at the screen; where the desktop
     // keeps it at all.
-    let keep = |o: &mut HashMap<&'static str, Value<'_>>| {
+    let keep = |o: &mut HashMap<&'static str, Variant<'_>>| {
         if types == 1 {
-            o.insert("persist_mode", Value::U32(2));
+            o.insert("persist_mode", Variant::U32(2));
             if let Some(r) = restore {
-                o.insert("restore_token", Value::from(r.to_string()));
+                o.insert("restore_token", Variant::from(r.to_string()));
             }
         }
     };
@@ -131,30 +135,30 @@ fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<
         let t2 = t(2);
         let mut o = options(&t2);
         // Keyboard and pointer.
-        o.insert("types", Value::U32(3));
+        o.insert("types", Variant::U32(3));
         keep(&mut o);
-        request(&conn, RD, "SelectDevices", &t2, &(&sp, o))?;
+        request(&conn, RD, "SelectDevices", &t2, &(&sp, o)).await?;
     }
 
     let t3 = t(3);
     let mut o = options(&t3);
     // What to share, one of it, with the pointer drawn into the picture (2) or beside it (4).
-    let apart = apart
-        && Proxy::new(&conn, DEST, PATH, SC).ok().and_then(|p| p.get_property::<u32>("AvailableCursorModes").ok()).is_some_and(|m| m & 4 != 0);
-    o.insert("types", Value::U32(types));
+    let sc = Proxy::new(&conn, DEST, PATH, SC).await.map_err(err("ScreenCast"))?;
+    let apart = apart && sc.get_property::<u32>("AvailableCursorModes").await.is_ok_and(|m| m & 4 != 0);
+    o.insert("types", Variant::U32(types));
     // Every monitor, where the desktop offers them together: the viewer picks one as it would
     // elsewhere. A window alone.
-    o.insert("multiple", Value::Bool(types == 1));
-    o.insert("cursor_mode", Value::U32(if apart { 4 } else { 2 }));
+    o.insert("multiple", Variant::Bool(types == 1));
+    o.insert("cursor_mode", Variant::U32(if apart { 4 } else { 2 }));
     if !input {
         keep(&mut o);
     }
-    request(&conn, SC, "SelectSources", &t3, &(&sp, o))?;
+    request(&conn, SC, "SelectSources", &t3, &(&sp, o)).await?;
 
     let t4 = t(4);
-    let r = request(&conn, iface, "Start", &t4, &(&sp, "", options(&t4)))?;
+    let r = request(&conn, iface, "Start", &t4, &(&sp, "", options(&t4))).await?;
     let restore = r.get("restore_token").and_then(|v| String::try_from(v.clone()).ok());
-    let streams: Vec<(u32, HashMap<String, OwnedValue>)> = r
+    let streams: Vec<(u32, HashMap<String, OwnedVariant>)> = r
         .get("streams")
         .and_then(|v| v.try_clone().ok())
         .and_then(|v| v.try_into().ok())
@@ -163,21 +167,21 @@ fn start(types: u32, restore: Option<&str>, input: bool, apart: bool) -> Result<
     let node = *node;
     // source_type 1 is a monitor, 2 a window.
     let monitor = props.get("source_type").and_then(|v| u32::try_from(v).ok()) == Some(1);
-    let pair = |props: &HashMap<String, OwnedValue>, k: &str| props.get(k).and_then(|v| <(i32, i32)>::try_from(v.clone()).ok()).unwrap_or((0, 0));
+    let pair = |props: &HashMap<String, OwnedVariant>, k: &str| props.get(k).and_then(|v| <(i32, i32)>::try_from(v.clone()).ok()).unwrap_or((0, 0));
     let mut screens: Vec<Screen> = streams.iter().map(|(node, p)| Screen { node: *node, at: pair(p, "position"), size: pair(p, "size") }).collect();
     screens.sort_by_key(|s| (s.at.0, s.at.1));
 
-    let p = Proxy::new(&conn, DEST, PATH, SC).map_err(err("ScreenCast"))?;
     let fd: OwnedFd =
-        p.call("OpenPipeWireRemote", &(&sp, HashMap::<&str, Value>::new())).map_err(err("OpenPipeWireRemote"))?;
+        sc.call("OpenPipeWireRemote", &(&sp, HashMap::<&str, Variant>::new())).await.map_err(err("OpenPipeWireRemote"))?;
     let rd = if input {
         Some(
-            zbus::blocking::proxy::Builder::new(&conn)
+            zbus::proxy::Builder::new(&conn)
                 .destination(DEST)
-                .and_then(|b| b.path(PATH))
-                .and_then(|b| b.interface(RD))
-                .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
-                .and_then(|b| b.build())
+                .path(PATH)
+                .interface(RD)
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await
                 .map_err(err("RemoteDesktop"))?,
         )
     } else {
@@ -196,9 +200,11 @@ impl Portal {
 
     /// Whether the portal session is still open; it closes when the shared window does.
     pub fn alive(&self) -> bool {
-        Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session")
-            .and_then(|p| p.get_property::<u32>("version"))
-            .is_ok()
+        zbus::block_on(async {
+            let p = Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session").await?;
+            p.get_property::<u32>("version").await
+        })
+        .is_ok()
     }
 
     /// What GStreamer's pipewiresrc needs to read the stream shown.
@@ -218,15 +224,15 @@ impl Portal {
 
     fn notify<B>(&self, method: &str, body: &B) -> Result<(), String>
     where
-        B: zbus::export::serde::ser::Serialize + zbus::zvariant::DynamicType,
+        B: zbus::export::serde::ser::Serialize + zbus::DynamicType,
     {
         // Each waits for its reply: the portal service handles calls on a pool of threads, so
         // calls sent ahead of their replies reach the desktop out of order (keys swapped or lost).
         let rd = self.rd.as_ref().ok_or("this desktop lets its screen be seen, not controlled (it has no remote-desktop portal)")?;
-        rd.call_method(method, body).map(drop).map_err(err(method))
+        zbus::block_on(rd.call_method(method, body)).map(drop).map_err(err(method))
     }
 
-    fn none() -> HashMap<&'static str, Value<'static>> {
+    fn none() -> HashMap<&'static str, Variant<'static>> {
         HashMap::new()
     }
 
@@ -298,8 +304,9 @@ impl Portal {
 impl Drop for Portal {
     fn drop(&mut self) {
         // Ends the sharing, and GNOME's "screen is shared" indicator with it.
-        if let Ok(p) = Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session") {
-            let _ = p.call_noreply("Close", &());
-        }
+        let _ = zbus::block_on(async {
+            let p = Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session").await?;
+            p.call_noreply("Close", &()).await
+        });
     }
 }

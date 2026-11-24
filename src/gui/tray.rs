@@ -294,7 +294,7 @@ mod sni {
     use std::sync::{Arc, Mutex};
 
     use zbus::object_server::SignalEmitter;
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue, StructureBuilder, Value};
+    use zbus::{OwnedObjectPath, OwnedVariant, Structure, Variant};
 
     use super::{Entry, QUIT, Shared, Status, act, entries, item, read_status};
 
@@ -323,7 +323,7 @@ mod sni {
     /// A line of the menu as dbusmenu has it: its number, properties and lines under it.
     struct Node {
         id: i32,
-        props: Vec<(&'static str, Value<'static>)>,
+        props: Vec<(&'static str, Variant<'static>)>,
         children: Vec<Node>,
     }
 
@@ -333,7 +333,7 @@ mod sni {
             .map(|e| match e {
                 Entry::Separator => {
                     *next += 1;
-                    Node { id: *next, props: vec![("type", Value::from("separator"))], children: Vec::new() }
+                    Node { id: *next, props: vec![("type", Variant::from("separator"))], children: Vec::new() }
                 }
                 Entry::Item { id, label, enabled, checked } => {
                     let id = if *id == 0 {
@@ -342,10 +342,10 @@ mod sni {
                     } else {
                         *id as i32
                     };
-                    let mut props = vec![("label", Value::from(label.replace('_', "__"))), ("enabled", Value::from(*enabled))];
+                    let mut props = vec![("label", Variant::from(label.replace('_', "__"))), ("enabled", Variant::from(*enabled))];
                     if let Some(on) = checked {
-                        props.push(("toggle-type", Value::from("checkmark")));
-                        props.push(("toggle-state", Value::from(if *on { 1i32 } else { 0 })));
+                        props.push(("toggle-type", Variant::from("checkmark")));
+                        props.push(("toggle-state", Variant::from(if *on { 1i32 } else { 0 })));
                     }
                     Node { id, props, children: Vec::new() }
                 }
@@ -353,13 +353,13 @@ mod sni {
                     *next += 1;
                     let id = *next;
                     let children = nodes(entries, next);
-                    Node { id, props: vec![("label", Value::from(label.clone())), ("children-display", Value::from("submenu"))], children }
+                    Node { id, props: vec![("label", Variant::from(label.clone())), ("children-display", Variant::from("submenu"))], children }
                 }
             })
             .collect()
     }
 
-    fn props(n: &Node, wanted: &[String]) -> HashMap<String, OwnedValue> {
+    fn props(n: &Node, wanted: &[String]) -> HashMap<String, OwnedVariant> {
         n.props
             .iter()
             .filter(|(k, _)| wanted.is_empty() || wanted.iter().any(|w| w == k))
@@ -367,16 +367,16 @@ mod sni {
             .collect()
     }
 
-    fn as_value(n: &Node, wanted: &[String], depth: i32) -> Option<OwnedValue> {
-        let children: Vec<OwnedValue> =
+    fn as_value(n: &Node, wanted: &[String], depth: i32) -> Option<OwnedVariant> {
+        let children: Vec<OwnedVariant> =
             if depth == 0 { Vec::new() } else { n.children.iter().filter_map(|c| as_value(c, wanted, depth - 1)).collect() };
-        let s = StructureBuilder::new()
-            .append_field(Value::I32(n.id))
-            .append_field(Value::from(props(n, wanted)))
-            .append_field(Value::from(children))
+        let s = Structure::builder()
+            .append_field(Variant::I32(n.id))
+            .append_field(Variant::from(props(n, wanted)))
+            .append_field(Variant::from(children))
             .build()
             .ok()?;
-        Value::Structure(s).try_to_owned().ok()
+        Variant::Structure(s).try_to_owned().ok()
     }
 
     fn find(list: &[Node], id: i32) -> Option<&Node> {
@@ -385,7 +385,7 @@ mod sni {
 
     fn root(s: &Status) -> Node {
         let mut next = 1000;
-        Node { id: 0, props: vec![("children-display", Value::from("submenu"))], children: nodes(&entries(s), &mut next) }
+        Node { id: 0, props: vec![("children-display", Variant::from("submenu"))], children: nodes(&entries(s), &mut next) }
     }
 
     struct Item {
@@ -478,7 +478,7 @@ mod sni {
         fn icon_theme_path(&self) -> Vec<String> {
             Vec::new()
         }
-        fn get_layout(&self, parent_id: i32, recursion_depth: i32, property_names: Vec<String>) -> (u32, (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>)) {
+        fn get_layout(&self, parent_id: i32, recursion_depth: i32, property_names: Vec<String>) -> (u32, (i32, HashMap<String, OwnedVariant>, Vec<OwnedVariant>)) {
             let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
             let r = root(&s);
             let n = if parent_id == 0 { Some(&r) } else { find(&r.children, parent_id) };
@@ -489,22 +489,22 @@ mod sni {
             };
             (self.revision.load(Ordering::Relaxed), (id, p, children))
         }
-        fn get_group_properties(&self, ids: Vec<i32>, property_names: Vec<String>) -> Vec<(i32, HashMap<String, OwnedValue>)> {
+        fn get_group_properties(&self, ids: Vec<i32>, property_names: Vec<String>) -> Vec<(i32, HashMap<String, OwnedVariant>)> {
             let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
             let r = root(&s);
             ids.iter().filter_map(|id| if *id == 0 { Some(&r) } else { find(&r.children, *id) }).map(|n| (n.id, props(n, &property_names))).collect()
         }
-        fn get_property(&self, id: i32, name: String) -> OwnedValue {
+        fn get_property(&self, id: i32, name: String) -> OwnedVariant {
             let s = self.status.lock().map(|s| s.clone()).unwrap_or_default();
             let r = root(&s);
-            find(&r.children, id).and_then(|n| props(n, &[name]).into_values().next()).unwrap_or_else(|| OwnedValue::from(0i32))
+            find(&r.children, id).and_then(|n| props(n, &[name]).into_values().next()).unwrap_or_else(|| OwnedVariant::from(0i32))
         }
-        fn event(&self, id: i32, event_id: String, _data: OwnedValue, _timestamp: u32) {
+        fn event(&self, id: i32, event_id: String, _data: OwnedVariant, _timestamp: u32) {
             if event_id == "clicked" {
                 self.chosen(id);
             }
         }
-        fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
+        fn event_group(&self, events: Vec<(i32, String, OwnedVariant, u32)>) -> Vec<i32> {
             for (id, event_id, ..) in events {
                 if event_id == "clicked" {
                     self.chosen(id);
@@ -551,25 +551,28 @@ mod sni {
         let revision = Arc::new(AtomicU32::new(1));
         let icon = crate::gui::app_icon().map(|i| vec![pixmap(&i, 32), pixmap(&i, 64)]).unwrap_or_default();
         let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
-        let conn = zbus::blocking::connection::Builder::session()
-            .map_err(e)?
-            .serve_at("/StatusNotifierItem", Item { status: status.clone(), icon })
-            .map_err(e)?
-            .serve_at("/MenuBar", Menu { status: status.clone(), revision: revision.clone() })
-            .map_err(e)?
-            .build()
-            .map_err(e)?;
-        // One icon for each signed-in user.
-        let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
-        match conn.request_name_with_flags("dev.sshremote.Tray", flags) {
-            Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {}
-            _ => return Ok(()),
-        }
-        conn.request_name(name.as_str()).map_err(e)?;
-        let watcher = zbus::blocking::Proxy::new(&conn, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher").map_err(e)?;
-        watcher
-            .call_method("RegisterStatusNotifierItem", &(name.as_str(),))
-            .map_err(|_| "the top bar shows no icons here (GNOME needs its AppIndicator extension)".to_string())?;
+        // The connection answers the menu's calls between these, on a thread of zbus's own.
+        let conn = zbus::block_on(async {
+            let conn = zbus::connection::Builder::session()
+                .serve_at("/StatusNotifierItem", Item { status: status.clone(), icon })
+                .serve_at("/MenuBar", Menu { status: status.clone(), revision: revision.clone() })
+                .build()
+                .await
+                .map_err(e)?;
+            // One icon for each signed-in user.
+            match conn.request_name_with_flags("dev.sshremote.Tray", zbus::fdo::RequestNameFlags::DO_NOT_QUEUE).await {
+                Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {}
+                _ => return Ok(None),
+            }
+            conn.request_name(name.as_str()).await.map_err(e)?;
+            let watcher = zbus::Proxy::new(&conn, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher").await.map_err(e)?;
+            watcher
+                .call_method("RegisterStatusNotifierItem", &(name.as_str(),))
+                .await
+                .map_err(|_| "the top bar shows no icons here (GNOME needs its AppIndicator extension)".to_string())?;
+            Ok::<_, String>(Some(conn))
+        })?;
+        let Some(conn) = conn else { return Ok(()) };
         let mut last = (String::new(), 0u32);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -588,12 +591,14 @@ mod sni {
                     revision.fetch_add(1, Ordering::Relaxed);
                 }
                 let rev = revision.load(Ordering::Relaxed);
-                if let Ok(menu) = conn.object_server().interface::<_, Menu>("/MenuBar") {
-                    let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), rev, 0));
-                }
-                if let Ok(item) = conn.object_server().interface::<_, Item>("/StatusNotifierItem") {
-                    let _ = zbus::block_on(Item::new_tool_tip(item.signal_emitter()));
-                }
+                zbus::block_on(async {
+                    if let Ok(menu) = conn.object_server().interface::<_, Menu>("/MenuBar").await {
+                        let _ = Menu::layout_updated(menu.signal_emitter(), rev, 0).await;
+                    }
+                    if let Ok(item) = conn.object_server().interface::<_, Item>("/StatusNotifierItem").await {
+                        let _ = Item::new_tool_tip(item.signal_emitter()).await;
+                    }
+                });
                 last = (said.0, rev);
             }
         }

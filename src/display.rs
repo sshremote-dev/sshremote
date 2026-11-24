@@ -380,7 +380,7 @@ mod linux {
     use x11rb::connection::Connection as _;
     use x11rb::protocol::randr::{self, ConnectionExt as _};
     use x11rb::protocol::xproto::ConnectionExt as _;
-    use zbus::zvariant::OwnedValue;
+    use zbus::OwnedVariant;
 
     use super::{Modes, Way};
 
@@ -746,21 +746,29 @@ mod linux {
     }
 
     // GetCurrentState's answer, which the GNOME capture reads too.
-    pub(crate) type MutterMode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
-    pub(crate) type MutterMonitor = ((String, String, String, String), Vec<MutterMode>, HashMap<String, OwnedValue>);
-    pub(crate) type MutterLogical = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
-    pub(crate) type MutterState = (u32, Vec<MutterMonitor>, Vec<MutterLogical>, HashMap<String, OwnedValue>);
+    pub(crate) type MutterMode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedVariant>);
+    pub(crate) type MutterMonitor = ((String, String, String, String), Vec<MutterMode>, HashMap<String, OwnedVariant>);
+    pub(crate) type MutterLogical = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedVariant>);
+    pub(crate) type MutterState = (u32, Vec<MutterMonitor>, Vec<MutterLogical>, HashMap<String, OwnedVariant>);
 
-    fn mutter() -> Option<zbus::blocking::Proxy<'static>> {
-        let conn = zbus::blocking::Connection::session().ok()?;
-        zbus::blocking::Proxy::new(&conn, "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig", "org.gnome.Mutter.DisplayConfig").ok()
+    /// Calls `method` of GNOME's display configuration.
+    fn mutter<B, R>(method: &str, body: &B) -> zbus::Result<R>
+    where
+        B: zbus::export::serde::Serialize + zbus::DynamicType,
+        R: for<'d> zbus::wire::DynamicDeserialize<'d>,
+    {
+        zbus::block_on(async {
+            let conn = zbus::Connection::session().await?;
+            let p = zbus::Proxy::new(&conn, "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig", "org.gnome.Mutter.DisplayConfig").await?;
+            p.call(method, body).await
+        })
     }
 
     fn mutter_state() -> Option<MutterState> {
-        mutter()?.call("GetCurrentState", &()).ok()
+        mutter("GetCurrentState", &()).ok()
     }
 
-    fn flag(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
+    fn flag(props: &HashMap<String, OwnedVariant>, key: &str) -> bool {
         props.get(key).is_some_and(|v| bool::try_from(v).unwrap_or(false))
     }
 
@@ -778,11 +786,11 @@ mod linux {
 
     /// A logical monitor as ApplyMonitorsConfig takes it: place, scale, turn, primary, and each
     /// monitor's connector and mode.
-    pub(super) type Placed = (i32, i32, f64, u32, bool, Vec<(String, String, HashMap<String, OwnedValue>)>);
+    pub(super) type Placed = (i32, i32, f64, u32, bool, Vec<(String, String, HashMap<String, OwnedVariant>)>);
 
     /// The layout with monitor `id` at `w`x`h`, the ones beside or below it moved to keep touching
     /// it, and the properties to keep.
-    pub(super) fn mutter_layout(state: &MutterState, id: &str, w: u16, h: u16) -> Result<(Vec<Placed>, HashMap<String, OwnedValue>), String> {
+    pub(super) fn mutter_layout(state: &MutterState, id: &str, w: u16, h: u16) -> Result<(Vec<Placed>, HashMap<String, OwnedVariant>), String> {
         let (_, monitors, logical, props) = state;
         let current_of = |c: &str| monitors.iter().find(|m| m.0.0 == c).and_then(|m| m.1.iter().find(|x| flag(&x.6, "is-current")).cloned());
         let (_, modes, _) = monitors.iter().find(|m| m.0.0 == id).ok_or("that screen is gone")?;
@@ -812,7 +820,7 @@ mod linux {
                 (x, y, if mine { scale } else { l.2 }, l.3, l.4, monitors)
             })
             .collect();
-        let mut keep: HashMap<String, OwnedValue> = HashMap::new();
+        let mut keep: HashMap<String, OwnedVariant> = HashMap::new();
         if let Some(mode) = props.get("layout-mode").and_then(|v| v.try_clone().ok()) {
             keep.insert("layout-mode".into(), mode);
         }
@@ -823,7 +831,7 @@ mod linux {
         let state = mutter_state().ok_or("GNOME's display configuration does not answer")?;
         let (layout, keep) = mutter_layout(&state, id, w, h)?;
         // Temporary (1): not saved, so the saved layout comes back with the next login.
-        let r: Result<(), zbus::Error> = mutter().ok_or("GNOME's display configuration does not answer")?.call("ApplyMonitorsConfig", &(state.0, 1u32, layout, keep));
+        let r: zbus::Result<()> = mutter("ApplyMonitorsConfig", &(state.0, 1u32, layout, keep));
         r.map_err(|e| format!("GNOME did not set {w}x{h}: {e}"))
     }
 }
@@ -869,8 +877,8 @@ mod tests {
     #[test]
     fn gnome_moves_the_screen_beside_one_that_grows() {
         use std::collections::HashMap;
-        use zbus::zvariant::{OwnedValue, Value};
-        let yes = || -> HashMap<String, OwnedValue> { HashMap::from([("is-current".to_string(), OwnedValue::try_from(Value::from(true)).unwrap())]) };
+        use zbus::{OwnedVariant, Variant};
+        let yes = || -> HashMap<String, OwnedVariant> { HashMap::from([("is-current".to_string(), OwnedVariant::try_from(Variant::from(true)).unwrap())]) };
         let mode = |id: &str, w, h, current: bool| (id.to_string(), w, h, 60.0, 1.0, vec![1.0, 2.0], if current { yes() } else { HashMap::new() });
         let spec = |c: &str| (c.to_string(), "v".to_string(), "p".to_string(), "s".to_string());
         let state: linux::MutterState = (

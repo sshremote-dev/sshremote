@@ -8,8 +8,8 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use futures_util::StreamExt;
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 
 use super::region::{self, R};
 use super::{Capture, Image, Input, Monitor, NEEDS_HELPER, Pixels, Share, WindowInfo};
@@ -19,7 +19,7 @@ use crate::proto::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 // the next event and the next frame.
 macro_rules! notify {
     ($s:expr, $method:literal, $body:expr) => {
-        $s.session.call_noreply($method, $body).map_err(|e| format!("GNOME {}: {e}", $method))
+        zbus::block_on($s.session.call_noreply($method, $body)).map_err(|e| format!("GNOME {}: {e}", $method))
     };
 }
 
@@ -342,17 +342,69 @@ fn content_box(img: &Pixels) -> (usize, usize, usize, usize) {
     (0, 0, w, h)
 }
 
+/// What a recording starts with on the bus: its session, the stream it records, the monitors, and
+/// the signal that names the stream's PipeWire node.
+struct Begun {
+    conn: Connection,
+    session: Proxy<'static>,
+    stream_path: String,
+    list: Vec<(String, Monitor, (i32, i32, f64))>,
+    current: usize,
+    added: zbus::proxy::SignalStream<'static>,
+}
+
+/// Starts a Mutter session recording monitor `index` (or the primary one), or a window, with the
+/// pointer beside the frames (`own`) or in them.
+async fn begin(index: Option<usize>, src: Src, own: bool) -> Result<Begun, String> {
+    let conn = Connection::session().await.map_err(err("session bus"))?;
+    let rd = Proxy::new(&conn, RD, "/org/gnome/Mutter/RemoteDesktop", RD).await.map_err(err("RemoteDesktop"))?;
+    let spath: OwnedObjectPath = rd.call("CreateSession", &()).await.map_err(err("CreateSession"))?;
+    let session = Proxy::new(&conn, RD, spath, "org.gnome.Mutter.RemoteDesktop.Session").await.map_err(err("session"))?;
+    let sid: String = session.get_property("SessionId").await.map_err(err("SessionId"))?;
+
+    let sc = Proxy::new(&conn, SC, "/org/gnome/Mutter/ScreenCast", SC).await.map_err(err("ScreenCast"))?;
+    let mut props: HashMap<&str, Variant> = HashMap::new();
+    props.insert("remote-desktop-session-id", Variant::from(sid.as_str()));
+    let cpath: OwnedObjectPath = sc.call("CreateSession", &(props,)).await.map_err(err("ScreenCast session"))?;
+    let cast = Proxy::new(&conn, SC, cpath, "org.gnome.Mutter.ScreenCast.Session").await.map_err(err("cast"))?;
+    let mut sprops: HashMap<&str, Variant> = HashMap::new();
+    // The pointer as metadata beside the frames (2), for the viewer to draw or drawn in here;
+    // in the frames (1) where GStreamer reads them.
+    sprops.insert("cursor-mode", Variant::U32(if own { 2 } else { 1 }));
+    let list = monitors(&conn).await;
+    let current = index.unwrap_or(0).min(list.len().saturating_sub(1));
+    let connector = list.get(current).map_or(String::new(), |m| m.0.clone());
+    // Without a window id Mutter records the window that has the focus.
+    let stream: OwnedObjectPath = match src {
+        Src::Monitor => cast.call("RecordMonitor", &(connector.as_str(), sprops)).await.map_err(err("RecordMonitor"))?,
+        Src::Focused => cast.call("RecordWindow", &(sprops,)).await.map_err(err("RecordWindow"))?,
+        Src::Portal => unreachable!("portal streams come from pick"),
+    };
+    let stream_path = stream.as_str().to_owned();
+    let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").await.map_err(err("stream"))?;
+    let added = sproxy.receive_signal("PipeWireStreamAdded").await.map_err(err("signal"))?;
+    session.call::<_, _, ()>("Start", &()).await.map_err(err("Start"))?;
+    // Mutter makes the session's keyboard and pointer at their first event, and drops what
+    // comes while it does (a viewer's first keys): both are made now, by events that do
+    // nothing (a key no key makes, a move by nothing).
+    let _ = session.call_noreply("NotifyKeyboardKeysym", &(0u32, true)).await;
+    let _ = session.call_noreply("NotifyPointerMotionRelative", &(0f64, 0f64)).await;
+    Ok(Begun { conn, session, stream_path, list, current, added })
+}
+
 /// Connectors and current modes of the monitors, primary first, from Mutter's DisplayConfig.
-fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
+async fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
     let Ok(dc) = Proxy::new(
         conn,
         "org.gnome.Mutter.DisplayConfig",
         "/org/gnome/Mutter/DisplayConfig",
         "org.gnome.Mutter.DisplayConfig",
-    ) else {
+    )
+    .await
+    else {
         return Vec::new();
     };
-    let state: Result<crate::display::MutterState, _> = dc.call("GetCurrentState", &());
+    let state: Result<crate::display::MutterState, _> = dc.call("GetCurrentState", &()).await;
     let Ok((_, mons, logical, _)) = state else { return Vec::new() };
     let primary: Vec<String> = logical.iter().filter(|l| l.4).flat_map(|l| l.5.iter().map(|m| m.0.clone())).collect();
     let place = |connector: &str| {
@@ -397,42 +449,10 @@ impl Gnome {
     fn record(index: Option<usize>, src: Src, own: bool, reader_failed: &mut bool) -> Result<Gnome, String> {
         ensure_env();
         gst::init().map_err(|e| format!("GStreamer init: {e}"))?;
-        let conn = Connection::session().map_err(err("session bus"))?;
-        let rd = Proxy::new(&conn, RD, "/org/gnome/Mutter/RemoteDesktop", RD).map_err(err("RemoteDesktop"))?;
-        let spath: OwnedObjectPath = rd.call("CreateSession", &()).map_err(err("CreateSession"))?;
-        let session = Proxy::new(&conn, RD, spath, "org.gnome.Mutter.RemoteDesktop.Session").map_err(err("session"))?;
-        let sid: String = session.get_property("SessionId").map_err(err("SessionId"))?;
-
-        let sc = Proxy::new(&conn, SC, "/org/gnome/Mutter/ScreenCast", SC).map_err(err("ScreenCast"))?;
-        let mut props: HashMap<&str, Value> = HashMap::new();
-        props.insert("remote-desktop-session-id", Value::from(sid.as_str()));
-        let cpath: OwnedObjectPath = sc.call("CreateSession", &(props,)).map_err(err("ScreenCast session"))?;
-        let cast = Proxy::new(&conn, SC, cpath, "org.gnome.Mutter.ScreenCast.Session").map_err(err("cast"))?;
-        let mut sprops: HashMap<&str, Value> = HashMap::new();
-        // The pointer as metadata beside the frames (2), for the viewer to draw or drawn in here;
-        // in the frames (1) where GStreamer reads them.
-        sprops.insert("cursor-mode", Value::U32(if own { 2 } else { 1 }));
-        let list = monitors(&conn);
-        let current = index.unwrap_or(0).min(list.len().saturating_sub(1));
-        let connector = list.get(current).map_or(String::new(), |m| m.0.clone());
-        // Without a window id Mutter records the window that has the focus.
-        let stream: OwnedObjectPath = match src {
-            Src::Monitor => cast.call("RecordMonitor", &(connector.as_str(), sprops)).map_err(err("RecordMonitor"))?,
-            Src::Focused => cast.call("RecordWindow", &(sprops,)).map_err(err("RecordWindow"))?,
-            Src::Portal => unreachable!("portal streams come from pick"),
-        };
-        let stream_path = stream.as_str().to_owned();
-        let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").map_err(err("stream"))?;
-        let mut added = sproxy.receive_signal("PipeWireStreamAdded").map_err(err("signal"))?;
-        session.call::<_, _, ()>("Start", &()).map_err(err("Start"))?;
-        // Mutter makes the session's keyboard and pointer at their first event, and drops what
-        // comes while it does (a viewer's first keys): both are made now, by events that do
-        // nothing (a key no key makes, a move by nothing).
-        let _ = session.call_noreply("NotifyKeyboardKeysym", &(0u32, true));
-        let _ = session.call_noreply("NotifyPointerMotionRelative", &(0f64, 0f64));
+        let Begun { conn, session, stream_path, list, current, mut added } = zbus::block_on(begin(index, src, own))?;
         const NO_FRAME: &str = "no frame from the GNOME stream within 5 s (is a desktop session logged in and unlocked?)";
         let started = (|| {
-            let msg = added.next().ok_or("GNOME did not publish a PipeWire stream")?;
+            let msg = zbus::block_on(added.next()).ok_or("GNOME did not publish a PipeWire stream")?;
             let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
             if own {
                 let s = super::pw::Stream::open(None, node, std::time::Duration::from_secs(5)).map_err(|(e, ours)| {
@@ -449,7 +469,7 @@ impl Gnome {
         })();
         // A session that started and failed is stopped, not left recording.
         let (node, first) = started.inspect_err(|_| {
-            let _ = session.call_noreply("Stop", &());
+            let _ = zbus::block_on(session.call_noreply("Stop", &()));
         })?;
         let (desk, pipe, pw, clean) = match first {
             First::Own(s, f) => ((f.w, f.h), None, Some(s), Some(f)),
@@ -565,20 +585,17 @@ impl Gnome {
         if let Some(p) = self.helper.get() {
             return Ok(p);
         }
-        let p = zbus::blocking::proxy::Builder::new(&self.conn)
-            .destination(HELPER)
-            .and_then(|b| b.path(HELPER_PATH))
-            .and_then(|b| b.interface(HELPER))
-            .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
-            .and_then(|b| b.build())
-            .map_err(|e| e.to_string())?;
+        let p = zbus::block_on(
+            zbus::proxy::Builder::new(&self.conn).destination(HELPER).path(HELPER_PATH).interface(HELPER).cache_properties(zbus::proxy::CacheProperties::No).build(),
+        )
+        .map_err(|e| e.to_string())?;
         Ok(self.helper.get_or_init(|| p))
     }
 
     fn helper_list(&self) -> Result<Vec<HelperWin>, String> {
         let p = self.helper()?;
         update_helper();
-        p.call("List", &()).map_err(|e| {
+        zbus::block_on(p.call("List", &())).map_err(|e| {
             let e = e.to_string();
             if e.contains("ServiceUnknown") || e.contains("NameHasNoOwner") || e.contains("UnknownObject") {
                 if helper_dir().join("extension.js").exists() {
@@ -600,7 +617,7 @@ impl Gnome {
     /// `text` typed into the focused text field by the helper; false without it, or with no
     /// such field (an X11 program).
     fn helper_commit(&self, text: &str) -> bool {
-        self.helper().ok().and_then(|p| p.call::<_, _, bool>("Commit", &(text,)).ok()).unwrap_or(false)
+        self.helper().ok().and_then(|p| zbus::block_on(p.call::<_, _, bool>("Commit", &(text,))).ok()).unwrap_or(false)
     }
 
     /// Waits until key events sent `GAP` ago or more and text committed so are both through:
@@ -621,7 +638,7 @@ impl Gnome {
 
     fn helper_activate(&self, id: u64) {
         if let Ok(p) = self.helper() {
-            let _ = p.call::<_, _, ()>("Activate", &(id,));
+            let _ = zbus::block_on(p.call::<_, _, ()>("Activate", &(id,)));
         }
     }
 
@@ -630,9 +647,11 @@ impl Gnome {
         if let Some(p) = &self.portal {
             return p.alive();
         }
-        Proxy::new(&self.conn, SC, self.stream_path.as_str(), "org.gnome.Mutter.ScreenCast.Stream")
-            .and_then(|p| p.get_property::<HashMap<String, OwnedValue>>("Parameters"))
-            .is_ok()
+        zbus::block_on(async {
+            let p = Proxy::new(&self.conn, SC, self.stream_path.as_str(), "org.gnome.Mutter.ScreenCast.Stream").await?;
+            p.get_property::<HashMap<String, OwnedVariant>>("Parameters").await
+        })
+        .is_ok()
     }
 
     /// Back to the whole monitor after the shared window or program closed.
@@ -787,7 +806,7 @@ impl Gnome {
         {
             // The host's resolution or rotation changed under the monitor stream.
             self.screen = (f.w, f.h);
-            self.monitors = monitors(&self.conn);
+            self.monitors = zbus::block_on(monitors(&self.conn));
             if self.app.is_none() {
                 // The agent tells the viewer the new size and asks for a new target.
                 (self.desk, self.target, self.dirty) = (self.screen, self.screen, true);
@@ -982,7 +1001,7 @@ impl Capture for Gnome {
         // The monitor recorded again at its new size (a window shared is recorded as it was);
         // one that kept its size keeps the picture's too.
         if self.src != Src::Monitor || self.reopen(Src::Monitor).is_err() {
-            self.monitors = monitors(&self.conn);
+            self.monitors = zbus::block_on(monitors(&self.conn));
         }
     }
 
@@ -1160,7 +1179,7 @@ impl Capture for Gnome {
         let now = if self.src == Src::Monitor { pipe.source_size() } else { None };
         if let Some(now) = now.filter(|&n| n != self.screen) {
             self.screen = now;
-            self.monitors = monitors(&self.conn);
+            self.monitors = zbus::block_on(monitors(&self.conn));
             if self.app.is_none() {
                 // The agent tells the viewer the new size and asks for a new target, which
                 // remakes the pipeline; this frame was scaled for the old one.
@@ -1309,7 +1328,7 @@ impl Drop for Gnome {
     fn drop(&mut self) {
         self.pipe = None;
         self.pw = None;
-        let _ = self.session.call_noreply("Stop", &());
+        let _ = zbus::block_on(self.session.call_noreply("Stop", &()));
     }
 }
 

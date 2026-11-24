@@ -558,8 +558,8 @@ mod note {
     use std::collections::HashMap;
     use std::sync::mpsc;
 
-    use zbus::blocking::{Connection, Proxy};
-    use zbus::zvariant::Value;
+    use futures_util::StreamExt;
+    use zbus::{Connection, Proxy, Variant};
 
     pub enum Act {
         End,
@@ -576,44 +576,48 @@ mod note {
     impl Note {
         /// Shown, with what is pressed on it; None where no notifications with buttons are shown.
         pub fn show(summary: &str, body: &str) -> Option<(Note, mpsc::Receiver<Act>)> {
-            let conn = Connection::session().ok()?;
-            // Only a service already running: starting one by its name may start a waiter for a
-            // desktop that is not there (Plasma's, under Sway or Hyprland), which never answers.
-            let dbus = zbus::blocking::fdo::DBusProxy::new(&conn).ok()?;
-            if !dbus.name_has_owner(zbus::names::BusName::try_from(DEST).ok()?).ok()? {
-                return None;
-            }
-            let proxy = Proxy::new(&conn, DEST, "/org/freedesktop/Notifications", DEST).ok()?;
-            let caps: Vec<String> = proxy.call("GetCapabilities", &()).ok()?;
-            if !caps.iter().any(|c| c == "actions") {
-                return None;
-            }
-            // Heard before it is shown, so no press is missed.
-            let signals = proxy.receive_all_signals().ok()?;
-            let actions = ["default", "Show", "show", "Show", "end", "End the connection"];
-            let mut hints: HashMap<&str, Value> = HashMap::new();
-            // Kept until dismissed or the connection ends.
-            hints.insert("urgency", Value::U8(2));
-            hints.insert("resident", Value::Bool(true));
-            let id: u32 = proxy.call("Notify", &("SSH Remote", 0u32, "", summary, body, &actions[..], hints, 0i32)).ok()?;
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                for m in signals {
-                    let member = m.header().member().map(|n| n.to_string()).unwrap_or_default();
-                    if member != "ActionInvoked" {
-                        continue;
-                    }
-                    let Ok((which, key)) = m.body().deserialize::<(u32, String)>() else { continue };
-                    if which == id && tx.send(if key == "end" { Act::End } else { Act::Open }).is_err() {
-                        return;
-                    }
+            zbus::block_on(async {
+                let conn = Connection::session().await.ok()?;
+                // Only a service already running: starting one by its name may start a waiter for
+                // a desktop that is not there (Plasma's, under Sway or Hyprland), which never answers.
+                let dbus = zbus::fdo::DBusProxy::new(&conn).await.ok()?;
+                if !dbus.name_has_owner(zbus::names::BusName::try_from(DEST).ok()?).await.ok()? {
+                    return None;
                 }
-            });
-            Some((Note { proxy, id }, rx))
+                let proxy = Proxy::new(&conn, DEST, "/org/freedesktop/Notifications", DEST).await.ok()?;
+                let caps: Vec<String> = proxy.call("GetCapabilities", &()).await.ok()?;
+                if !caps.iter().any(|c| c == "actions") {
+                    return None;
+                }
+                // Heard before it is shown, so no press is missed.
+                let mut signals = proxy.receive_all_signals().await.ok()?;
+                let actions = ["default", "Show", "show", "Show", "end", "End the connection"];
+                let mut hints: HashMap<&str, Variant> = HashMap::new();
+                // Kept until dismissed or the connection ends.
+                hints.insert("urgency", Variant::U8(2));
+                hints.insert("resident", Variant::Bool(true));
+                let id: u32 = proxy.call("Notify", &("SSH Remote", 0u32, "", summary, body, &actions[..], hints, 0i32)).await.ok()?;
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    zbus::block_on(async {
+                        while let Some(m) = signals.next().await {
+                            let member = m.header().member().map(|n| n.to_string()).unwrap_or_default();
+                            if member != "ActionInvoked" {
+                                continue;
+                            }
+                            let Ok((which, key)) = m.body().deserialize::<(u32, String)>() else { continue };
+                            if which == id && tx.send(if key == "end" { Act::End } else { Act::Open }).is_err() {
+                                return;
+                            }
+                        }
+                    })
+                });
+                Some((Note { proxy, id }, rx))
+            })
         }
 
         pub fn close(&self) {
-            let _ = self.proxy.call_noreply("CloseNotification", &(self.id,));
+            let _ = zbus::block_on(self.proxy.call_noreply("CloseNotification", &(self.id,)));
         }
     }
 }

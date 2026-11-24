@@ -10,7 +10,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, FontId, Rect};
-use zbus::blocking::{Connection, Proxy};
+use futures_util::StreamExt;
+use zbus::{Connection, Proxy};
 
 const KWIN: &str = "org.kde.KWin";
 /// This program's name on the bus, where scripts say which window they caught.
@@ -18,7 +19,7 @@ const INBOX: &str = "io.github.thinkbigx.SshRemote.Held";
 
 fn conn() -> Option<&'static Connection> {
     static CONN: std::sync::OnceLock<Option<Connection>> = std::sync::OnceLock::new();
-    CONN.get_or_init(|| zbus::blocking::connection::Builder::session().ok()?.method_timeout(Duration::from_millis(800)).build().ok()).as_ref()
+    CONN.get_or_init(|| zbus::block_on(zbus::connection::Builder::session().method_timeout(Duration::from_millis(800)).build()).ok()).as_ref()
 }
 
 /// Windows caught by token, as the catching scripts call `Caught`.
@@ -31,31 +32,38 @@ static ASKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 fn inbox() -> Option<String> {
     static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
-        let conn = Connection::session().ok()?;
         let name = format!("{INBOX}.p{}", std::process::id());
-        conn.request_name(name.as_str()).ok()?;
+        let conn = zbus::block_on(async {
+            let conn = Connection::session().await.ok()?;
+            conn.request_name(name.as_str()).await.ok()?;
+            Some(conn)
+        })?;
         std::thread::Builder::new()
             .name("held-inbox".into())
             .spawn(move || {
-                for msg in zbus::blocking::MessageIterator::from(&conn).flatten() {
-                    if msg.message_type() != zbus::message::Type::MethodCall {
-                        continue;
-                    }
-                    let header = msg.header();
-                    let said = msg.body().deserialize::<(String, String)>();
-                    match (header.member().map(|m| m.as_str()), said) {
-                        (Some("Caught"), Ok((token, id))) => CAUGHT.lock().unwrap_or_else(|e| e.into_inner()).push((token, id)),
-                        (Some("Asking"), Ok((token, yes))) => {
-                            let mut asking = ASKING.lock().unwrap_or_else(|e| e.into_inner());
-                            asking.retain(|t| *t != token);
-                            if yes == "yes" {
-                                asking.push(token);
-                            }
+                zbus::block_on(async {
+                    let mut calls = zbus::MessageStream::from(&conn);
+                    while let Some(msg) = calls.next().await {
+                        let Ok(msg) = msg else { continue };
+                        if msg.message_type() != zbus::message::Type::MethodCall {
+                            continue;
                         }
-                        _ => {}
+                        let header = msg.header();
+                        let said = msg.body().deserialize::<(String, String)>();
+                        match (header.member().map(|m| m.as_str()), said) {
+                            (Some("Caught"), Ok((token, id))) => CAUGHT.lock().unwrap_or_else(|e| e.into_inner()).push((token, id)),
+                            (Some("Asking"), Ok((token, yes))) => {
+                                let mut asking = ASKING.lock().unwrap_or_else(|e| e.into_inner());
+                                asking.retain(|t| *t != token);
+                                if yes == "yes" {
+                                    asking.push(token);
+                                }
+                            }
+                            _ => {}
+                        }
+                        let _ = conn.reply(&header, &()).await;
                     }
-                    let _ = conn.reply(&header, &());
-                }
+                })
             })
             .ok()?;
         Some(name)
@@ -64,13 +72,13 @@ fn inbox() -> Option<String> {
 }
 
 fn scripting() -> Option<Proxy<'static>> {
-    Proxy::new(conn()?, KWIN, "/Scripting", "org.kde.kwin.Scripting").ok()
+    zbus::block_on(Proxy::new(conn()?, KWIN, "/Scripting", "org.kde.kwin.Scripting")).ok()
 }
 
 /// A KDE session on Wayland whose KWin runs scripts.
 pub(in crate::gui) fn here() -> bool {
     static HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HERE.get_or_init(|| std::env::var_os("WAYLAND_DISPLAY").is_some() && scripting().is_some_and(|p| p.call::<_, _, bool>("isScriptLoaded", &("sshremote-none",)).is_ok()))
+    *HERE.get_or_init(|| std::env::var_os("WAYLAND_DISPLAY").is_some() && scripting().is_some_and(|p| zbus::block_on(p.call::<_, _, bool>("isScriptLoaded", &("sshremote-none",))).is_ok()))
 }
 
 fn script_file(name: &str) -> std::path::PathBuf {
@@ -96,9 +104,12 @@ fn run(name: &str, body: &str) -> bool {
     if std::fs::write(&part, body).is_err() || std::fs::rename(&part, &file).is_err() {
         return false;
     }
-    let _: Result<bool, _> = p.call("unloadScript", &(name,));
-    let loaded: Result<i32, _> = p.call("loadScript", &(file.display().to_string(), name));
-    let started: Result<(), _> = p.call("start", &());
+    let (loaded, started) = zbus::block_on(async {
+        let _: Result<bool, _> = p.call("unloadScript", &(name,)).await;
+        let loaded: Result<i32, _> = p.call("loadScript", &(file.display().to_string(), name)).await;
+        let started: Result<(), _> = p.call("start", &()).await;
+        (loaded, started)
+    });
     loaded.is_ok_and(|n| n >= 0) && started.is_ok()
 }
 
@@ -116,15 +127,15 @@ fn run_once(name: &str, body: &str) -> bool {
 
 fn unload(name: &str) {
     if let Some(p) = scripting() {
-        let _: Result<bool, _> = p.call("unloadScript", &(name,));
+        let _: Result<bool, _> = zbus::block_on(p.call("unloadScript", &(name,)));
     }
     let _ = std::fs::remove_file(script_file(name));
 }
 
 /// Whether KWin still has the window, and where its frame is (x, y, width, height).
 fn info(id: &str) -> Option<[i32; 4]> {
-    let p = Proxy::new(conn()?, KWIN, "/KWin", "org.kde.KWin").ok()?;
-    let map: HashMap<String, zbus::zvariant::OwnedValue> = p.call("getWindowInfo", &(id,)).ok()?;
+    let conn = conn()?;
+    let map: HashMap<String, zbus::OwnedVariant> = zbus::block_on(async { Proxy::new(conn, KWIN, "/KWin", "org.kde.KWin").await?.call("getWindowInfo", &(id,)).await }).ok()?;
     let num = |k: &str| map.get(k).and_then(|v| f64::try_from(v).ok().or_else(|| i32::try_from(v).ok().map(f64::from))).map(|f| f.round() as i32);
     Some([num("x")?, num("y")?, num("width")?, num("height")?])
 }
