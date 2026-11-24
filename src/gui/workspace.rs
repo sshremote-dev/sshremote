@@ -360,8 +360,8 @@ pub(super) struct Workspace {
 /// A tab's width: as wide as fits, between these; past the narrowest the tabs scroll.
 const TAB_MAX: f32 = 220.0;
 const TAB_MIN: f32 = 120.0;
-/// The + after the tabs.
-const PLUS_W: f32 = 34.0;
+/// The + and the projects button after the tabs.
+const AFTER_TABS_W: f32 = 2.0 * 34.0;
 /// The six layout buttons and their separator.
 const LAYOUT_W: f32 = 6.0 * 32.0 + 16.0;
 

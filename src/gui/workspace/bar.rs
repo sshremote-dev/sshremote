@@ -4,10 +4,11 @@ use super::*;
 
 impl Workspace {
     /// The title bar's contents at their natural width: the tabs at their widest (up to four), the
-    /// +, the mode, the pane's controls as measured last frame, the layout and full-screen buttons.
+    /// buttons after them (+ and projects), the mode, the pane's controls as measured last frame
+    /// and the separator before them, the layout and full-screen buttons.
     pub(super) fn bar_width(&self) -> f32 {
-        let tabs = self.tabs.len().clamp(1, 4) as f32 * TAB_MAX + PLUS_W + 12.0;
-        tabs + self.active_mode_w() + 8.0 + self.controls_w + LAYOUT_W + 46.0 + 16.0
+        let tabs = self.tabs.len().clamp(1, 4) as f32 * TAB_MAX + AFTER_TABS_W + 12.0;
+        tabs + self.active_mode_w() + 8.0 + self.controls_w + 8.0 + LAYOUT_W + 46.0 + 16.0
     }
 
     /// Whether pane `id` has the mode drop-down (a web page or a program held here has not).
@@ -38,7 +39,7 @@ impl Workspace {
         }
         // The controls fold before the tabs shrink below three at their narrowest.
         // The window's full-screen button and its separator stay at the right in any width.
-        let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - PLUS_W - 46.0;
+        let room = avail - self.tabs.len().min(3) as f32 * TAB_MIN - AFTER_TABS_W - 46.0;
         let fold_controls = room < mode_w + self.controls_w + LAYOUT_W;
         let fold_layout = room < mode_w + MORE_W + LAYOUT_W;
         // Narrower still: the mode drop-down shows its icon only (its full width is about 150).
@@ -92,9 +93,11 @@ impl Workspace {
                     self.controls_w = (ui.cursor().left() - start).max(0.0);
                 });
             }
+            // Set apart from the projects button beside it, which would read as the mode's own.
+            ui.separator();
         }
         let right_left = right.min_rect().left().min(full.right());
-        let width = (right_left - ui.cursor().left() - PLUS_W - 12.0).max(84.0);
+        let width = (right_left - ui.cursor().left() - AFTER_TABS_W - 12.0).max(84.0);
         let tab_rects = self.tab_strip(ui, width);
         if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
             self.picker = Some(Place::Tab);
