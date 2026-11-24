@@ -261,7 +261,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     // Remote access by ID, from start-up and at the sign-in screen, while it is turned on.
     std::thread::spawn(|| {
         loop {
-            let on = || Some(crate::access::load()).filter(|c| c.enabled);
+            let on = || crate::access::recent().filter(|c| c.enabled);
             if on().is_some() {
                 crate::access::run(on);
             }

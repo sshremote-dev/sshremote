@@ -403,6 +403,29 @@ pub fn stored() -> Result<Option<Config>, String> {
     Config::from_json(&v).filter(|c| valid_id(&c.id)).map(Some).ok_or_else(|| "the remote access settings are damaged".into())
 }
 
+/// When [`recent`] last read the settings, from where, and what it found.
+static RECENT: Mutex<Option<(std::time::Instant, Option<PathBuf>, Option<Config>)>> = Mutex::new(None);
+
+/// [`stored`] for the loops that wait on it: read again at most once a second, however often
+/// they ask (a burst of calls or of network questions included).
+pub fn recent() -> Option<Config> {
+    // Windows keeps them in one place for the whole machine.
+    #[cfg(all(windows, not(test)))]
+    let path: Option<PathBuf> = None;
+    #[cfg(any(not(windows), test))]
+    let path = file();
+    let mut last = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, from, c)) = &*last
+        && at.elapsed() < Duration::from_secs(1)
+        && *from == path
+    {
+        return c.clone();
+    }
+    let c = stored().ok().flatten();
+    *last = Some((std::time::Instant::now(), path, c.clone()));
+    c
+}
+
 /// New settings, not yet kept.
 pub fn fresh() -> Config {
     Config {
@@ -466,8 +489,15 @@ pub fn save(c: &Config) -> Result<(), String> {
         return Err("The password needs at least 8 characters".into());
     }
     let text = serde_json::to_string_pretty(&c.to_json()).map_err(|e| e.to_string())?;
+    let done = write_settings(&text);
+    // The loops that wait on the settings see these at once.
+    *RECENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    done
+}
+
+fn write_settings(text: &str) -> Result<(), String> {
     #[cfg(all(windows, not(test)))]
-    return machine::write(&text);
+    return machine::write(text);
     #[cfg(any(not(windows), test))]
     {
         let f = file().ok_or("no settings folder")?;
@@ -1285,7 +1315,7 @@ impl Drop for CallSlot {
 pub fn run(keep: impl Fn() -> Option<Config>) {
     // Computers on this network that ask are told this one's ID, while remote access is on and
     // that is allowed (one process answers: another that runs it too finds the port taken).
-    thread::spawn(|| crate::lan::answer(|| stored().ok().flatten().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay, c.direct))));
+    thread::spawn(|| crate::lan::answer(|| recent().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay, c.direct))));
     let guard = Arc::new(Guard::default());
     {
         let guard = guard.clone();
@@ -1460,7 +1490,7 @@ fn listen_direct(guard: Arc<Guard>) {
     // Another process running remote access holds it already.
     let Ok(l) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, crate::net::DIRECT_PORT)) else { return };
     let _ = l.set_nonblocking(true);
-    while let Some(cfg) = stored().ok().flatten().filter(|c| c.enabled && c.direct) {
+    while let Some(cfg) = recent().filter(|c| c.enabled && c.direct) {
         match l.accept() {
             Ok((mut s, _)) => {
                 let _ = s.set_nonblocking(false);
@@ -1875,10 +1905,7 @@ pub fn start_in_app() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         thread::spawn(|| loop {
-            let on = || {
-                let c = load();
-                (c.enabled && !service_runs_cached()).then_some(c)
-            };
+            let on = || recent().filter(|c| c.enabled && !service_runs_cached());
             if on().is_some() {
                 run(on);
             }
@@ -2488,7 +2515,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 if parent.is_some_and(|p| !alive(p)) {
                     std::process::exit(0);
                 }
-                Some(load()).filter(|c| c.enabled && (service || !service_runs_cached()))
+                recent().filter(|c| c.enabled && (service || !service_runs_cached()))
             };
             // Until the parent goes, it waits for remote access to be turned on again.
             loop {
