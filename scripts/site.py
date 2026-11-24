@@ -14,6 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+PLATFORMS = {"sshremote-windows-x86_64.exe", "sshremote-linux-x86_64", "sshremote-macos.zip"}
+
+
 def main():
     out = Path(sys.argv[1])
     for f in (ROOT / "site").iterdir():
@@ -31,6 +34,13 @@ def main():
             shutil.copy(file, downloads / name)
             data = (downloads / name).read_bytes()
             files.append({"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    # The list updates read names every platform's file: without them the one served stays, and
+    # some alone would take the others out of it.
+    if not files:
+        return
+    missing = sorted(PLATFORMS - {f["name"] for f in files})
+    if missing:
+        sys.exit(f"site.py: give every platform's download or none (missing {', '.join(missing)})")
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8").splitlines()
     version = next((l.split('"')[1] for l in cargo if l.startswith("version")), "")
     (downloads / "index.json").write_text(json.dumps({"version": version, "files": files}, indent=1))
