@@ -410,7 +410,10 @@ tunnels, set in the settings and changed for one session in the window shown the
 connection can also be ended. **Two-step sign-in** adds the code of an authenticator app to the
 password. Computers on the same network can find this one (its ID, name and network card, never
 the password) and, when allowed, come **straight in** on TCP 7073 instead of through the relay,
-with the same password check.
+with the same password check. Anyone on a network can answer for an ID, so the viewer believes an
+address found there only until one turns down a password: it then asks the relay, which reaches
+the computer itself, and from then on goes straight only to addresses where the password got in
+before.
 
 With the service installed, an icon starts with each sign-in, in the notification area on
 Windows and in the top bar on Linux (GNOME shows it with its AppIndicator extension, which Ubuntu

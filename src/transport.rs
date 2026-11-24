@@ -73,16 +73,34 @@ pub fn serve_others() {
     FOR_OTHERS.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Keeps what a connection by ID showed about a computer's addresses on this network: one where
+/// its password got in is proven; one found there that turned down the password the relay took
+/// was someone else answering for it, so found ones are not believed for it any more.
+fn note_way(c: &crate::computers::Computer, way: &crate::net::Way) {
+    if let Some(at) = &way.straight {
+        let mut proven: Vec<String> = c.proven.split(',').map(str::trim).filter(|d| !d.is_empty() && d != at).map(String::from).collect();
+        proven.insert(0, at.clone());
+        proven.truncate(4);
+        let proven = proven.join(",");
+        if proven != c.proven {
+            crate::computers::update(&c.address, |k| k.proven = proven);
+        }
+    }
+    if way.refused.is_some() && !c.found_refused {
+        crate::computers::update(&c.address, |k| k.found_refused = true);
+    }
+}
+
 pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
     if let Target::Direct { addr, password } = target {
         let own = !FOR_OTHERS.load(std::sync::atomic::Ordering::Relaxed);
-        // Where it was last found on this network: tried first, straight, before the relay.
-        let direct: Vec<String> = crate::computers::all()
-            .into_iter()
-            .filter(|_| own)
-            .find(|c| c.id() == Some(addr.id.as_str()))
-            .map(|c| c.direct.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect())
-            .unwrap_or_default();
+        let known = crate::computers::all().into_iter().filter(|_| own).find(|c| c.id() == Some(addr.id.as_str()));
+        let list = |s: &str| s.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect::<Vec<_>>();
+        // Straight, before the relay: where its password got in before, then where it was last
+        // found on this network unless an address found there was caught answering for it.
+        let proven = known.as_ref().map(|c| list(&c.proven)).unwrap_or_default();
+        let found: Vec<String> =
+            known.as_ref().filter(|c| !c.found_refused).map(|c| list(&c.direct)).unwrap_or_default().into_iter().filter(|d| !proven.contains(d)).collect();
         // A device the computer trusts gives its token where the two-step code is asked.
         let trust = crate::vault::trust_name(&crate::access::address(&addr.id, &addr.relay));
         let token = own.then(|| crate::vault::get(&trust)).flatten().filter(|t| !t.trim().is_empty());
@@ -90,7 +108,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             Some(t) => format!("{}{}{}{t}", password.split(crate::net::CODE_SEP).next().unwrap_or(""), crate::net::CODE_SEP, crate::net::TRUST_MARK),
             None => password.clone(),
         };
-        let (r, w) = match crate::net::connect_via(addr, &given, &direct) {
+        let ((r, w), way) = match crate::net::connect_via(addr, &given, &proven, &found) {
             // Trusted no longer (its time is up, or it was forgotten there): the code typed
             // goes instead, else it is asked.
             Err(e) if token.is_some() && e == crate::net::NOT_TRUSTED => {
@@ -99,10 +117,13 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
                 if !typed {
                     return Err(e);
                 }
-                crate::net::connect_via(addr, password, &direct)?
+                crate::net::connect_via(addr, password, &proven, &found)?
             }
             r => r?,
         };
+        if let Some(c) = &known {
+            note_way(c, &way);
+        }
         let ender = Some(w.ender());
         return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, local: false, ender });
     }
@@ -173,5 +194,22 @@ mod tests {
         let mut b = [0u8; 1];
         assert!(matches!(far.read(&mut b), Ok(0) | Err(_)), "the other side sees the end");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// What a connection by ID showed is kept: where its password got in is proven, the latest
+    /// first; a found address caught answering for it stops found ones being believed.
+    #[test]
+    fn what_a_connection_by_id_showed_is_kept() {
+        let address = "sshremote://918273645@relay.example";
+        crate::computers::update(address, |c| c.direct = "10.0.0.66:7073".into());
+        let get = || crate::computers::get(address).unwrap();
+        let way = |straight: Option<&str>, refused: Option<&str>| crate::net::Way { straight: straight.map(Into::into), refused: refused.map(Into::into) };
+        super::note_way(&get(), &way(Some("10.0.0.5:7073"), None));
+        super::note_way(&get(), &way(Some("10.0.0.9:7073"), None));
+        super::note_way(&get(), &way(Some("10.0.0.5:7073"), None));
+        assert_eq!((get().proven.as_str(), get().found_refused), ("10.0.0.5:7073,10.0.0.9:7073", false));
+        super::note_way(&get(), &way(None, Some("10.0.0.66:7073")));
+        assert!(get().found_refused);
+        crate::computers::forget(address);
     }
 }

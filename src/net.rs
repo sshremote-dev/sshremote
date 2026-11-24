@@ -961,7 +961,17 @@ pub const DIRECT_PORT: u16 = 7073;
 
 /// Viewer side: straight to the computer at one of `direct` (addresses it was last found at on
 /// this network), without the relay; None when none answers in a moment as that ID.
-fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Result<Option<(SealedReader, SealedWriter)>, String> {
+/// What trying a computer straight on this network came to.
+enum Straight {
+    /// In, at this address.
+    In((SealedReader, SealedWriter), String),
+    /// The password was turned down at this address, and why.
+    Refused(String, String),
+    /// Nobody there answered for the ID.
+    Missed,
+}
+
+fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Straight {
     use std::net::ToSocketAddrs;
     for d in direct {
         let Some(to) = d.to_socket_addrs().ok().and_then(|mut a| a.next()) else { continue };
@@ -971,16 +981,23 @@ fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Result<O
             continue;
         }
         let _ = s.set_read_timeout(Some(VERDICT_LIMIT + Duration::from_secs(15)));
-        // A wrong password is as wrong here as through the relay: no second try there.
         let pair = match handshake(s, password, true, &now) {
             Ok(p) => p,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e.to_string()),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Straight::Refused(d.clone(), e.to_string()),
             Err(_) => continue,
         };
         pair.1.ender().set_idle_limit(Duration::from_secs(120));
-        return Ok(Some(pair));
+        return Straight::In(pair, d.clone());
     }
-    Ok(None)
+    Straight::Missed
+}
+
+/// How a viewer got in by its ID: `straight` at that address (else through the relay);
+/// `refused`, an address found on this network that turned down the password the relay took.
+#[derive(Debug, Default, PartialEq)]
+pub struct Way {
+    pub straight: Option<String>,
+    pub refused: Option<String>,
 }
 
 /// The computer's side of a direct connection: the viewer names the ID it wants; anything else
@@ -992,13 +1009,24 @@ pub fn accept_direct(s: &mut TcpStream, id: &str) -> bool {
     ok && writeln!(s, "ok").is_ok()
 }
 
-/// Viewer side: reaches the ID directly when it is on this network at an address it was found
-/// at, else through its relay, and runs the handshake.
-pub fn connect_via(addr: &Address, password: &str, direct: &[String]) -> Result<(SealedReader, SealedWriter), String> {
-    if let Some(pair) = connect_direct(addr, password, direct)? {
-        return Ok(pair);
+/// Viewer side: reaches the ID straight on this network when it can, else through its relay,
+/// and runs the handshake. `proven`: addresses where its password got in before, whose answer
+/// stands (a wrong password is not tried again through the relay). `found`: where it answered on
+/// this network but has not been proven, which anyone there could have answered for it: a
+/// refusal there is put to the relay, which reaches the computer itself.
+pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[String]) -> Result<((SealedReader, SealedWriter), Way), String> {
+    match connect_direct(addr, password, proven) {
+        Straight::In(pair, at) => return Ok((pair, Way { straight: Some(at), refused: None })),
+        Straight::Refused(_, why) => return Err(why),
+        Straight::Missed => {}
     }
-    connect(addr, password)
+    match connect_direct(addr, password, found) {
+        Straight::In(pair, at) => return Ok((pair, Way { straight: Some(at), refused: None })),
+        // Turned down there too: the password is wrong, as that address said.
+        Straight::Refused(at, why) => return connect(addr, password).map(|pair| (pair, Way { straight: None, refused: Some(at) })).map_err(|_| why),
+        Straight::Missed => {}
+    }
+    Ok((connect(addr, password)?, Way::default()))
 }
 
 /// Viewer side: reaches the ID through its relay and runs the handshake.
@@ -1332,14 +1360,62 @@ mod tests {
         };
         let addr = Address { id: "482913075".into(), relay: "relay.example".into(), for_whom: None };
         let at = serve("right one");
-        assert!(matches!(connect_direct(&addr, "right one", &[at]), Ok(Some(_))));
+        assert!(matches!(connect_direct(&addr, "right one", std::slice::from_ref(&at)), Straight::In(_, a) if a == at));
         let at = serve("right one");
-        assert!(connect_direct(&addr, "wrong one", &[at]).is_err());
+        assert!(matches!(connect_direct(&addr, "wrong one", std::slice::from_ref(&at)), Straight::Refused(a, _) if a == at));
         let other = Address { id: "111222333".into(), relay: "relay.example".into(), for_whom: None };
         let at = serve("right one");
-        assert!(matches!(connect_direct(&other, "right one", &[at]), Ok(None)));
+        assert!(matches!(connect_direct(&other, "right one", &[at]), Straight::Missed));
         // Nobody there: no answer, quickly.
-        assert!(matches!(connect_direct(&addr, "right one", &["127.0.0.1:1".into()]), Ok(None)));
+        assert!(matches!(connect_direct(&addr, "right one", &["127.0.0.1:1".into()]), Straight::Missed));
+    }
+
+    /// Anyone on this network can answer for an ID. A refusal at an address found there is put
+    /// to the relay, which reaches the computer itself: an impostor is found out and the viewer
+    /// gets in; a wrong password is still wrong. At a proven address a refusal stands, and the
+    /// relay is not asked.
+    #[test]
+    fn an_impostor_on_this_network_is_put_to_the_relay() {
+        let straight = |pw: &'static str| {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = l.local_addr().unwrap().to_string();
+            thread::spawn(move || {
+                let (mut s, _) = l.accept().unwrap();
+                if accept_direct(&mut s, "482913075") {
+                    let _ = handshake_agent(s, pw, &now);
+                }
+            });
+            at
+        };
+        // A relay that hands the viewer to the computer, and counts the viewers it took.
+        let relay = |pw: &'static str| {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = l.local_addr().unwrap().to_string();
+            let asked = Arc::new(AtomicU64::new(0));
+            let count = asked.clone();
+            thread::spawn(move || {
+                while let Ok((mut s, _)) = l.accept() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if crate::access::line(&mut s).is_ok_and(|l| l == "viewer 482913075") && writeln!(s, "ok").is_ok() {
+                        thread::spawn(move || handshake_agent(s, pw, &now));
+                    }
+                }
+            });
+            (Address { id: "482913075".into(), relay: at, for_whom: None }, asked)
+        };
+        let (addr, asked) = relay("right one");
+        let fake = straight("an impostor's guess");
+        let (_, way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&fake)).unwrap();
+        assert_eq!(way, Way { straight: None, refused: Some(fake) }, "in through the relay, the impostor named");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let real = straight("right one");
+        assert!(connect_via(&addr, "wrong one", &[], &[real]).is_err_and(|e| e.contains("wrong password")), "wrong is wrong both ways");
+        let real = straight("right one");
+        assert_eq!(connect_via(&addr, "right one", &[], std::slice::from_ref(&real)).unwrap().1, Way { straight: Some(real), refused: None });
+        let (addr, asked) = relay("right one");
+        let proven = straight("someone else's");
+        assert!(connect_via(&addr, "right one", &[proven], &[]).is_err_and(|e| e.contains("wrong password")));
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "a proven address's word stands");
     }
 
     /// A computer that wants a code: refused without it, or with a wrong one, though the

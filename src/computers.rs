@@ -29,8 +29,15 @@ pub struct Computer {
     /// Its network card's hardware address, to wake it (Wake-on-LAN); empty: not known.
     pub mac: String,
     /// Where it answered on this network last (`IP:PORT`, comma separated), to reach it by its ID
-    /// straight rather than through the relay.
+    /// straight rather than through the relay. Anyone on the network can answer for an ID, so
+    /// these are believed only until one turns down a password the relay then takes.
     pub direct: String,
+    /// Where its password got in straight (`IP:PORT`, comma separated, the latest first): tried
+    /// first, and what they say about a password stands.
+    pub proven: String,
+    /// An address found on this network turned down the password the relay took: only proven
+    /// ones are tried from then on.
+    pub found_refused: bool,
     /// Words it is grouped by in the list ("work", "servers"), as typed, in order.
     pub tags: Vec<String>,
 }
@@ -63,6 +70,8 @@ impl Computer {
             "tunnels": self.tunnels.iter().map(Tunnel::to_json).collect::<Vec<_>>(),
             "mac": self.mac,
             "direct": self.direct,
+            "proven": self.proven,
+            "found_refused": self.found_refused,
             "tags": self.tags,
         })
     }
@@ -79,6 +88,8 @@ impl Computer {
             tunnels: v.get("tunnels").and_then(Value::as_array).map(|a| a.iter().filter_map(Tunnel::from_json).collect()).unwrap_or_default(),
             mac: v.get("mac").and_then(Value::as_str).filter(|m| crate::lan::parse_mac(m).is_some()).unwrap_or("").to_string(),
             direct: v.get("direct").and_then(Value::as_str).unwrap_or("").to_string(),
+            proven: v.get("proven").and_then(Value::as_str).unwrap_or("").to_string(),
+            found_refused: v.get("found_refused").and_then(Value::as_bool).unwrap_or(false),
             tags: tags(&v.get("tags").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         })
     }
