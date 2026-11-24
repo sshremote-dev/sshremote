@@ -948,3 +948,15 @@ mod win {
 
 #[cfg(windows)]
 pub(super) use win::{front_window, hide};
+
+#[cfg(all(test, target_os = "linux", feature = "remote"))]
+mod tests {
+    #[test]
+    fn the_icon_is_averaged_down() {
+        let rgba = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]].concat();
+        let icon = eframe::egui::IconData { rgba, width: 2, height: 2 };
+        assert_eq!(super::icon_at(&icon, 1), vec![[127, 127, 127, 255]]);
+        assert_eq!(super::icon_at(&icon, 2)[1], [0, 255, 0, 255]);
+        assert_eq!(super::icon_at(&eframe::egui::IconData { rgba: Vec::new(), width: 0, height: 0 }, 2), vec![[0; 4]; 4]);
+    }
+}
