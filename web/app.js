@@ -500,6 +500,10 @@ const NAMED = { Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b, D
   End: 0xff57, Insert: 0xff63, ContextMenu: 0xff67, Pause: 0xff13, PrintScreen: 0xff61, CapsLock: 0xffe5, NumLock: 0xff7f, ScrollLock: 0xff14 };
 const SIDED = { Shift: [0xffe1, 0xffe2], Control: [0xffe3, 0xffe4], Alt: [0xffe9, 0xffea], Meta: [0xffeb, 0xffec], OS: [0xffeb, 0xffec], AltGraph: [0xffea, 0xffea] };
 const K = { ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, tab: 0xff09, esc: 0xff1b, del: 0xffff, f4: 0xffc1, prt: 0xff61, enter: 0xff0d };
+// Whether this browser runs on a Mac (or an iPhone or iPad), whose shortcuts take the command key.
+const HERE_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);
+// Ctrl as the command key (Win elsewhere) and the command key as Ctrl, between a Mac and another computer.
+const TRADED = { 0xffe3: 0xffeb, 0xffe4: 0xffec, 0xffeb: 0xffe3, 0xffec: 0xffe4 };
 function keysym(e) {
   if (NAMED[e.key]) return NAMED[e.key];
   if (SIDED[e.key]) return SIDED[e.key][e.location === 2 ? 1 : 0];
@@ -510,7 +514,7 @@ function keysym(e) {
     // Windows reports as Ctrl+Alt) makes a character of its own, "@" or "€", sent as it is.
     let c = e.key.codePointAt(0);
     const altGr = e.getModifierState && e.getModifierState("AltGraph");
-    if ((e.ctrlKey || e.altKey) && !altGr && /^Key[A-Z]$/.test(e.code)) c = e.code.charCodeAt(3) + (e.shiftKey ? 0 : 32);
+    if ((e.ctrlKey || e.altKey || e.metaKey) && !altGr && /^Key[A-Z]$/.test(e.code)) c = e.code.charCodeAt(3) + (e.shiftKey ? 0 : 32);
     return c < 0x100 ? c : 0x01000000 + c;
   }
   return 0;
@@ -817,6 +821,7 @@ class Client {
     }
     if (v.ready) {
       this.ready = true;
+      this.setBackend(v.ready.backend);
       for (const q of this.queued?.splice(0) || []) this.send(q);
       this.state(v.ready.screen ? v.ready.screen[0] + "×" + v.ready.screen[1] : "Connected", "up");
       this.connected = true;
@@ -828,9 +833,9 @@ class Client {
       if (this.t.monitor !== undefined) this.send({ monitor: this.t.monitor });
       this.screenTools();
     }
-    if (v.agent) this.agentUp(v.agent.screen);
+    if (v.agent) { this.setBackend(v.agent.backend); this.agentUp(v.agent.screen); }
     if (v.agentError) this.agentDown(v.agentError);
-    if (v.screen) { this.desk = v.screen; this.figures(); }
+    if (v.screen) { this.setBackend(v.backend); this.desk = v.screen; this.figures(); }
     if (v.hostPointer !== undefined) { this.hostPtrAt = v.hostPointer; this.pointerLook(); }
     if (v.exit !== undefined) {
       this.shellEnded = true;
@@ -1224,10 +1229,12 @@ class Client {
     const keySend = m => later ? later.push(m) : send(m);
     const settle = () => { const q = later; later = null; clearTimeout(this.pasteGiveUp); for (const m of q || []) send(m); };
     const pasteThere = () => {
-      const ctrl = [...held.values()].some(k => k === 0xffe3 || k === 0xffe4);
-      if (!ctrl) send({ key: [K.ctrl, 1] });
+      // The paste key as pressed here (Ctrl, or the command key on a Mac), as it goes there.
+      const mod = this.there(HERE_MAC ? K.win : K.ctrl), sides = [mod, mod + 1];
+      const down = [...held.values()].some(k => sides.includes(k));
+      if (!down) send({ key: [mod, 1] });
       tap(0x76);
-      if (!ctrl) send({ key: [K.ctrl, 0] });
+      if (!down) send({ key: [mod, 0] });
       settle();
     };
     const pasting = () => { later ||= []; clearTimeout(this.pasteGiveUp); this.pasteGiveUp = setTimeout(settle, 10000); };
@@ -1243,7 +1250,8 @@ class Client {
       // An input method is composing (Korean, Japanese, Chinese) or a phone keyboard sends no
       // key: its text comes when it is done.
       if (e.isComposing || e.key === "Process" || e.key === "Unidentified" || e.keyCode === 229) return;
-      if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && e.code === "KeyV" && !this.viewOnly) {
+      const pasteKey = HERE_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+      if (pasteKey && !e.altKey && !e.shiftKey && e.code === "KeyV" && !this.viewOnly) {
         // Left to the browser, which pastes into the field; a browser that does not still pastes there.
         swallowed.add(e.code);
         pasting();
@@ -1251,7 +1259,7 @@ class Client {
         pasteWait = setTimeout(() => { pasteWait = null; pasteThere(); }, 400);
         return;
       }
-      const k = keysym(e); if (!k) return;
+      const k = this.there(keysym(e)); if (!k) return;
       e.preventDefault();
       // "Win + the next key" from the keys menu: this key goes with Win held.
       if (this.winNext && !SIDED[e.key]) {
@@ -1264,7 +1272,7 @@ class Client {
     kbd.onkeyup = e => {
       const id = e.code || e.key;
       if (swallowed.delete(id)) { e.preventDefault(); return; }
-      const k = held.get(id) ?? keysym(e); if (!k) return;
+      const k = held.get(id) ?? this.there(keysym(e)); if (!k) return;
       e.preventDefault(); held.delete(id); keySend({ key: [k, 0] });
     };
     const tap = k => { send({ key: [k, 1] }); send({ key: [k, 0] }); };
@@ -1312,6 +1320,17 @@ class Client {
       } catch { /* not this browser */ }
     };
     this.screenTools();
+  }
+  // A key pressed here as it goes there: Ctrl and the command key trade places when asked.
+  there(k) {
+    return this.swapCmd ? TRADED[k] ?? k : k;
+  }
+  // The kind of screen the host has: a Mac's keys are its own.
+  setBackend(b) {
+    if (!b || b === this.backend) return;
+    this.backend = b;
+    const swap = (b === "mac") !== HERE_MAC;
+    if (swap !== !!this.swapCmd) { this.releaseKeys?.(); this.swapCmd = swap; }
   }
   combo(keys) {
     if (this.viewOnly) { toast("View only: nothing is sent to the host."); return; }
@@ -1491,7 +1510,27 @@ class Client {
     bar.textContent = "";
     bar.append(h("span", { class: "sep" }));
     // The menus, each opened under `at`.
-    const keysMenu = at => menu([
+    // Between a Mac and another computer: each side's shortcuts with its own keys (as it is when
+    // the menu opens).
+    const trade = mac => mac !== HERE_MAC ? [null, [mac ? "Ctrl here is Cmd there" : "Cmd here is Ctrl there", () => {
+      this.releaseKeys?.();
+      this.swapCmd = !this.swapCmd;
+      toast(this.swapCmd ? (mac ? "Ctrl+C, Ctrl+V and the rest work there as here; Win is Ctrl there." : "Cmd+C, Cmd+V and the rest work there as here; Ctrl is Win there.") : "The keys go there as they are.");
+      this.keyboard();
+    }, { on: !!this.swapCmd }]] : [];
+    // A Mac's own shortcuts, named as macOS names them.
+    const keysMenu = at => this.backend === "mac" ? menu([
+      ["Lock the screen", () => this.combo([K.ctrl, K.win, 0x71]), { kbd: "Ctrl+Cmd+Q" }],
+      ["Spotlight", () => this.combo([K.win, 0x20]), { kbd: "Cmd+Space" }],
+      ["Cmd + the next key", () => { this.winNext = true; toast("Press the key to go with Cmd."); this.keyboard(); }],
+      ["Switch applications", () => this.combo([K.win, K.tab]), { kbd: "Cmd+Tab" }],
+      ["Mission Control", () => this.combo([K.ctrl, 0xff52]), { kbd: "Ctrl+Up" }],
+      ["Force Quit", () => this.combo([K.alt, K.win, K.esc]), { kbd: "Option+Cmd+Esc" }],
+      ["Screenshot", () => this.combo([K.shift, K.win, 0x35]), { kbd: "Shift+Cmd+5" }],
+      ["Close the window", () => this.combo([K.win, 0x77]), { kbd: "Cmd+W" }],
+      ["Quit the application", () => this.combo([K.win, 0x71]), { kbd: "Cmd+Q" }],
+      ...trade(true),
+    ], at) : menu([
       ["Ctrl+Alt+Del", () => { if (!this.viewOnly) this.send({ sas: 1 }); }],
       ["Lock the screen", () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
       ["Start menu", () => this.combo([K.win]), { kbd: "Win" }],
@@ -1503,6 +1542,7 @@ class Client {
       ["Run", () => this.combo([K.win, 0x72]), { kbd: "Win+R" }],
       ["File Explorer", () => this.combo([K.win, 0x65]), { kbd: "Win+E" }],
       ["Print Screen", () => this.combo([K.prt]), { kbd: "PrtSc" }],
+      ...trade(false),
     ], at);
     const clipMenu = at => menu([
       ["Paste my clipboard into the host", () => this.pasteHere()],

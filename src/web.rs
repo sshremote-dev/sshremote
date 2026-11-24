@@ -1002,12 +1002,13 @@ fn client(
         (None, Agent::Up(sess, _)) => sess.send(ToAgent::TermOpen { id: shell, cols, rows }).map_err(io)?,
         (None, _) => {}
     }
-    let desk = match &agent {
-        Agent::Up(sess, _) => serde_json::json!([sess.desk.0, sess.desk.1]),
-        _ => serde_json::Value::Null,
+    let (desk, backend) = match &agent {
+        Agent::Up(sess, _) => (serde_json::json!([sess.desk.0, sess.desk.1]), serde_json::json!(sess.backend)),
+        _ => (serde_json::Value::Null, serde_json::Value::Null),
     };
     // What extensions this gateway has bring their menus to the page (Programs: the host's programs).
-    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk } }))?;
+    // The host's kind of screen too: a Mac's keys are its own.
+    send_json(&w, serde_json::json!({ "ready": { "host": open.name, "screen": desk, "backend": backend } }))?;
     send_json(&w, serde_json::json!({ "qualities": quality_list(), "quality": quality_state(&ctl) }))?;
     // The browser's messages on their own thread; a bounded queue so a fast sender waits.
     let (in_tx, input) = mpsc::sync_channel(32);
@@ -1079,7 +1080,7 @@ fn client(
             Agent::Connecting(c) => match c.try_recv() {
                 Ok(Ok((mut sess, rx))) => {
                     // Reached: what was asked meanwhile goes now.
-                    let _ = send_json(&w, serde_json::json!({ "agent": { "screen": [sess.desk.0, sess.desk.1] } }));
+                    let _ = send_json(&w, serde_json::json!({ "agent": { "screen": [sess.desk.0, sess.desk.1], "backend": sess.backend } }));
                     if shown && !paused {
                         let _ = sess.send(ToAgent::Pause(false));
                     }
@@ -1138,8 +1139,8 @@ fn client(
                         damage.extend(f.tiles.iter().chain(f.video.iter()).map(|t| (t.x as usize, t.y as usize, t.w as usize, t.h as usize)));
                     }
                 }
-                ToClient::Hello { w: dw, h: dh, .. } => {
-                    let _ = send_json(&w, serde_json::json!({ "screen": [dw, dh] }));
+                ToClient::Hello { w: dw, h: dh, backend } => {
+                    let _ = send_json(&w, serde_json::json!({ "screen": [dw, dh], "backend": backend }));
                 }
                 ToClient::Error(e) => break 'run plain(&e),
                 ToClient::TermOutput { id, data } if id == shell && pty.is_none() => {
