@@ -1223,6 +1223,11 @@ fn serve_page(
                 ToClient::Notice(t) => {
                     let _ = send_json(&w, serde_json::json!({ "notice": t }));
                 }
+                // What the person at that computer lets this viewer use.
+                ToClient::Allowed(bits) => {
+                    let all = bits & crate::grant::ALL == crate::grant::ALL;
+                    let _ = send_json(&w, serde_json::json!({ "allowed": { "all": all, "words": crate::grant::words(bits) } }));
+                }
                 ToClient::HostState { can, on } => {
                     let _ = send_json(&w, serde_json::json!({ "host": { "can": can, "on": on } }));
                 }

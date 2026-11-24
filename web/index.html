@@ -131,6 +131,7 @@
   #who { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; overflow: hidden; padding: 0 6px; }
   #who .dot { flex: none; }
   #who b { flex: 0 0 auto; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+  #limits { color: var(--warn); flex: none; }
   #who span { flex: 0 1 auto; min-width: 0; color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
   .dot.up { background: var(--good); } .dot.down { background: var(--bad); }
@@ -321,6 +322,7 @@
 <div id="client" hidden>
   <div id="bar">
     <div id="who"><i class="dot" id="dot"></i><b id="name"></b><span id="state"></span></div>
+    <button class="btn icon" id="limits" hidden></button>
     <div class="seg" role="tablist">
       <button class="btn" data-view="term" title="Its terminal"><span>Terminal</span></button>
       <button class="btn" data-view="screen" title="Its screen"><span>Screen</span></button>

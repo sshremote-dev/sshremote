@@ -50,6 +50,7 @@ const ICONS = {
   dots: "M5 12h.01|M12 12h.01|M19 12h.01",
   server: "M4 4h16v6H4z|M4 14h16v6H4z|M8 7h.01|M8 17h.01",
   lock: "M6 11h12v9H6z|M8 11V7.5a4 4 0 0 1 8 0V11",
+  shield: "M12 3l7.5 3v5.5c0 4.6-3.2 8-7.5 9.5-4.3-1.5-7.5-4.9-7.5-9.5V6z",
   open: "M5 12h14|M13 6l6 6-6 6",
 };
 const SVG = "http://www.w3.org/2000/svg";
@@ -874,6 +875,7 @@ class Client {
     }
     if (v.quality) { this.quality = v.quality; this.figures(); }
     if (v.stats) { this.stats = v.stats; this.figures(); }
+    if (v.allowed) this.allowedIn(v.allowed);
     if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied|does not let/i.test(v.notice) });
     if (v.host) {
       this.host = v.host;
@@ -910,6 +912,8 @@ class Client {
     setButton($("full"), "full");
     setButton($("fold"), "caretup");
     setButton($("bye"), "logout", "Close");
+    setButton($("limits"), "shield");
+    $("limits").hidden = true;
     for (const b of document.querySelectorAll("#bar [data-view]")) {
       b.onclick = () => this.pick(b.dataset.view);
       if (!b.querySelector("svg")) b.prepend(icon({ term: "terminal", screen: "monitor", files: "folder" }[b.dataset.view]));
@@ -954,6 +958,17 @@ class Client {
     addEventListener("resize", resize);
     const old = this.unbind;
     this.unbind = () => { old?.(); document.removeEventListener("fullscreenchange", fs); removeEventListener("resize", resize); $("client").classList.remove("folded"); };
+  }
+
+  // What the person at that computer lets this viewer use, when not everything: a shield in the
+  // toolbar keeps saying it after the agent's note is gone (a tap shows it again, on a phone).
+  allowedIn(a) {
+    const b = $("limits");
+    b.hidden = a.all;
+    if (a.all) return;
+    const text = "The person at that computer lets you use: " + a.words + ".";
+    b.title = text;
+    b.onclick = () => toast(text);
   }
 
   pick(view, first) {
