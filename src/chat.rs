@@ -309,6 +309,14 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
     // Windows and macOS open it without the keyboard when asked; X11 is told below.
     if quiet {
         native.viewport = native.viewport.with_active(false);
+        // A Mac's program comes in front of the others as it starts, its keyboard with it.
+        #[cfg(target_os = "macos")]
+        {
+            native.event_loop_builder = Some(Box::new(|b| {
+                use winit::platform::macos::EventLoopBuilderExtMacOS;
+                b.with_activate_ignoring_other_apps(false);
+            }));
+        }
     }
     #[cfg(feature = "drive")]
     crate::gui::drive::start();
