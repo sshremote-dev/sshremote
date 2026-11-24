@@ -27,6 +27,8 @@ pub const SHIFT_R: u32 = 0xffe2;
 pub const CONTROL_L: u32 = 0xffe3;
 pub const CONTROL_R: u32 = 0xffe4;
 pub const CAPS_LOCK: u32 = 0xffe5;
+pub const NUM_LOCK: u32 = 0xff7f;
+pub const SCROLL_LOCK: u32 = 0xff14;
 pub const ALT_L: u32 = 0xffe9;
 pub const ALT_R: u32 = 0xffea;
 pub const SUPER_L: u32 = 0xffeb;
@@ -52,4 +54,31 @@ pub fn unicode(c: u32) -> u32 {
 /// Whether `k` is in the Unicode range: a character to type rather than a key.
 pub fn is_unicode(k: u32) -> bool {
     k & 0xff00_0000 == 0x0100_0000
+}
+
+/// The character a keysym types: Latin-1's are their own code and the others carry theirs;
+/// function and special keys (Num Lock, the keypad) type none.
+pub fn to_char(k: u32) -> Option<char> {
+    if is_unicode(k) {
+        char::from_u32(k & 0x00ff_ffff)
+    } else if k < 0x100 {
+        char::from_u32(k)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keysyms_type_their_characters_and_special_keys_none() {
+        assert_eq!(to_char('a' as u32), Some('a'));
+        assert_eq!(to_char(0xe9), Some('é'));
+        assert_eq!(to_char(unicode('한' as u32)), Some('한'));
+        for k in [NUM_LOCK, SCROLL_LOCK, CAPS_LOCK, RETURN, F1, 0xffb5] {
+            assert_eq!(to_char(k), None, "{k:x}");
+        }
+    }
 }

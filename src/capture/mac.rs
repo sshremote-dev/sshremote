@@ -1161,10 +1161,7 @@ impl Hands {
                 match code_of(keysym) {
                     Some((code, _)) => self.key(code, down, self.flags()),
                     // A character no key types here: as text, once, when it goes down.
-                    None if down => {
-                        let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
-                        char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()))
-                    }
+                    None if down => xk::to_char(keysym).map_or(Ok(()), |c| self.text(&c.to_string())),
                     None => Ok(()),
                 }
             }
@@ -1172,8 +1169,7 @@ impl Hands {
                 let shortcut = mods & (MOD_CTRL | MOD_ALT | MOD_SUPER) != 0;
                 let code = special(keysym).map(|c| (c, false)).or_else(|| if shortcut || keysym < 0x80 { code_of(keysym) } else { None });
                 let Some((code, shift)) = code else {
-                    let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
-                    return char::from_u32(c).map_or(Ok(()), |c| self.text(&c.to_string()));
+                    return xk::to_char(keysym).map_or(Ok(()), |c| self.text(&c.to_string()));
                 };
                 let mut flags = self.flags();
                 for (bit, f) in [(MOD_SHIFT, CGEventFlags::MaskShift), (MOD_CTRL, CGEventFlags::MaskControl), (MOD_ALT, CGEventFlags::MaskAlternate), (MOD_SUPER, CGEventFlags::MaskCommand)] {

@@ -20,8 +20,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW,
     SendInput, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
-    VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PAUSE, VK_PRIOR,
-    VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP, VkKeyScanW,
+    VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PAUSE, VK_PRIOR,
+    VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP, VkKeyScanW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics, ICONINFO,
@@ -980,6 +980,8 @@ fn vk_of(keysym: u32) -> Option<(VIRTUAL_KEY, bool)> {
         xk::ALT_L => (VK_LMENU, false),
         xk::ALT_R => (VK_RMENU, true),
         xk::CAPS_LOCK => (VK_CAPITAL, false),
+        xk::NUM_LOCK => (VK_NUMLOCK, true),
+        xk::SCROLL_LOCK => (VK_SCROLL, false),
         xk::PAUSE => (VK_PAUSE, false),
         xk::PRINT => (VK_SNAPSHOT, true),
         xk::MENU => (VK_APPS, true),
@@ -1004,8 +1006,7 @@ fn key_state(keysym: u32, down: bool, seq: &mut Vec<INPUT>) {
             seq.push(kbd(vk, scan, up | if ext { KEYEVENTF_EXTENDEDKEY } else { 0 }));
         }
         None => {
-            let c = if xk::is_unicode(keysym) { keysym & 0xff_ffff } else { keysym };
-            if let Some(c) = char::from_u32(c) {
+            if let Some(c) = xk::to_char(keysym) {
                 let mut buf = [0u16; 2];
                 for &unit in c.encode_utf16(&mut buf).iter() {
                     seq.push(kbd(0, unit, KEYEVENTF_UNICODE | up));
