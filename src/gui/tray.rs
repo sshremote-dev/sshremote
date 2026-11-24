@@ -194,6 +194,35 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
 
 /// The icon's own program's view: the service's state file and the service manager; on Linux
 /// the settings themselves too, which are the user's.
+/// The program's icon averaged down to `size` by `size`, RGBA (all clear for an icon of none).
+#[cfg(any(windows, all(target_os = "linux", feature = "remote")))]
+fn icon_at(icon: &eframe::egui::IconData, size: usize) -> Vec<[u8; 4]> {
+    let (w, h) = (icon.width as usize, icon.height as usize);
+    let mut out = vec![[0u8; 4]; size * size];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    for y in 0..size {
+        for x in 0..size {
+            let (x0, x1) = (x * w / size, ((x + 1) * w / size).max(x * w / size + 1).min(w));
+            let (y0, y1) = (y * h / size, ((y + 1) * h / size).max(y * h / size + 1).min(h));
+            let (mut sum, mut n) = ([0u32; 4], 0u32);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let o = (sy * w + sx) * 4;
+                    for (s, &v) in sum.iter_mut().zip(&icon.rgba[o..o + 4]) {
+                        *s += v as u32;
+                    }
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            out[y * size + x] = sum.map(|s| (s / n) as u8);
+        }
+    }
+    out
+}
+
 #[cfg(all(any(windows, target_os = "linux"), feature = "remote"))]
 fn read_status() -> Status {
     let mut st = Status { alone: true, ..Default::default() };
@@ -512,31 +541,8 @@ mod sni {
 
     /// The program's icon at `size`, as ARGB in network order.
     fn pixmap(icon: &eframe::egui::IconData, size: usize) -> (i32, i32, Vec<u8>) {
-        let (w, h) = (icon.width as usize, icon.height as usize);
-        let mut out = vec![0u8; size * size * 4];
-        if w == 0 || h == 0 {
-            return (size as i32, size as i32, out);
-        }
-        for y in 0..size {
-            for x in 0..size {
-                let (x0, x1) = (x * w / size, ((x + 1) * w / size).max(x * w / size + 1).min(w));
-                let (y0, y1) = (y * h / size, ((y + 1) * h / size).max(y * h / size + 1).min(h));
-                let (mut sum, mut n) = ([0u32; 4], 0u32);
-                for sy in y0..y1 {
-                    for sx in x0..x1 {
-                        let o = (sy * w + sx) * 4;
-                        for (s, &v) in sum.iter_mut().zip(&icon.rgba[o..o + 4]) {
-                            *s += v as u32;
-                        }
-                        n += 1;
-                    }
-                }
-                let n = n.max(1);
-                let o = (y * size + x) * 4;
-                out[o..o + 4].copy_from_slice(&[(sum[3] / n) as u8, (sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8]);
-            }
-        }
-        (size as i32, size as i32, out)
+        let argb = super::icon_at(icon, size).into_iter().flat_map(|[r, g, b, a]| [a, r, g, b]).collect();
+        (size as i32, size as i32, argb)
     }
 
     pub(super) fn run() -> Result<(), String> {
@@ -925,27 +931,8 @@ mod win {
         if w == 0 || h == 0 {
             return 0;
         }
-        // Box-averaged down to 32x32, as BGRA.
-        let mut bgra = vec![0u8; S * S * 4];
-        for y in 0..S {
-            for x in 0..S {
-                let (x0, x1, y0, y1) = (x * w / S, ((x + 1) * w / S).max(x * w / S + 1), y * h / S, ((y + 1) * h / S).max(y * h / S + 1));
-                let mut sum = [0u32; 4];
-                let mut n = 0;
-                for sy in y0..y1.min(h) {
-                    for sx in x0..x1.min(w) {
-                        let o = (sy * w + sx) * 4;
-                        for (s, &v) in sum.iter_mut().zip(&icon.rgba[o..o + 4]) {
-                            *s += v as u32;
-                        }
-                        n += 1;
-                    }
-                }
-                let o = (y * S + x) * 4;
-                let n = n.max(1);
-                bgra[o..o + 4].copy_from_slice(&[(sum[2] / n) as u8, (sum[1] / n) as u8, (sum[0] / n) as u8, (sum[3] / n) as u8]);
-            }
-        }
+        // Down to 32x32, as BGRA.
+        let bgra: Vec<u8> = super::icon_at(icon, S).into_iter().flat_map(|[r, g, b, a]| [b, g, r, a]).collect();
         unsafe {
             let color = CreateBitmap(S as i32, S as i32, 1, 32, bgra.as_ptr().cast());
             let mask_bits = [0u8; S * S / 8];
