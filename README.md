@@ -46,13 +46,32 @@ Viewers: the native window (Windows, macOS, Linux), a terminal that shows pictur
 
 ## Install
 
-Download the single program for your system from [sshremote.dev](https://sshremote.dev/#download)
-and put the same file on each host you want to reach (`~/.local/bin/sshremote` on Linux, anywhere
-on `PATH` on Windows, the app in Applications on a Mac). Or build it:
+One line puts it in place, on your computer and on each host you want to reach:
+
+```sh
+curl -fsSL https://sshremote.dev/install.sh | sh      # macOS and Linux
+```
+
+```powershell
+irm https://sshremote.dev/install.ps1 | iex           # Windows, in PowerShell
+```
+
+Each takes the current version from [GitHub Releases](https://github.com/sshremote-dev/sshremote/releases),
+checks its SHA-256 against the list on sshremote.dev and puts it in place: `~/.local/bin/sshremote`
+on Linux, the app in Applications on a Mac, and on Windows `%LOCALAPPDATA%\Programs\SSH Remote`
+with a Start menu entry and the folder on `PATH`. Or download a file from
+[GitHub Releases](https://github.com/sshremote-dev/sshremote/releases/latest), or build it:
 
 ```sh
 cargo build --release
 ```
+
+The Linux and Windows files are built by [GitHub Actions](.github/workflows/release.yml) from the
+tagged source, each with a build attestation (`gh attestation verify FILE -R
+sshremote-dev/sshremote`); the Mac app is built and signed on the project's Mac. The Windows file
+is not code-signed and the Mac app not notarized, so a copy downloaded with a browser is checked
+the first time it runs (SmartScreen's **More info**, then **Run anyway**; on a Mac, right click
+and **Open**); the install lines above download without that mark.
 
 ## Quick start
 

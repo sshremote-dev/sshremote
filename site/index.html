@@ -210,25 +210,31 @@
   <div class="section-head">
     <span class="eyebrow">Download</span>
     <h2>Get SSH Remote<span class="version" id="dl-version" hidden></span></h2>
-    <p class="dim">A single program. Put the same file on your computer and on each host: <code>~/.local/bin/sshremote</code> on Linux, anywhere on <code>PATH</code> on Windows, the app in Applications on a Mac.</p>
+    <p class="dim">A single program. Put the same one on your computer and on each host.</p>
   </div>
+  <div class="install">
+    <div><h3><span data-i="windows"></span>Windows, in PowerShell</h3>
+      <pre class="cmd"><code>irm https://sshremote.dev/install.ps1 | iex</code></pre></div>
+    <div><h3><span data-i="apple"></span><span data-i="linux"></span>macOS and Linux</h3>
+      <pre class="cmd"><code>curl -fsSL https://sshremote.dev/install.sh | sh</code></pre></div>
+  </div>
+  <p class="dim small">Each takes the current version from GitHub Releases, checks its SHA-256 against the list on this site and puts it in place: on Windows in your programs, with a Start menu entry and on <code>PATH</code>; on Linux as <code>~/.local/bin/sshremote</code>; on a Mac in Applications. Read them first if you like: <a href="install.ps1">install.ps1</a>, <a href="install.sh">install.sh</a>.</p>
+  <p class="dim" style="margin:28px 0 12px">Or download a file from <a href="https://github.com/sshremote-dev/sshremote/releases/latest">GitHub Releases</a>:</p>
   <div class="files">
-    <a class="file" href="download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 · .exe</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
-    <a class="file" href="download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · X11 and Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
-    <a class="file" href="download/sshremote-macos.zip" data-file="sshremote-macos.zip"><span data-i="apple"></span><span><b>SSH Remote for macOS</b><span class="meta">Apple silicon and Intel · macOS 12.3 or later</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
+    <a class="file" href="https://github.com/sshremote-dev/sshremote/releases/latest/download/sshremote-windows-x86_64.exe" data-file="sshremote-windows-x86_64.exe"><span data-i="windows"></span><span><b>SSH Remote for Windows</b><span class="meta">x86_64 · .exe</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
+    <a class="file" href="https://github.com/sshremote-dev/sshremote/releases/latest/download/sshremote-linux-x86_64" data-file="sshremote-linux-x86_64"><span data-i="linux"></span><span><b>SSH Remote for Linux</b><span class="meta">x86_64 · X11 and Wayland</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
+    <a class="file" href="https://github.com/sshremote-dev/sshremote/releases/latest/download/sshremote-macos.zip" data-file="sshremote-macos.zip"><span data-i="apple"></span><span><b>SSH Remote for macOS</b><span class="meta">Apple silicon and Intel · macOS 12.3 or later</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
   </div>
-  <p class="dim small" style="margin-top:20px">The Windows file is not signed yet, so Windows may hold it back the first time it runs: <b>More info</b>, then <b>Run anyway</b>. The Mac app is not notarized by Apple: unzip it, move it to Applications, and the first time open it with a right click and <b>Open</b> (or <b>Open Anyway</b> in System Settings &gt; Privacy &amp; Security).</p>
+  <p class="dim small" style="margin-top:20px">The Windows file is not signed, so a copy downloaded with a browser is held back by SmartScreen the first time it runs: <b>More info</b>, then <b>Run anyway</b>. The Mac app is not notarized by Apple: downloaded with a browser, unzip it, move it to Applications, and the first time open it with a right click and <b>Open</b>. Both checks look at what a browser downloaded, so the lines above install without them. The Linux and Windows files are built by GitHub Actions from the tagged source, each with a build attestation: <code>gh attestation verify FILE -R sshremote-dev/sshremote</code> checks one.</p>
   <p class="dim small">Nothing to install where you are? Reach a computer by its ID <a href="https://web.sshremote.dev/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/sshremote-dev/sshremote">README</a>.</p>
 </div></section>
 
 <section id="start"><div class="wrap">
   <div class="section-head"><span class="eyebrow">Quick start</span><h2>Running in a minute</h2></div>
   <div class="steps">
-    <div><h3>Put it on both ends</h3><p>The same file on this computer and on the host.</p>
-      <pre class="cmd"><code>mkdir -p ~/.local/bin
-chmod +x sshremote-linux-x86_64
-mv sshremote-linux-x86_64 \
-  ~/.local/bin/sshremote</code></pre></div>
+    <div><h3>Put it on both ends</h3><p>The same program on this computer and on the host.</p>
+      <pre class="cmd"><code>curl -fsSL https://sshremote.dev/install.sh \
+  | sh</code></pre></div>
     <div><h3>Open it</h3><p>Pick a host from <code>~/.ssh/config</code>, or type one.</p>
       <pre class="cmd"><code>sshremote</code></pre></div>
     <div><h3>Or go straight there</h3><p>A terminal, the screen or the files.</p>
