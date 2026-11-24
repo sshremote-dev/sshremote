@@ -1047,12 +1047,15 @@ pub fn run(opt: Options) -> Result<(), String> {
         if opt.sound && v.probe.is_some() {
             eprintln!("probe: sound {:.1} KB", v.audio_bytes as f64 / 1024.0);
         }
-        if keys_total > 0 {
+        let sent = keys_total - typing.len();
+        if sent > 0 {
             let rx = v.sess.rx() - type_start.0;
+            // Inputs go half a second apart: a probe too short for them all leaves the rest.
+            let left = if typing.is_empty() { String::new() } else { format!(" ({} left unsent: probe longer)", typing.len()) };
             eprintln!(
-                "probe: sent {keys_total} inputs, {} frames, {:.0} bytes per input (includes idle since the first)",
+                "probe: sent {sent} inputs{left}, {} frames, {:.0} bytes per input (includes idle since the first)",
                 v.ctl.frames - type_start.1,
-                rx as f64 / keys_total as f64
+                rx as f64 / sent as f64
             );
             // From an input to the first changed picture after it (a screen that changes on its
             // own meanwhile answers sooner).
