@@ -1,5 +1,7 @@
 xterm.js 5.5.0 and @xterm/addon-fit 0.10.0, used as published (non-breaking spaces written as
-  escapes).
+  escapes), with one change: CoreBrowserService registers its ScreenDprMonitor for disposal
+  (`this._screenDprMonitor=this.register(new a(this._window))`), so a disposed terminal no
+  longer leaves its window resize listener behind.
 
 The MIT License (MIT)
 
