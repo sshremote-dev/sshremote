@@ -190,8 +190,14 @@ impl Capture for Wayland {
         if self.live.is_none()
             && let Ok(again) = Wayland::open()
         {
-            let apart = self.apart;
+            // Who to wake stays (the agent gives that once), and the picture's size where the
+            // screen kept its own.
+            let (apart, wake, desk, target) = (self.apart, std::mem::take(&mut self.wake), self.desk, self.target);
             *self = again;
+            self.wake = wake;
+            if self.desk == desk {
+                self.target = target;
+            }
             self.apart = apart && self.pointer_apart(true);
         }
     }

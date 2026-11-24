@@ -495,11 +495,12 @@ impl Gnome {
         })
     }
 
-    /// Takes over from a new recording, keeping whether the viewer draws the pointer.
+    /// Takes over from a new recording, keeping whether the viewer draws the pointer and who to
+    /// wake (the agent gives that once).
     fn take_over(&mut self, next: Gnome) {
-        let apart = self.apart;
+        let (apart, wake) = (self.apart, std::mem::take(&mut self.wake));
         *self = next;
-        self.apart = apart && self.pw.is_some();
+        (self.apart, self.wake) = (apart && self.pw.is_some(), wake);
     }
 
     /// A new pipeline on the same stream, for when cutting or scaling changes; the old one is
@@ -983,12 +984,9 @@ impl Capture for Gnome {
     }
 
     fn screen_changed(&mut self) {
-        // The monitor recorded again at its new size (a window shared is recorded as it was).
-        if self.src == Src::Monitor
-            && let Ok(again) = Gnome::open_on(Some(self.current), Src::Monitor)
-        {
-            self.take_over(again);
-        } else {
+        // The monitor recorded again at its new size (a window shared is recorded as it was);
+        // one that kept its size keeps the picture's too.
+        if self.src != Src::Monitor || self.reopen(Src::Monitor).is_err() {
             self.monitors = monitors(&self.conn);
         }
     }
@@ -1331,6 +1329,38 @@ mod tests {
             with_helper("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com']"),
             format!("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', '{HELPER_UUID}']")
         );
+    }
+
+    /// The agent is woken as pictures come, also after the monitor was recorded again (its
+    /// resolution changed, or a window shared and let go): the stream that takes over wakes it.
+    /// In a private session: SSHREMOTE_GNOME_TEST=1 scripts/gnome-session.sh run TESTS --ignored
+    /// the_agent_is_woken
+    #[test]
+    #[ignore]
+    fn the_agent_is_woken_after_the_monitor_is_recorded_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        if std::env::var_os("SSHREMOTE_GNOME_TEST").is_none() {
+            return;
+        }
+        let woken = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut g = Gnome::open().expect("a GNOME session");
+        let w = woken.clone();
+        assert!(g.set_waker(Box::new(move || _ = w.fetch_add(1, Ordering::Relaxed))));
+        // Pictures taken while the pointer moves (each move changes the screen), the wakes counted.
+        let count = |g: &mut Gnome| {
+            woken.store(0, Ordering::Relaxed);
+            for i in 0..40 {
+                g.input(Input::Move { x: 200.0 + (i % 20) as f64 * 10.0, y: 200.0 }).unwrap();
+                let _ = g.grab();
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            woken.load(Ordering::Relaxed)
+        };
+        let before = count(&mut g);
+        g.screen_changed();
+        let after = count(&mut g);
+        eprintln!("woken {before} times before, {after} after the monitor was recorded again");
+        assert!(before > 5 && after > 5);
     }
 
     /// GNOME's pointer kept apart: it comes beside the frames, its picture once with where it
