@@ -13,6 +13,9 @@ pub struct Link {
     /// Diagnostics such as ssh errors; drained into the session log.
     pub errors: Box<dyn Read + Send>,
     child: Option<Child>,
+    /// The child is this computer's agent, which sets back what it changed (the screen's
+    /// resolution) as it ends.
+    local: bool,
     /// A link by ID: ended on close, so the other end stops at once (the reader thread holds a
     /// copy, which would keep it open), and asked which way it runs.
     ender: Option<crate::net::Ender>,
@@ -21,6 +24,12 @@ pub struct Link {
 impl Link {
     pub fn close(&mut self) {
         if let Some(c) = self.child.as_mut() {
+            // This computer's agent ends by itself once its input has ended, a moment later; one
+            // over ssh ends when ssh does.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while self.local && std::time::Instant::now() < until && matches!(c.try_wait(), Ok(None)) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -95,7 +104,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             r => r?,
         };
         let ender = Some(w.ender());
-        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, ender });
+        return Ok(Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, local: false, ender });
     }
     let mut cmd = match target {
         Target::Direct { .. } => unreachable!(),
@@ -147,6 +156,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         writer: Box::new(child.stdin.take().unwrap()),
         errors: Box::new(child.stderr.take().unwrap()),
         child: Some(child),
+        local: matches!(target, Target::Local { .. }),
         ender: None,
     })
 }
@@ -161,7 +171,7 @@ mod tests {
     fn closing_a_link_by_id_ends_it_for_the_other_side() {
         let ((r, w), (mut far, _keep)) = crate::net::sealed_pair(false);
         let ender = Some(w.ender());
-        let mut link = super::Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, ender };
+        let mut link = super::Link { reader: Box::new(r), writer: Box::new(w), errors: Box::new(std::io::empty()), child: None, local: false, ender };
         let started = Instant::now();
         link.close();
         let mut b = [0u8; 1];

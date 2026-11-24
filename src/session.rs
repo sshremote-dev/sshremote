@@ -367,6 +367,13 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    /// The agent's input ends before the link does, so a local agent ends by itself.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// Exact copy of the remote screen in RGB.
 #[derive(Default)]
 pub struct Framebuffer {
