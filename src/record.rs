@@ -423,6 +423,10 @@ impl Mp4 {
 /// Opens a new file at `path`, or NAME-2.mp4 and on beside it when that is taken (two sessions
 /// recorded in the same second): never one written over another.
 fn create_beside(path: &Path) -> Result<(PathBuf, File), String> {
+    // Its folder made first: a computer without a desktop may have no Downloads.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut last = String::new();
     for n in 1..100 {

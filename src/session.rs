@@ -16,7 +16,9 @@ pub use crate::options::Options;
 /// Saves a screenshot sent by the agent; the text tells where, or why not.
 pub fn save_snapshot(png: &[u8]) -> String {
     let path = crate::shot::save_path();
-    match std::fs::write(&path, png) {
+    // (The folder made first: a computer without a desktop may have no Downloads.)
+    let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, png));
+    match saved {
         Ok(()) => format!("Screenshot saved to {}", path.display()),
         Err(e) => format!("Screenshot: {e}"),
     }
