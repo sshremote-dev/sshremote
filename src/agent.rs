@@ -226,6 +226,12 @@ pub fn code_arg() -> String {
     code().map(|c| format!(" --code {c}")).unwrap_or_default()
 }
 
+/// The viewer by ID may see the cameras, as given on to the helper: ` --cameras`, or nothing.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn cameras_arg() -> &'static str {
+    if by_id() && CAMERAS.load(std::sync::atomic::Ordering::Relaxed) { " --cameras" } else { "" }
+}
+
 /// What the agent's loop hears: a message from the viewer, something to send, the viewer gone.
 enum Heard {
     Msg(ToAgent),
