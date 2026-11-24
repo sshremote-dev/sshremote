@@ -206,6 +206,58 @@ fn alt_tab_reaches_the_host_with_alt() {
     assert!(!h.r.mods.alt && !h.r.held.contains(&ALT_L), "and let go");
 }
 
+/// Between a Mac and another computer Ctrl and the command key trade places: Ctrl (and copying
+/// with it) is the command key there, the Win key Ctrl; a Mac's command key reaches the host
+/// (as Super, or as Ctrl when they trade).
+#[test]
+#[ignore]
+fn ctrl_and_the_command_key_trade_places_between_a_mac_and_another() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    let show = |h: &mut Harness, modifiers: egui::Modifiers, extra: Vec<Event>, grabbed: Vec<(u32, bool)>| {
+        let mut grabbed = Some(grabbed);
+        let mut events = vec![Event::ModifiersChanged(modifiers)];
+        events.extend(extra);
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)), focused: true, events, ..Default::default() };
+        let r = &mut h.r;
+        let mut result = Ok(());
+        h.snap.frame(&h.ctx, input, |ui| result = r.show(ui, grabbed.take().unwrap_or_default()));
+        result.unwrap();
+    };
+    let none = egui::Modifiers::NONE;
+    show(&mut h, none, Vec::new(), Vec::new());
+    h.r.swap_cmd = true;
+    show(&mut h, egui::Modifiers::CTRL | egui::Modifiers::COMMAND, vec![Event::Copy], Vec::new());
+    assert!(h.r.held.contains(&SUPER_L) && !h.r.held.contains(&CONTROL_L), "Ctrl is the command key there: {:?}", h.r.held);
+    assert!(!h.r.held.contains(&('c' as u32)), "C was tapped");
+    show(&mut h, none, Vec::new(), Vec::new());
+    assert!(h.r.held.is_empty(), "let go: {:?}", h.r.held);
+    show(&mut h, none, Vec::new(), vec![(SUPER_L, true)]);
+    assert!(h.r.held.contains(&CONTROL_L), "the Win key is Ctrl there");
+    show(&mut h, none, Vec::new(), vec![(SUPER_L, false)]);
+    assert!(h.r.held.is_empty(), "let go: {:?}", h.r.held);
+    // A Mac host's keys menu: its own shortcuts, and the trade to turn off.
+    h.r.sess.backend = "mac".into();
+    h.tool(ic::KEYBOARD).unwrap();
+    assert!(h.find("Spotlight").is_some() && h.find("Start menu").is_none(), "a Mac's shortcuts");
+    if !cfg!(target_os = "macos") {
+        h.click("Ctrl here is Cmd there").unwrap();
+        assert!(!h.r.swap_cmd, "turned off");
+    }
+    h.tool(ic::KEYBOARD).unwrap();
+    h.click("Cmd + next key").unwrap();
+    assert!(h.r.win_next, "Cmd with the next key");
+    h.r.win_next = false;
+    h.r.sess.backend = "synthetic".into();
+    // A Mac's command key, to a Mac and to another computer.
+    for (swap, there) in [(false, SUPER_L), (true, CONTROL_L)] {
+        h.r.swap_cmd = swap;
+        show(&mut h, egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND, Vec::new(), Vec::new());
+        assert!(h.r.held.contains(&there), "the command key reaches the host as {there:x}: {:?}", h.r.held);
+        show(&mut h, none, Vec::new(), Vec::new());
+        assert!(h.r.held.is_empty(), "let go: {:?}", h.r.held);
+    }
+}
+
 /// Tab with the toolbar in sight goes to the host, and so does every key after it: egui would
 /// give Tab to the toolbar's first button and keep the keys in this window. Esc and the arrows
 /// likewise stay the host's.

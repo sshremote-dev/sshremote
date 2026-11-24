@@ -369,18 +369,33 @@ impl Remote {
                 r.send(ToAgent::ListWindows)
             }));
         }
+        let mac = self.sess.backend == "mac";
         let keys = icon_menu(ui, ic::KEYBOARD, |ui| {
-            let combos: [(&str, &str, Option<Vec<u32>>); 9] = [
-                ("Secure attention", "Ctrl+Alt+Del", None),
-                ("Lock screen", "Win+L", Some(vec![SUPER_L, 'l' as u32])),
-                ("Start menu", "Win", Some(vec![SUPER_L])),
-                ("Run", "Win+R", Some(vec![SUPER_L, 'r' as u32])),
-                ("File explorer", "Win+E", Some(vec![SUPER_L, 'e' as u32])),
-                ("Show desktop", "Win+D", Some(vec![SUPER_L, 'd' as u32])),
-                ("Switch window", "Alt+Tab", Some(vec![ALT_L, xk::TAB])),
-                ("Close window", "Alt+F4", Some(vec![ALT_L, xk::F1 + 3])),
-                ("Print screen", "PrtSc", Some(vec![xk::PRINT])),
-            ];
+            // A Mac's own shortcuts there, named as macOS names them (the keys as that Mac has them).
+            let combos: Vec<(&str, &str, Option<Vec<u32>>)> = if mac {
+                vec![
+                    ("Lock screen", "Ctrl+Cmd+Q", Some(vec![CONTROL_L, SUPER_L, 'q' as u32])),
+                    ("Spotlight", "Cmd+Space", Some(vec![SUPER_L, ' ' as u32])),
+                    ("Switch application", "Cmd+Tab", Some(vec![SUPER_L, xk::TAB])),
+                    ("Mission Control", "Ctrl+Up", Some(vec![CONTROL_L, xk::UP])),
+                    ("Force quit", "Option+Cmd+Esc", Some(vec![ALT_L, SUPER_L, xk::ESCAPE])),
+                    ("Screenshot", "Shift+Cmd+5", Some(vec![SHIFT_L, SUPER_L, '5' as u32])),
+                    ("Close window", "Cmd+W", Some(vec![SUPER_L, 'w' as u32])),
+                    ("Quit application", "Cmd+Q", Some(vec![SUPER_L, 'q' as u32])),
+                ]
+            } else {
+                vec![
+                    ("Secure attention", "Ctrl+Alt+Del", None),
+                    ("Lock screen", "Win+L", Some(vec![SUPER_L, 'l' as u32])),
+                    ("Start menu", "Win", Some(vec![SUPER_L])),
+                    ("Run", "Win+R", Some(vec![SUPER_L, 'r' as u32])),
+                    ("File explorer", "Win+E", Some(vec![SUPER_L, 'e' as u32])),
+                    ("Show desktop", "Win+D", Some(vec![SUPER_L, 'd' as u32])),
+                    ("Switch window", "Alt+Tab", Some(vec![ALT_L, xk::TAB])),
+                    ("Close window", "Alt+F4", Some(vec![ALT_L, xk::F1 + 3])),
+                    ("Print screen", "PrtSc", Some(vec![xk::PRINT])),
+                ]
+            };
             for (label, shortcut, keys) in combos {
                 if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {
                     *action = Some(Box::new(move |r, _| match keys {
@@ -391,13 +406,31 @@ impl Remote {
                 }
             }
             ui.separator();
-            if ui.button("Win + next key").clicked() {
-                *action = Some(Box::new(|r, _| {
+            if ui.button(if mac { "Cmd + next key" } else { "Win + next key" }).clicked() {
+                *action = Some(Box::new(move |r, _| {
                     r.win_next = true;
-                    r.notify("Press a key to send with Win (Space: Win alone)");
+                    r.notify(if mac { "Press a key to send with Cmd" } else { "Press a key to send with Win (Space: Win alone)" });
                     Ok(())
                 }));
                 ui.close();
+            }
+            // Between a Mac and another computer: each side's shortcuts with its own keys.
+            if mac != cfg!(target_os = "macos") {
+                let (label, tip) = if mac {
+                    ("Ctrl here is Cmd there", "Ctrl+C, Ctrl+V and the other shortcuts work there as here; the Win key is Ctrl there")
+                } else {
+                    ("Cmd here is Ctrl there", "Cmd+C, Cmd+V and the other shortcuts work there as here; Ctrl is the Win key there")
+                };
+                let mut on = self.swap_cmd;
+                if ui.checkbox(&mut on, label).on_hover_text(tip).changed() {
+                    *action = Some(Box::new(move |r, _| {
+                        // Nothing held stays down under the other name.
+                        r.release_all()?;
+                        r.swap_cmd = on;
+                        Ok(())
+                    }));
+                    ui.close();
+                }
             }
         });
         keys.on_hover_text("Send special keys");

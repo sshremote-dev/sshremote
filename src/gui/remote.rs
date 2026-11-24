@@ -92,6 +92,10 @@ pub(super) struct Remote {
     mirror: bool,
     held: BTreeSet<u32>,
     mods: Modifiers,
+    /// Ctrl and the command key (⌘ on a Mac, Win elsewhere) trade places on their way, between a
+    /// Mac and another computer: each side's copy, paste and other shortcuts with the key its
+    /// people press for them.
+    swap_cmd: bool,
     pointer: (u16, u16),
     view: (u16, u16),
     view_changed: Option<Instant>,
@@ -306,6 +310,7 @@ impl Remote {
         // The pointer is drawn here where this mouse is, never a round trip behind it.
         let mut ctl = ctl;
         ctl.s.formats |= crate::proto::FORMAT_POINTER;
+        let swap_cmd = swap_by_default(&sess.backend);
         Remote {
             web: sess.backend == "browser",
             screenless: sess.backend == "none",
@@ -350,6 +355,7 @@ impl Remote {
             mirror: false,
             held: BTreeSet::new(),
             mods: Modifiers::NONE,
+            swap_cmd,
             pointer: (u16::MAX, u16::MAX),
             view: (0, 0),
             view_changed: None,
@@ -783,6 +789,10 @@ impl Remote {
                     self.modes_heard = true;
                 }
                 Ok(Ev::Net(ToClient::Hello { w, h, backend })) => {
+                    if backend != self.sess.backend && swap_by_default(&backend) != self.swap_cmd {
+                        self.release_all()?;
+                        self.swap_cmd = !self.swap_cmd;
+                    }
                     // Another monitor: new size, and the capture must be fitted again.
                     self.sess.hello(w, h, backend.clone());
                     let host = self.label.split("  ").next().unwrap_or("").to_string();
@@ -1417,4 +1427,10 @@ impl Remote {
             },
         }
     }
+}
+
+/// Whether Ctrl and the command key trade places for a host captured by `backend`: when one side
+/// is a Mac and the other is not.
+fn swap_by_default(backend: &str) -> bool {
+    cfg!(target_os = "macos") != (backend == "mac")
 }

@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Ctrl as the command key and the command key as Ctrl.
+fn swapped(keysym: u32) -> u32 {
+    match keysym {
+        CONTROL_L => SUPER_L,
+        xk::CONTROL_R => xk::SUPER_R,
+        SUPER_L => CONTROL_L,
+        xk::SUPER_R => xk::CONTROL_R,
+        k => k,
+    }
+}
+
 impl Remote {
     /// Moves a picture larger than the window when the pointer rests near an edge.
     pub(in crate::gui) fn edge_pan(&mut self, ctx: &egui::Context, area: Rect) {
@@ -38,6 +49,7 @@ impl Remote {
     }
 
     pub(in crate::gui) fn key(&mut self, keysym: u32, down: bool) -> Result<(), String> {
+        let keysym = if self.swap_cmd { swapped(keysym) } else { keysym };
         if down {
             self.held.insert(keysym);
         } else if !self.held.remove(&keysym) {
@@ -53,8 +65,13 @@ impl Remote {
     }
 
     pub(in crate::gui) fn sync_mods(&mut self, m: Modifiers) -> Result<(), String> {
-        let pairs =
-            [(self.mods.shift, m.shift, SHIFT_L), (self.mods.ctrl, m.ctrl, CONTROL_L), (self.mods.alt, m.alt, ALT_L)];
+        // (⌘ on a Mac here; the Win key elsewhere comes as a key of its own.)
+        let pairs = [
+            (self.mods.shift, m.shift, SHIFT_L),
+            (self.mods.ctrl, m.ctrl, CONTROL_L),
+            (self.mods.alt, m.alt, ALT_L),
+            (self.mods.mac_cmd, m.mac_cmd, SUPER_L),
+        ];
         for (was, now, sym) in pairs {
             if was != now {
                 self.key(sym, now)?;
@@ -222,7 +239,8 @@ impl Remote {
                     };
                     let Some(sym) = keysym(key) else { continue };
                     if pressed && std::mem::take(&mut self.win_next) {
-                        let (sym, mods) = if sym == ' ' as u32 { (SUPER_L, 0) } else { (sym, MOD_SUPER) };
+                        // (Cmd+Space on a Mac is Spotlight's.)
+                        let (sym, mods) = if sym == ' ' as u32 && self.sess.backend != "mac" { (SUPER_L, 0) } else { (sym, MOD_SUPER) };
                         self.send(ToAgent::Key { keysym: sym, mods })?;
                         continue;
                     }
