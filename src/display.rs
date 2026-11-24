@@ -76,8 +76,9 @@ impl Way {
             "x11" => Some(Way::RandR),
             #[cfg(target_os = "linux")]
             "gnome" => Some(Way::Mutter),
+            // Sway and Hyprland read by wlr-screencopy, the other Wayland desktops by the portal.
             #[cfg(target_os = "linux")]
-            "portal" | "portal-view" => linux::wayland(),
+            "wlroots" | "portal" | "portal-view" => linux::wayland(),
             #[cfg(target_os = "macos")]
             "mac" => Some(Way::Mac),
             _ => None,

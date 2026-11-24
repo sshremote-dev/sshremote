@@ -737,6 +737,43 @@ mod tests {
         assert_eq!((half.w, half.h), (first.w / 2, first.h / 2));
     }
 
+    /// The shown output set to another resolution through the display settings the agent uses
+    /// for this backend, and back: the pictures follow it both ways. In a wlroots desktop's
+    /// session: SSHREMOTE_WLR_TEST=1 TESTS --ignored a_wlroots_screen_takes
+    #[test]
+    #[ignore]
+    fn a_wlroots_screen_takes_another_resolution() {
+        use std::time::{Duration, Instant};
+        if std::env::var_os("SSHREMOTE_WLR_TEST").is_none() {
+            return;
+        }
+        let mut w = WlrCopy::open().expect("screen copying");
+        let first = w.grab().unwrap().expect("the first picture");
+        let mut s = crate::display::Session::new(w.name());
+        let id = s.screen(w.screen_id()).expect("a screen the agent can set");
+        let (m, _) = s.modes(&id).expect("its resolutions");
+        let want = *m.list.iter().find(|&&(x, y)| (x, y) != m.current && (x as usize) < first.w && (y as usize) < first.h).expect("a smaller one");
+        // The screen's new size, then a picture of it once the viewer asks for that size (as the
+        // agent does when the size it hears changes).
+        let size_soon = |w: &mut WlrCopy, size: (usize, usize)| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until && w.desktop_size() != size {
+                let _ = w.grab();
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            w.set_target(size.0, size.1).unwrap();
+            w.grab().ok().flatten().is_some_and(|img| (img.w, img.h) == size)
+        };
+        w.screen_changing();
+        s.set(&id, want.0, want.1).unwrap();
+        w.screen_changed();
+        let smaller = size_soon(&mut w, (want.0 as usize, want.1 as usize));
+        drop(s);
+        let back = size_soon(&mut w, (first.w, first.h));
+        eprintln!("{}x{} -> {want:?}: {smaller}, back: {back}", first.w, first.h);
+        assert!(smaller && back);
+    }
+
     /// Grabbed at a viewer's pace while keys come in between, the picture ends where the screen
     /// does: a change made while no copy was asked for still reaches it. In a wlroots desktop's
     /// session with a terminal focused: SSHREMOTE_WLR_TEST=1 TESTS --ignored the_last_change
