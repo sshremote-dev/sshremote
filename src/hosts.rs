@@ -147,6 +147,12 @@ fn find_config_dir() -> Option<std::path::PathBuf> {
             .map(Into::into)
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))
     };
+    // Tests keep to folders they made (under the temporary folder), never the settings of
+    // whoever runs them.
+    #[cfg(test)]
+    let base = base
+        .filter(|b| b.starts_with(std::env::temp_dir()))
+        .or_else(|| Some(std::env::temp_dir().join(format!("sshremote-test-{}", std::process::id()))));
     let base = base?;
     let dir = base.join("sshremote");
     // Hosts, favorites and settings kept under the program's former name move over once.
