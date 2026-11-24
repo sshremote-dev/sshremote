@@ -601,6 +601,10 @@ pub fn event(name: &str, data: Value) {
 /// The commands of running extensions: (extension, command id, label).
 pub fn commands() -> Vec<(String, String, String)> {
     let running: Vec<String> = with(|s| s.running.iter().map(|r| r.id.clone()).collect());
+    // Looked at every frame: with none running, the manifests are not read from disk.
+    if running.is_empty() {
+        return Vec::new();
+    }
     crate::ext::installed()
         .into_iter()
         .filter(|m| running.contains(&m.id))
@@ -657,6 +661,10 @@ pub fn settings_changed(ext: &str) {
 /// The keys of running extensions' commands: (modifiers, key, extension, command).
 pub fn keys() -> Vec<(u8, String, String, String)> {
     let running: Vec<String> = with(|s| s.running.iter().map(|r| r.id.clone()).collect());
+    // Looked at every frame: with none running, the manifests are not read from disk.
+    if running.is_empty() {
+        return Vec::new();
+    }
     crate::ext::installed()
         .into_iter()
         .filter(|m| running.contains(&m.id))
