@@ -55,30 +55,12 @@ struct RemoteFiles {
 }
 
 impl RemoteFiles {
-    fn sep(&self) -> char {
-        if self.path.contains('\\') && !self.path.contains('/') { '\\' } else { '/' }
-    }
-
     fn child(&self, name: &str) -> String {
-        if self.path == crate::files::DRIVES {
-            return name.to_string();
-        }
-        let sep = self.sep();
-        if self.path.ends_with(sep) { format!("{}{name}", self.path) } else { format!("{}{sep}{name}", self.path) }
+        crate::files::path_child(&self.path, name)
     }
 
     fn parent(&self) -> String {
-        let sep = self.sep();
-        let trimmed = self.path.trim_end_matches(sep);
-        if trimmed.len() == 2 && trimmed.ends_with(':') {
-            return crate::files::DRIVES.into();
-        }
-        match trimmed.rfind(sep) {
-            Some(0) => sep.to_string(),
-            Some(i) if trimmed[..i].ends_with(':') => format!("{}{sep}", &trimmed[..i]),
-            Some(i) => trimmed[..i].to_string(),
-            None => self.path.clone(),
-        }
+        crate::files::path_parent(&self.path)
     }
 
     /// The entries shown: hidden ones only when asked, folders first.

@@ -829,6 +829,35 @@ impl Outbox {
 /// The pseudo-folder listing the drives (Windows); elsewhere it is the root.
 pub const DRIVES: &str = "::";
 
+/// The separator of a remote folder's path: `\` on Windows, `/` elsewhere.
+pub fn path_sep(path: &str) -> char {
+    if path.contains('\\') && !path.contains('/') { '\\' } else { '/' }
+}
+
+/// Entry `name` in the remote folder `path` (a drive, in the list of drives).
+pub fn path_child(path: &str, name: &str) -> String {
+    if path == DRIVES {
+        return name.to_string();
+    }
+    let sep = path_sep(path);
+    if path.ends_with(sep) { format!("{path}{name}") } else { format!("{path}{sep}{name}") }
+}
+
+/// The folder above the remote folder `path`: above a drive's root, the list of drives.
+pub fn path_parent(path: &str) -> String {
+    let sep = path_sep(path);
+    let trimmed = path.trim_end_matches(sep);
+    if trimmed.len() == 2 && trimmed.ends_with(':') {
+        return DRIVES.into();
+    }
+    match trimmed.rfind(sep) {
+        Some(0) => sep.to_string(),
+        Some(i) if trimmed[..i].ends_with(':') => format!("{}{sep}", &trimmed[..i]),
+        Some(i) => trimmed[..i].to_string(),
+        None => path.to_string(),
+    }
+}
+
 fn mtime(m: &std::fs::Metadata) -> u64 {
     m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
