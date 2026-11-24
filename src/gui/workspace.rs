@@ -151,11 +151,13 @@ fn item_of(p: &Pane) -> Option<super::project::Item> {
 }
 
 /// What the open window knows a reached connection by: an ID's address, or the host as typed
-/// (which is the pane's label).
+/// (the label of one not saved with a name).
 fn reached_as(target: &Target, label: &str) -> String {
     match target {
         #[cfg(feature = "remote")]
         Target::Direct { addr, .. } => crate::access::address(&addr.id, &addr.relay),
+        // By its host, as the password typed for it waits (a saved computer's label is its name).
+        Target::Ssh { host, .. } => host.clone(),
         _ => label.to_string(),
     }
 }

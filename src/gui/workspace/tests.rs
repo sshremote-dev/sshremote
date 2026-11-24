@@ -1396,3 +1396,12 @@ fn all_screens_open_each_in_a_window_of_its_own() {
     h.w.close_all();
     other.w.close_all();
 }
+
+/// A saved computer's pane is labelled with its name, but its typed password waits under its
+/// host: the reached connection is told by the host, so the password is kept.
+#[test]
+fn a_named_computer_is_reached_as_its_host() {
+    let ssh = Target::Ssh { host: "dev@build".into(), port: None, args: Vec::new(), remote: String::new(), capture: "auto".into(), password: None, unattended: true };
+    assert_eq!(reached_as(&ssh, "Build box"), "dev@build");
+    assert_eq!(reached_as(&Target::Local { capture: "auto".into() }, "This computer"), "This computer");
+}
