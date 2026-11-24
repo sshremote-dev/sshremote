@@ -269,10 +269,12 @@ What is opened goes into the workspace:
 - **Settings** hold every setting once. A pane's quick menu shows the ones that matter there with
   the same controls and links to its page; a screen's menus say "this connection" where they
   change that connection only, and what new ones start with.
-- On Windows the window asks for administrator rights at start and works without them. Closed
-  while remote access by ID or tunnels are up here, it goes to the notification area: a click
-  brings it back, and its menu turns remote access on or off, copies the ID, starts, stops,
-  installs or removes the service, and quits.
+- On Windows the window starts without administrator rights and asks for them only when
+  something needs them (setting up remote access, the service), opening again with its tabs;
+  Settings can have it ask at every start instead. Closed while remote access by ID or tunnels
+  are up here, it goes to the notification area: a click brings it back, and its menu turns
+  remote access on or off, copies the ID, starts, stops, installs or removes the service, and
+  quits.
 
 ## In a browser
 
@@ -424,7 +426,7 @@ connected, so ending the connection and changing what they may do are always at 
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
-asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/sshremote-dev/sshremote-relay); the one this project runs is `relay.sshremote.dev` (before 0.10 it went by
+asks for them then). The relay is its own small program, [sshremote-relay](https://github.com/sshremote-dev/sshremote-relay); the one this project runs is `relay.sshremote.dev` (before 0.10 it went by
 `sshremote.dev`, which still reaches it and is read as the same relay), reached on TCP and UDP
 7071, or on port 80 through a web server when 7071 is shut.
 
