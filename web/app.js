@@ -1623,6 +1623,17 @@ class Client {
       this.screenTools();
     };
     // A narrow screen (a phone): one button for all of it, so the bar keeps its right end.
+    // (Both ways of showing the tools use these.)
+    const sound = () => {
+      if (this.sound) { this.sound.close(); this.sound = null; this.send({ sound: false }); }
+      else {
+        this.sound = soundPlayer();
+        if (!this.sound) { toast("This browser cannot play the host's sound (it needs WebCodecs: Chrome, Edge or Firefox).", { bad: true }); return; }
+        this.send({ sound: true });
+      }
+      this.screenTools();
+    };
+    const below = () => { this.split = !this.split; store.set("split", this.split); this.splitView(); this.screenTools(); };
     if (matchMedia("(max-width: 760px)").matches) {
       const more = button("dots", null, { title: "The screen's tools" });
       more.classList.toggle("on", this.viewOnly);
@@ -1662,16 +1673,6 @@ class Client {
     chat.classList.toggle("on", !$("chat").hidden);
     if (this.unread) chat.append(h("span", { class: "count", text: String(this.unread) }));
     chat.onclick = () => this.chatShow($("chat").hidden);
-    const sound = () => {
-      if (this.sound) { this.sound.close(); this.sound = null; this.send({ sound: false }); }
-      else {
-        this.sound = soundPlayer();
-        if (!this.sound) { toast("This browser cannot play the host's sound (it needs WebCodecs: Chrome, Edge or Firefox).", { bad: true }); return; }
-        this.send({ sound: true });
-      }
-      this.screenTools();
-    };
-    const below = () => { this.split = !this.split; store.set("split", this.split); this.splitView(); this.screenTools(); };
     const hear = button("sound", null, { title: this.sound ? "Stop the host's sound" : "Hear the host's sound" });
     hear.classList.toggle("on", !!this.sound);
     hear.onclick = sound;
