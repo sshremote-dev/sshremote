@@ -239,11 +239,12 @@ fn ctrl_and_the_command_key_trade_places_between_a_mac_and_another() {
     h.r.sess.backend = "mac".into();
     h.tool(ic::KEYBOARD).unwrap();
     assert!(h.find("Spotlight").is_some() && h.find("Start menu").is_none(), "a Mac's shortcuts");
+    // (A Mac to a Mac has nothing to trade: the menu stays open.)
     if !cfg!(target_os = "macos") {
         h.click("Ctrl here is Cmd there").unwrap();
         assert!(!h.r.swap_cmd, "turned off");
+        h.tool(ic::KEYBOARD).unwrap();
     }
-    h.tool(ic::KEYBOARD).unwrap();
     h.click("Cmd + next key").unwrap();
     assert!(h.r.win_next, "Cmd with the next key");
     h.r.win_next = false;
