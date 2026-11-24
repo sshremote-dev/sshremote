@@ -148,7 +148,7 @@ section.alt { background: var(--bg2); }
 /* Commands */
 pre { background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 13px 16px; overflow-x: auto; margin: 12px 0; line-height: 1.6; }
 pre code { background: none; padding: 0; font-size: 13.5px; }
-pre.cmd { position: relative; padding-right: 50px; }
+pre.cmd { position: relative; padding-right: 50px; white-space: pre-wrap; overflow-wrap: anywhere; }
 pre .c { color: var(--faint); }
 button.copy { position: absolute; top: 7px; right: 7px; width: 30px; height: 30px; border-radius: 6px; border: 0; background: transparent; color: var(--faint); cursor: pointer; display: grid; place-items: center; }
 button.copy:hover { color: var(--fg); background: var(--bg2); }
