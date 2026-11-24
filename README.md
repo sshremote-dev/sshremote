@@ -135,7 +135,8 @@ What is opened goes into the workspace:
   its lossless coding and scrolls keep exact; a smaller pane or zoom makes them smaller here, each
   pixel the mean of those it covers, so text keeps every stroke), the host's
   pointer drawn here right where this mouse is (its shape comes apart from the picture on Windows,
-  X11, GNOME and KDE Plasma hosts, so moving it costs no pictures and lags no round trip; GNOME and
+  X11, GNOME, KDE Plasma and macOS hosts (Macs with Metal graphics), so moving it costs no
+  pictures and lags no round trip; GNOME and
   KDE send it beside their PipeWire frames, which the agent reads itself through libpipewire; in the
   browser it is the page's own pointer), system keys (Win or Super, Alt+Tab, Alt+Esc, Ctrl+Esc, Print Screen) going
   to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (or

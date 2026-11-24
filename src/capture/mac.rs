@@ -239,7 +239,7 @@ fn samples(buffer: &CMSampleBuffer) -> Option<(Vec<f32>, u32, usize)> {
 /// screen, as Screen & System Audio Recording). The sound this program plays itself is left out.
 pub fn sound(hear: Box<dyn FnMut(&[f32], u32, usize) + Send>) -> Result<Box<dyn std::any::Any>, String> {
     // The pictures it must have are the smallest and slowest there are.
-    let c = config((2, 2), 1, None);
+    let c = config((2, 2), 1, None, true);
     // SAFETY: a fresh configuration, set before the stream takes it.
     unsafe {
         c.setCapturesAudio(true);
@@ -358,17 +358,16 @@ impl Drop for Live {
     }
 }
 
-/// A stream's settings: its pictures' size and rate, and the part of the display they show
-/// (points from the display's corner; all of it when None).
-fn config(size: (usize, usize), fps: u8, part: Option<CGRect>) -> Retained<SCStreamConfiguration> {
+/// A stream's settings: its pictures' size and rate, the part of the display they show (points
+/// from the display's corner; all of it when None), and whether the pointer is drawn into them.
+fn config(size: (usize, usize), fps: u8, part: Option<CGRect>, pointer: bool) -> Retained<SCStreamConfiguration> {
     // SAFETY: a fresh configuration, set before any stream takes it.
     unsafe {
         let c = SCStreamConfiguration::new();
         c.setWidth(size.0.max(2));
         c.setHeight(size.1.max(2));
         c.setPixelFormat(kCVPixelFormatType_32BGRA);
-        // The pointer comes in the pictures, as the system draws it.
-        c.setShowsCursor(true);
+        c.setShowsCursor(pointer);
         c.setMinimumFrameInterval(CMTime::new(1, fps.clamp(1, 60) as i32));
         c.setQueueDepth(4);
         if let Some(r) = part {
@@ -433,6 +432,57 @@ fn metal() -> bool {
     static METAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // SAFETY: the device made here (or none) is owned and released at once.
     *METAL.get_or_init(|| unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }.is_some())
+}
+
+/// The system's count of the pointer's changes of shape: a private call others use as well,
+/// looked up rather than linked, so a macOS without it still starts this program.
+fn cursor_seed() -> Option<i32> {
+    static SEED: std::sync::OnceLock<Option<extern "C" fn() -> i32>> = std::sync::OnceLock::new();
+    // SAFETY: a symbol of the loaded Core Graphics, of this type wherever it is there.
+    let seed = SEED.get_or_init(|| unsafe {
+        let f = libc::dlsym(libc::RTLD_DEFAULT, c"CGSCurrentCursorSeed".as_ptr());
+        (!f.is_null()).then(|| std::mem::transmute::<*mut c_void, extern "C" fn() -> i32>(f))
+    });
+    seed.map(|f| f())
+}
+
+/// The whole system's pointer as it looks now, drawn at `scale` pixels a point.
+fn cursor_now(scale: f64) -> Option<super::Pointer> {
+    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+    let class = objc2::runtime::AnyClass::get(c"NSCursor")?;
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: AppKit's getters of the current cursor and its image; the image drawn into
+        // `rgba`, `w * 4` bytes a row, by a context gone before they are read.
+        unsafe {
+            let cursor: Option<Retained<AnyObject>> = msg_send![class, currentSystemCursor];
+            let cursor = cursor?;
+            let image: Option<Retained<AnyObject>> = msg_send![&*cursor, image];
+            let image = image?;
+            let size: CGSize = msg_send![&*image, size];
+            let hot: CGPoint = msg_send![&*cursor, hotSpot];
+            let (w, h) = ((size.width * scale).round() as usize, (size.height * scale).round() as usize);
+            if !(1..=512).contains(&w) || !(1..=512).contains(&h) {
+                return None;
+            }
+            let mut rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
+            let none: Option<&AnyObject> = None;
+            let cg: *mut CGImage = msg_send![&*image, CGImageForProposedRect: &mut rect, context: none, hints: none];
+            let cg = cg.as_ref()?;
+            let mut rgba = vec![0u8; w * h * 4];
+            let space = CGColorSpace::new_device_rgb();
+            let ctx = CGBitmapContextCreate(rgba.as_mut_ptr().cast(), w, h, 8, w * 4, space.as_deref(), CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0)?;
+            CGContext::draw_image(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), Some(cg));
+            drop(ctx);
+            for p in rgba.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                for c in &mut p[..3] {
+                    *c = (*c as u32 * 255).checked_div(a).map_or(0, |v| v.min(255) as u8);
+                }
+            }
+            let hot = (((hot.x * scale) as usize).min(w - 1), ((hot.y * scale) as usize).min(h - 1));
+            Some(super::Pointer { w, h, hot, rgba })
+        }
+    })
 }
 
 /// Brings a program forward, and its window `id` in front of its others; nothing happens where
@@ -571,6 +621,10 @@ pub struct Mac {
     /// When the stream was last given a new size: pictures of the old one still come a while.
     resized: Option<Instant>,
     shrink: super::Shrink,
+    /// Whether the viewer draws the pointer (the pictures leave it out), and what was looked at
+    /// of its shape last: the system's count of its changes, and the shape sent.
+    apart: bool,
+    shape: (Option<i32>, Option<u64>),
 }
 
 impl Mac {
@@ -629,6 +683,8 @@ impl Mac {
             hands: Hands::default(),
             resized: None,
             shrink: super::Shrink::default(),
+            apart: false,
+            shape: (None, None),
         };
         mac.restart()?;
         Ok(mac)
@@ -688,7 +744,7 @@ impl Mac {
                 }
             }
         };
-        self.live = Some(start(&filter, &config(self.stream_size(), self.fps, self.part()), self.latest.clone())?);
+        self.live = Some(start(&filter, &config(self.stream_size(), self.fps, self.part(), !self.apart), self.latest.clone())?);
         Ok(())
     }
 
@@ -704,7 +760,7 @@ impl Mac {
         }
         if let Some(l) = &self.live {
             // SAFETY: a fresh configuration given to the running stream.
-            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.stream_size(), self.fps, self.part()), None) };
+            unsafe { l.stream.updateConfiguration_completionHandler(&config(self.stream_size(), self.fps, self.part(), !self.apart), None) };
         }
     }
 
@@ -1304,6 +1360,44 @@ impl Capture for Mac {
         self.hands.notice.take()
     }
 
+    fn pointer_apart(&mut self, on: bool) -> bool {
+        if on == self.apart {
+            self.shape = (None, None);
+            return on;
+        }
+        // Without Metal a stream that leaves the pointer out made the window server abort
+        // (VMware: CA::OGL::Context::push_surface), and the login window's still pictures are
+        // taken as they come: there, and where its shape cannot be read, it stays in them.
+        if on && (!metal() || before_sign_in() || cursor_now(1.0).is_none()) {
+            return false;
+        }
+        (self.apart, self.shape) = (on, (None, None));
+        // A new stream, whose first picture comes at once (a still screen's would not).
+        if let Err(e) = self.restart() {
+            eprintln!("sshremote: {e}");
+        }
+        true
+    }
+
+    fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
+        let a = &self.area;
+        let (kx, ky) = (a.pixels.0 as f64 / a.points.0, a.pixels.1 as f64 / a.points.1);
+        let Some(at) = CGEvent::new(None).map(|e| CGEvent::location(Some(&e))) else { return (None, None) };
+        let at = Some((((at.x - a.at.0) * kx).floor() as i32, ((at.y - a.at.1) * ky).floor() as i32));
+        // Without the system's count of changes, its shape is looked at four times a second.
+        let seed = cursor_seed().or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| (d.as_millis() / 250) as i32));
+        if std::mem::replace(&mut self.shape.0, seed) == seed {
+            return (None, at);
+        }
+        let shape = cursor_now(kx).filter(|p| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (p.w, p.h, p.hot, &p.rgba).hash(&mut h);
+            self.shape.1.replace(h.finish()) != Some(h.finish())
+        });
+        (shape, at)
+    }
+
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.follow();
         if !self.latest.fresh.swap(false, Ordering::AcqRel) {
@@ -1437,6 +1531,71 @@ mod tests {
         }
     }
 
+    /// The pointer's shape and place as the viewer that draws it gets them, and over the text of
+    /// a window of SSHREMOTE_MAC_TEXT_APP (Terminal, say) its shape changes. With Metal it is
+    /// left out of the pictures then: moving it alone brings none (it does while drawn in them).
+    /// Without Metal it stays in them, as leaving it out made the window server abort.
+    #[test]
+    #[ignore]
+    fn a_mac_pointer_comes_apart() {
+        let mut m = Mac::open().unwrap();
+        let (w, h) = m.desktop_size();
+        let pictures = |m: &mut Mac, ms: u64| {
+            let (until, mut n) = (Instant::now() + Duration::from_millis(ms), 0);
+            while Instant::now() < until {
+                n += m.grab().unwrap().is_some() as usize;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            n
+        };
+        // Moves across the middle of the screen, the pictures counted as it goes.
+        let wander = |m: &mut Mac| {
+            let mut n = 0;
+            for i in 0..20 {
+                m.input(Input::Move { x: (w / 3 + i * 12) as f64, y: (h / 2 + i * 4) as f64 }).unwrap();
+                n += pictures(m, 50);
+            }
+            n
+        };
+        pictures(&mut m, 1500);
+        let drawn = wander(&mut m);
+        let (shape, at) = m.pointer();
+        let shape = shape.expect("the pointer's picture");
+        let seen = shape.rgba.chunks(4).filter(|p| p[3] > 0).count();
+        println!("metal {}; drawn in: {drawn} pictures while it moved; shape {}x{} hot {:?} ({seen} pixels seen), at {at:?}", metal(), shape.w, shape.h, shape.hot);
+        assert!(seen > 20 && drawn >= 10, "drawn {drawn}");
+        assert_eq!(at, Some(((w / 3 + 19 * 12) as i32, (h / 2 + 19 * 4) as i32)));
+        assert_eq!(m.pointer().0.map(|p| p.w), None, "the same shape is not sent again");
+        assert_eq!(m.pointer_apart(true), metal());
+        if metal() {
+            pictures(&mut m, 1500);
+            let apart = wander(&mut m);
+            println!("apart: {apart} pictures while it moved");
+            assert!(apart <= 3, "apart {apart}");
+        }
+        if let Ok(app) = std::env::var("SSHREMOTE_MAC_TEXT_APP") {
+            let win = listed(None).into_iter().find(|v| v.app == app && v.layer == 0).expect("a window of that program");
+            let d = m.display().clone();
+            let (kx, ky) = (d.pixels.0 as f64 / d.points.0, d.pixels.1 as f64 / d.points.1);
+            let mid = (win.rect.origin.x + win.rect.size.width / 2.0 - d.at.0, win.rect.origin.y + win.rect.size.height / 2.0 - d.at.1);
+            // Only the program in front sets the pointer's shape over its windows.
+            raise(win.pid, Some(win.id));
+            std::thread::sleep(Duration::from_millis(300));
+            m.input(Input::Move { x: mid.0 * kx, y: mid.1 * ky }).unwrap();
+            let until = Instant::now() + Duration::from_secs(2);
+            let text = loop {
+                if let (Some(p), _) = m.pointer() {
+                    break p;
+                }
+                assert!(Instant::now() < until, "the shape stayed over {app}");
+                std::thread::sleep(Duration::from_millis(16));
+            };
+            println!("over {app}: {}x{} hot {:?}", text.w, text.h, text.hot);
+            assert_ne!((text.w, text.h, text.hot), (shape.w, shape.h, shape.hot));
+        }
+        m.input(Input::Move { x: (w - 40) as f64, y: (h - 40) as f64 }).unwrap();
+    }
+
     #[test]
     #[ignore]
     fn a_mac_sound_starts() {
@@ -1446,11 +1605,11 @@ mod tests {
             c
         };
         let tries: Vec<(&str, Retained<SCStreamConfiguration>, bool)> = vec![
-            ("pictures 640x360 30/s", audio(config((640, 360), 30, None), false), true),
-            ("pictures 64x64 1/s", audio(config((64, 64), 1, None), false), true),
-            ("pictures 2x2 1/s", audio(config((2, 2), 1, None), false), true),
-            ("sound, pictures 640x360 30/s", audio(config((640, 360), 30, None), true), true),
-            ("sound alone 640x360", audio(config((640, 360), 30, None), true), false),
+            ("pictures 640x360 30/s", audio(config((640, 360), 30, None, true), false), true),
+            ("pictures 64x64 1/s", audio(config((64, 64), 1, None, true), false), true),
+            ("pictures 2x2 1/s", audio(config((2, 2), 1, None, true), false), true),
+            ("sound, pictures 640x360 30/s", audio(config((640, 360), 30, None, true), true), true),
+            ("sound alone 640x360", audio(config((640, 360), 30, None, true), true), false),
         ];
         for (name, c, seen) in tries {
             let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
