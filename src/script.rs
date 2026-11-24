@@ -89,7 +89,11 @@ pub fn run(wasm: &[u8], id: &str, input: &str) -> Result<String, String> {
 
 fn trap(e: wasmi::Error, store: &Store<State>) -> String {
     let log = &store.data().log;
-    let why = if store.get_fuel().is_ok_and(|f| f == 0) { "it ran too long and was stopped".to_string() } else { e.to_string() };
+    let why = if matches!(e.as_trap_code(), Some(wasmi::TrapCode::OutOfFuel)) {
+        "it ran too long and was stopped".to_string()
+    } else {
+        e.to_string()
+    };
     if log.is_empty() { format!("the script failed: {why}") } else { format!("the script failed: {why}\n{log}") }
 }
 
