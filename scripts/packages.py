@@ -120,7 +120,7 @@ def git(*args, cwd=None):
     subprocess.run(["git", "-c", f"http.extraHeader=Authorization: Basic {auth}", *args], cwd=cwd, check=True)
 
 
-def homebrew(version, platforms):
+def homebrew(version, platforms, out):
     try:
         call(f"/repos/{TAP}")
     except urllib.error.HTTPError as e:
@@ -215,16 +215,25 @@ def winget_pr(version, files):
     print(f"winget: {pr['html_url']}")
 
 
+def winget(version, platforms, out):
+    files = winget_manifests(version, platforms, out / "winget" / version)
+    print(f"winget: manifests in {out / 'winget' / version}")
+    if os.environ.get("WINGET_PR") == "1":
+        winget_pr(version, files)
+
+
+# Each channel takes the release (its version, release/platforms.json's entries with their sha256
+# and url, and OUT) to where its package manager reads it: another is one more function here.
+CHANNELS = [homebrew, winget]
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     out = Path(sys.argv[1])
     version, platforms = release(out)
-    homebrew(version, platforms)
-    files = winget_manifests(version, platforms, out / "winget" / version)
-    print(f"winget: manifests in {out / 'winget' / version}")
-    if os.environ.get("WINGET_PR") == "1":
-        winget_pr(version, files)
+    for channel in CHANNELS:
+        channel(version, platforms, out)
 
 
 if __name__ == "__main__":
