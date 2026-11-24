@@ -71,9 +71,17 @@ impl Proc {
         }
     }
 
-    fn end(&mut self) {
+    /// Ends it once it has had a moment to go by itself: its input ending is its cue, and a
+    /// notification it shows goes with it then (one left behind would stay on the screen, ahead of
+    /// the next connection's).
+    fn end(&mut self, input: Box<dyn Write + Send>) {
+        drop(input);
         match self {
             Proc::Here(c) => {
+                let until = std::time::Instant::now() + Duration::from_millis(500);
+                while std::time::Instant::now() < until && matches!(c.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 let _ = c.kill();
                 let _ = c.wait();
             }
@@ -128,9 +136,9 @@ impl Window {
             }
         };
         if answer.is_none()
-            && let Some((mut c, _)) = self.child.take()
+            && let Some((mut c, input)) = self.child.take()
         {
-            c.end();
+            c.end(input);
         }
         self.by_id = answer;
         Ok(answer)
@@ -232,8 +240,8 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
-        if let Some((mut c, _)) = self.child.take() {
-            c.end();
+        if let Some((mut c, input)) = self.child.take() {
+            c.end(input);
         }
     }
 }
