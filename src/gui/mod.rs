@@ -1708,7 +1708,7 @@ mod tests {
     fn site_pictures() {
         let Some(dir) = std::env::var_os("SSHREMOTE_SITE_DIR").map(std::path::PathBuf::from) else { return };
         for dark in [true, false] {
-            for name in ["new", "ssh", "local", "tools"] {
+            for name in ["new", "local", "tools"] {
                 let ctx = egui::Context::default();
                 theme::style(&ctx);
                 theme::apply_theme(&ctx, dark);
@@ -1734,7 +1734,6 @@ mod tests {
                     app.access.service_looked = Some(Instant::now());
                 }
                 match name {
-                    "ssh" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
                     "local" => app.access_sheet_open = true,
                     "tools" => app.settings = Some(settings::Settings::at("keys")),
                     _ => {}

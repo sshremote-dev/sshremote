@@ -113,7 +113,7 @@ section.alt { background: var(--bg2); }
 .feature + .feature { margin-top: clamp(72px, 9vw, 120px); }
 .feature.flip { grid-template-columns: 7fr 5fr; }
 .feature.flip > :first-child { order: 2; }
-.feature h3 { font-size: clamp(22px, 2.4vw, 28px); letter-spacing: -.02em; margin-bottom: 14px; }
+.feature h2, .feature h3 { font-size: clamp(22px, 2.4vw, 28px); letter-spacing: -.02em; margin-bottom: 14px; }
 .feature p { color: var(--dim); }
 .points { list-style: none; padding: 0; margin: 22px 0 0; border-top: 1px solid var(--line); }
 .points li { padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 15px; display: grid; grid-template-columns: 9ch 1fr; gap: 16px; }

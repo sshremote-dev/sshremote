@@ -3,8 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SSH Remote: terminal, remote screen and files over SSH</title>
-<meta name="description" content="A terminal workspace that also shows the host's screen and files, through the SSH login you already have. For PCs without SSH, connect by ID and password.">
+<title>SSH Remote: one workspace for all your servers and projects</title>
+<meta name="description" content="An open-source workspace for developers with many servers and projects: split terminals across hosts, AI agent output read as Markdown, remote screens and files, all over the SSH login you already have. Windows, macOS and Linux.">
+<link rel="canonical" href="https://sshremote.dev/">
+<meta name="robots" content="index, follow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SSH Remote">
+<meta property="og:url" content="https://sshremote.dev/">
+<meta property="og:title" content="SSH Remote: one workspace for all your servers and projects">
+<meta property="og:description" content="Split terminals across hosts, AI agent output read as Markdown, remote screens and files, over the SSH you already have. Open source, no account.">
+<meta property="og:image" content="https://sshremote.dev/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="SSH Remote's workspace: a project's files, a server's terminal and an AI agent's answer read as Markdown, side by side">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="SSH Remote: one workspace for all your servers and projects">
+<meta name="twitter:description" content="Split terminals across hosts, AI agent output read as Markdown, remote screens and files, over the SSH you already have.">
+<meta name="twitter:image" content="https://sshremote.dev/img/og.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "SSH Remote",
+  "url": "https://sshremote.dev/",
+  "description": "An open-source workspace for developers with many servers and projects: split terminals across hosts, AI agent output read as Markdown, remote screens and files, over SSH.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Windows, macOS, Linux",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "downloadUrl": "https://sshremote.dev/#download",
+  "screenshot": "https://sshremote.dev/img/workspace-dark.png",
+  "softwareHelp": "https://sshremote.dev/docs.html",
+  "codeRepository": "https://github.com/sshremote-dev/sshremote",
+  "programmingLanguage": "Rust"
+}
+</script>
 <meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e0e10" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -21,7 +55,7 @@
     <a href="extensions.html">Extensions</a>
     <a href="docs.html">Docs</a>
     <a href="index.html#download">Download</a>
-    <a class="gh" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>GitHub</a>
+    <a class="gh" href="https://github.com/sshremote-dev/sshremote"><span data-i="github"></span>GitHub</a>
   </nav>
   <a class="btn sm" id="webapp" href="https://web.sshremote.dev/" title="Reach a computer by its ID from this browser, with nothing to install"><span data-i="globe"></span>Open in browser</a>
   <button class="icon-btn" id="theme" type="button" aria-label="Theme"></button>
@@ -29,22 +63,22 @@
 
 <main id="main">
 <div class="hero"><div class="wrap">
-  <h1>Terminal, screen and files. <span>One SSH login.</span></h1>
-  <p class="lead">SSH Remote opens a shell, the desktop and the file system of another computer side by side, over the SSH you already use. No account, no open port, nobody in between.</p>
+  <h1>All your servers. <span>One workspace.</span></h1>
+  <p class="lead">For developers who run many servers and many projects, and code on them with AI agents. Split terminals across hosts, read an agent's answer as Markdown, open a host's files or desktop in the next pane, all over the SSH login you already have. No account, no open port, nobody in between.</p>
   <div class="btns">
     <a class="btn" href="#download"><span data-i="download"></span>Download</a>
     <a class="btn alt" href="https://web.sshremote.dev/"><span data-i="globe"></span>Open in the browser</a>
     <a class="btn alt" href="docs.html#start">Read the guide</a>
   </div>
   <ul class="facts">
-    <li>Windows and Linux</li>
+    <li>Windows, macOS and Linux</li>
     <li>One file, nothing to install</li>
-    <li>Open source, written in Rust</li>
+    <li>Open source (MIT), written in Rust</li>
   </ul>
   <div class="stage">
     <div class="window">
-      <img class="th-dark" src="img/new-dark.png" width="1100" height="700" alt="The home window: this computer on the left, the address field and the computers on the right">
-      <img class="th-light" src="img/new-light.png" width="1100" height="700" alt="The home window: this computer on the left, the address field and the computers on the right">
+      <img class="th-dark" src="img/workspace-dark.png" width="1100" height="700" alt="The workspace: a project's files, a server's terminal and an AI agent's answer read as Markdown, side by side">
+      <img class="th-light" src="img/workspace-light.png" width="1100" height="700" alt="The workspace: a project's files, a server's terminal and an AI agent's answer read as Markdown, side by side">
     </div>
   </div>
 </div></div>
@@ -52,8 +86,44 @@
 <section id="features"><div class="wrap">
   <div class="feature">
     <div>
-      <span class="eyebrow">01 · Computers</span>
-      <h3>One field for every computer, and tabs that switch between shell, screen and files</h3>
+      <span class="eyebrow">01 · Workspace</span>
+      <h2>Every server and project in one window</h2>
+      <p>Each tab is a computer, split beside or below into panes, and each pane is a terminal, the host's screen or its files, switched in place. Layouts arrange many panes at once, tabs tear off into windows of their own, a tab set is kept as a project and opened again whole, and lost connections come back by themselves.</p>
+      <ul class="points">
+        <li><b>Terminals</b><span>Tabs and splits across hosts, scrollback search, Ctrl+Shift+T/W, links and pictures (sixel, kitty)</span></li>
+        <li><b>Markdown</b><span>Any output read as rendered Markdown, tables and code blocks with copy and download</span></li>
+        <li><b>Files</b><span>Two sides, drag and drop between them or from the desktop, never overwriting</span></li>
+        <li><b>Extensions</b><span>Panels, commands, styles and programs from a signed registry, each held to its permissions</span></li>
+      </ul>
+    </div>
+    <div class="window">
+      <img class="th-dark" src="img/servers-dark.png" width="1100" height="700" alt="Four servers' terminals in one tab: a web server's containers, a GPU training run, a database query and a staging build" loading="lazy">
+      <img class="th-light" src="img/servers-light.png" width="1100" height="700" alt="Four servers' terminals in one tab: a web server's containers, a GPU training run, a database query and a staging build" loading="lazy">
+    </div>
+  </div>
+
+  <div class="feature flip">
+    <div>
+      <span class="eyebrow">02 · Coding with AI agents</span>
+      <h2>Built for agents working on remote machines</h2>
+      <p>Run Claude Code, Codex or any agent in a server's terminal and read what it writes as a document, not a scrolling wall. Drop files or paste a screenshot into its terminal and they land on that server. Let an agent see and operate a remote desktop itself through the built-in MCP server.</p>
+      <ul class="points">
+        <li><b>Reading</b><span>Prompts, replies and code blocks of an agent's session, rendered as Markdown</span></li>
+        <li><b>Drop</b><span>Files and screenshots dropped or pasted into a terminal go to that host</span></li>
+        <li><b>MCP</b><span><code>sshremote mcp HOST</code>: screenshots, clicks, keys and the window as text, for any agent</span></li>
+        <li><b>Web apps</b><span>Claude, ChatGPT, Gemini and other web apps in a pane beside your terminals</span></li>
+      </ul>
+    </div>
+    <div class="window">
+      <img class="th-dark" src="img/agent-dark.png" width="1100" height="700" alt="An agent's plan, a table of checks and a code block, read as Markdown in a server's terminal" loading="lazy">
+      <img class="th-light" src="img/agent-light.png" width="1100" height="700" alt="An agent's plan, a table of checks and a code block, read as Markdown in a server's terminal" loading="lazy">
+    </div>
+  </div>
+
+  <div class="feature">
+    <div>
+      <span class="eyebrow">03 · Computers</span>
+      <h2>One field for every computer, and tabs that switch between shell, screen and files</h2>
       <p>Type <code>user@host</code>, an alias, an IP or a remote access ID and open its terminal, its screen or its files. Each computer keeps its name, key, saved password and SSH tunnels; aliases stay in <code>~/.ssh/config</code>. In the workspace each tab is a computer, split beside or below, and lost connections come back by themselves.</p>
       <ul class="points">
         <li><b>Screen</b><span>Keyboard and mouse, monitors, one window, clipboard with files, sound, chat, voice calls, recording</span></li>
@@ -63,15 +133,15 @@
       </ul>
     </div>
     <div class="window">
-      <img class="th-dark" src="img/ssh-dark.png" width="1100" height="700" alt="A computer's sheet: its ~/.ssh/config block, saved password and tunnels" loading="lazy">
-      <img class="th-light" src="img/ssh-light.png" width="1100" height="700" alt="A computer's sheet: its ~/.ssh/config block, saved password and tunnels" loading="lazy">
+      <img class="th-dark" src="img/new-dark.png" width="1100" height="700" alt="The home window: this computer on the left, the address field and a developer's servers, tagged, on the right" loading="lazy">
+      <img class="th-light" src="img/new-light.png" width="1100" height="700" alt="The home window: this computer on the left, the address field and a developer's servers, tagged, on the right" loading="lazy">
     </div>
   </div>
 
   <div class="feature flip">
     <div>
-      <span class="eyebrow">02 · Remote access by ID</span>
-      <h3>For the PC on Wi-Fi with no address and no SSH</h3>
+      <span class="eyebrow">04 · Remote access by ID</span>
+      <h2>For the PC on Wi-Fi with no address and no SSH</h2>
       <p>Turn it on and the PC gets a lasting 9-digit ID. Type that ID and its password on the other side; both ends dial out to the relay, which only copies bytes it cannot read.</p>
       <ul class="points">
         <li><b>Crypto</b><span>SPAKE2 password proof, ChaCha20-Poly1305 on every byte, two-step codes</span></li>
@@ -90,8 +160,8 @@
 
   <div class="feature">
     <div>
-      <span class="eyebrow">03 · Settings</span>
-      <h3>The SSH chores, done properly</h3>
+      <span class="eyebrow">05 · Settings</span>
+      <h2>The SSH chores, done properly</h2>
       <p>Make, copy and install keys, keep passwords in the system's password store, and back up your computers, settings and all of <code>~/.ssh</code> under a passphrase.</p>
     </div>
     <div class="window">
@@ -148,7 +218,7 @@
     <a class="file" href="download/sshremote-macos.zip" data-file="sshremote-macos.zip"><span data-i="apple"></span><span><b>SSH Remote for macOS</b><span class="meta">Apple silicon and Intel · macOS 12.3 or later</span></span><span class="size"></span><span class="go">Download <span data-i="download"></span></span></a>
   </div>
   <p class="dim small" style="margin-top:20px">The Windows file is not signed yet, so Windows may hold it back the first time it runs: <b>More info</b>, then <b>Run anyway</b>. The Mac app is not notarized by Apple: unzip it, move it to Applications, and the first time open it with a right click and <b>Open</b> (or <b>Open Anyway</b> in System Settings &gt; Privacy &amp; Security).</p>
-  <p class="dim small">Nothing to install where you are? Reach a computer by its ID <a href="https://web.sshremote.dev/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/thinkbigx/sshremote">README</a>.</p>
+  <p class="dim small">Nothing to install where you are? Reach a computer by its ID <a href="https://web.sshremote.dev/">in the browser</a>: its screen and files, in the page. From source: <code>cargo build --release</code>, see the <a href="https://github.com/sshremote-dev/sshremote">README</a>.</p>
 </div></section>
 
 <section id="start"><div class="wrap">
@@ -166,27 +236,28 @@ mv sshremote-linux-x86_64 ~/.local/bin/sshremote</code></pre></div>
 </div></section>
 
 <section class="alt closing"><div class="wrap">
-  <h2>Your other computer, one window away.</h2>
-  <p class="dim">Free and open source. No sign-up.</p>
-  <div class="btns"><a class="btn" href="#download"><span data-i="download"></span>Download</a><a class="btn alt" href="https://web.sshremote.dev/"><span data-i="globe"></span>Open in the browser</a><a class="btn alt" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>Source</a></div>
+  <h2>All your servers, one window away.</h2>
+  <p class="dim">Free and open source under the MIT license. No account, no sign-up.</p>
+  <div class="btns"><a class="btn" href="#download"><span data-i="download"></span>Download</a><a class="btn alt" href="https://web.sshremote.dev/"><span data-i="globe"></span>Open in the browser</a><a class="btn alt" href="https://github.com/sshremote-dev/sshremote"><span data-i="github"></span>Source</a></div>
 </div></section>
 </main>
 
 <footer><div class="wrap">
   <span>SSH Remote · open source · icons by <a href="https://phosphoricons.com">Phosphor</a></span>
-  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="https://github.com/sshremote-dev/sshremote">GitHub</a></nav>
 </div></footer>
 <script>
 fetch('download/index.json').then((r) => r.ok ? r.json() : null).then((d) => {
   if (!d) return;
   if (d.version) { const v = document.getElementById('dl-version'); v.textContent = 'v' + d.version; v.hidden = false; }
-  const mb = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+  // Decimal units, as the size a download shows (the exact bytes on hover).
+  const mb = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.ceil(n / 1e3) + ' kB';
   for (const f of d.files || []) {
     const a = document.querySelector('[data-file="' + CSS.escape(f.name) + '"]');
     if (!a) continue;
     a.querySelector('.size').textContent = mb(f.size);
     a.querySelector('.meta').insertAdjacentText('beforeend', ' · SHA-256 ' + f.sha256.slice(0, 12) + '…');
-    a.title = 'SHA-256 ' + f.sha256;
+    a.title = f.size.toLocaleString('en') + ' bytes · SHA-256 ' + f.sha256;
   }
 }).catch(() => {});
 </script>

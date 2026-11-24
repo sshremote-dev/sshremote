@@ -456,6 +456,129 @@ fn workspace_pictures() {
     }
 }
 
+/// The site's picture of the workspace: a computer's screen beside two servers' terminals, one
+/// of them read as Markdown. The terminals' programs print nothing; what they show is written in:
+/// SSHREMOTE_SITE_DIR=site/img cargo test --release site_workspace_pictures -- --ignored
+#[test]
+#[ignore]
+fn site_workspace_pictures() {
+    let Some(dir) = std::env::var_os("SSHREMOTE_SITE_DIR").map(std::path::PathBuf::from) else { return };
+    let deploy = concat!(
+        "\x1b[2J\x1b[H\x1b[32mdeploy@web1\x1b[0m:\x1b[34m~/api\x1b[0m$ git pull && cargo build --release\r\n",
+        "Updating 4f2c1a9..b81d0e3\r\n",
+        " src/retry.rs | 18 \x1b[32m+++++++++\x1b[31m---\x1b[0m\r\n",
+        "\x1b[1;32m   Compiling\x1b[0m api v2.4.1 (/home/deploy/api)\r\n",
+        "\x1b[1;32m    Finished\x1b[0m `release` profile [optimized] target(s) in 41.2s\r\n",
+        "\x1b[32mdeploy@web1\x1b[0m:\x1b[34m~/api\x1b[0m$ sudo systemctl restart api\r\n",
+        "\x1b[32mdeploy@web1\x1b[0m:\x1b[34m~/api\x1b[0m$ journalctl -u api -n 3\r\n",
+        "Nov 24 10:21:07 web1 api[48211]: listening on 0.0.0.0:8080\r\n",
+        "Nov 24 10:21:07 web1 api[48211]: connected to postgres://db:5432/app\r\n",
+        "Nov 24 10:21:08 web1 api[48211]: GET /health 200 0.4ms\r\n",
+        "\x1b[32mdeploy@web1\x1b[0m:\x1b[34m~/api\x1b[0m$ ",
+    );
+    let answer = concat!(
+        "\x1b[2J\x1b[H## What changed\r\n",
+        "\r\n",
+        "The retry loop in `src/retry.rs` now backs off **exponentially**, capped at 30 s:\r\n",
+        "\r\n",
+        "```rust\r\n",
+        "let delay = base.saturating_mul(2u32.pow(attempt)).min(MAX);\r\n",
+        "```\r\n",
+        "\r\n",
+        "- `cargo test`: 48 passed\r\n",
+        "- Deployed to **staging**; `/health` answers in 0.4 ms\r\n",
+    );
+    // Nothing behind the panes and no overlay: the panes alone.
+    crate::gui::look::set(crate::gui::look::Look { layers: Vec::new(), hud: false, ..Default::default() });
+    for dark in [true, false] {
+        let mut h = Harness::new();
+        crate::gui::theme::apply_theme(&h.ctx, dark);
+        h.size = Vec2::new(1100.0, 700.0);
+        // (The files of the folder the test runs in: a home with projects in it, for the site.)
+        let files = Launch::Agent { target: Target::Local { capture: "synthetic".into() }, label: "staging".into(), ssh_cmd: None, mode: PaneMode::Files };
+        h.w.add(files, Place::Tab, PaneStart::default());
+        h.until("connected", |w| live(w, 0));
+        for (name, below) in [("web1", false), ("staging", true)] {
+            let profile = crate::termwin::Profile { name: name.into(), icon: ic::TERMINAL, launch: crate::termwin::Launch::Local(vec!["sleep".into(), "600".into()]) };
+            h.w.add(Launch::Shell { label: name.into(), profile, target: Target::Local { capture: "synthetic".into() }, ssh_cmd: None }, Place::Split { below }, PaneStart::default());
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.frame(Vec::new());
+            }
+        }
+        for (i, (text, markdown)) in [(deploy, false), (answer, true)].into_iter().enumerate() {
+            let State::Shell(t) = &mut h.w.panes[i + 1].state else { panic!("a terminal") };
+            t.write_for_picture(text.as_bytes(), markdown);
+        }
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            h.frame(Vec::new());
+        }
+        h.snap.save(&h.ctx, h.size, &dir.join(format!("workspace-{}.png", if dark { "dark" } else { "light" })));
+        h.w.close_all();
+    }
+    // Four servers' terminals in one tab, and an agent's answer read whole.
+    let prompt = |who: &str, at: &str| format!("\x1b[32m{who}\x1b[0m:\x1b[34m{at}\x1b[0m$ ");
+    let servers = [
+        ("web1", format!("\x1b[2J\x1b[H{}docker ps --format 'table {{{{.Names}}}}\\t{{{{.Status}}}}'\r\nNAMES     STATUS\r\napi       Up 3 hours (healthy)\r\nworker    Up 3 hours\r\nnginx     Up 9 days\r\n{}", prompt("deploy@web1", "~"), prompt("deploy@web1", "~"))),
+        ("gpu box", format!("\x1b[2J\x1b[H{}python train.py --epochs 40\r\nepoch 37/40  loss 0.1842  val_acc 0.913  3m12s\r\nepoch 38/40  loss 0.1797  val_acc 0.916  3m11s\r\nepoch 39/40  loss 0.1771  val_acc 0.917  3m12s\r\n\x1b[32msaved\x1b[0m runs/0412/best.pt\r\n", prompt("ml@gpu", "~/ml-train"))),
+        ("db", format!("\x1b[2J\x1b[H{}psql -c \"select count(*) from orders\"\r\n count\r\n-------\r\n 18342\r\n(1 row)\r\n\r\n{}", prompt("postgres@db", "~"), prompt("postgres@db", "~"))),
+        ("staging", format!("\x1b[2J\x1b[H{}git log --oneline -3\r\n\x1b[33mb81d0e3\x1b[0m retry with exponential backoff\r\n\x1b[33m4f2c1a9\x1b[0m cache the session lookup\r\n\x1b[33m9e07b52\x1b[0m healthcheck answers in under 1 ms\r\n{}npm run build\r\n\x1b[32m\u{2713}\x1b[0m built in 2.41s\r\n{}", prompt("deploy@staging", "~/web"), prompt("deploy@staging", "~/web"), prompt("deploy@staging", "~/web"))),
+    ];
+    let plan = concat!(
+        "\x1b[2J\x1b[H## Plan\r\n\r\n",
+        "1. Read `src/retry.rs` and its tests\r\n",
+        "2. Replace the fixed 2 s wait with exponential backoff, capped at 30 s\r\n",
+        "3. Run the tests, then deploy to **staging**\r\n\r\n",
+        "## Result\r\n\r\n",
+        "| Check | Result |\r\n|---|---|\r\n| `cargo test` | 48 passed |\r\n| `cargo clippy` | clean |\r\n| `/health` on staging | 200 in 0.4 ms |\r\n\r\n",
+        "```rust\r\nlet delay = base.saturating_mul(2u32.pow(attempt)).min(MAX);\r\n```\r\n",
+    );
+    for dark in [true, false] {
+        let theme = if dark { "dark" } else { "light" };
+        let mut h = Harness::new();
+        crate::gui::theme::apply_theme(&h.ctx, dark);
+        h.size = Vec2::new(1100.0, 700.0);
+        let shell = |name: &str| Launch::Shell {
+            label: name.into(),
+            profile: crate::termwin::Profile { name: name.into(), icon: ic::TERMINAL, launch: crate::termwin::Launch::Local(vec!["sleep".into(), "600".into()]) },
+            target: Target::Local { capture: "synthetic".into() },
+            ssh_cmd: None,
+        };
+        let settle = |h: &mut Harness| {
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.frame(Vec::new());
+            }
+        };
+        // web1 | gpu box over db | staging: two columns of two.
+        h.w.add(shell(servers[0].0), Place::Tab, PaneStart::default());
+        settle(&mut h);
+        h.w.add(shell(servers[1].0), Place::Split { below: false }, PaneStart::default());
+        settle(&mut h);
+        h.w.add(shell(servers[3].0), Place::Split { below: true }, PaneStart::default());
+        settle(&mut h);
+        h.w.tabs[0].active = h.w.order(0)[0];
+        h.w.add(shell(servers[2].0), Place::Split { below: true }, PaneStart::default());
+        settle(&mut h);
+        for (i, (_, text)) in servers.iter().enumerate() {
+            let State::Shell(t) = &mut h.w.panes[i].state else { panic!("a terminal") };
+            t.write_for_picture(text.as_bytes(), false);
+        }
+        settle(&mut h);
+        h.snap.save(&h.ctx, h.size, &dir.join(format!("servers-{theme}.png")));
+        h.w.close_all();
+        h.frame(Vec::new());
+        h.w.add(shell("staging"), Place::Tab, PaneStart::default());
+        settle(&mut h);
+        let State::Shell(t) = &mut h.w.panes[0].state else { panic!("a terminal") };
+        t.write_for_picture(plan.as_bytes(), true);
+        settle(&mut h);
+        h.snap.save(&h.ctx, h.size, &dir.join(format!("agent-{theme}.png")));
+        h.w.close_all();
+    }
+}
+
 /// Many tabs scroll as whole tabs, the current one always in view, with the + and the
 /// pane's controls kept clear; the list at the end goes to any tab, middle click closes one.
 #[test]

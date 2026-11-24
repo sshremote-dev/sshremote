@@ -1632,6 +1632,20 @@ pub(crate) fn spawn_system(cmd: &[String]) -> std::io::Result<()> {
 mod tests;
 
 #[cfg(test)]
+impl TermWindow {
+    /// What the first tab's program wrote, as `bytes`; read as Markdown when asked (for pictures
+    /// of the windows).
+    pub(crate) fn write_for_picture(&mut self, bytes: &[u8], markdown: bool) {
+        let t = &mut self.tabs[0];
+        t.parser.advance(&mut t.term, bytes);
+        t.rev += 1;
+        if markdown {
+            t.view = View::Markdown;
+        }
+    }
+}
+
+#[cfg(test)]
 mod speed {
     use crate::gui::snapshot::RunTest;
     use super::*;

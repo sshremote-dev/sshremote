@@ -3,8 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docs: SSH Remote</title>
-<meta name="description" content="Getting started with SSH Remote: SSH and relay connections, extensions, MCP and security.">
+<title>SSH Remote docs: workspace, terminals, SSH, remote access by ID, MCP</title>
+<meta name="description" content="How to use SSH Remote: the workspace and its panes, terminals and Markdown, SSH hosts and ~/.ssh/config, remote access by ID, the MCP server for AI agents, extensions and security.">
+<link rel="canonical" href="https://sshremote.dev/docs.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SSH Remote">
+<meta property="og:url" content="https://sshremote.dev/docs.html">
+<meta property="og:title" content="SSH Remote docs: workspace, terminals, SSH, remote access by ID, MCP">
+<meta property="og:description" content="How to use SSH Remote: the workspace and its panes, terminals and Markdown, SSH hosts and ~/.ssh/config, remote access by ID, the MCP server for AI agents, extensions and security.">
+<meta property="og:image" content="https://sshremote.dev/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e0e10" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -21,7 +29,7 @@
     <a href="extensions.html">Extensions</a>
     <a href="docs.html">Docs</a>
     <a href="index.html#download">Download</a>
-    <a class="gh" href="https://github.com/thinkbigx/sshremote"><span data-i="github"></span>GitHub</a>
+    <a class="gh" href="https://github.com/sshremote-dev/sshremote"><span data-i="github"></span>GitHub</a>
   </nav>
   <a class="btn sm" id="webapp" href="https://web.sshremote.dev/" title="Reach a computer by its ID from this browser, with nothing to install"><span data-i="globe"></span>Open in browser</a>
   <button class="icon-btn" id="theme" type="button" aria-label="Theme"></button>
@@ -104,7 +112,7 @@ sshremote sshremote://ID --password P [--code C]
 sshremote find                       # computers nearby with remote access on
 sshremote wake 3c:52:82:1a:2b:3c     # Wake-on-LAN</code></pre>
   <h3>Your own relay</h3>
-  <p>The relay is a small program of its own, <a href="https://github.com/thinkbigx/sshremote-relay">sshremote-relay</a>, listening on TCP 7071, and on UDP 7071 to tell computers where it sees them from (for straight paths; open both in a firewall). To run your own and keep its IDs in a file:</p>
+  <p>The relay is a small program of its own, <a href="https://github.com/sshremote-dev/sshremote-relay">sshremote-relay</a>, listening on TCP 7071, and on UDP 7071 to tell computers where it sees them from (for straight paths; open both in a firewall). To run your own and keep its IDs in a file:</p>
   <pre class="cmd"><code>sshremote-relay --listen 0.0.0.0:7071 --store /var/lib/sshremote/ids.json</code></pre>
 
   <h2 id="workspace">Working in panes</h2>
@@ -130,7 +138,7 @@ sshremote ext install FILE.sshx  # from a file</code></pre>
   <p>An extension is a folder with an <code>extension.json</code> manifest. Programs speak JSON-RPC 2.0 over stdin and stdout, one message per line, so any language works. Start from the Rust template, which has a status bar item, a command with a key, a panel, a setting and a form:</p>
   <pre class="cmd"><code>sshremote ext new my-extension
 sshremote ext dev my-extension</code></pre>
-  <p><code>ext dev</code> builds, installs and reloads it in the open app every time a file changes. To share one, pack it with <code>sshremote ext pack DIR OUT.sshx</code>. The manifest, the permissions and the full protocol are in <a href="https://github.com/thinkbigx/sshremote/blob/main/docs/extensions.md">docs/extensions.md</a>.</p>
+  <p><code>ext dev</code> builds, installs and reloads it in the open app every time a file changes. To share one, pack it with <code>sshremote ext pack DIR OUT.sshx</code>. The manifest, the permissions and the full protocol are in <a href="https://github.com/sshremote-dev/sshremote/blob/main/docs/extensions.md">docs/extensions.md</a>.</p>
 
   <h2 id="mcp">MCP for AI agents</h2>
   <p><code>sshremote mcp HOST</code> (or <code>sshremote mcp --here</code> for this computer) is an MCP server that reads the window in front as text from the accessibility tree and acts on its controls, taking screenshots only when needed. In your agent's MCP configuration:</p>
@@ -151,7 +159,7 @@ sshremote ext dev my-extension</code></pre>
 
 <footer><div class="wrap">
   <span>SSH Remote · open source · icons by <a href="https://phosphoricons.com">Phosphor</a></span>
-  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="https://github.com/thinkbigx/sshremote">GitHub</a></nav>
+  <nav aria-label="Footer"><a href="docs.html">Docs</a><a href="extensions.html">Extensions</a><a href="https://github.com/sshremote-dev/sshremote">GitHub</a></nav>
 </div></footer>
 </body>
 </html>

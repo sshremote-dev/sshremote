@@ -2,8 +2,10 @@
 name = "sshremote"
 version = "0.25.28"
 edition = "2024"
-description = "Remote control over SSH, in a terminal or a window"
+description = "A workspace for many servers and projects: terminals, Markdown, screens and files over SSH"
 license = "MIT"
+repository = "https://github.com/sshremote-dev/sshremote"
+homepage = "https://sshremote.dev"
 
 [dependencies]
 alacritty_terminal = { version = "0.25", default-features = false }

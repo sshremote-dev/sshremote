@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /registry/
+Disallow: /web/
+
+Sitemap: https://sshremote.dev/sitemap.xml
