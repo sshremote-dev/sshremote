@@ -611,13 +611,15 @@ fn many_tabs_scroll_and_keep_the_bar_whole() {
     h.click_at(list.center(), PointerButton::Primary);
     h.item("host03");
     assert_eq!(h.w.current, 3, "the list goes to a tab");
-    let at = in_bar(&h, "host04")[0].center();
+    // That tab is in view (its neighbours may not be, with wider letters).
+    h.frame(Vec::new());
+    let at = in_bar(&h, "host03")[0].center();
     h.click_at(at, PointerButton::Middle);
     assert!(matches!(h.w.confirm, Some(Confirm::Tab(_))), "middle click asks to close the tab");
     h.frame(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
     assert_eq!(h.w.tabs.len(), 29, "and closes it");
     h.frame(Vec::new());
-    assert!(in_bar(&h, "host04").is_empty());
+    assert!(in_bar(&h, "host03").is_empty());
     h.w.close_all();
 }
 
