@@ -1256,17 +1256,27 @@ impl Guard {
     }
 
     /// Takes one of the calls answered at once, if there is one for a call from there.
-    /// Given back with `calls.fetch_sub` when the call is over.
-    fn take_call(&self, from: &str) -> bool {
+    /// A place for one call more from `from`, if it may have one: given back as the slot goes,
+    /// also when its call ends in a panic.
+    fn take_call(self: &Arc<Self>, from: &str) -> Option<CallSlot> {
         if self.locked(from) {
-            return false;
+            return None;
         }
         let most = if self.known(from) { MOST_CALLS + KNOWN_CALLS } else { MOST_CALLS };
         if self.calls.fetch_add(1, Ordering::AcqRel) >= most {
             self.calls.fetch_sub(1, Ordering::AcqRel);
-            return false;
+            return None;
         }
-        true
+        Some(CallSlot(self.clone()))
+    }
+}
+
+/// One of the calls taken at once (`Guard::take_call`).
+struct CallSlot(Arc<Guard>);
+
+impl Drop for CallSlot {
+    fn drop(&mut self) {
+        self.0.calls.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1382,13 +1392,11 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                     let from = seen.remove(nonce);
                     // A flood of calls is not answered past a handful at once, nor at all while
                     // no password is taken from there.
-                    if !guard.take_call(&place(from)) {
-                        continue;
-                    }
+                    let Some(slot) = guard.take_call(&place(from)) else { continue };
                     let (cfg, nonce, guard) = (cfg.clone(), nonce.to_string(), guard.clone());
                     thread::spawn(move || {
+                        let _slot = slot;
                         answer_call(&cfg, &nonce, &guard, from);
-                        guard.calls.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
             }
@@ -1456,16 +1464,14 @@ fn listen_direct(guard: Arc<Guard>) {
         match l.accept() {
             Ok((mut s, _)) => {
                 let _ = s.set_nonblocking(false);
-                if !guard.take_call(&place(s.peer_addr().ok().map(|a| a.ip()))) {
-                    continue;
-                }
+                let Some(slot) = guard.take_call(&place(s.peer_addr().ok().map(|a| a.ip()))) else { continue };
                 let guard = guard.clone();
                 thread::spawn(move || {
+                    let _slot = slot;
                     if crate::net::accept_direct(&mut s, &cfg.id) {
                         let from = s.peer_addr().ok().map(|a| a.ip());
                         serve_call(s, &cfg, &guard, false, from);
                     }
-                    guard.calls.fetch_sub(1, Ordering::AcqRel);
                 });
             }
             Err(_) => thread::sleep(Duration::from_millis(200)),
@@ -2676,7 +2682,7 @@ mod tests {
 
     #[test]
     fn wrong_passwords_lock_out_where_they_come_from_never_the_owner() {
-        let g = Guard::default();
+        let g = Arc::new(Guard::default());
         let (owner, guesser, other) = ("192.0.2.1", "198.51.100.7", "2001:db8:1:2::/64");
         g.passed(owner);
         for _ in 0..LOCK_AFTER - 1 {
@@ -2686,8 +2692,8 @@ mod tests {
         assert!(g.delay(guesser) >= Duration::from_secs(30) && g.delay(owner) == Duration::ZERO, "a wait for guessers, none for the owner");
         g.failed(guesser);
         assert!(g.locked(guesser) && !g.locked(other) && !g.locked(owner), "{LOCK_AFTER} in a row lock out only their place");
-        assert!(!g.take_call(guesser) && g.take_call(owner));
-        g.calls.fetch_sub(1, Ordering::AcqRel);
+        assert!(g.take_call(guesser).is_none() && g.take_call(owner).is_some());
+        assert_eq!(g.calls.load(Ordering::Acquire), 0, "the slot given back as it went");
         // Guesses from places by the hundred: all places not let in lately are locked, not the owner's.
         for i in 0..LOCK_ALL_AFTER {
             g.failed(&format!("203.0.{}.{}", i / 200, i % 200));
@@ -2695,7 +2701,7 @@ mod tests {
         assert!(g.locked(other) && locked() && !g.locked(owner), "{LOCK_ALL_AFTER} from many places");
         // The owner keeps calls of its own while a flood takes all the others.
         g.calls.store(MOST_CALLS, Ordering::Release);
-        assert!(!g.take_call("203.0.9.9") && g.take_call(owner));
+        assert!(g.take_call("203.0.9.9").is_none() && g.take_call(owner).is_some());
         g.calls.store(0, Ordering::Release);
         // The owner's own mistakes count against the owner's place alone.
         let before = g.strikes.lock().unwrap().0;
