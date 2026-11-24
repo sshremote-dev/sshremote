@@ -129,7 +129,8 @@ What is opened goes into the workspace:
 - **Screen sharing**: quality (auto, five presets from black and white at 30 fps to
   full colour at 60, each at full size, or colours, picture size and frame rate of one's own), the resolution of the
   host's screen itself (its display mode, as RustDesk's: set from the Display menu and set back
-  when the connection ends; on Windows, X11, GNOME, KDE Plasma with kscreen-doctor, Sway,
+  when the connection ends; on Windows, macOS (the sizes System Settings lists, a Retina display's
+  at twice the pixels), X11, GNOME, KDE Plasma with kscreen-doctor, Sway,
   Hyprland and COSMIC, a virtual screen there taking common sizes; not Hyprland on a virtual machine's
   graphics, which cannot make a screen larger again once it made it smaller), fit, zoom (the host sends its own pixels, which
   its lossless coding and scrolls keep exact; a smaller pane or zoom makes them smaller here, each

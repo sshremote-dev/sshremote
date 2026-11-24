@@ -2,7 +2,8 @@
 //! not the picture's size) and set back as it was when the session ends. On Windows through the
 //! display settings, without saving them (signing out puts the saved ones back too); in X11
 //! sessions through RandR; under Wayland through the desktop: GNOME's display configuration, KDE
-//! Plasma's kscreen-doctor, Sway's swaymsg, Hyprland's hyprctl and COSMIC's cosmic-randr.
+//! Plasma's kscreen-doctor, Sway's swaymsg, Hyprland's hyprctl and COSMIC's cosmic-randr; on
+//! macOS through Core Graphics' display modes, for as long as this program runs.
 
 /// A screen's resolutions, largest first, and the one it has.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,11 +13,11 @@ pub struct Modes {
 }
 
 /// Smaller than this is no desktop to work in.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux", target_os = "macos")), allow(dead_code))]
 const SMALLEST: (u16, u16) = (640, 480);
 
 /// The resolutions once each, largest first.
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn tidy(mut list: Vec<(u16, u16)>) -> Vec<(u16, u16)> {
     list.retain(|&(w, h)| w >= SMALLEST.0 && h >= SMALLEST.1);
     list.sort_by_key(|&(w, h)| std::cmp::Reverse((w as u32 * h as u32, w)));
@@ -40,10 +41,12 @@ enum Way {
     KScreen,
     #[cfg(target_os = "linux")]
     Cosmic,
+    #[cfg(target_os = "macos")]
+    Mac,
 }
 
-/// None yet elsewhere (macOS): no screen is set there.
-#[cfg(not(any(windows, target_os = "linux")))]
+/// None elsewhere: no screen is set there.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 impl Way {
     fn find(_backend: &str) -> Option<Way> {
         None
@@ -62,7 +65,7 @@ impl Way {
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 impl Way {
     /// For the capture backend named `backend`, where this desktop lets its screens be set.
     fn find(backend: &str) -> Option<Way> {
@@ -75,6 +78,8 @@ impl Way {
             "gnome" => Some(Way::Mutter),
             #[cfg(target_os = "linux")]
             "portal" | "portal-view" => linux::wayland(),
+            #[cfg(target_os = "macos")]
+            "mac" => Some(Way::Mac),
             _ => None,
         }
     }
@@ -96,6 +101,8 @@ impl Way {
             Way::KScreen => linux::kscreen_outputs().into_iter().map(|o| o.name).collect(),
             #[cfg(target_os = "linux")]
             Way::Cosmic => linux::cosmic_outputs().into_iter().map(|o| o.name).collect(),
+            #[cfg(target_os = "macos")]
+            Way::Mac => mac::screens(),
         }
     }
 
@@ -115,6 +122,8 @@ impl Way {
             Way::KScreen => linux::kscreen_outputs().into_iter().find(|o| o.name == id).map(|o| o.modes()),
             #[cfg(target_os = "linux")]
             Way::Cosmic => linux::cosmic_outputs().into_iter().find(|o| o.name == id).map(|o| o.modes()),
+            #[cfg(target_os = "macos")]
+            Way::Mac => mac::modes(id),
         }?;
         Some(Modes { list: tidy(m.list), current: m.current })
     }
@@ -135,6 +144,8 @@ impl Way {
             Way::KScreen => linux::kscreen_set(id, w, h),
             #[cfg(target_os = "linux")]
             Way::Cosmic => linux::cosmic_set(id, w, h),
+            #[cfg(target_os = "macos")]
+            Way::Mac => mac::set(id, w, h),
         }
     }
 }
@@ -218,6 +229,93 @@ impl Drop for Session {
                 let _ = way.set(&id, w, h);
             }
         }
+    }
+}
+
+/// A Mac's displays by their Core Graphics number, their modes by the size they give the desktop
+/// (in points, as System Settings lists them: a Retina display's pixels are twice as many).
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::Modes;
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, Type};
+    use objc2_core_graphics::{
+        CGBeginDisplayConfiguration, CGCancelDisplayConfiguration, CGCompleteDisplayConfiguration, CGConfigureDisplayWithDisplayMode, CGConfigureOption, CGDisplayConfigRef,
+        CGDisplayCopyAllDisplayModes, CGDisplayCopyDisplayMode, CGDisplayMode, CGError, CGGetActiveDisplayList, kCGDisplayShowDuplicateLowResolutionModes,
+    };
+
+    pub fn screens() -> Vec<String> {
+        let (mut ids, mut n) = ([0u32; 16], 0u32);
+        // SAFETY: room for 16 displays; their count is written back.
+        unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+        ids[..(n as usize).min(16)].iter().map(|id| id.to_string()).collect()
+    }
+
+    /// A mode's size in points, and its pixels to a point.
+    fn size(m: &CGDisplayMode) -> ((u16, u16), usize) {
+        let (w, h) = (CGDisplayMode::width(Some(m)), CGDisplayMode::height(Some(m)));
+        let side = |v: usize| v.min(u16::MAX as usize) as u16;
+        ((side(w), side(h)), CGDisplayMode::pixel_width(Some(m)) / w.max(1))
+    }
+
+    /// Display `id`'s modes for a desktop, each size once (at the scale the display has now where
+    /// it can, else the sharper; the faster), and the one it has.
+    fn all(id: &str) -> Option<(Vec<CFRetained<CGDisplayMode>>, CFRetained<CGDisplayMode>)> {
+        let id: u32 = id.parse().ok()?;
+        let current = CGDisplayCopyDisplayMode(id)?;
+        // SAFETY: Core Graphics' own key, a static string.
+        let key: &CFString = unsafe { kCGDisplayShowDuplicateLowResolutionModes };
+        // The modes at another scale too (HiDPI, or not), to choose among.
+        let options = CFDictionary::<CFString, CFBoolean>::from_slices(&[key], &[CFBoolean::new(true)]);
+        // SAFETY: the options are the dictionary of the key and value the call takes.
+        let list = unsafe { CGDisplayCopyAllDisplayModes(id, Some(options.as_opaque())) }?;
+        let scale = size(&current).1;
+        let rank = |m: &CGDisplayMode| {
+            let k = size(m).1;
+            (k == scale, k, CGDisplayMode::refresh_rate(Some(m)) as u32)
+        };
+        let mut picked: Vec<CFRetained<CGDisplayMode>> = Vec::new();
+        for i in 0..list.count() {
+            // SAFETY: an index inside the array, whose values are display modes.
+            let m: &CGDisplayMode = unsafe { &*list.value_at_index(i).cast::<CGDisplayMode>() };
+            if !CGDisplayMode::is_usable_for_desktop_gui(Some(m)) {
+                continue;
+            }
+            match picked.iter().position(|o| size(o).0 == size(m).0) {
+                Some(j) if rank(m) > rank(&picked[j]) => picked[j] = m.retain(),
+                Some(_) => {}
+                None => picked.push(m.retain()),
+            }
+        }
+        Some((picked, current))
+    }
+
+    pub fn modes(id: &str) -> Option<Modes> {
+        let (list, current) = all(id)?;
+        Some(Modes { list: list.iter().map(|m| size(m).0).collect(), current: size(&current).0 })
+    }
+
+    pub fn set(id: &str, w: u16, h: u16) -> Result<(), String> {
+        let (list, _) = all(id).ok_or("that display is gone")?;
+        let mode = list.into_iter().find(|m| size(m).0 == (w, h)).ok_or_else(|| format!("that display has no {w}x{h}"))?;
+        let display: u32 = id.parse().map_err(|_| "no such display")?;
+        let mut config: CGDisplayConfigRef = std::ptr::null_mut();
+        // SAFETY: a configuration begun here and then completed or cancelled; the mode is one
+        // this display listed.
+        let e = unsafe {
+            let e = CGBeginDisplayConfiguration(&mut config);
+            if e != CGError::Success {
+                e
+            } else if let e = CGConfigureDisplayWithDisplayMode(config, display, Some(&mode), None)
+                && e != CGError::Success
+            {
+                CGCancelDisplayConfiguration(config);
+                e
+            } else {
+                // Only while this program runs: the display is as it was once it ends, even unasked.
+                CGCompleteDisplayConfiguration(config, CGConfigureOption::ForAppOnly)
+            }
+        };
+        if e == CGError::Success { Ok(()) } else { Err(format!("macOS did not set the display to {w}x{h} (error {})", e.0)) }
     }
 }
 
@@ -836,5 +934,20 @@ mod tests {
         let mut s = Session::new("browser");
         assert_eq!(s.screen(Some("x".into())), None);
         assert!(s.set("x", 800, 600).is_err());
+    }
+
+    /// A Mac's displays and their modes as listed here, nothing set.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn a_macs_modes_are_listed() {
+        let s = Session::new("mac");
+        let all = mac::screens();
+        assert!(!all.is_empty());
+        for id in &all {
+            let (m, own) = s.modes(id).expect("its modes");
+            println!("{id}: {m:?}");
+            assert!(m.list.contains(&m.current) && own == m.current, "{m:?}");
+        }
     }
 }

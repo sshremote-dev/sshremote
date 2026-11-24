@@ -473,7 +473,7 @@ fn cursor_now(scale: f64) -> Option<super::Pointer> {
             let ctx = CGBitmapContextCreate(rgba.as_mut_ptr().cast(), w, h, 8, w * 4, space.as_deref(), CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0)?;
             CGContext::draw_image(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), Some(cg));
             drop(ctx);
-            for p in rgba.chunks_exact_mut(4) {
+            for p in rgba.as_chunks_mut::<4>().0 {
                 let a = p[3] as u32;
                 for c in &mut p[..3] {
                     *c = (*c as u32 * 255).checked_div(a).map_or(0, |v| v.min(255) as u8);
@@ -599,6 +599,25 @@ fn may_post(asked: &mut bool) -> bool {
     unsafe { AXIsProcessTrustedWithOptions(Retained::as_ptr(&options) as *const std::ffi::c_void) }
 }
 
+/// The displays as they are now (those `content` lists, when it is there), the main one first,
+/// then left to right.
+fn displays_now(content: Option<&SCShareableContent>) -> Vec<Display> {
+    let main = CGMainDisplayID();
+    let listed: Vec<(u32, CGRect)> = match content {
+        // SAFETY: reading the displays the content lists, with their plain getters.
+        Some(c) => unsafe { c.displays() }.iter().map(|d| unsafe { (d.displayID(), d.frame()) }).collect(),
+        None => {
+            let (mut ids, mut n) = ([0u32; 16], 0u32);
+            // SAFETY: room for 16 displays; their count is written back.
+            unsafe { objc2_core_graphics::CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+            ids[..(n as usize).min(16)].iter().map(|&id| (id, CGDisplayBounds(id))).collect()
+        }
+    };
+    let mut displays: Vec<Display> = listed.into_iter().map(|(id, frame)| Display::measured(id, frame)).collect();
+    displays.sort_by(|a, b| (a.id != main).cmp(&(b.id != main)).then(a.at.0.total_cmp(&b.at.0)));
+    displays
+}
+
 pub struct Mac {
     /// What ScreenCaptureKit lists; none at the login window, where it may list nothing.
     content: Option<Retained<SCShareableContent>>,
@@ -625,6 +644,16 @@ pub struct Mac {
     /// of its shape last: the system's count of its changes, and the shape sent.
     apart: bool,
     shape: (Option<i32>, Option<u64>),
+    /// When the shown display was last measured, and what Core Graphics said of it then.
+    measured: (Instant, Option<Measure>),
+}
+
+/// A display, its place and size in points and its pixels.
+type Measure = (u32, (f64, f64), (f64, f64), (usize, usize));
+
+fn measure(id: u32) -> Measure {
+    let d = Display::measured(id, CGDisplayBounds(id));
+    (id, d.at, d.points, d.pixels)
 }
 
 impl Mac {
@@ -636,33 +665,10 @@ impl Mac {
         // Just after start-up ScreenCaptureKit lists nothing at the login window: Core Graphics'
         // own list there, as its pictures are taken by Core Graphics too.
         let content = if before_sign_in() { None } else { Some(shareable()?) };
-        let main = CGMainDisplayID();
-        let listed: Vec<(u32, CGRect)> = match &content {
-            // SAFETY: reading the displays the content lists, with their plain getters.
-            Some(c) => unsafe { c.displays() }.iter().map(|d| unsafe { (d.displayID(), d.frame()) }).collect(),
-            None => {
-                let (mut ids, mut n) = ([0u32; 16], 0u32);
-                // SAFETY: room for 16 displays; their count is written back.
-                unsafe { objc2_core_graphics::CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
-                ids[..(n as usize).min(16)].iter().map(|&id| (id, CGDisplayBounds(id))).collect()
-            }
-        };
-        let mut displays: Vec<Display> = listed
-            .into_iter()
-            .map(|(id, frame)| {
-                let mode = CGDisplayCopyDisplayMode(id);
-                let pixels = (CGDisplayMode::pixel_width(mode.as_deref()), CGDisplayMode::pixel_height(mode.as_deref()));
-                let points = (frame.size.width, frame.size.height);
-                // A display whose mode cannot be read is taken at one pixel a point.
-                let pixels = if pixels.0 == 0 { (points.0 as usize, points.1 as usize) } else { pixels };
-                Display { id, at: (frame.origin.x, frame.origin.y), points, pixels }
-            })
-            .collect();
+        let displays = displays_now(content.as_deref());
         if displays.is_empty() {
             return Err("this Mac shows no display to share".into());
         }
-        // The main display first, then left to right.
-        displays.sort_by(|a, b| (a.id != main).cmp(&(b.id != main)).then(a.at.0.total_cmp(&b.at.0)));
         let target = displays[0].pixels;
         let area = displays[0].clone();
         let latest = Arc::new(Latest { frame: Mutex::new(None), fresh: AtomicBool::new(false), wake: Default::default() });
@@ -685,8 +691,10 @@ impl Mac {
             shrink: super::Shrink::default(),
             apart: false,
             shape: (None, None),
+            measured: (Instant::now(), None),
         };
         mac.restart()?;
+        mac.measured.1 = Some(measure(mac.display().id));
         Ok(mac)
     }
 
@@ -824,6 +832,38 @@ impl Mac {
         }
     }
 
+    /// Follows the shown display to its new size or place (its mode changed, from the viewer or
+    /// here): listed again, and the stream started anew. `now` looks at once.
+    fn follow_display(&mut self, now: bool) {
+        if !now && self.measured.0.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        let d = self.display().clone();
+        let seen = measure(d.id);
+        let before = std::mem::replace(&mut self.measured, (Instant::now(), Some(seen))).1;
+        // Measured the first time (or another display now), or as it was.
+        if before.is_none_or(|b| b.0 != d.id || b == seen) {
+            return;
+        }
+        // ScreenCaptureKit's list too, whose display has the new size.
+        if self.content.is_some()
+            && let Ok(c) = shareable()
+        {
+            self.content = Some(c);
+        }
+        let all = displays_now(self.content.as_deref());
+        let Some(i) = all.iter().position(|x| x.id == d.id) else { return };
+        (self.displays, self.current) = (all, i);
+        self.area = match self.scope {
+            Scope::Window { id, .. } => listed(Some(id)).into_iter().find(|w| w.id == id).and_then(|w| self.area_of(w.rect)).map_or_else(|| self.display().clone(), |(_, a)| a),
+            _ => self.display().clone(),
+        };
+        self.resized = Some(Instant::now());
+        if let Err(e) = self.restart() {
+            eprintln!("sshremote: {e}");
+        }
+    }
+
     /// The windows on screen, listed again when the last list is older than a tenth of a second.
     fn windows_now(&mut self) -> &[Win] {
         if self.seen.0.elapsed() > Duration::from_millis(100) || self.seen.1.is_empty() {
@@ -894,12 +934,17 @@ impl Display {
     #[cfg_attr(not(test), allow(dead_code))]
     fn main() -> Display {
         let id = CGMainDisplayID();
-        let b = CGDisplayBounds(id);
+        Display::measured(id, CGDisplayBounds(id))
+    }
+
+    /// Display `id` at `frame` (points), its pixels as its mode has them now.
+    fn measured(id: u32, frame: CGRect) -> Display {
         let mode = CGDisplayCopyDisplayMode(id);
         let pixels = (CGDisplayMode::pixel_width(mode.as_deref()), CGDisplayMode::pixel_height(mode.as_deref()));
-        let points = (b.size.width, b.size.height);
+        let points = (frame.size.width, frame.size.height);
+        // A display whose mode cannot be read is taken at one pixel a point.
         let pixels = if pixels.0 == 0 { (points.0 as usize, points.1 as usize) } else { pixels };
-        Display { id, at: (b.origin.x, b.origin.y), points, pixels }
+        Display { id, at: (frame.origin.x, frame.origin.y), points, pixels }
     }
 
     /// Its pixels to the point events go to.
@@ -1262,6 +1307,14 @@ impl Capture for Mac {
         self.area.pixels
     }
 
+    fn screen_id(&self) -> Option<String> {
+        Some(self.display().id.to_string())
+    }
+
+    fn screen_changed(&mut self) {
+        self.follow_display(true);
+    }
+
     fn origin(&self) -> (i32, i32) {
         let a = &self.area;
         ((a.at.0 * a.pixels.0 as f64 / a.points.0) as i32, (a.at.1 * a.pixels.1 as f64 / a.points.1) as i32)
@@ -1399,6 +1452,7 @@ impl Capture for Mac {
     }
 
     fn grab(&mut self) -> Result<Option<Image>, String> {
+        self.follow_display(false);
         self.follow();
         if !self.latest.fresh.swap(false, Ordering::AcqRel) {
             return Ok(None);
@@ -1594,6 +1648,57 @@ mod tests {
             assert_ne!((text.w, text.h, text.hot), (shape.w, shape.h, shape.hot));
         }
         m.input(Input::Move { x: (w - 40) as f64, y: (h - 40) as f64 }).unwrap();
+    }
+
+    /// The shown display set to another of its modes and back (SSHREMOTE_MAC_SET_MODE=1; it
+    /// changes for a few seconds): the capture follows, its pictures still lit and clicks still
+    /// landing where they are sent.
+    #[test]
+    #[ignore]
+    fn a_mac_follows_its_display_mode() {
+        if std::env::var_os("SSHREMOTE_MAC_SET_MODE").is_none() {
+            return;
+        }
+        let lit = |m: &mut Mac| {
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut last = None;
+            while Instant::now() < until {
+                if let Ok(Some(img)) = m.grab() {
+                    last = Some((img.w, img.h, img.data.chunks(img.stride).flat_map(|r| &r[..img.w * 4]).filter(|&&b| b > 16).count()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            last.expect("pictures")
+        };
+        let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).expect("where the pointer is");
+        let mut m = Mac::open().unwrap();
+        let id = m.screen_id().unwrap();
+        let before = (m.area.points, m.area.pixels);
+        let mut s = crate::display::Session::new("mac");
+        let (modes, _) = s.modes(&id).expect("its modes");
+        let other = *modes.list.iter().find(|&&x| x != modes.current).expect("another mode");
+        lit(&mut m);
+        m.screen_changing();
+        s.set(&id, other.0, other.1).unwrap();
+        m.screen_changed();
+        let after = (m.area.points, m.area.pixels);
+        let pictures = lit(&mut m);
+        let (w, h) = m.desktop_size();
+        m.input(Input::Move { x: w as f64 / 4.0, y: h as f64 / 4.0 }).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let at = here();
+        drop(s);
+        let until = Instant::now() + Duration::from_secs(3);
+        while (m.area.points, m.area.pixels) != before && Instant::now() < until {
+            let _ = m.grab();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let back = lit(&mut m);
+        println!("{before:?} -> {other:?}: {after:?}, pictures {pictures:?}, pointer at {:.0},{:.0}; back {:?}, pictures {back:?}", at.x, at.y, (m.area.points, m.area.pixels));
+        assert_eq!(after.0, (other.0 as f64, other.1 as f64));
+        assert!(pictures.2 > pictures.0 * pictures.1 && back.2 > back.0 * back.1, "lit");
+        assert!((at.x - after.0.0 / 4.0).abs() < 2.0 && (at.y - after.0.1 / 4.0).abs() < 2.0, "the pointer went where it was sent");
+        assert_eq!((m.area.points, m.area.pixels), before);
     }
 
     #[test]
