@@ -342,10 +342,6 @@ fn content_box(img: &Pixels) -> (usize, usize, usize, usize) {
     (0, 0, w, h)
 }
 
-type ModeT = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
-type MonitorT = ((String, String, String, String), Vec<ModeT>, HashMap<String, OwnedValue>);
-type LogicalT = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
-
 /// Connectors and current modes of the monitors, primary first, from Mutter's DisplayConfig.
 fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
     let Ok(dc) = Proxy::new(
@@ -356,8 +352,7 @@ fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
     ) else {
         return Vec::new();
     };
-    let state: Result<(u32, Vec<MonitorT>, Vec<LogicalT>, HashMap<String, OwnedValue>), _> =
-        dc.call("GetCurrentState", &());
+    let state: Result<crate::display::MutterState, _> = dc.call("GetCurrentState", &());
     let Ok((_, mons, logical, _)) = state else { return Vec::new() };
     let primary: Vec<String> = logical.iter().filter(|l| l.4).flat_map(|l| l.5.iter().map(|m| m.0.clone())).collect();
     let place = |connector: &str| {

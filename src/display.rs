@@ -368,6 +368,9 @@ mod win {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) use linux::MutterState;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -742,10 +745,11 @@ mod linux {
         Ok(())
     }
 
-    pub(super) type MutterMode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
-    pub(super) type MutterMonitor = ((String, String, String, String), Vec<MutterMode>, HashMap<String, OwnedValue>);
-    pub(super) type MutterLogical = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
-    pub(super) type MutterState = (u32, Vec<MutterMonitor>, Vec<MutterLogical>, HashMap<String, OwnedValue>);
+    // GetCurrentState's answer, which the GNOME capture reads too.
+    pub(crate) type MutterMode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
+    pub(crate) type MutterMonitor = ((String, String, String, String), Vec<MutterMode>, HashMap<String, OwnedValue>);
+    pub(crate) type MutterLogical = (i32, i32, f64, u32, bool, Vec<(String, String, String, String)>, HashMap<String, OwnedValue>);
+    pub(crate) type MutterState = (u32, Vec<MutterMonitor>, Vec<MutterLogical>, HashMap<String, OwnedValue>);
 
     fn mutter() -> Option<zbus::blocking::Proxy<'static>> {
         let conn = zbus::blocking::Connection::session().ok()?;
