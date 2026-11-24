@@ -221,6 +221,11 @@ fn copy_here(paths: &[PathBuf], odd: &[bool], done: &AtomicU64) -> Outcome {
 /// What the clipboard holds that is pasted as files: files copied in a file manager, or a
 /// picture (a screenshot), kept as a PNG file here first. None when it holds neither.
 pub(super) fn clipboard_files() -> Option<Vec<PathBuf>> {
+    // Tests never read this computer's clipboard: whatever another program, or another session's
+    // desktop the process found, holds there would decide what a key does.
+    if cfg!(test) {
+        return None;
+    }
     let files = crate::clip::files_here();
     if !files.is_empty() {
         return Some(files);
