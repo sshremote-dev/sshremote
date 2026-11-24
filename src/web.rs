@@ -83,12 +83,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if let Some(d) = file.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&file, &p).map_err(|e| e.to_string())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
-            }
+            crate::sys::write_private(&file, p.as_bytes())?;
             eprintln!("sshremote web: the password is {p} (kept in {})", file.display());
             p
         }

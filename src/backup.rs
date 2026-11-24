@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::sys::write_private;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -45,24 +47,6 @@ fn ssh_file_kept_apart(rel: &str) -> bool {
         || name.starts_with("known_hosts")
         || name.ends_with(".old")
         || name.rsplit_once(".bak").is_some_and(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
-}
-
-/// Writes a file only this user may read, as ssh insists on for its configuration and keys.
-fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    o.open(path).and_then(|mut f| std::io::Write::write_all(&mut f, data)).map_err(|e| format!("{}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
 }
 
 /// Makes a folder of ~/.ssh (and those above it) that only this user may enter.

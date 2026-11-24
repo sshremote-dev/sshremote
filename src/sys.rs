@@ -216,6 +216,25 @@ pub fn free_space(path: &std::path::Path) -> Option<u64> {
     }
 }
 
+/// Writes a file only this user may read, made so from the start (as ssh insists on for its
+/// configuration and keys, and as secrets need).
+pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path).and_then(|mut f| std::io::Write::write_all(&mut f, data)).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 /// Today in UTC as YYYY-MM-DD.
 pub fn today() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400) as i64;
