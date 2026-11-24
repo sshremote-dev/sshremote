@@ -981,11 +981,14 @@ fn connect_direct(addr: &Address, password: &str, direct: &[String]) -> Straight
             continue;
         }
         let _ = s.set_read_timeout(Some(VERDICT_LIMIT + Duration::from_secs(15)));
+        let peer = s.peer_addr().ok();
         let pair = match handshake(s, password, true, &now) {
             Ok(p) => p,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Straight::Refused(d.clone(), e.to_string()),
             Err(_) => continue,
         };
+        // Past the relay from the start, as the window and the probe say.
+        *guard(&pair.1.line.straight) = peer;
         pair.1.ender().set_idle_limit(Duration::from_secs(120));
         return Straight::In(pair, d.clone());
     }
@@ -1411,7 +1414,9 @@ mod tests {
         let real = straight("right one");
         assert!(connect_via(&addr, "wrong one", &[], &[real]).is_err_and(|e| e.contains("wrong password")), "wrong is wrong both ways");
         let real = straight("right one");
-        assert_eq!(connect_via(&addr, "right one", &[], std::slice::from_ref(&real)).unwrap().1, Way { straight: Some(real), refused: None });
+        let ((_, w), way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&real)).unwrap();
+        assert_eq!(way, Way { straight: Some(real.clone()), refused: None });
+        assert_eq!(w.ender().straight().map(|a| a.to_string()), Some(real), "shown as past the relay");
         let (addr, asked) = relay("right one");
         let proven = straight("someone else's");
         assert!(connect_via(&addr, "right one", &[proven], &[]).is_err_and(|e| e.contains("wrong password")));
