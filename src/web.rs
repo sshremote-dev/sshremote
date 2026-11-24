@@ -1126,7 +1126,7 @@ fn client(
                     if std::mem::take(&mut fb.need_key) {
                         sess.send(ToAgent::Refresh).map_err(io)?;
                     }
-                    ctl.frame_done(f.covered() * 2 > fb.w * fb.h);
+                    ctl.frame_done(f.covered() * 2 >= fb.w * fb.h);
                     if resized {
                         (damage, moves) = (vec![(0, 0, fb.w, fb.h)], Vec::new());
                     } else {
@@ -1141,7 +1141,10 @@ fn client(
                         damage.extend(f.tiles.iter().chain(f.video.iter()).map(|t| (t.x as usize, t.y as usize, t.w as usize, t.h as usize)));
                     }
                 }
+                ToClient::Pong(t) => ctl.pong(t),
+                // Another monitor, or its resolution changed: the pointer's place scales with it.
                 ToClient::Hello { w: dw, h: dh, backend } => {
+                    sess.hello(dw, dh, backend.clone());
                     let _ = send_json(&w, serde_json::json!({ "screen": [dw, dh], "backend": backend }));
                 }
                 ToClient::Error(e) => break 'run plain(&e),
