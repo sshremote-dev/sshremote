@@ -1,12 +1,13 @@
 //! A newer version from sshremote.dev: its list of downloads is looked at (at most once a day by
-//! the window), its signature checked with the registry's key under a namespace of its own, and
-//! the file for this system, checked against the list, put in place of this program when asked.
+//! the window), its signature checked with the release key under a namespace of its own, and the
+//! file for this system (by its system and processor in the list), checked against the list, put
+//! in place of this program when asked.
 
 #[cfg(not(target_os = "macos"))]
 use std::path::Path;
 use std::path::PathBuf;
 
-const INDEX: &str = "https://sshremote.dev/download/index.json";
+const INDEX: &str = "https://sshremote.dev/download/latest.json";
 const NAMESPACE: &str = "sshremote-release";
 
 /// A release newer than this program, and where its file for this system is.
@@ -29,7 +30,8 @@ pub fn newer(theirs: &str, ours: &str) -> bool {
     parts(theirs) > parts(ours)
 }
 
-/// The name of this system's file in the list.
+/// The name of this system's file in a list of the first kind, which names its files only (a
+/// mirror of `index.json`).
 fn file_name() -> Option<&'static str> {
     if cfg!(all(windows, target_arch = "x86_64")) {
         Some("sshremote-windows-x86_64.exe")
@@ -48,7 +50,7 @@ pub fn check() -> Result<Option<Release>, String> {
     let url = index_url();
     let data = crate::ext::fetch(&url)?;
     let sig = crate::ext::fetch(&format!("{url}.sig")).map_err(|_| "the list of downloads came without its signature".to_string())?;
-    crate::ext::verify_with(&data, &sig, crate::ext::SIGNER, NAMESPACE).map_err(|e| format!("the list of downloads is not signed by sshremote.dev ({e})"))?;
+    crate::ext::verify_with(&data, &sig, crate::ext::SIGNERS, NAMESPACE).map_err(|e| format!("the list of downloads is not signed by sshremote.dev ({e})"))?;
     release_in(&data, &url, env!("CARGO_PKG_VERSION"))
 }
 
@@ -59,11 +61,30 @@ fn release_in(list: &[u8], url: &str, ours: &str) -> Result<Option<Release>, Str
     if !newer(&version, ours) {
         return Ok(None);
     }
-    let name = file_name().ok_or("no build of it for this system")?;
-    let file = v["files"].as_array().and_then(|f| f.iter().find(|f| f["name"] == name)).ok_or_else(|| format!("version {version} has no {name}"))?;
+    let file = v["files"].as_array().and_then(|f| f.iter().find(|f| for_here(f))).ok_or_else(|| format!("version {version} has no build for this system ({} on {})", OS, ARCH))?;
+    let name = file["name"].as_str().ok_or("a file is listed without its name")?;
     let (Some(size), Some(sha256)) = (file["size"].as_u64(), file["sha256"].as_str()) else { return Err(format!("{name} is listed without its size and checksum")) };
-    let dir = url.rsplit_once('/').map_or(url, |(d, _)| d);
-    Ok(Some(Release { version, url: format!("{dir}/{name}"), size, sha256: sha256.to_lowercase() }))
+    // Where the list says it is (its release on GitHub), or beside the list.
+    let at = match file["url"].as_str() {
+        Some(u) if u.starts_with("https://") => u.to_string(),
+        Some(u) => return Err(format!("{name} is listed at {u}, which is not https")),
+        None => format!("{}/{name}", url.rsplit_once('/').map_or(url, |(d, _)| d)),
+    };
+    Ok(Some(Release { version, url: at, size, sha256: sha256.to_lowercase() }))
+}
+
+/// This system and processor as the list names them ("linux", "windows", "macos"; "x86_64",
+/// "aarch64").
+const OS: &str = std::env::consts::OS;
+const ARCH: &str = std::env::consts::ARCH;
+
+/// Whether a listed file is the one for this system: by its system and processor ("universal":
+/// any), or, in a list that names its files only, by name.
+fn for_here(file: &serde_json::Value) -> bool {
+    match (file["os"].as_str(), file["arch"].as_str()) {
+        (Some(os), Some(arch)) => os == OS && (arch == ARCH || arch == "universal"),
+        _ => file_name().is_some_and(|n| file["name"] == n),
+    }
 }
 
 /// Downloads the release, checks it against the list, and puts it in place of this program,
@@ -249,6 +270,46 @@ mod tests {
         assert_eq!((r.size, r.sha256.as_str()), (size, sum));
         assert_eq!(release_in(list, "x/index.json", "0.30.1").unwrap(), None);
         assert!(release_in(br#"{"version":"9.0.0","files":[]}"#, "x/index.json", "0.1.0").is_err());
+    }
+
+    /// The list since 0.25.36 names each file's system and processor and where it is (its
+    /// release on GitHub): this system's is taken, whatever its name, and only over https.
+    #[test]
+    fn a_list_offers_the_file_for_this_system_and_processor() {
+        let entry = |os: &str, arch: &str, n: u64| format!(r#"{{"name":"f-{os}-{arch}","os":"{os}","arch":"{arch}","size":{n},"sha256":"S{n}","url":"https://github.com/o/r/releases/download/v9/f-{os}-{arch}"}}"#);
+        let other = if ARCH == "x86_64" { "aarch64" } else { "x86_64" };
+        let mut files = vec![entry("linux", other, 1), entry("windows", other, 2), entry("plan9", ARCH, 3), entry(OS, ARCH, 4)];
+        if OS == "macos" {
+            files.truncate(3);
+            files.push(entry("macos", "universal", 4));
+        }
+        let list = format!(r#"{{"version":"9.0.0","files":[{}]}}"#, files.join(","));
+        let r = release_in(list.as_bytes(), "https://sshremote.dev/download/latest.json", "0.25.36").unwrap().unwrap();
+        assert_eq!((r.size, r.sha256.as_str()), (4, "s4"));
+        assert!(r.url.starts_with("https://github.com/o/r/releases/download/v9/f-"), "{}", r.url);
+        let plain = list.replace("https://github.com", "http://github.com");
+        assert!(release_in(plain.as_bytes(), "https://sshremote.dev/download/latest.json", "0.25.36").is_err(), "not over http");
+        let none = format!(r#"{{"version":"9.0.0","files":[{}]}}"#, entry("plan9", ARCH, 3));
+        assert!(release_in(none.as_bytes(), "x/latest.json", "0.25.36").is_err(), "nothing for this system");
+    }
+
+    /// Every file release/platforms.json ships is named by the system and processor this program
+    /// compares with its own, once; the three names versions up to 0.25.35 look for are among them.
+    #[test]
+    fn the_platforms_shipped_are_named_as_the_update_reads_them() {
+        let list: serde_json::Value = serde_json::from_str(include_str!("../release/platforms.json")).unwrap();
+        let platforms = list["platforms"].as_array().unwrap();
+        let mut names = std::collections::HashSet::new();
+        for p in platforms {
+            let (file, os, arch) = (p["file"].as_str().unwrap(), p["os"].as_str().unwrap(), p["arch"].as_str().unwrap());
+            assert!(["linux", "windows", "macos"].contains(&os), "{file}: {os}");
+            assert!(["x86_64", "aarch64"].contains(&arch) || (os == "macos" && arch == "universal"), "{file}: {arch}");
+            assert!(["ci", "mac"].contains(&p["build"]["by"].as_str().unwrap()), "{file}");
+            assert!(names.insert(file), "{file} twice");
+        }
+        for first in ["sshremote-windows-x86_64.exe", "sshremote-linux-x86_64", "sshremote-macos.zip"] {
+            assert!(names.contains(first), "{first}");
+        }
     }
 
     #[test]

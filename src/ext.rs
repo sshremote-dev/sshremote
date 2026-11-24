@@ -32,7 +32,7 @@ use crate::gui::ic;
 /// What extensions this program can read.
 pub const API: u64 = 4;
 /// Where the registry's index is unless a setting names another (a company's own mirror).
-pub const REGISTRY: &str = "https://sshremote.dev/registry/v1/index.json";
+pub const REGISTRY: &str = "https://sshremote.dev/registry/v1/catalog.json";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -788,18 +788,25 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-/// The key that signs the registry's index (ed25519, checked with OpenSSH's ssh-keygen).
-pub const SIGNER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFgMJKE5ZmC2xmWV5LZMjrpbZ3d9JoC0GJX0QNUEGsQX";
+/// The keys whose signature the registry's index and the list of downloads may carry (ed25519,
+/// checked with OpenSSH's ssh-keygen): the release key, kept on the project's Mac since 2026-11,
+/// which signs `registry/v1/catalog.json` and `download/latest.json`; and the first one, which
+/// signs the lists that versions up to 0.25.35 read (`index.json` beside them), as a mirror of
+/// those may still be named in the settings.
+pub const SIGNERS: &[&str] = &[
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIATWzVHrLab5YV9xWMNlhlQypG7ekpTUFEf16TNaSA+Q",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFgMJKE5ZmC2xmWV5LZMjrpbZ3d9JoC0GJX0QNUEGsQX",
+];
 const SIGNER_ID: &str = "registry@sshremote.dev";
 const NAMESPACE: &str = "sshremote-registry";
 
 /// Checks the index against its signature with `ssh-keygen -Y verify`.
 fn verify(data: &[u8], sig: &[u8]) -> Result<(), String> {
-    verify_with(data, sig, SIGNER, NAMESPACE).map_err(|e| format!("the registry's index is not signed by sshremote.dev; nothing installed ({e})"))
+    verify_with(data, sig, SIGNERS, NAMESPACE).map_err(|e| format!("the registry's index is not signed by sshremote.dev; nothing installed ({e})"))
 }
 
-/// Checks `data` against an ssh signature by `key` in `namespace`.
-pub(crate) fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -> Result<(), String> {
+/// Checks `data` against an ssh signature by one of `keys` in `namespace`.
+pub(crate) fn verify_with(data: &[u8], sig: &[u8], keys: &[&str], namespace: &str) -> Result<(), String> {
     // In this user's own settings folder: in the shared temp folder another user could put
     // their own allowed signers in its place.
     let base = crate::hosts::config_dir().ok_or("no settings folder")?;
@@ -811,8 +818,8 @@ pub(crate) fn verify_with(data: &[u8], sig: &[u8], key: &str, namespace: &str) -
     let sig_file = dir.join("index.sig");
     let data_file = dir.join("index");
     let r = (|| {
-        std::fs::write(&signers, format!("{SIGNER_ID} namespaces=\"{namespace}\" {key}
-")).map_err(|e| e.to_string())?;
+        let lines: String = keys.iter().map(|key| format!("{SIGNER_ID} namespaces=\"{namespace}\" {key}\n")).collect();
+        std::fs::write(&signers, lines).map_err(|e| e.to_string())?;
         std::fs::write(&sig_file, sig).map_err(|e| e.to_string())?;
         std::fs::write(&data_file, data).map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new("ssh-keygen");
@@ -1757,6 +1764,41 @@ mod tests {
         let mut bad = index.clone();
         bad.extend_from_slice(b" ");
         assert!(verify(&bad, &sig).is_err());
+    }
+
+    /// The keys the program trusts are the ones in release/keys, which scripts/deploy.sh checks
+    /// the site's signatures with.
+    #[test]
+    fn the_keys_trusted_are_the_releases() {
+        let key = |text: &str| text.trim().to_string();
+        assert_eq!(SIGNERS, [key(include_str!("../release/keys/release.pub")), key(include_str!("../release/keys/first.pub"))]);
+    }
+
+    /// A signature by any one of the keys trusted is good, by no other key, nor in another
+    /// namespace (the key changed in 2026-11: both are trusted while older lists are about).
+    #[test]
+    fn a_signature_by_either_key_is_good() {
+        let dir = std::env::temp_dir().join(format!("sshremote-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = |name: &str| {
+            let f = dir.join(name);
+            let made = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&f).status().unwrap();
+            assert!(made.success());
+            std::fs::read_to_string(f.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ")
+        };
+        let (old, new, stranger) = (key("old"), key("new"), key("stranger"));
+        let data = dir.join("list.json");
+        std::fs::write(&data, b"{\"version\":\"9.0.0\"}").unwrap();
+        let signed = std::process::Command::new("ssh-keygen").args(["-q", "-Y", "sign", "-n", "sshremote-release", "-f"]).arg(dir.join("new")).arg(&data).status().unwrap();
+        assert!(signed.success());
+        let sig = std::fs::read(dir.join("list.json.sig")).unwrap();
+        let list = std::fs::read(&data).unwrap();
+        assert!(verify_with(&list, &sig, &[&new, &old], "sshremote-release").is_ok());
+        assert!(verify_with(&list, &sig, &[&old, &new], "sshremote-release").is_ok(), "in any order");
+        assert!(verify_with(&list, &sig, &[&old, &stranger], "sshremote-release").is_err(), "not by a key not trusted");
+        assert!(verify_with(&list, &sig, &[&new], "sshremote-registry").is_err(), "not for another namespace");
+        assert!(verify_with(b"{}", &sig, &[&new], "sshremote-release").is_err(), "not for other data");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
