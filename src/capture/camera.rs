@@ -226,6 +226,9 @@ impl Capture for WithCameras {
     fn commit_text(&mut self, text: &str) -> bool {
         self.now_mut().commit_text(text)
     }
+    fn shortcut_key(&self) -> u32 {
+        self.screen.shortcut_key()
+    }
 }
 
 #[cfg(target_os = "linux")]

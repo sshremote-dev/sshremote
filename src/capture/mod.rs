@@ -196,6 +196,11 @@ pub trait Capture {
     }
     fn input(&mut self, ev: Input) -> Result<(), String>;
 
+    /// The key that copy, paste and select-all go with here: Ctrl, or the command key on a Mac.
+    fn shortcut_key(&self) -> u32 {
+        crate::xk::CONTROL_L
+    }
+
     /// Puts `text` into the focused text field as text, where keys cannot type it; false where
     /// this desktop cannot (the agent pastes it then).
     fn commit_text(&mut self, _text: &str) -> bool {

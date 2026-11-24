@@ -1493,6 +1493,10 @@ impl Capture for Mac {
         self.hands.input(&a, ev)
     }
 
+    fn shortcut_key(&self) -> u32 {
+        xk::SUPER_L
+    }
+
     fn commit_text(&mut self, text: &str) -> bool {
         self.hands.text(text).is_ok()
     }

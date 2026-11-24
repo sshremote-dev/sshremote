@@ -742,9 +742,7 @@ fn serve_with(
                     } else if paths.is_empty() || !clip.set_files(paths) {
                         send(enc, &ToClient::Notice("The files could not be put on that computer's clipboard.".into())).map_err(io_err)?;
                     } else {
-                        for (k, down) in [(xk::CONTROL_L, true), ('v' as u32, true), ('v' as u32, false), (xk::CONTROL_L, false)] {
-                            report(cap.input(Input::KeyState { keysym: k, down }));
-                        }
+                        shortcut(cap.as_mut(), 'v');
                     }
                 }
                 ToAgent::Host { act, on } => {
@@ -991,9 +989,8 @@ fn serve_with(
                         }
                         Ok(crate::ui::Outcome::Type { text, replace }) => {
                             if replace {
-                                for (k, down) in
-                                    [(xk::CONTROL_L, true), ('a' as u32, true), ('a' as u32, false), (xk::CONTROL_L, false)]
-                                {
+                                let m = cap.shortcut_key();
+                                for (k, down) in [(m, true), ('a' as u32, true), ('a' as u32, false), (m, false)] {
                                     queued.push(ToAgent::KeyState { keysym: k, down });
                                 }
                             }
@@ -1515,11 +1512,17 @@ fn paste(pending: &mut String, clip: &mut crate::clip::Clip, cap: &mut dyn captu
         report(Err("text outside the keyboard layout needs the clipboard, which is unavailable".into()));
         return;
     }
-    for (k, down) in [(xk::CONTROL_L, true), ('v' as u32, true), ('v' as u32, false), (xk::CONTROL_L, false)] {
-        report(cap.input(Input::KeyState { keysym: k, down }));
-    }
+    shortcut(cap, 'v');
     // Applications fetch pasted text asynchronously; let it land before the next keys.
     thread::sleep(Duration::from_millis(150));
+}
+
+/// `key` with the key shortcuts take here (Ctrl, or the command key on a Mac), as pressed.
+fn shortcut(cap: &mut dyn capture::Capture, key: char) {
+    let m = cap.shortcut_key();
+    for (k, down) in [(m, true), (key as u32, true), (key as u32, false), (m, false)] {
+        report(cap.input(Input::KeyState { keysym: k, down }));
+    }
 }
 
 /// The shown screen's resolutions, for the viewer to set it to one (none where it cannot).
