@@ -525,8 +525,8 @@ mod sni {
                 for sy in y0..y1 {
                     for sx in x0..x1 {
                         let o = (sy * w + sx) * 4;
-                        for c in 0..4 {
-                            sum[c] += icon.rgba[o + c] as u32;
+                        for (s, &v) in sum.iter_mut().zip(&icon.rgba[o..o + 4]) {
+                            *s += v as u32;
                         }
                         n += 1;
                     }
@@ -935,8 +935,8 @@ mod win {
                 for sy in y0..y1.min(h) {
                     for sx in x0..x1.min(w) {
                         let o = (sy * w + sx) * 4;
-                        for c in 0..4 {
-                            sum[c] += icon.rgba[o + c] as u32;
+                        for (s, &v) in sum.iter_mut().zip(&icon.rgba[o..o + 4]) {
+                            *s += v as u32;
                         }
                         n += 1;
                     }
@@ -948,7 +948,7 @@ mod win {
         }
         unsafe {
             let color = CreateBitmap(S as i32, S as i32, 1, 32, bgra.as_ptr().cast());
-            let mask_bits = vec![0u8; S * S / 8];
+            let mask_bits = [0u8; S * S / 8];
             let mask = CreateBitmap(S as i32, S as i32, 1, 1, mask_bits.as_ptr().cast());
             let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
             let icon = CreateIconIndirect(&info);

@@ -861,73 +861,6 @@ fn with_helper(list: &str) -> String {
     format!("[{}]", names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_helper_joins_the_enabled_extensions() {
-        assert_eq!(with_helper("@as []"), format!("['{HELPER_UUID}']"));
-        assert_eq!(
-            with_helper("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com']"),
-            format!("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', '{HELPER_UUID}']")
-        );
-    }
-
-    /// GNOME's pointer kept apart: it comes beside the frames, its picture once with where it
-    /// is, pictures leave it out, and put back it is drawn in again. In a private session:
-    /// SSHREMOTE_GNOME_TEST=1 scripts/gnome-session.sh run TESTS --ignored the_gnome_pointer_comes_apart
-    #[test]
-    #[ignore]
-    fn the_gnome_pointer_comes_apart() {
-        if std::env::var_os("SSHREMOTE_GNOME_TEST").is_none() {
-            return;
-        }
-        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
-        let next = |g: &mut Gnome| (0..150).find_map(|_| g.grab().unwrap().or_else(|| (pause(), None).1));
-        // The pixels around a point, to tell whether the pointer is drawn there.
-        let around = |img: &Image, (x, y): (usize, usize)| -> Vec<u8> {
-            (y..y + 24).flat_map(|r| img.data[r * img.stride + x * 4..][..24 * 4].to_vec()).collect()
-        };
-        let mut g = Gnome::open().expect("a GNOME session");
-        assert!(g.pw.is_some(), "the stream is read here");
-        // A new session's first move can leave the pointer in its corner's column.
-        g.input(Input::Move { x: 250.0, y: 150.0 }).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        g.input(Input::Move { x: 300.0, y: 200.0 }).unwrap();
-        assert!(g.pointer_apart(true));
-        let without = next(&mut g).expect("a picture");
-        let (mut shape, mut at) = (None, None);
-        for _ in 0..150 {
-            let (s, a) = g.pointer();
-            shape = shape.or(s);
-            at = a;
-            if shape.is_some() && at == Some((300, 200)) {
-                break;
-            }
-            pause();
-        }
-        let shape = shape.expect("the pointer's picture");
-        assert!(shape.w > 0 && shape.rgba.len() == shape.w * shape.h * 4, "{}x{}", shape.w, shape.h);
-        assert_eq!(at, Some((300, 200)));
-        assert!(g.pointer().0.is_none(), "the same picture is not sent again");
-        g.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
-        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
-        // Moved by so much (the mouse for games), and back.
-        g.input(Input::MoveBy { dx: 40, dy: -30 }).unwrap();
-        assert!((0..150).any(|_| g.pointer().1 == Some((540, 370)) || (pause(), false).1), "moved by 40, -30: {:?}", g.pointer().1);
-        g.input(Input::MoveBy { dx: -40, dy: 30 }).unwrap();
-        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "and back");
-        let still = next(&mut g).unwrap_or(without);
-        let bare = around(&still, (490, 390));
-        // Put back into the pictures, it is drawn where it is.
-        assert!(g.pointer_apart(false));
-        let with = next(&mut g).expect("a picture with the pointer");
-        assert_ne!(around(&with, (490, 390)), bare, "the pointer drawn in");
-        assert_eq!(around(&with, (100, 600)), around(&still, (100, 600)), "and nothing else changed");
-    }
-}
-
 /// The helper extension's files, as this program has them.
 const HELPER_FILES: [(&str, &str); 2] = [
     ("metadata.json", include_str!("../../assets/gnome-helper/metadata.json")),
@@ -1384,5 +1317,72 @@ impl Drop for Gnome {
         self.pipe = None;
         self.pw = None;
         let _ = self.session.call_noreply("Stop", &());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_helper_joins_the_enabled_extensions() {
+        assert_eq!(with_helper("@as []"), format!("['{HELPER_UUID}']"));
+        assert_eq!(
+            with_helper("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com']"),
+            format!("['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', '{HELPER_UUID}']")
+        );
+    }
+
+    /// GNOME's pointer kept apart: it comes beside the frames, its picture once with where it
+    /// is, pictures leave it out, and put back it is drawn in again. In a private session:
+    /// SSHREMOTE_GNOME_TEST=1 scripts/gnome-session.sh run TESTS --ignored the_gnome_pointer_comes_apart
+    #[test]
+    #[ignore]
+    fn the_gnome_pointer_comes_apart() {
+        if std::env::var_os("SSHREMOTE_GNOME_TEST").is_none() {
+            return;
+        }
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let next = |g: &mut Gnome| (0..150).find_map(|_| g.grab().unwrap().or_else(|| (pause(), None).1));
+        // The pixels around a point, to tell whether the pointer is drawn there.
+        let around = |img: &Image, (x, y): (usize, usize)| -> Vec<u8> {
+            (y..y + 24).flat_map(|r| img.data[r * img.stride + x * 4..][..24 * 4].to_vec()).collect()
+        };
+        let mut g = Gnome::open().expect("a GNOME session");
+        assert!(g.pw.is_some(), "the stream is read here");
+        // A new session's first move can leave the pointer in its corner's column.
+        g.input(Input::Move { x: 250.0, y: 150.0 }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        g.input(Input::Move { x: 300.0, y: 200.0 }).unwrap();
+        assert!(g.pointer_apart(true));
+        let without = next(&mut g).expect("a picture");
+        let (mut shape, mut at) = (None, None);
+        for _ in 0..150 {
+            let (s, a) = g.pointer();
+            shape = shape.or(s);
+            at = a;
+            if shape.is_some() && at == Some((300, 200)) {
+                break;
+            }
+            pause();
+        }
+        let shape = shape.expect("the pointer's picture");
+        assert!(shape.w > 0 && shape.rgba.len() == shape.w * shape.h * 4, "{}x{}", shape.w, shape.h);
+        assert_eq!(at, Some((300, 200)));
+        assert!(g.pointer().0.is_none(), "the same picture is not sent again");
+        g.input(Input::Move { x: 500.0, y: 400.0 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "where it went");
+        // Moved by so much (the mouse for games), and back.
+        g.input(Input::MoveBy { dx: 40, dy: -30 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((540, 370)) || (pause(), false).1), "moved by 40, -30: {:?}", g.pointer().1);
+        g.input(Input::MoveBy { dx: -40, dy: 30 }).unwrap();
+        assert!((0..150).any(|_| g.pointer().1 == Some((500, 400)) || (pause(), false).1), "and back");
+        let still = next(&mut g).unwrap_or(without);
+        let bare = around(&still, (490, 390));
+        // Put back into the pictures, it is drawn where it is.
+        assert!(g.pointer_apart(false));
+        let with = next(&mut g).expect("a picture with the pointer");
+        assert_ne!(around(&with, (490, 390)), bare, "the pointer drawn in");
+        assert_eq!(around(&with, (100, 600)), around(&still, (100, 600)), "and nothing else changed");
     }
 }

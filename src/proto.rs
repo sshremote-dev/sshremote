@@ -372,7 +372,7 @@ pub struct Frame {
     pub moves: Vec<Move>,
     /// With a palette (whether the viewer forgets its own first, and the slots that changed),
     /// every tile's data starts with its form (`color::Palette`).
-    pub palette: Option<(bool, Vec<(u16, [u8; 3])>)>,
+    pub palette: Option<(bool, crate::color::Slots)>,
     pub tiles: Vec<Tile>,
     /// One H.264 access unit for the video region, which no tile covers.
     pub video: Option<Tile>,

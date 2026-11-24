@@ -392,7 +392,7 @@ fn decode(data: &str) -> Option<Image> {
     let rgba = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()?.to_rgba8();
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     let mut out = rgba.into_raw();
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Some(Image { w, h, stride: w * 4, data: out })

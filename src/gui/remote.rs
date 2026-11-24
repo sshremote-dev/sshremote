@@ -865,18 +865,14 @@ impl Remote {
                     None => self.notify(&text),
                 },
                 Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => self.fetch_started(id, size, tag, name)?,
-                Ok(Ev::Net(ToClient::FetchData { id, data })) => match self
-                    .sess
-                    .fetch_data(&mut self.inbox, id, &data)
-                    .map_err(|e| format!("connection lost: {e}"))?
-                {
-                    Some(crate::files::Note::Done { text, .. }) => {
+                Ok(Ev::Net(ToClient::FetchData { id, data })) => {
+                    let note = self.sess.fetch_data(&mut self.inbox, id, &data).map_err(|e| format!("connection lost: {e}"))?;
+                    if let Some(crate::files::Note::Done { text, .. }) = note {
                         let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
                         self.downloads.retain(|d| d.0 != id);
                         self.notify(&format!("{name} failed: {text}"));
                     }
-                    _ => {}
-                },
+                }
                 Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
                     if id != 0 && !self.downloads.iter().any(|d| d.0 == id) {
                         // Already cancelled or failed here; one that could not even be opened

@@ -437,7 +437,7 @@ impl SealedReader {
             // offer TAG FIRST [mac=KEY] ADDRESS...: FIRST names the side that probes first, KEY
             // checks every packet of the path.
             Some("offer") => {
-                let unhex = |t: &str| (t.len() % 2 == 0 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (0..t.len() / 2).filter_map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Vec<u8>>());
+                let unhex = |t: &str| (t.len().is_multiple_of(2) && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (0..t.len() / 2).filter_map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Vec<u8>>());
                 let tag = words.next().filter(|t| t.len() == 16).and_then(unhex);
                 let first = words.next().unwrap_or("viewer").to_string();
                 let rest: Vec<&str> = words.collect();

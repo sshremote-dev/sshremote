@@ -1,5 +1,8 @@
 use crate::shared::Image;
 
+/// Palette slots that changed, each with its colour, as a frame carries them.
+pub type Slots = Vec<(u16, [u8; 3])>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Mono,
@@ -343,7 +346,7 @@ impl Palette {
 
     /// The slot for `key` in this frame, taking a free one or one this frame does not use;
     /// None when all `cap` are in use here.
-    fn take(&mut self, key: u32, cap: usize, changed: &mut Vec<(u16, [u8; 3])>) -> Option<u16> {
+    fn take(&mut self, key: u32, cap: usize, changed: &mut Slots) -> Option<u16> {
         if let Some(n) = self.get(key) {
             self.used[n as usize] = self.frame;
             return Some(n);
@@ -381,7 +384,7 @@ impl Palette {
     /// two bytes), 0 for `pack`'s lossless prediction (photographs). Returns whether the viewer
     /// must forget its palette first (`fresh`, as for a whole new picture), the slots that
     /// changed, and the data.
-    pub fn pack(&mut self, p: &Plane, rects: &[Rect], fresh: bool, wide: bool) -> (bool, Vec<(u16, [u8; 3])>, Vec<Vec<u8>>) {
+    pub fn pack(&mut self, p: &Plane, rects: &[Rect], fresh: bool, wide: bool) -> (bool, Slots, Vec<Vec<u8>>) {
         debug_assert_eq!(p.mode, Mode::True);
         let cap = if wide { WIDE } else { 256 };
         // Back to 256 slots (another viewer's settings): the palette starts over.
@@ -540,7 +543,7 @@ pub fn rich(img: &Image, r: &Rect) -> bool {
             keys.clear();
             for row in y..y + sh {
                 let s = row * img.stride + x * 4;
-                keys.extend(img.data[s..s + sw * 4].chunks_exact(4).map(|px| (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32));
+                keys.extend(img.data[s..s + sw * 4].as_chunks::<4>().0.iter().map(|px| (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32));
             }
             keys.sort_unstable();
             let top = keys.chunk_by(|a, b| a == b).map(<[u32]>::len).max().unwrap_or(0);
@@ -837,7 +840,7 @@ mod tests {
         assert_eq!(again[0], data[0]);
         // A viewer that lost the palette cannot read it, rather than showing wrong colours.
         assert!(Colours::default().unpack(&data[0], 32, 32).is_none());
-        let img = Image { w, h, stride: w * 4, data: p.data.chunks_exact(3).flat_map(|c| [c[2], c[1], c[0], 255]).collect() };
+        let img = Image { w, h, stride: w * 4, data: p.data.as_chunks::<3>().0.iter().flat_map(|c| [c[2], c[1], c[0], 255]).collect() };
         assert!(!rich(&img, &Rect { x: 0, y: 0, w: 64, h: 40 }));
         assert!(rich(&img, &Rect { x: 64, y: 0, w: 32, h: 40 }));
     }

@@ -580,10 +580,7 @@ pub fn folder(id: &str) -> Option<PathBuf> {
 
 /// This computer's platform as extensions name it.
 pub fn platform() -> String {
-    let os = match std::env::consts::OS {
-        "macos" => "macos",
-        o => o,
-    };
+    let os = std::env::consts::OS;
     format!("{os}-{}", std::env::consts::ARCH)
 }
 

@@ -307,9 +307,9 @@ fn sweep_pictures(ctx: &egui::Context) {
 fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Option<(egui::TextureHandle, Option<f64>)>, String> {
     // An extension's layer: its file in the extension's folder; a still one drawn once.
     let resolved;
-    let (path, play) = if path.starts_with("ext:") {
+    let (path, play) = if let Some(rest) = path.strip_prefix("ext:") {
         if crate::ext::label(path).is_none() {
-            let id = path[4..].split('/').next().unwrap_or("");
+            let id = rest.split('/').next().unwrap_or("");
             return Err(format!("needs the extension {id}: Settings > Extensions"));
         }
         resolved = crate::ext::resolve(path);

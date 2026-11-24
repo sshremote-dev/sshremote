@@ -223,10 +223,8 @@ fn workspace_look_pictures() {
     // Out of the box: the 3D title over the night lake.
     shot(&mut h, &Look::default(), "default");
     // The built-in style: its picture and its animation, across the window.
-    for style in ["night"] {
-        let l = Look { layers: vec![built(&format!("{style}-motion"), 0.7, Fit::Fill), built(&format!("{style}-still"), 0.7, Fit::Fill)], ..Look::default() };
-        shot(&mut h, &l, style);
-    }
+    let l = Look { layers: vec![built("night-motion", 0.7, Fit::Fill), built("night-still", 0.7, Fit::Fill)], ..Look::default() };
+    shot(&mut h, &l, "night");
     // The title in front of the night lake, and the same with each pane its own.
     let night = vec![built("brand", 0.8, Fit::Whole), built("night-motion", 0.7, Fit::Fill), built("night-still", 0.7, Fit::Fill)];
     shot(&mut h, &Look { layers: night.clone(), ..Look::default() }, "brand_night");

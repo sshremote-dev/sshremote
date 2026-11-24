@@ -160,10 +160,10 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 pub fn start(waker: impl Fn() + Send + Sync + 'static) {
     with(|s| s.waker = Some(std::sync::Arc::new(waker)));
     for m in crate::ext::installed() {
-        if m.activation.as_deref() == Some("startup") {
-            if let Err(e) = launch(&m) {
-                with(|s| s.notices.push(format!("{}: {e}", m.name)));
-            }
+        if m.activation.as_deref() == Some("startup")
+            && let Err(e) = launch(&m)
+        {
+            with(|s| s.notices.push(format!("{}: {e}", m.name)));
         }
     }
 }
@@ -737,10 +737,10 @@ pub fn reload(ext: &str) {
     if with(|s| s.waker.is_none()) {
         return;
     }
-    if let Some(m) = crate::ext::installed().into_iter().find(|m| m.id == ext && m.activation.as_deref() == Some("startup")) {
-        if let Err(e) = launch(&m) {
-            with(|s| s.notices.push(format!("{}: {e}", m.name)));
-        }
+    if let Some(m) = crate::ext::installed().into_iter().find(|m| m.id == ext && m.activation.as_deref() == Some("startup"))
+        && let Err(e) = launch(&m)
+    {
+        with(|s| s.notices.push(format!("{}: {e}", m.name)));
     }
 }
 

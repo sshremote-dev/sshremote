@@ -67,9 +67,9 @@ pub(super) fn ssh_of(argv: &[String]) -> Option<(String, Option<String>, Vec<Str
             if !LEFT_OUT.contains(&&a[..2]) {
                 opts.push(a.clone());
             }
-        } else if a.starts_with('-') {
+        } else if let Some(flags) = a.strip_prefix('-') {
             // Flags: those that change only how it goes (-4, -6, -A, -C, -q, -v...) stay.
-            let kept: String = a[1..].chars().filter(|c| !"tTNfnMsGVxXyY".contains(*c)).collect();
+            let kept: String = flags.chars().filter(|c| !"tTNfnMsGVxXyY".contains(*c)).collect();
             if !kept.is_empty() {
                 opts.push(format!("-{kept}"));
             }

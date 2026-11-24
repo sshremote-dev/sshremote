@@ -76,7 +76,7 @@ impl Way {
             return Ok(None);
         }
         let len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
-        if len < 16 || len > MOST + 16 {
+        if !(16..=MOST + 16).contains(&len) {
             return Err(());
         }
         if raw.len() < 2 + len {
@@ -145,6 +145,8 @@ pub struct Link {
 }
 
 /// How sealing the line went.
+// One per connection, handed on at once: no need to box the link.
+#[allow(clippy::large_enum_variant)]
 pub enum Outcome {
     /// Sealed, with the relay's lasting key.
     Sealed(Link, [u8; 32]),

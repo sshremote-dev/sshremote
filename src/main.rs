@@ -1,5 +1,7 @@
 // Builds with only some parts (the extensions' helpers) leave the others' code unused.
 #![cfg_attr(not(all(feature = "gui", feature = "remote", feature = "web", feature = "mcp")), allow(dead_code))]
+// Tuples named where they are used (a D-Bus reply, a cache, a few results) read better than aliases.
+#![allow(clippy::type_complexity)]
 #[cfg(feature = "remote")]
 mod access;
 mod admin;

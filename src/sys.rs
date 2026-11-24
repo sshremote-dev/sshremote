@@ -216,18 +216,6 @@ pub fn free_space(path: &std::path::Path) -> Option<u64> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn arguments_are_quoted_for_the_c_runtime() {
-        assert_eq!(super::quote_arg("plain"), "plain");
-        assert_eq!(super::quote_arg("two words"), "\"two words\"");
-        assert_eq!(super::quote_arg(r#"a\"b"#), r#""a\\\"b""#);
-        assert_eq!(super::quote_arg(r"C:\dir with space\"), r#""C:\dir with space\\""#);
-        assert_eq!(super::quote_arg(""), "\"\"");
-    }
-}
-
 /// Today in UTC as YYYY-MM-DD.
 pub fn today() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400) as i64;
@@ -304,4 +292,16 @@ pub fn end_tree(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn arguments_are_quoted_for_the_c_runtime() {
+        assert_eq!(super::quote_arg("plain"), "plain");
+        assert_eq!(super::quote_arg("two words"), "\"two words\"");
+        assert_eq!(super::quote_arg(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(super::quote_arg(r"C:\dir with space\"), r#""C:\dir with space\\""#);
+        assert_eq!(super::quote_arg(""), "\"\"");
+    }
 }

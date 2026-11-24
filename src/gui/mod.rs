@@ -277,7 +277,7 @@ fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
         };
         #[cfg(not(feature = "remote"))]
         let r = {
-            let _ = target;
+            let _ = (target, said);
             Err(crate::not_built("screens and files"))
         };
         let _ = tx.send(r);
@@ -1140,14 +1140,16 @@ impl App {
                 self.access.looked = None;
             }
         }
-        let mut st = tray::Status::default();
         #[cfg(feature = "remote")]
-        {
-            st.access = self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone()));
-            st.settings = self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct, c.requests]);
-            st.connected = crate::access::viewers();
-            st.service = self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs)));
-        }
+        let st = tray::Status {
+            access: self.access.cfg.as_ref().map(|c| (c.enabled, c.id.clone())),
+            settings: self.access.cfg.as_ref().map(|c| [c.ask, c.punch, c.lan, c.direct, c.requests]),
+            connected: crate::access::viewers(),
+            service: self.access.service.lock().ok().and_then(|s| s.filter(|s| s.known).map(|s| (s.installed, s.runs))),
+            ..Default::default()
+        };
+        #[cfg(not(feature = "remote"))]
+        let st = tray::Status::default();
         if let Ok(mut s) = self.tray_status.lock() {
             *s = st;
         }
@@ -1825,10 +1827,11 @@ mod tests {
                 let mut snap = snapshot::Snap::default();
                 for k in 0..12 {
                     let mut events = Vec::new();
-                    if name == "row_hover" && k > 3 {
-                        if let Some(r) = snap.find("Build box").first() {
-                            events.push(egui::Event::PointerMoved(r.center()));
-                        }
+                    if name == "row_hover"
+                        && k > 3
+                        && let Some(r) = snap.find("Build box").first()
+                    {
+                        events.push(egui::Event::PointerMoved(r.center()));
                     }
                     let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(k as f64 * 0.05), events, ..Default::default() };
                     snap.frame(&ctx, input, |ui| {

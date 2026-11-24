@@ -389,11 +389,11 @@ mod tests {
         use std::sync::atomic::Ordering::Relaxed;
         let ctx = egui::Context::default();
         let input = |focused| egui::RawInput { focused, ..Default::default() };
-        let _ = ctx.run_ui(input(true), |ui| note_focus(ui.ctx())).textures_delta.clear();
+        ctx.run_ui(input(true), |ui| note_focus(ui.ctx())).textures_delta.clear();
         assert!(awake(), "a window has the keyboard");
         // As if the last frame with the keyboard were two seconds back.
         FOCUSED_AT.store(since_epoch().saturating_sub(2000).max(1), Relaxed);
-        let _ = ctx.run_ui(input(false), |ui| note_focus(ui.ctx())).textures_delta.clear();
+        ctx.run_ui(input(false), |ui| note_focus(ui.ctx())).textures_delta.clear();
         assert!(!awake() || since_epoch() < 2000, "in the background");
     }
 

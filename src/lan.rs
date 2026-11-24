@@ -110,7 +110,7 @@ pub fn find(wait: Duration) -> Vec<Found> {
         let port = v.get("port").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok());
         out.push(Found { id, relay: s("relay"), name: s("name"), ip: from.ip(), mac: s("mac"), port });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 

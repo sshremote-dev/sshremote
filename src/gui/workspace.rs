@@ -69,6 +69,8 @@ pub(super) enum Launch {
 }
 
 /// A tab to open whole, as a project keeps it: one pane, or two parts beside or below each other.
+// A few, briefly, as a tab opens: no need to box the pane's launch.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Opening {
     One(Launch),
     Split { below: bool, ratio: f32, a: Box<Opening>, b: Box<Opening> },
@@ -1273,6 +1275,25 @@ impl Workspace {
     }
 
     /// One frame of the whole window.
+    /// All of a host's screens, asked for in its pane: the others, each to open in a window of
+    /// its own.
+    // (Without screens to show, the stand-in viewer leaves all of this unreachable.)
+    #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
+    fn spread_screens(&mut self) {
+        for p in &mut self.panes {
+            if let State::Live(r) = &mut p.state
+                && std::mem::take(&mut r.spread_asked)
+            {
+                let (n, shown) = r.monitors();
+                for m in (0..n).filter(|m| *m != shown) {
+                    let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
+                    self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
+                }
+                self.spread_from = Some(shown);
+            }
+        }
+    }
+
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, grabbed: Vec<(u32, bool)>) -> Out {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
@@ -1389,26 +1410,26 @@ impl Workspace {
                         }
                     }
                 }
-                State::Down(d) => match {
+                State::Down(d) => {
                     // Its shells, kept while it connects, go on taking their output meanwhile.
                     if let Some(t) = pane.terms.as_mut() {
                         let _ = t.background(&ctx);
                     }
-                    down_view(&mut child, *rect, d, &pane.label, pane.carry.as_ref().map_or(0, remote::Carry::count))
-                } {
-                    Some(DownAct::Close) => closing.push(*id),
-                    // A shell that was reaching for the agent stays the shell it was.
-                    Some(DownAct::Cancel) if !d.again && pane.terms.is_some() => to_shell.push(*id),
-                    Some(DownAct::Cancel) => {
-                        d.rx = None;
-                        d.given_up = true;
-                        if d.why.is_empty() {
-                            d.why = "Cancelled.".into();
+                    match down_view(&mut child, *rect, d, &pane.label, pane.carry.as_ref().map_or(0, remote::Carry::count)) {
+                        Some(DownAct::Close) => closing.push(*id),
+                        // A shell that was reaching for the agent stays the shell it was.
+                        Some(DownAct::Cancel) if !d.again && pane.terms.is_some() => to_shell.push(*id),
+                        Some(DownAct::Cancel) => {
+                            d.rx = None;
+                            d.given_up = true;
+                            if d.why.is_empty() {
+                                d.why = "Cancelled.".into();
+                            }
                         }
+                        Some(DownAct::Retry) => *d = Down::new(d.again, String::new()),
+                        None => {}
                     }
-                    Some(DownAct::Retry) => *d = Down::new(d.again, String::new()),
-                    None => {}
-                },
+                }
                 State::Held(h) => {
                     h.show(&mut child, *rect);
                     if h.ended() {
@@ -1469,19 +1490,7 @@ impl Workspace {
         {
             lost.push((i, e));
         }
-        // All of a host's screens: the others, each to open in a window of its own.
-        for p in &mut self.panes {
-            if let State::Live(r) = &mut p.state
-                && std::mem::take(&mut r.spread_asked)
-            {
-                let (n, shown) = r.monitors();
-                for m in (0..n).filter(|m| *m != shown) {
-                    let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
-                    self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
-                }
-                self.spread_from = Some(shown);
-            }
-        }
+        self.spread_screens();
         if let Some(n) = self.full_later.as_mut() {
             if *n == 0 {
                 self.full_later = None;

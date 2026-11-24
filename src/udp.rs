@@ -233,7 +233,7 @@ impl State {
                 self.rttvar = r / 2;
             }
             Some(s) => {
-                let d = if s > r { s - r } else { r - s };
+                let d = s.abs_diff(r);
                 self.rttvar = (self.rttvar * 3 + d) / 4;
                 self.srtt = Some((s * 7 + r) / 8);
             }
@@ -289,7 +289,7 @@ impl Inner {
                 x ^= x >> 7;
                 x ^= x << 17;
                 DICE.store(x, Ordering::Relaxed);
-                if x % n as u64 == 0 {
+                if x.is_multiple_of(n as u64) {
                     return;
                 }
             }
@@ -403,7 +403,7 @@ impl Inner {
             }
             acked.push(e.remove_entry());
         }
-        for r in body[8..].chunks_exact(8) {
+        for r in body[8..].as_chunks::<8>().0 {
             let (Some(a), Some(b)) = (u32_at(r, 0), u32_at(r, 4)) else { continue };
             if b <= a || b - a > 1 << 16 {
                 continue;

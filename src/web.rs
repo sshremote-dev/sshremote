@@ -311,7 +311,7 @@ fn read_frame(r: &mut impl Read, w: &Mutex<TcpStream>) -> Result<Frame, String> 
             0x8 => return Ok(Frame::Close),
             0x9 => send(w, 0xA, &data)?,
             0xA => {}
-            0x0 | 0x1 | 0x2 => {
+            0x0..=0x2 => {
                 if op != 0 {
                     kind = op;
                 }
@@ -933,6 +933,8 @@ enum Opened {
 }
 
 /// The agent of a session, or where it stands.
+// One per page, moved between its states: no need to box the session.
+#[allow(clippy::large_enum_variant)]
 enum Agent {
     Up(crate::session::Session, mpsc::Receiver<crate::session::Ev>),
     Connecting(mpsc::Receiver<Result<(crate::session::Session, mpsc::Receiver<crate::session::Ev>), String>>),
@@ -1404,7 +1406,7 @@ fn client(
                     });
                     None
                 }
-                Ask::ClipEnd => match std::mem::replace(&mut clip_image, Some(Vec::new())) {
+                Ask::ClipEnd => match clip_image.replace(Vec::new()) {
                     Some(png) if !png.is_empty() => Some(ToAgent::ClipImage(png)),
                     Some(_) => None,
                     None => {

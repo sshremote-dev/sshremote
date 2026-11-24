@@ -1386,7 +1386,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
             assert!(out.status.success(), "turning the screen: {}", String::from_utf8_lossy(&out.stderr));
         };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
-        let (w, h) = (sess.desk.0 as u16, sess.desk.1 as u16);
+        let (w, h) = (sess.desk.0, sess.desk.1);
         assert!(w > h, "a screen wider than tall to start with: {w}x{h}");
         sess.send(ToAgent::Settings(Settings { view_w: 640, view_h: 640, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         // The next frame for which `want` holds, acknowledging every frame meanwhile; the sizes
@@ -1463,7 +1463,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
             unattended: true,
         };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
-        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        let screen = (sess.desk.0, sess.desk.1);
         sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         // Sends `first`, then waits for a frame for which `want` holds.
         let mut fb = Framebuffer::default();
@@ -1768,7 +1768,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
         let agent = std::env::var("SSHREMOTE_GNOME_AGENT").unwrap_or_else(|_| "sshremote".into());
         let target = Target::Ssh { host, port: None, args: Vec::new(), remote: format!("env {env} {agent} --agent"), capture: "gnome".into(), password: None, unattended: true };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
-        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        let screen = (sess.desk.0, sess.desk.1);
         sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::True, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         let mut fb = Framebuffer::default();
         // Frames for `secs` seconds (or until one for which `want` holds), applied to `fb`.
@@ -1829,7 +1829,7 @@ gdbus call --session -d org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/Disp
             unattended: true,
         };
         let (mut sess, _tx, rx) = Session::open(&target, true).expect("the agent answers");
-        let screen = (sess.desk.0 as u16, sess.desk.1 as u16);
+        let screen = (sess.desk.0, sess.desk.1);
         sess.send(ToAgent::Settings(Settings { view_w: 4000, view_h: 4000, scale: 100, mode: crate::color::Mode::Gray16, fps: 10, formats: crate::proto::FORMATS })).unwrap();
         let mut fb = Framebuffer::default();
         let mut next = |first: Option<ToAgent>, want: &dyn Fn(u16, u16) -> bool| -> (Option<(u8, String)>, (u16, u16), Vec<u8>) {
