@@ -172,12 +172,8 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
     }
     cmd.args(t.args()).arg("--").arg(address);
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: no console flashes up for it.
-        cmd.creation_flags(0x0800_0000);
-    }
+    // No console flashes up for it.
+    crate::sys::quiet(&mut cmd);
     // Ended with the app even when it does not end well (on Windows its job does that). Tunnels
     // are started from the window's thread, which lasts as long as the app.
     #[cfg(target_os = "linux")]

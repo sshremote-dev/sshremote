@@ -750,15 +750,13 @@ mod win {
         nid.uCallbackMessage = CALLBACK;
         nid.hIcon = inner.as_ref().map_or(std::ptr::null_mut(), |i| i.icon as HICON);
         let status = inner.as_ref().and_then(|i| i.status.lock().ok().map(|s| s.clone())).unwrap_or_default();
-        let mut tip = match &status.access {
+        let tip = match &status.access {
             Some((true, id)) => format!("SSH Remote: reachable by ID {}", crate::computers::spaced(id)),
             Some((false, _)) => "SSH Remote: remote access is off".to_string(),
             None => "SSH Remote".to_string(),
         };
         #[cfg(feature = "remote")]
-        if !status.connected.is_empty() {
-            tip.push_str(&format!("; {} connected now", status.connected.len()));
-        }
+        let tip = if status.connected.is_empty() { tip } else { format!("{tip}; {} connected now", status.connected.len()) };
         copy(&mut nid.szTip, &tip);
         let mut inner = inner;
         if what == NIM_MODIFY

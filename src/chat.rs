@@ -198,12 +198,8 @@ impl Window {
                 cmd.env("DISPLAY", ":0");
             }
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // CREATE_NO_WINDOW: the chat window itself, without a console behind it.
-            cmd.creation_flags(0x0800_0000);
-        }
+        // The chat window itself, without a console behind it.
+        crate::sys::quiet(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("chat window: {e}"))?;
         crate::sys::tie(&child);
         let stdin = child.stdin.take().ok_or("chat window stdin")?;

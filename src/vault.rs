@@ -30,11 +30,7 @@ fn ssh_destination(host: &str, port: Option<u16>) -> Option<String> {
         c.args(["-p", &p.to_string()]);
     }
     c.arg(host).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
-    }
+    crate::sys::quiet(&mut c);
     let out = c.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let value = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(|v| v.trim().to_string()));

@@ -179,12 +179,8 @@ fn launch(m: &crate::ext::Manifest) -> Result<(), String> {
     let mut cmd = Command::new(&program);
     // Not in its own folder either, which Windows would then keep from being replaced.
     cmd.current_dir(program.parent().unwrap_or(&dir)).env("SSHREMOTE_EXTENSION_DIR", &dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: no console flashes up for an extension.
-        cmd.creation_flags(0x0800_0000);
-    }
+    // No console flashes up for an extension.
+    crate::sys::quiet(&mut cmd);
     let mut child = crate::sys::spawn_tied(&mut cmd).map_err(|e| format!("{}: {e}", file))?;
     let stdout = child.stdout.take().ok_or("no output")?;
     let stderr = child.stderr.take().ok_or("no errors")?;

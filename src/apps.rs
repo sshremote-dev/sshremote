@@ -348,7 +348,7 @@ mod imp {
                 use std::os::windows::process::CommandExt;
                 std::process::Command::new("powershell.exe")
                     .raw_arg(&PS["powershell.exe ".len()..])
-                    .creation_flags(0x0800_0000)
+                    .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
                     .stdin(std::process::Stdio::null())
                     .output()
                     .ok()
@@ -388,10 +388,9 @@ mod imp {
             crate::console_user::Acting::Nobody => Err(crate::console_user::NOBODY.into()),
             crate::console_user::Acting::Myself => {
                 use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 std::process::Command::new("cmd.exe")
                     .raw_arg(format!("/d /c start \"\" {line}"))
-                    .creation_flags(CREATE_NO_WINDOW)
+                    .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())

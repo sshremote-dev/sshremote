@@ -381,11 +381,7 @@ fn ssh_command(host: &str, port: Option<&str>, opts: &[String]) -> std::process:
         }
     }
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
-    }
+    crate::sys::quiet(&mut c);
     c
 }
 

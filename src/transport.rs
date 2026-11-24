@@ -141,14 +141,10 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         }
     };
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
+    // A window-mode viewer must not flash a console for ssh.
     if hidden {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: a window-mode viewer must not flash a console for ssh.
-        cmd.creation_flags(0x0800_0000);
+        crate::sys::quiet(&mut cmd);
     }
-    #[cfg(not(windows))]
-    let _ = hidden;
     let mut child = cmd.spawn().map_err(|e| format!("could not start the agent: {e}"))?;
     crate::sys::tie(&child);
     Ok(Link {

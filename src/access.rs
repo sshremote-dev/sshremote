@@ -1786,11 +1786,7 @@ fn serve_viewer(
     if cameras {
         cmd.arg("--cameras");
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::sys::quiet(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     crate::sys::tie(&child);
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
@@ -1948,7 +1944,7 @@ pub fn service_is_this() -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let Ok(o) = Command::new("sc").args(["qc", crate::service::NAME]).creation_flags(0x0800_0000).output() else { return true };
+        let Ok(o) = Command::new("sc").args(["qc", crate::service::NAME]).creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).output() else { return true };
         let text = String::from_utf8_lossy(&o.stdout).to_string();
         // BINARY_PATH_NAME   : "C:\Program Files\SSH Remote\sshremote.exe" --service
         let Some(path) = text.lines().find(|l| l.contains("BINARY_PATH_NAME")).and_then(|l| l.split('"').nth(1)) else { return false };
@@ -1972,7 +1968,7 @@ pub fn service_runs() -> bool {
         use std::os::windows::process::CommandExt;
         return Command::new("sc")
             .args(["query", crate::service::NAME])
-            .creation_flags(0x0800_0000)
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"));
     }
