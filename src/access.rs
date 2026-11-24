@@ -504,21 +504,8 @@ fn write_settings(text: &str) -> Result<(), String> {
         if let Some(d) = f.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
-        // Readable by its user only from the start: it holds the password.
-        let tmp = f.with_extension("json.new");
-        // A leftover could keep wider permissions: a new file gets the mode.
-        let _ = std::fs::remove_file(&tmp);
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-        o.open(&tmp)
-            .and_then(|mut h| {
-                h.write_all(text.as_bytes())?;
-                h.sync_all()
-            })
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))?;
+        // Readable by its user only: it holds the password.
+        crate::sys::write_whole(&f, text.as_bytes(), true, true).map_err(|e| format!("{}: {e}", f.display()))?;
         hand_back(&f);
         Ok(())
     }
@@ -641,8 +628,7 @@ pub fn publish_state(said: &mut String) {
     }
     #[cfg(not(windows))]
     let _ = f.parent().map(std::fs::create_dir_all);
-    let tmp = f.with_extension("new");
-    if std::fs::write(&tmp, &now).and_then(|_| std::fs::rename(&tmp, &f)).is_ok() {
+    if crate::sys::write_whole(&f, now.as_bytes(), false, false).is_ok() {
         hand_back(&f);
         *said = now;
     }
@@ -1444,10 +1430,10 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
 fn known_key(cfg: &Config) -> Option<[u8; 32]> {
     let relay = crate::computers::relay_name(&cfg.relay);
     if relay.eq_ignore_ascii_case(crate::computers::RELAY) {
-        return crate::relaylink::unhex(crate::relaylink::PUBLIC_RELAY_KEY);
+        return crate::relaylink::key_from_hex(crate::relaylink::PUBLIC_RELAY_KEY);
     }
     let (r, k) = cfg.relay_key.split_once(' ')?;
-    (r == relay).then(|| crate::relaylink::unhex(k)).flatten()
+    (r == relay).then(|| crate::relaylink::key_from_hex(k)).flatten()
 }
 
 /// The line to the relay, sealed: with the key it is known by, or (a relay of one's own seen
@@ -2620,7 +2606,7 @@ mod tests {
                         }
                         continue;
                     };
-                    let e = crate::relaylink::unhex(first.strip_prefix("secure ").unwrap()).unwrap();
+                    let e = crate::relaylink::key_from_hex(first.strip_prefix("secure ").unwrap()).unwrap();
                     let (answer, seal) = crate::relaylink::answer(&e, &lasting, [4; 32]).unwrap();
                     writeln!(s, "{answer}").unwrap();
                     let crate::relaylink::Sealed { mut out, mut inn } = seal;
@@ -2668,7 +2654,7 @@ mod tests {
         assert!(sealed_line(&mut cfg).err().unwrap().contains("as it always has"));
         // The public relay is known by the key shipped.
         cfg.relay = crate::computers::OLD_RELAY.into();
-        assert_eq!(known_key(&cfg), crate::relaylink::unhex(crate::relaylink::PUBLIC_RELAY_KEY));
+        assert_eq!(known_key(&cfg), crate::relaylink::key_from_hex(crate::relaylink::PUBLIC_RELAY_KEY));
     }
 
     /// The public relay seals the line with the key shipped: cargo test -- --ignored public_relay_seals

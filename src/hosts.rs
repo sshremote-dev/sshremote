@@ -166,17 +166,9 @@ fn write_lines(name: &str, lines: &[String]) {
     if let Some(d) = config_dir() {
         let _ = std::fs::create_dir_all(&d);
         let f = d.join(name);
-        // Whole or not at all (a reader never meets half a file), and its user's alone from the
-        // start: settings may hold a proxy's password.
-        let tmp = d.join(format!("{name}.{}.new", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        // Its user's alone: settings may hold a proxy's password.
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        if o.open(&tmp).and_then(|mut h| std::io::Write::write_all(&mut h, text.as_bytes())).and_then(|_| std::fs::rename(&tmp, &f)).is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        if crate::sys::write_whole(&f, text.as_bytes(), true, false).is_err() {
             let _ = std::fs::write(&f, text);
         }
         #[cfg(unix)]

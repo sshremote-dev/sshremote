@@ -28,15 +28,9 @@ fn dh(secret: &[u8; 32], public: &[u8; 32]) -> Option<[u8; 32]> {
     (shared != [0; 32]).then_some(shared)
 }
 
-pub fn unhex(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+/// A key of 32 bytes from its 64 hex digits.
+pub fn key_from_hex(s: &str) -> Option<[u8; 32]> {
+    crate::sys::unhex(s)?.try_into().ok()
 }
 
 /// One direction's sealing: a key and the count of frames so far (each frame's nonce).
@@ -172,7 +166,7 @@ impl Link {
             Err(_) => return Ok(Outcome::Older),
         };
         let words: Vec<&str> = answer.split(' ').collect();
-        let (Some(e), Some(lasting)) = (words.get(1).and_then(|w| unhex(w)), words.get(2).and_then(|w| unhex(w))) else {
+        let (Some(e), Some(lasting)) = (words.get(1).and_then(|w| key_from_hex(w)), words.get(2).and_then(|w| key_from_hex(w))) else {
             return if words.first() == Some(&"secure") { Err(io::Error::other("a garbled answer")) } else { Ok(Outcome::Older) };
         };
         if known.is_some_and(|k| k != lasting) {
@@ -253,7 +247,7 @@ mod tests {
         let agent = keypair([9; 32]);
         let (line, mut relay) = answer(&agent.1, &lasting, [5; 32]).unwrap();
         let words: Vec<&str> = line.split(' ').collect();
-        let (e_relay, s_relay) = (unhex(words[1]).unwrap(), unhex(words[2]).unwrap());
+        let (e_relay, s_relay) = (key_from_hex(words[1]).unwrap(), key_from_hex(words[2]).unwrap());
         assert_eq!(s_relay, lasting.1);
         let mut comp = finish(&agent, &e_relay, &s_relay).unwrap();
         // Several frames, in order, and a long one in parts.

@@ -437,11 +437,10 @@ impl SealedReader {
             // offer TAG FIRST [mac=KEY] ADDRESS...: FIRST names the side that probes first, KEY
             // checks every packet of the path.
             Some("offer") => {
-                let unhex = |t: &str| (t.len().is_multiple_of(2) && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| (0..t.len() / 2).filter_map(|i| u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()).collect::<Vec<u8>>());
-                let tag = words.next().filter(|t| t.len() == 16).and_then(unhex);
+                let tag = words.next().filter(|t| t.len() == 16).and_then(crate::sys::unhex);
                 let first = words.next().unwrap_or("viewer").to_string();
                 let rest: Vec<&str> = words.collect();
-                let key = rest.iter().find_map(|w| w.strip_prefix("mac=")).filter(|k| k.len() == 64).and_then(unhex).and_then(|k| <[u8; 32]>::try_from(k).ok());
+                let key = rest.iter().find_map(|w| w.strip_prefix("mac=")).filter(|k| k.len() == 64).and_then(crate::sys::unhex).and_then(|k| <[u8; 32]>::try_from(k).ok());
                 if let Some(tag) = tag.and_then(|t| <[u8; 8]>::try_from(t).ok()) {
                     self.line.offered(tag, key, &first, rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect());
                 }

@@ -94,10 +94,6 @@ fn legacy_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     h
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
-}
-
 fn seal(plain: &[u8], passphrase: &str) -> Value {
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 12];
@@ -112,7 +108,7 @@ fn open(sealed: &Value, passphrase: &str) -> Result<Vec<u8>, String> {
     let pbkdf2_sealed = sealed["kdf"] == "pbkdf2-sha256";
     let field = |k: &str| {
         let s = sealed[k].as_str();
-        if pbkdf2_sealed { s.and_then(|s| B64.decode(s).ok()) } else { s.and_then(unhex) }.ok_or("damaged backup")
+        if pbkdf2_sealed { s.and_then(|s| B64.decode(s).ok()) } else { s.and_then(crate::sys::unhex) }.ok_or("damaged backup")
     };
     let salt = field("salt")?;
     let key = if pbkdf2_sealed {
@@ -443,7 +439,7 @@ pub fn restore(path: &Path, passphrase: Option<&str>, ssh_config: bool, ssh_file
                     let base64 = secrets["encoding"] == "base64";
                     for (rel, data) in &files {
                         let data = data.as_str();
-                        let data = if base64 { data.and_then(|d| B64.decode(d).ok()) } else { data.and_then(unhex) };
+                        let data = if base64 { data.and_then(|d| B64.decode(d).ok()) } else { data.and_then(crate::sys::unhex) };
                         let data = data.ok_or("damaged backup")?;
                         written += put_ssh_file(&ssh, rel, &data)? as usize;
                     }

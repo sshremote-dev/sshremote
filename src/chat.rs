@@ -1031,11 +1031,8 @@ fn append_to(path: &std::path::Path, theirs: bool, text: &str, at: u64, limit: u
             from -= 1;
             size += lines[from].len() as u64;
         }
-        // Written beside it and renamed over it: a crash midway leaves the old file whole.
-        let tmp = path.with_extension("jsonl.tmp");
-        if std::fs::write(&tmp, lines[from..].concat()).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        // A crash midway leaves the old file whole.
+        let _ = crate::sys::write_whole(path, lines[from..].concat().as_bytes(), false, false);
     } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = f.write_all((serde_json::to_string(&(theirs, text, at)).expect("json") + "\n").as_bytes());

@@ -99,6 +99,14 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Bytes from hex digits as [`hex`] writes them; None unless the text is pairs of hex digits.
+pub fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
 /// `n` bytes from the system's random source.
 #[cfg(feature = "remote")]
 pub fn random(n: usize) -> Vec<u8> {
@@ -235,6 +243,38 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
+/// Writes `data` to `path` whole or not at all: beside it first, then renamed over it, so a
+/// reader never meets half a file. `private`: readable by its user only, from the start;
+/// `durable`: on the disk before it takes the old one's place, so not even a crash loses both.
+pub fn write_whole(path: &std::path::Path, data: &[u8], private: bool, durable: bool) -> std::io::Result<()> {
+    // One of its own for each write, so two at once (threads of this program too) never share it.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.{}.{n}.new", std::process::id()));
+    // A leftover could keep wider permissions: a new file gets the mode.
+    let _ = std::fs::remove_file(&tmp);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let done = o
+        .open(&tmp)
+        .and_then(|mut h| {
+            std::io::Write::write_all(&mut h, data)?;
+            if durable { h.sync_all() } else { Ok(()) }
+        })
+        .and_then(|_| std::fs::rename(&tmp, path));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
 /// Today in UTC as YYYY-MM-DD.
 pub fn today() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400) as i64;
@@ -322,5 +362,34 @@ mod tests {
         assert_eq!(super::quote_arg(r#"a\"b"#), r#""a\\\"b""#);
         assert_eq!(super::quote_arg(r"C:\dir with space\"), r#""C:\dir with space\\""#);
         assert_eq!(super::quote_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn hex_comes_back_as_bytes_and_nothing_else_does() {
+        assert_eq!(super::unhex(&super::hex(&[0, 0xab, 0xff, 16])), Some(vec![0, 0xab, 0xff, 16]));
+        assert_eq!(super::unhex("ABcd"), Some(vec![0xab, 0xcd]));
+        assert_eq!(super::unhex(""), Some(vec![]));
+        for bad in ["0", "abc", "zz", "+f", "-1", "0x", " 1"] {
+            assert_eq!(super::unhex(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_is_written_whole_and_private_ones_stay_private() {
+        let dir = std::env::temp_dir().join(format!("sshremote-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("settings.json");
+        std::fs::write(&f, "old").unwrap();
+        super::write_whole(&f, b"new", true, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600, "a file that was readable by all is not any more");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("settings.json")], "nothing is left beside it");
+        assert!(super::write_whole(&dir.join("no-such-folder").join("x"), b"x", false, false).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

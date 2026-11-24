@@ -153,9 +153,8 @@ fn write(v: &[Value]) -> Result<(), String> {
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
-    let tmp = f.with_extension(format!("json.{}.new", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &f).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    crate::sys::write_whole(&f, text.as_bytes(), false, false).map_err(|e| e.to_string())
 }
 
 /// Keeps `tabs` under `name`, in place of one of that name.
