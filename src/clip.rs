@@ -389,6 +389,42 @@ mod tests {
         assert_ne!(mark_image(w, h, &other), mark_image(w, h, &rgba));
     }
 
+    /// A picture from the other side goes onto this computer's clipboard, and one copied here by
+    /// another program is told as copied, as an agent's clipboard does. It replaces what is
+    /// copied: SSHREMOTE_CLIP_TEST=1 cargo test -- --ignored a_picture_goes
+    #[test]
+    #[ignore]
+    fn a_picture_goes_through_this_clipboard() {
+        if std::env::var_os("SSHREMOTE_CLIP_TEST").is_none() {
+            return;
+        }
+        let (w, h) = (64usize, 48usize);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| if i % 4 == 3 { 255 } else { (i * 7 % 251) as u8 }).collect();
+        let other: Vec<u8> = rgba.iter().enumerate().map(|(i, &b)| if i % 4 == 3 { b } else { 255 - b }).collect();
+        // A system's clipboard may pass colours through its colour handling: near enough is the same.
+        let near = |png: &[u8], want: &[u8]| {
+            let got = from_png(png).expect("a PNG");
+            assert_eq!((got.width, got.height), (w, h));
+            got.bytes.iter().zip(want).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0)
+        };
+        let mut agent = Clip::with_files();
+        assert!(agent.set_image(to_png(w, h, &rgba).unwrap()), "the picture was taken");
+        let (_, png) = image_png().expect("a picture on the clipboard");
+        let there = near(&png, &rgba);
+        arboard::Clipboard::new().unwrap().set_image(arboard::ImageData { width: w, height: h, bytes: other.clone().into() }).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(8);
+        let told = loop {
+            if let Some(Copied::Image(png)) = agent.poll() {
+                break near(&png, &other);
+            }
+            assert!(std::time::Instant::now() < until, "the picture copied here was not told");
+            thread::sleep(Duration::from_millis(50));
+        };
+        let _ = arboard::Clipboard::new().unwrap().clear();
+        println!("put there: off by {there} at most; copied here and told: off by {told} at most");
+        assert!(there <= 2 && told <= 2);
+    }
+
     #[test]
     fn marks_tell_texts_apart() {
         assert_eq!(mark("hello"), mark("hello"));
