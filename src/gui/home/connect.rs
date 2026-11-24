@@ -81,15 +81,16 @@ fn finds(c: &Computer, q: &str) -> bool {
         || (!digits.is_empty() && c.id().is_some_and(|id| id.contains(&digits)))
 }
 
-/// A tag as a small rounded label, in a row of the list.
+/// A tag as a small rounded label, in a row of the list: as tall as its text and a little room,
+/// centred on the line (a frame there would take the line's whole height).
 fn tag_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let brand = super::super::brand();
-    egui::Frame::new()
-        .fill(brand.gamma_multiply(0.12))
-        .corner_radius(CornerRadius::same(7))
-        .inner_margin(egui::Margin::symmetric(6, 0))
-        .show(ui, |ui| ui.add(egui::Label::new(RichText::new(text).size(10.5).color(brand)).selectable(false)))
-        .response
+    let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(10.5), brand);
+    let pad = egui::vec2(6.0, 1.5);
+    let (rect, r) = ui.allocate_exact_size(galley.size() + 2.0 * pad, egui::Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(7), brand.gamma_multiply(0.12));
+    ui.painter().galley(rect.min + pad, galley, brand);
+    r
 }
 
 /// A tag over the list, to pick its computers; `on`: the one the list is showing.
