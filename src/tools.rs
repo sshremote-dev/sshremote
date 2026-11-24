@@ -834,6 +834,13 @@ pub fn open_path(p: &std::path::Path) {
         } else {
             let _ = Command::new("explorer.exe").arg(p).spawn();
         }
+    } else if cfg!(target_os = "macos") {
+        // A file in the text editor, as on Windows; a folder in the Finder.
+        let mut c = Command::new("/usr/bin/open");
+        if p.is_file() {
+            c.arg("-t");
+        }
+        let _ = c.arg(p).spawn();
     } else {
         let _ = Command::new("xdg-open").arg(p).spawn();
     }

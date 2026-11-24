@@ -613,9 +613,11 @@ pub(crate) fn open_url(url: &str) {
     if !["http://", "https://", "mailto:"].iter().any(|s| lower.starts_with(s)) {
         return;
     }
-    if cfg!(windows) {
-        let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    let _ = if cfg!(windows) {
+        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("/usr/bin/open").arg(url).spawn()
     } else {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
 }
