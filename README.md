@@ -147,9 +147,11 @@ screen's toolbar and the web page offer none. Without the extension the Tools ar
 cargo build --release
 ```
 
-Linux needs `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopus-dev libasound2-dev
-pkg-config` and a C++ compiler. Put the binary on the host as `~/.local/bin/sshremote` (Windows:
-anywhere on `PATH`).
+On Debian or Ubuntu, Linux needs a C++ compiler and `pkg-config cmake nasm libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev libopus-dev libasound2-dev libxkbcommon-dev libwayland-dev`; the
+tests also want `openssh-client fonts-dejavu-core`. [CI](.github/workflows/ci.yml) builds it this
+way on every push. Put the binary on the host as `~/.local/bin/sshremote` (Windows: anywhere on
+`PATH`).
 
 ## Tests
 
