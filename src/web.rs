@@ -945,7 +945,19 @@ enum Agent {
 
 /// A computer in the browser as in the app: a shell first, its screen (made only while shown) and
 /// its files. Says whether it was reached, refused the password, or could not be reached.
-fn client(
+fn client(r: BufReader<TcpStream>, w: Arc<Mutex<TcpStream>>, open: Open, view: (u16, u16), term: (u16, u16)) -> Result<Opened, String> {
+    let out = serve_page(r, w.clone(), open, view, term);
+    // Ended by an error on the way: the page hears why and its socket is shut, as at the end.
+    if let Err(e) = &out {
+        let _ = send_json(&w, serde_json::json!({ "end": plain(e) }));
+        if let Ok(s) = w.lock() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+    out
+}
+
+fn serve_page(
     mut r: BufReader<TcpStream>,
     w: Arc<Mutex<TcpStream>>,
     open: Open,
