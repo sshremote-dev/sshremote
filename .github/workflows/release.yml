@@ -1,9 +1,10 @@
 name: Release
 
-# The Linux and Windows files of a release, built here from the tagged source with a build
-# attestation: `gh attestation verify FILE -R sshremote-dev/sshremote` checks a downloaded file.
-# scripts/release.sh takes them from this run, builds the Mac app on the project's Mac (its
-# signing key stays there) and publishes the release.
+# Every file of release/platforms.json built `by: ci`, from the tagged source: built, run where it
+# is meant to run, attested (`gh attestation verify FILE -R sshremote-dev/sshremote` checks a
+# downloaded one), and, for a tag, put in a draft release with release/notes.md.
+# scripts/release.sh takes them from that draft and adds the Mac app; scripts/publish.sh
+# publishes. Started by hand, it builds and checks without making a release.
 on:
   push:
     tags: ['v*']
@@ -13,9 +14,24 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: ${{ matrix.file }}
+  plan:
     runs-on: ubuntu-24.04
+    outputs:
+      builds: ${{ steps.plan.outputs.builds }}
+      checks: ${{ steps.plan.outputs.checks }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          echo "builds=$(jq -c '[.platforms[] | select(.build.by == "ci")]' release/platforms.json)" >> "$GITHUB_OUTPUT"
+          echo "checks=$(jq -c '[.platforms[] | select(.build.by == "ci" and .check != null and .check != .build.runner)]' release/platforms.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.file }}
+    runs-on: ${{ matrix.build.runner }}
     permissions:
       contents: read
       id-token: write
@@ -24,39 +40,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - file: sshremote-linux-x86_64
-            target: ''
-          - file: sshremote-windows-x86_64.exe
-            target: x86_64-pc-windows-gnu
+        include: ${{ fromJSON(needs.plan.outputs.builds) }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: System libraries
+      - name: Linux libraries
+        if: matrix.build.setup == 'linux'
         run: |
           sudo apt-get update
-          if [ -z "${{ matrix.target }}" ]; then
-            sudo apt-get install -y pkg-config cmake nasm libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libasound2-dev libxkbcommon-dev libwayland-dev
-          else
-            sudo apt-get install -y cmake nasm gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-            sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
-            sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
-          fi
+          sudo apt-get install -y pkg-config cmake nasm libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libasound2-dev libxkbcommon-dev libwayland-dev
+      - name: MinGW-w64
+        if: matrix.build.setup == 'mingw'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target || 'x86_64-unknown-linux-gnu' }}
+          targets: ${{ matrix.build.target }}
       # No cache: what is shipped is built from nothing but the source.
       - name: Build
-        run: |
-          if [ -z "${{ matrix.target }}" ]; then
-            cargo build --profile dist --locked
-            cp target/dist/sshremote "${{ matrix.file }}"
-          else
-            cargo build --profile dist --locked --target "${{ matrix.target }}"
-            cp "target/${{ matrix.target }}/dist/sshremote.exe" "${{ matrix.file }}"
-          fi
-          sha256sum "${{ matrix.file }}"
+        run: scripts/ci-build.sh "${{ matrix.build.target }}" "${{ matrix.file }}"
+      - name: Run here
+        if: matrix.check == matrix.build.runner
+        run: scripts/ci-check.sh "./${{ matrix.file }}"
       - uses: actions/attest@v4
         with:
           subject-path: ${{ matrix.file }}
@@ -66,3 +78,53 @@ jobs:
           path: ${{ matrix.file }}
           if-no-files-found: error
           retention-days: 30
+
+  # A file built elsewhere (Windows on Linux) runs on its own system before it ships.
+  check:
+    needs: [plan, build]
+    if: needs.plan.outputs.checks != '[]'
+    name: run ${{ matrix.file }}
+    runs-on: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.checks) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.file }}
+      - run: chmod +x "${{ matrix.file }}" && scripts/ci-check.sh "./${{ matrix.file }}"
+
+  draft:
+    needs: [build, check]
+    if: ${{ !cancelled() && !failure() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          path: files
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd files
+          sha256sum * > ../SHA256SUMS
+          cd ..
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" files/* SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" files/* SHA256SUMS --draft --verify-tag --title "SSH Remote ${TAG#v}" --notes-file release/notes.md --repo "$GITHUB_REPOSITORY"
+          fi

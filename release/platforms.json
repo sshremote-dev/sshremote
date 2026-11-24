@@ -1,0 +1,49 @@
+{
+  "about": "Every file a release ships. GitHub Actions builds the ones `by: ci` (.github/workflows/release.yml), runs each on `check` and attests it; scripts/release.sh builds the `by: mac` one on the project's Mac. The site's download list, the list the app updates from, the installers and the package managers all follow this. See docs/releasing.md.",
+  "platforms": [
+    {
+      "file": "sshremote-windows-x86_64.exe",
+      "os": "windows",
+      "arch": "x86_64",
+      "label": "Windows",
+      "detail": "x86_64 · .exe",
+      "build": { "by": "ci", "runner": "ubuntu-24.04", "target": "x86_64-pc-windows-gnu", "setup": "mingw" },
+      "check": "windows-2025"
+    },
+    {
+      "file": "sshremote-windows-aarch64.exe",
+      "os": "windows",
+      "arch": "aarch64",
+      "label": "Windows on Arm",
+      "detail": "Arm64 · .exe",
+      "build": { "by": "ci", "runner": "windows-11-arm", "target": "aarch64-pc-windows-msvc", "setup": "msvc" },
+      "check": "windows-11-arm"
+    },
+    {
+      "file": "sshremote-linux-x86_64",
+      "os": "linux",
+      "arch": "x86_64",
+      "label": "Linux",
+      "detail": "x86_64 · X11 and Wayland",
+      "build": { "by": "ci", "runner": "ubuntu-24.04", "target": "x86_64-unknown-linux-gnu", "setup": "linux" },
+      "check": "ubuntu-24.04"
+    },
+    {
+      "file": "sshremote-linux-aarch64",
+      "os": "linux",
+      "arch": "aarch64",
+      "label": "Linux on Arm",
+      "detail": "Arm64 · X11 and Wayland",
+      "build": { "by": "ci", "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "setup": "linux" },
+      "check": "ubuntu-24.04-arm"
+    },
+    {
+      "file": "sshremote-macos.zip",
+      "os": "macos",
+      "arch": "universal",
+      "label": "macOS",
+      "detail": "Apple silicon and Intel · macOS 12.3 or later",
+      "build": { "by": "mac" }
+    }
+  ]
+}
