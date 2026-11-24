@@ -1,4 +1,104 @@
-# sshremote
+# SSH Remote
+
+**One workspace for all your servers and projects.** Split terminals across hosts, read an AI
+agent's answer as Markdown, open a host's files or desktop in the next pane, all over the SSH login
+you already have. No account, no open port, nobody in between.
+
+![The workspace: a project's files, a server's terminal and an AI agent's answer read as Markdown](site/img/workspace-dark.png)
+
+[Website](https://sshremote.dev) · [Download](https://sshremote.dev/#download) ·
+[Docs](https://sshremote.dev/docs.html) · [In the browser](https://web.sshremote.dev) ·
+[Extensions](https://sshremote.dev/extensions.html)
+
+## Why
+
+Developers who look after many machines end up with a pile of terminal windows, a separate remote
+desktop app, an SFTP client and a browser tab per dashboard, and lately an AI agent scrolling away
+in one of those terminals. SSH Remote puts all of it in one window: each tab is a computer, split
+into panes, and each pane is that computer's terminal, its screen or its files, switched in place.
+It needs nothing on the server but the same single file, started over the SSH you already use.
+
+## Features
+
+- **Workspace.** Tabs and splits across hosts, layouts for many panes, tabs torn off into windows
+  of their own, a set of tabs kept as a project and opened again whole, connections that come back
+  by themselves.
+- **Terminals.** A full terminal emulator with scrollback search, links, pictures (sixel and the
+  kitty protocol) and profiles for local shells, SSH hosts and `~/.ssh/config` aliases.
+- **Coding with AI agents.** Any output read as rendered Markdown, with an agent's prompts, replies
+  and code blocks laid out as a document. Files and screenshots dropped or pasted into a terminal
+  land on that host. `sshremote mcp HOST` gives any agent the host's screen, its window as text,
+  clicks and keys through the Model Context Protocol.
+- **Screens and files.** The host's desktop with keyboard, mouse, monitors, one window or one
+  program, clipboard with files and pictures, sound, chat and voice calls; two-sided file transfer
+  with drag and drop. Lossless text in about half of RustDesk's AV1 traffic.
+- **Remote access by ID.** For a PC behind Wi-Fi or NAT with no SSH: a 9-digit ID and a password,
+  sealed end to end (SPAKE2, ChaCha20-Poly1305) through a relay that only copies bytes, straight
+  past it when hole punching finds a path. Also from a browser at
+  [web.sshremote.dev](https://web.sshremote.dev).
+- **The SSH chores.** Keys made, copied and installed, passwords in the system's password store,
+  tunnels (local, remote, SOCKS), and a passphrase-protected backup of your computers and `~/.ssh`.
+- **Extensions.** Panels, commands, styles, scripts and programs from a signed registry, each held
+  to the permissions it names.
+
+Hosts: Windows, macOS, and Linux with GNOME, KDE Plasma, Sway, Hyprland, COSMIC or any X11 desktop.
+Viewers: the native window (Windows, macOS, Linux), a terminal that shows pictures, or a browser.
+
+## Install
+
+Download the single program for your system from [sshremote.dev](https://sshremote.dev/#download)
+and put the same file on each host you want to reach (`~/.local/bin/sshremote` on Linux, anywhere
+on `PATH` on Windows, the app in Applications on a Mac). Or build it:
+
+```sh
+cargo build --release
+```
+
+## Quick start
+
+```sh
+sshremote                                  # the window: your computers, ~/.ssh/config included
+sshremote --gui user@host --open files     # straight to a host's terminal, screen or files
+sshremote user@host                        # the host's screen in this terminal (sixel or kitty)
+sshremote remote-access on                 # reachable by ID, for a PC without SSH
+sshremote mcp user@host                    # an MCP server for AI agents
+```
+
+## How it works
+
+There is one program. On the viewer it is the window (or the terminal viewer, the browser gateway,
+the MCP server); on the host it is the agent, started over SSH as `ssh -T HOST sshremote --agent`.
+The agent sends an exact copy of the screen as changed rectangles and moves in one zstd stream
+(H.264 only for areas that keep moving), along with terminals, files, clipboard and sound. Over SSH
+there is no relay, ID server or open port. Remote access by ID runs the same protocol through
+[sshremote-relay](https://github.com/sshremote-dev/sshremote-relay), sealed end to end, for
+computers SSH cannot reach.
+
+## Compared with
+
+- **ssh and tmux** give you terminals; SSH Remote adds the host's screen and files in the next
+  pane, keeps every host's terminals in one window, and reads an agent's output as a document.
+- **Remote desktop tools** such as RustDesk or TeamViewer need their service and, by default, their
+  servers in between; over SSH nothing sits between you and the host, and when you do need a relay
+  (remote access by ID) it only copies bytes sealed end to end.
+- **Editor remotes** such as VS Code Remote-SSH install a server and open one host per editor
+  window; SSH Remote is not tied to an editor and needs only itself on the host.
+
+## Repositories
+
+| Repository | What it is |
+|---|---|
+| [sshremote](https://github.com/sshremote-dev/sshremote) | The app: window, agent, terminal viewer, web gateway, MCP server, site and release scripts |
+| [sshremote-relay](https://github.com/sshremote-dev/sshremote-relay) | The relay for remote access by ID |
+| [sshremote-extensions](https://github.com/sshremote-dev/sshremote-extensions) | The registry's extensions (`scripts/deploy.sh` expects it beside this one) |
+
+## Contributing, security and license
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](https://github.com/sshremote-dev/.github/blob/main/CONTRIBUTING.md).
+Report security problems privately, as [SECURITY.md](https://github.com/sshremote-dev/.github/blob/main/SECURITY.md)
+describes. SSH Remote is under the [MIT license](LICENSE).
+
+## Feature reference
 
 Remote control over the SSH login you already have: a terminal, the host's screen with keyboard and
 mouse, files, and an MCP server for AI agents. Over SSH there is no relay, ID server or open port:
@@ -319,7 +419,7 @@ connected, so ending the connection and changing what they may do are always at 
 
 On Windows the settings live under `HKLM\SOFTWARE\sshremote`, which only administrators and
 SYSTEM can open, so setting it up or seeing the password needs administrator rights (the window
-asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/thinkbigx/sshremote-relay); the one this project runs is `relay.sshremote.dev` (before 0.10 it went by
+asks for them at start). The relay is its own small program, [sshremote-relay](https://github.com/sshremote-dev/sshremote-relay); the one this project runs is `relay.sshremote.dev` (before 0.10 it went by
 `sshremote.dev`, which still reaches it and is read as the same relay), reached on TCP and UDP
 7071, or on port 80 through a web server when 7071 is shut.
 
@@ -343,11 +443,3 @@ passwords cost more time each, and attempts per address are limited. See
 
 Icons: [Phosphor Icons](https://phosphoricons.com) (MIT) via egui-phosphor, see
 `assets/fonts/LICENSE-phosphor.txt`.
-
-## Repositories
-
-| Repository | What |
-|---|---|
-| [sshremote](https://github.com/thinkbigx/sshremote) | The app, the web gateway, the site and `scripts/deploy.sh` |
-| [sshremote-relay](https://github.com/thinkbigx/sshremote-relay) | The relay for remote access by ID |
-| [sshremote-extensions](https://github.com/thinkbigx/sshremote-extensions) | The registry's extensions; `scripts/deploy.sh` expects it beside this one |
