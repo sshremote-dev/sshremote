@@ -56,6 +56,11 @@ curl -fsSL https://sshremote.dev/install.sh | sh      # macOS and Linux
 irm https://sshremote.dev/install.ps1 | iex           # Windows, in PowerShell
 ```
 
+```sh
+brew install --cask sshremote-dev/tap/sshremote       # macOS with Homebrew (the app, and sshremote)
+brew install sshremote-dev/tap/sshremote              # Linux with Homebrew
+```
+
 Each takes the current version from [GitHub Releases](https://github.com/sshremote-dev/sshremote/releases),
 checks its SHA-256 against the list on sshremote.dev and puts it in place: `~/.local/bin/sshremote`
 on Linux, the app in Applications on a Mac, and on Windows `%LOCALAPPDATA%\Programs\SSH Remote`
@@ -66,9 +71,11 @@ with a Start menu entry and the folder on `PATH`. Or download a file from
 cargo build --release
 ```
 
-The Linux and Windows files are built by [GitHub Actions](.github/workflows/release.yml) from the
-tagged source, each with a build attestation (`gh attestation verify FILE -R
-sshremote-dev/sshremote`); the Mac app is built and signed on the project's Mac. The Windows file
+There are builds for Windows and Linux on x86_64 and Arm, and one Mac app for Apple silicon and
+Intel. The Windows and Linux files are built by [GitHub Actions](.github/workflows/release.yml)
+from the tagged source and run on their own system before they ship, each with a build attestation
+(`gh attestation verify FILE -R sshremote-dev/sshremote`); the Mac app is built and signed on the
+project's Mac. How a release is made, and how a platform is added: [docs/releasing.md](docs/releasing.md). The Windows file
 is not code-signed and the Mac app not notarized, so a copy downloaded with a browser is checked
 the first time it runs (SmartScreen's **More info**, then **Run anyway**; on a Mac, right click
 and **Open**); the install lines above download without that mark.

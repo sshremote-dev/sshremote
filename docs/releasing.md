@@ -50,6 +50,14 @@ the installers, the program's update, the Homebrew tap and the winget manifests 
 Homebrew and winget know a processor by the maps `HOMEBREW_ARCH` and `WINGET_ARCH` in
 `scripts/packages.py`; a new system there (FreeBSD, say) needs its own entry kind.
 
+## Adding a package manager
+
+`scripts/packages.py` keeps one function for each package manager in `CHANNELS`. Each takes the
+version, `release/platforms.json`'s entries (with each file's SHA-256 and its URL in the GitHub
+release) and the release folder, and puts the release where that package manager reads it: the
+Homebrew tap is a repository of the organization it commits to; winget's manifests are proposed to
+`microsoft/winget-pkgs`. Another, such as Scoop, is one more function in that list.
+
 ## Keys and lists
 
 | Key | Where | Signs |
