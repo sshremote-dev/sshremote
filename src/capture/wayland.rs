@@ -45,9 +45,6 @@ pub struct Wayland {
     wake: super::Waker,
 }
 
-// SAFETY: the pipeline and the portal's connection are used from the thread that holds them.
-unsafe impl Send for Wayland {}
-
 fn token_file() -> Option<std::path::PathBuf> {
     crate::hosts::config_dir().map(|d| d.join("portal-restore-token"))
 }

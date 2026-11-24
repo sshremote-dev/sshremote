@@ -34,9 +34,6 @@ pub struct Camera {
     again: bool,
 }
 
-// SAFETY: the stream is used from the thread that holds the capture.
-unsafe impl Send for Camera {}
-
 impl Camera {
     pub fn open(cam: &Cam) -> Result<Camera, String> {
         let mut stream = imp::Stream::open(cam)?;

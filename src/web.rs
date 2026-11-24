@@ -963,7 +963,6 @@ fn serve_page(
     use crate::session::Ev;
     let io = |e: std::io::Error| e.to_string();
     let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {}\u{2026}", open.name) }));
-    let start = reach;
     // Rung by the agent's messages, the browser's and the shell here's output, so the loop below
     // takes each at once rather than after its wait for the agent (keys waited up to 10 ms).
     let (bell, rung) = mpsc::channel::<()>();
@@ -981,7 +980,7 @@ fn serve_page(
     let mut agent = if open.lazy {
         Agent::Idle
     } else {
-        match start(open.agent.clone(), settings(&ctl, view), w.clone()) {
+        match reach(open.agent.clone(), settings(&ctl, view), w.clone()) {
             Ok((s, rx)) => {
                 hook(&s);
                 Agent::Up(s, rx)
@@ -1227,9 +1226,6 @@ fn serve_page(
                 ToClient::HostState { can, on } => {
                     let _ = send_json(&w, serde_json::json!({ "host": { "can": can, "on": on } }));
                 }
-                ToClient::Allowed(bits) => {
-                    let _ = send_json(&w, serde_json::json!({ "allowed": { "bits": bits, "words": crate::grant::words(bits) } }));
-                }
                 ToClient::Chat(t) => {
                     let _ = send_json(&w, serde_json::json!({ "chat": t }));
                 }
@@ -1369,7 +1365,7 @@ fn serve_page(
                         let (target, at) = (open.agent.clone(), settings(&ctl, view));
                         let (w, b) = (w.clone(), bell.clone());
                         std::thread::spawn(move || {
-                            let _ = tx.send(start(target, at, w));
+                            let _ = tx.send(reach(target, at, w));
                             let _ = b.send(());
                         });
                         agent = Agent::Connecting(rx);
@@ -1436,7 +1432,7 @@ fn serve_page(
                     let (target, at) = (open.agent.clone(), settings(&ctl, view));
                     let (w, b) = (w.clone(), bell.clone());
                     std::thread::spawn(move || {
-                        let _ = tx.send(start(target, at, w));
+                        let _ = tx.send(reach(target, at, w));
                         let _ = b.send(());
                     });
                     agent = Agent::Connecting(rx);

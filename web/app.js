@@ -499,7 +499,7 @@ const NAMED = { Backspace: 0xff08, Tab: 0xff09, Enter: 0xff0d, Escape: 0xff1b, D
   ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54, PageUp: 0xff55, PageDown: 0xff56,
   End: 0xff57, Insert: 0xff63, ContextMenu: 0xff67, Pause: 0xff13, PrintScreen: 0xff61, CapsLock: 0xffe5, NumLock: 0xff7f, ScrollLock: 0xff14 };
 const SIDED = { Shift: [0xffe1, 0xffe2], Control: [0xffe3, 0xffe4], Alt: [0xffe9, 0xffea], Meta: [0xffeb, 0xffec], OS: [0xffeb, 0xffec], AltGraph: [0xffea, 0xffea] };
-const K = { ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, tab: 0xff09, esc: 0xff1b, del: 0xffff, f4: 0xffc1, prt: 0xff61, enter: 0xff0d };
+const K = { ctrl: 0xffe3, alt: 0xffe9, shift: 0xffe1, win: 0xffeb, tab: 0xff09, esc: 0xff1b, f4: 0xffc1, prt: 0xff61 };
 // Whether this browser runs on a Mac (or an iPhone or iPad), whose shortcuts take the command key.
 const HERE_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);
 // Ctrl as the command key (Win elsewhere) and the command key as Ctrl, between a Mac and another computer.
@@ -828,7 +828,6 @@ class Client {
       this.setBackend(v.ready.backend);
       for (const q of this.queued?.splice(0) || []) this.send(q);
       this.state(v.ready.screen ? v.ready.screen[0] + "×" + v.ready.screen[1] : "Connected", "up");
-      this.connected = true;
       if (v.ready.screen) this.agentUp(v.ready.screen);
       // An ID is in once ready; an SSH host once its shell stays up or its agent answers.
       if (this.t.kind === "id") this.remember();
@@ -882,7 +881,6 @@ class Client {
       this.hostWait = null;
       if (at && this.computerMenu) this.computerMenu(at);
     }
-    if (v.allowed) this.allowed = v.allowed;
     if (typeof v.call === "number") this.callState(v.call);
     if (v.end || v.error) {
       const why = v.end || v.error;

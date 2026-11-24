@@ -1221,7 +1221,7 @@ impl ExtTool {
         }
         let mut act: Act = None;
         match self.tab {
-            ExtTab::Installed => self.installed_tab(ui, &installed, &offers, &mut act),
+            ExtTab::Installed => self.added_list(ui, &installed, &offers, &mut act),
             ExtTab::Browse => self.browse_tab(ui, &installed, &mut act),
             ExtTab::Manage => self.manage_tab(ui, &mut act),
         }
@@ -1254,10 +1254,6 @@ impl ExtTool {
                 Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
             }
         }
-    }
-
-    fn installed_tab(&mut self, ui: &mut egui::Ui, installed: &[Manifest], offers: &[Offer], act: &mut Act) {
-        self.added_list(ui, installed, offers, act);
     }
 
     /// The extensions you added, with their updates; a way to find some when there are none.

@@ -175,9 +175,6 @@ struct Client {
     frame: (i16, i16, usize, usize),
 }
 
-// SAFETY: the segment is this capture's own, used from the thread that holds it.
-unsafe impl Send for X11 {}
-
 /// The keyboard as X maps it: keysyms by keycode and level, and keycodes free to map a
 /// character no key makes (as xdotool does), with what they were last mapped to.
 struct Keys {

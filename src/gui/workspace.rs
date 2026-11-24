@@ -1133,7 +1133,7 @@ impl Workspace {
             p.mode = r.mode();
             p.prefs = Some(r.prefs());
             p.carry = r.take_carry();
-            p.terms = r.take_terms().filter(|_| true).and_then(|mut t| t.keep_local().then_some(t));
+            p.terms = r.take_terms().and_then(|mut t| t.keep_local().then_some(t));
             r.close();
         }
         p.state = State::Down(Down::new(true, why));

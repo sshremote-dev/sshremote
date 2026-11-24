@@ -101,9 +101,6 @@ impl Remote {
     pub(super) fn prefs_on(&self, _: u8) -> Prefs {
         match self.never {}
     }
-    pub(super) fn prefs_for_app(&self) -> Prefs {
-        match self.never {}
-    }
     pub(super) fn monitors(&self) -> (usize, usize) {
         match self.never {}
     }
