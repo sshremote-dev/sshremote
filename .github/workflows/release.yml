@@ -1,0 +1,68 @@
+name: Release
+
+# The Linux and Windows files of a release, built here from the tagged source with a build
+# attestation: `gh attestation verify FILE -R sshremote-dev/sshremote` checks a downloaded file.
+# scripts/release.sh takes them from this run, builds the Mac app on the project's Mac (its
+# signing key stays there) and publishes the release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.file }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - file: sshremote-linux-x86_64
+            target: ''
+          - file: sshremote-windows-x86_64.exe
+            target: x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          if [ -z "${{ matrix.target }}" ]; then
+            sudo apt-get install -y pkg-config cmake nasm libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libasound2-dev libxkbcommon-dev libwayland-dev
+          else
+            sudo apt-get install -y cmake nasm gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+            sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+            sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || 'x86_64-unknown-linux-gnu' }}
+      # No cache: what is shipped is built from nothing but the source.
+      - name: Build
+        run: |
+          if [ -z "${{ matrix.target }}" ]; then
+            cargo build --profile dist --locked
+            cp target/dist/sshremote "${{ matrix.file }}"
+          else
+            cargo build --profile dist --locked --target "${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/dist/sshremote.exe" "${{ matrix.file }}"
+          fi
+          sha256sum "${{ matrix.file }}"
+      - uses: actions/attest@v4
+        with:
+          subject-path: ${{ matrix.file }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.file }}
+          path: ${{ matrix.file }}
+          if-no-files-found: error
+          retention-days: 30

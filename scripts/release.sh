@@ -2,8 +2,10 @@
 # Release builds of the commit checked out here, for Linux and Windows (MinGW), into OUT:
 #   scripts/release.sh OUT
 # OUT gets sshremote-linux-x86_64 and sshremote-windows-x86_64.exe, the program with every part
-# in, which scripts/deploy.sh takes as $LINUX_BIN and $WINDOWS_BIN. They build in target-full,
-# so the next release only builds what changed. With $MAC_HOST (a Mac reached by ssh, with
+# in, which scripts/deploy.sh takes as $LINUX_BIN and $WINDOWS_BIN. With $GITHUB_TOKEN they are
+# the files GitHub Actions built, with build attestations, for the commit's tag (pushed first:
+# scripts/ci_files.py waits for that run); without it they build here, in target-full, so the
+# next release only builds what changed. With $MAC_HOST (a Mac reached by ssh, with
 # rustup, Xcode's command line tools and CMake; $MAC_PATH adds to its PATH), the commit is built
 # there too (scripts/macos.sh, in ~/sshremote-build, kept between releases): OUT gets
 # sshremote-macos.zip, deploy.sh's $MAC_ZIP.
@@ -24,9 +26,13 @@ build() { # PLATFORM
   echo "built $1"
 }
 
-# One after the other: both use the one target folder.
-build linux-x86_64
-build windows-x86_64
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  python3 scripts/ci_files.py "$(git rev-parse HEAD)" "$OUT"
+else
+  # One after the other: both use the one target folder.
+  build linux-x86_64
+  build windows-x86_64
+fi
 if [ -n "${MAC_HOST:-}" ]; then
   git archive --format=tar.gz --prefix=src/ HEAD | ssh "$MAC_HOST" 'rm -rf ~/sshremote-build/src && mkdir -p ~/sshremote-build/tree && tar xzf - -C ~/sshremote-build && rsync -a --delete --exclude target ~/sshremote-build/src/ ~/sshremote-build/tree/'
   if ssh "$MAC_HOST" "cd ~/sshremote-build/tree && PATH=\$HOME/.cargo/bin:${MAC_PATH:-}:\$PATH sh scripts/macos.sh ~/sshremote-build/out" > "$OUT/sshremote-macos.log" 2>&1; then
