@@ -1,5 +1,6 @@
-//! Administrator rights. On Windows the window asks for them at start (UAC) and keeps working
-//! without them; what needs them is shown disabled until it runs elevated.
+//! Administrator rights. On Windows the window starts without them and asks for them (UAC) only
+//! when something that needs them is wanted, starting again with its tabs; until then what needs
+//! them is shown disabled.
 
 use std::sync::OnceLock;
 
@@ -41,12 +42,13 @@ fn check() -> bool {
 /// The setting as last read or written: 0 not read yet, 1 no, 2 yes (the menu asks every frame).
 static ASK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Whether the window asks for administrator rights when it starts (the default).
+/// Whether the window asks for administrator rights when it starts: only when chosen in
+/// Settings, as most of it needs none and the prompt would come at every start.
 pub fn ask_at_start() -> bool {
     use std::sync::atomic::Ordering;
     match ASK.load(Ordering::Relaxed) {
         0 => {
-            let on = cfg!(windows) && crate::hosts::setting("elevate").is_none_or(|v| v != "no");
+            let on = cfg!(windows) && crate::hosts::setting("elevate").is_some_and(|v| v == "yes");
             ASK.store(1 + on as u8, Ordering::Relaxed);
             on
         }
@@ -58,6 +60,21 @@ pub fn ask_at_start() -> bool {
 pub fn set_ask_at_start(on: bool) {
     crate::hosts::set_setting("elevate", if on { "yes" } else { "no" });
     ASK.store(1 + on as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The argument of a window started again with administrator rights: it opens the tabs the
+/// window before had, kept as the last session.
+pub const AGAIN: &str = "--again-as-administrator";
+
+static AGAIN_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This window was started with `AGAIN`.
+pub fn again() -> bool {
+    AGAIN_SEEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn note_again() {
+    AGAIN_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Starts this program again with administrator rights through the UAC prompt. Ok(false) when
@@ -117,3 +134,20 @@ pub const ADDS: &str = "With administrator rights:\n\
     screen and receive Ctrl+Alt+Del\n\
     - windows of elevated programs can be controlled through mcp --here\n\
     Files cannot be dragged in from Explorer while elevated; use the file window instead.";
+
+#[cfg(test)]
+mod tests {
+    /// The window asks for administrator rights at start only when that was chosen: the prompt
+    /// would otherwise come at every start, for what most of it never needs.
+    #[test]
+    fn administrator_rights_are_asked_for_at_start_only_when_chosen() {
+        assert!(!super::ask_at_start(), "not by default");
+        #[cfg(windows)]
+        {
+            super::set_ask_at_start(true);
+            assert!(super::ask_at_start());
+            super::set_ask_at_start(false);
+            assert!(!super::ask_at_start());
+        }
+    }
+}

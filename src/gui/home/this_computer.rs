@@ -85,10 +85,21 @@ impl App {
                 ui.label(RichText::new("Remote access by ID").strong());
                 ui.add_space(4.0);
                 let why = self.access.problem.clone().unwrap_or_default();
-                kit::notice(ui, kit::Tone::Bad, "Its settings cannot be read or kept", &why);
+                // On Windows they hold the password and open to administrators only: a window
+                // started without the rights asks for them here, when they are wanted.
+                let ask = cfg!(windows) && !crate::admin::elevated();
+                if ask {
+                    let mut why = why.clone();
+                    if let Some(first) = why.get_mut(..1) {
+                        first.make_ascii_uppercase();
+                    }
+                    kit::notice(ui, kit::Tone::Info, "Its settings open to administrators", &format!("{why}. The window opens again as administrator, with its tabs."));
+                } else {
+                    kit::notice(ui, kit::Tone::Bad, "Its settings cannot be read or kept", &why);
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if cfg!(windows) && !crate::admin::elevated() && ui.add(kit::secondary(format!("{}  As administrator", ic::SHIELD_CHECK))).clicked() {
+                    if ask && ui.add(theme::primary(format!("{}  Open as administrator", ic::SHIELD_CHECK))).clicked() {
                         restart = true;
                     }
                     if ui.add(kit::secondary("Try again")).clicked() {

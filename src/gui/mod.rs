@@ -977,12 +977,13 @@ impl eframe::App for App {
         }
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         // What was chosen opens in the workspace, which takes a working window's size first.
-        // The last session's tabs, once, when asked to come back with the app and nothing else was.
+        // The last session's tabs, once, when asked to come back with the app (or brought over
+        // from the window before, started again as administrator) and nothing else was.
         if !std::mem::replace(&mut self.reopened, true)
             && self.queued.is_empty()
             && !self.quit_when_empty
             && matches!(self.screen, Screen::Connect)
-            && project::reopen_at_start()
+            && (project::reopen_at_start() || crate::admin::again())
             && let Some(p) = project::get(project::LAST)
         {
             self.open_project(&p);
@@ -1261,16 +1262,15 @@ impl App {
 
     /// Keeps `main` (the main window's tabs) and every other window's as the last session; an
     /// app that ends with its last pane (`sshremote terminal`) or no tabs at all keeps the one before.
-    fn keep_session(&self, mut tabs: Vec<project::Tree>) {
+    /// Whether they were kept.
+    fn keep_session(&self, mut tabs: Vec<project::Tree>) -> bool {
         if self.quit_when_empty {
-            return;
+            return false;
         }
         for (_, w, _) in &self.windows {
             tabs.extend(w.snapshot());
         }
-        if !tabs.is_empty() {
-            let _ = project::save(project::LAST, tabs);
-        }
+        !tabs.is_empty() && project::save(project::LAST, tabs).is_ok()
     }
 
     /// The app quits: its tabs are the last session, unless they were kept as the main window closed.

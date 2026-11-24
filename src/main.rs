@@ -420,7 +420,9 @@ fn main() {
     if args.first().is_some_and(|a| a == "--saved-login") && args.len() > 3 && args[2] == "--" {
         std::process::exit(saved_login(&args[1], &args[3..]));
     }
-    if args.is_empty() {
+    // Started again with administrator rights, the window before's tabs with it.
+    let again = args.len() == 1 && args[0] == admin::AGAIN;
+    if args.is_empty() || again {
         // Started from a file manager or a shortcut: open the window.
         #[cfg(windows)]
         unsafe {
@@ -431,9 +433,11 @@ fn main() {
                 FreeConsole();
             }
         }
-        // Administrator rights are asked for at start; without them the window works and shows
-        // what needs them disabled.
-        if admin::ask_at_start() && !admin::elevated() && admin::relaunch(&[]).unwrap_or(false) {
+        // Administrator rights are asked for at start only when chosen; without them the window
+        // works and asks when something needs them.
+        if again {
+            admin::note_again();
+        } else if admin::ask_at_start() && !admin::elevated() && admin::relaunch(&[]).unwrap_or(false) {
             return;
         }
         let opt = parse_client(&["--gui".to_string()]).expect("default options");

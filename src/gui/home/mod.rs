@@ -223,7 +223,11 @@ impl App {
     }
 
     pub(super) fn restart_elevated(&mut self, ctx: &egui::Context) {
-        match crate::admin::relaunch(&[]) {
+        // The tabs open now are kept first, for the new window to open: this one would keep them
+        // only as it closes, which may be after the new one has looked.
+        let main = if let Screen::Work(w) = &self.screen { w.snapshot() } else { Vec::new() };
+        let args: Vec<String> = if self.keep_session(main) { vec![crate::admin::AGAIN.into()] } else { Vec::new() };
+        match crate::admin::relaunch(&args) {
             Ok(true) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Ok(false) => self.error = Some("Administrator rights were not given; sshremote goes on without them.".into()),
             Err(e) => self.error = Some(format!("Cannot ask for administrator rights: {e}")),

@@ -135,8 +135,8 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
     #[cfg(feature = "remote")]
     {
         use crate::access;
-        // A change of the settings or the service: here when this program has the rights (the
-        // window asks for them at start), else by the command line through the prompt for them.
+        // A change of the settings or the service: here when this program has the rights (a
+        // window started as administrator), else by the command line through the prompt for them.
         let as_admin = |args: &[&str], here: &dyn Fn() -> Result<(), String>| -> Result<(), String> {
             // Elsewhere than Windows the settings and the service are the user's own.
             if crate::admin::elevated() || !cfg!(windows) {
