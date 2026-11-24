@@ -1014,6 +1014,13 @@ impl Capture for Gnome {
         Ok(())
     }
 
+    fn bring_forward(&mut self, id: u64) -> Result<(), String> {
+        // Through the helper: GNOME lets no other program raise a window.
+        self.helper()?;
+        self.helper_activate(id);
+        Ok(())
+    }
+
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         let list = self.helper_list()?;
         Ok(list

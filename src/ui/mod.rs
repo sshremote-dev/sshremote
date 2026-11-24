@@ -40,6 +40,14 @@ pub enum Outcome {
         text: String,
         replace: bool,
     },
+    /// Bring the window of this title to the front through the screen's own means (the window
+    /// manager), which accessibility cannot do everywhere; `focused`: whether it took the focus
+    /// it was asked to.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Raise {
+        title: String,
+        focused: bool,
+    },
 }
 
 /// Short role names, so a list costs few tokens.

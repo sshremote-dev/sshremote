@@ -124,6 +124,9 @@ impl Capture for WithCameras {
     fn windows(&self) -> Result<Vec<super::WindowInfo>, String> {
         self.screen.windows()
     }
+    fn bring_forward(&mut self, id: u64) -> Result<(), String> {
+        self.screen.bring_forward(id)
+    }
     fn share(&mut self, scope: super::Share) -> Result<String, String> {
         // Sharing a window or the screen leaves the camera.
         self.cam = None;

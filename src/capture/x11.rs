@@ -524,6 +524,11 @@ impl Capture for X11 {
         Ok(self.clients().into_iter().map(|c| WindowInfo { id: c.id as u64, title: c.title, app: c.class, w: c.frame.2 as u16, h: c.frame.3 as u16 }).collect())
     }
 
+    fn bring_forward(&mut self, id: u64) -> Result<(), String> {
+        self.raise(u32::try_from(id).map_err(|_| "no such window")?);
+        Ok(())
+    }
+
     fn share(&mut self, scope: Share) -> Result<String, String> {
         let active = || self.property(self.root, self.atoms._NET_ACTIVE_WINDOW, xproto::AtomEnum::WINDOW.into()).and_then(|p| p.value32().and_then(|mut v| v.next())).filter(|w| *w != 0);
         let (scope, id) = match scope {

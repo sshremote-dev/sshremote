@@ -112,6 +112,10 @@ pub trait Capture {
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         Err("This desktop can only share whole screens.".into())
     }
+    /// Brings window `id` (of `windows`) to the front, as a taskbar does.
+    fn bring_forward(&mut self, _id: u64) -> Result<(), String> {
+        Err("this desktop does not let programs bring windows to the front; click the window instead".into())
+    }
     /// Shares a window or a program instead of the whole screen; returns what is shown, in words.
     fn share(&mut self, scope: Share) -> Result<String, String> {
         match scope {

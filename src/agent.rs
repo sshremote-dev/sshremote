@@ -979,7 +979,17 @@ fn serve_with(
                 }
                 ToAgent::UiState { text, max } => {
                     let scope = crate::ui::Scope { window: cap.shared_window(), app: cap.shared_app() };
-                    let tree = ui.state(cap.origin(), cap.desktop_size(), &scope, text, max.max(1) as usize);
+                    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+                    let mut tree = ui.state(cap.origin(), cap.desktop_size(), &scope, text, max.max(1) as usize);
+                    // Accessibility lists panels, the desktop's background and a panel's own pop-ups
+                    // as windows too: where the screen lists the windows it could bring forward, those
+                    // are the ones offered (by their numbers as listed, which focusing goes by).
+                    #[cfg(target_os = "linux")]
+                    if let (ToClient::UiTree { windows, .. }, Ok(real)) = (&mut tree, cap.windows())
+                        && !real.is_empty()
+                    {
+                        windows.retain(|(_, name)| real.iter().any(|w| w.title == *name));
+                    }
                     send(enc, &tree).map_err(io_err)?;
                 }
                 ToAgent::UiAct { target, act, text } => {
@@ -1010,6 +1020,17 @@ fn serve_with(
                                 queued.push(ToAgent::Key { keysym, mods: 0 });
                             }
                             ToClient::UiDone { ok: true, text: "typed".into() }
+                        }
+                        Ok(crate::ui::Outcome::Raise { title, focused }) => {
+                            // The window manager brings it forward where the screen can ask it;
+                            // the focus accessibility gave is all there is elsewhere.
+                            let raised = cap.windows().ok().and_then(|list| list.into_iter().find(|w| w.title == title)).map(|w| cap.bring_forward(w.id));
+                            match raised {
+                                Some(Ok(())) => ToClient::UiDone { ok: true, text: format!("brought \"{title}\" to the front") },
+                                _ if focused => ToClient::UiDone { ok: true, text: "asked the window to come forward".into() },
+                                Some(Err(e)) => ToClient::UiDone { ok: false, text: e },
+                                None => ToClient::UiDone { ok: false, text: "this desktop does not let programs bring windows to the front; click the window instead".into() },
+                            }
                         }
                         Err(e) => ToClient::UiDone { ok: false, text: e },
                     };

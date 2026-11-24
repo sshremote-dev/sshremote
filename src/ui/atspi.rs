@@ -93,7 +93,7 @@ impl Ui {
         self.pinned = zbus::block_on(async {
             for app in Self::children(&conn, &root).await {
                 for frame in Self::children(&conn, &app).await {
-                    if Self::states(&conn, &frame).await & ACTIVE != 0 {
+                    if Self::states(&conn, &frame).await & ACTIVE != 0 && Self::holds_something(&conn, &frame).await {
                         let window = matches!(kind, 1 | 3).then_some(frame);
                         return Some((app, window));
                     }
@@ -150,6 +150,12 @@ impl Ui {
         s.first().copied().unwrap_or(0) as u64 | (s.get(1).copied().unwrap_or(0) as u64) << 32
     }
 
+    /// Whether a window has anything in it: a window manager's own (Xfce's) can be the one marked
+    /// active, empty, while the window really in front is not marked.
+    async fn holds_something(conn: &Connection, r: &Ref) -> bool {
+        !Self::children(conn, r).await.is_empty()
+    }
+
     async fn name(conn: &Connection, r: &Ref) -> String {
         match Self::proxy(conn, r, ACC).await {
             Ok(p) => p.get_property::<String>("Name").await.unwrap_or_default(),
@@ -198,7 +204,7 @@ impl Ui {
             }
             for frame in Self::children(conn, &app).await {
                 let st = Self::states(conn, &frame).await;
-                if st & ACTIVE != 0 && active.is_none() {
+                if st & ACTIVE != 0 && active.is_none() && Self::holds_something(conn, &frame).await {
                     active = Some(frame.clone());
                 } else if st & SHOWING != 0 {
                     windows.push(frame);
@@ -323,11 +329,8 @@ impl Ui {
                 .get((target as usize).wrapping_sub(1))
                 .cloned()
                 .ok_or("no such window; call state again")?;
-            return if Self::grab_focus(conn, &w).await {
-                Ok(Outcome::Done("asked the window to come forward".into()))
-            } else {
-                Err("GNOME does not let programs raise windows; click the window instead".into())
-            };
+            let focused = Self::grab_focus(conn, &w).await;
+            return Ok(Outcome::Raise { title: Self::name(conn, &w).await, focused });
         }
         let e =
             self.elems.get((target as usize).wrapping_sub(1)).cloned().ok_or("no such element; call state again")?;
