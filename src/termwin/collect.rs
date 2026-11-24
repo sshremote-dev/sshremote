@@ -131,8 +131,8 @@ fn step(c: &mut Collect, t: &Tab, now: f64) -> Option<f64> {
     }
     if c.seen_rev != t.rev {
         c.seen_rev = t.rev;
-        for p in 0..n {
-            c.hashes[p] = row_hash(t, p as i32);
+        for (p, h) in c.hashes.iter_mut().enumerate().take(n) {
+            *h = row_hash(t, p as i32);
         }
         let seen = std::mem::take(&mut c.seen);
         c.seen = c.hashes.iter().map(|h| (*h, seen.get(h).copied().unwrap_or(now))).collect();
