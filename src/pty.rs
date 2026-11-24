@@ -14,12 +14,6 @@ enum Out {
     Exit(String),
 }
 
-struct Shell {
-    input: Input,
-    out: mpsc::Receiver<Out>,
-    sys: sys::Handle,
-}
-
 /// What is typed into a program, written on a thread of its own: a program that does not read
 /// (a paste into a stopped one, say) holds that thread, never the window or the agent's loop.
 struct Input(mpsc::SyncSender<Vec<u8>>);
@@ -47,7 +41,7 @@ impl Input {
 /// The shells opened by one viewer.
 #[derive(Default)]
 pub struct Terms {
-    open: HashMap<u32, Shell>,
+    open: HashMap<u32, Local>,
     /// Called as output comes, for a loop that waits rather than looks.
     wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
@@ -60,13 +54,10 @@ impl Terms {
 
     /// Starts a shell; returns a message to send if it failed.
     pub fn open(&mut self, id: u32, cols: u16, rows: u16) -> Option<ToClient> {
-        match sys::spawn(cols.max(2), rows.max(1), None, &[]) {
-            Ok((input, output, handle)) => {
-                // Bounded, so a flood of output waits for the reader instead of filling memory.
-                let (tx, rx) = mpsc::sync_channel(64);
-                let wake = self.wake.clone();
-                std::thread::spawn(move || read_loop(output, tx, Box::new(move || wake.iter().for_each(|w| w()))));
-                self.open.insert(id, Shell { input: Input::new(input), out: rx, sys: handle });
+        let wake = self.wake.clone();
+        match Local::spawn(&[], cols, rows, Box::new(move || wake.iter().for_each(|w| w()))) {
+            Ok(shell) => {
+                self.open.insert(id, shell);
                 None
             }
             Err(e) => Some(ToClient::TermExit { id, text: format!("cannot start a shell: {e}") }),
@@ -74,14 +65,14 @@ impl Terms {
     }
 
     pub fn input(&mut self, id: u32, data: &[u8]) {
-        if let Some(s) = self.open.get(&id) {
-            s.input.write(data);
+        if let Some(s) = self.open.get_mut(&id) {
+            s.write(data);
         }
     }
 
     pub fn resize(&mut self, id: u32, cols: u16, rows: u16) {
         if let Some(s) = self.open.get(&id) {
-            s.sys.resize(cols.max(2), rows.max(1));
+            s.resize(cols, rows);
         }
     }
 
@@ -92,30 +83,15 @@ impl Terms {
     /// Output and exits since the last call.
     pub fn poll(&mut self) -> Vec<ToClient> {
         let mut msgs = Vec::new();
-        let mut ended = Vec::new();
-        for (&id, s) in &self.open {
-            let mut data = Vec::new();
-            for o in s.out.try_iter() {
-                match o {
-                    Out::Data(d) => data.extend_from_slice(&d),
-                    Out::Exit(text) => {
-                        ended.push(id);
-                        if !data.is_empty() {
-                            msgs.push(ToClient::TermOutput { id, data: std::mem::take(&mut data) });
-                        }
-                        let text = s.sys.exit_text().unwrap_or(text);
-                        msgs.push(ToClient::TermExit { id, text });
-                        break;
-                    }
-                }
-            }
+        self.open.retain(|&id, s| {
+            let (data, exit) = s.drain();
             if !data.is_empty() {
                 msgs.push(ToClient::TermOutput { id, data });
             }
-        }
-        for id in ended {
-            self.open.remove(&id);
-        }
+            let Some(text) = exit else { return true };
+            msgs.push(ToClient::TermExit { id, text });
+            false
+        });
         msgs
     }
 }
@@ -156,6 +132,7 @@ impl Local {
     /// other users of the computer can read).
     pub fn spawn_with(argv: &[String], env: &[(String, String)], cols: u16, rows: u16, wake: Box<dyn Fn() + Send>) -> Result<Local, String> {
         let (input, output, sys) = sys::spawn(cols.max(2), rows.max(1), (!argv.is_empty()).then_some(argv), env)?;
+        // Bounded, so a flood of output waits for the reader instead of filling memory.
         let (tx, out) = mpsc::sync_channel(64);
         std::thread::spawn(move || read_loop(output, tx, wake));
         Ok(Local { input: Input::new(input), out, sys })
