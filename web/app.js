@@ -665,6 +665,8 @@ function connect(t) {
 class Client {
   constructor(t) {
     this.t = t;
+    // What this connection listens to on the page's lasting parts, all let go as it closes.
+    this.gone = new AbortController();
     this.ready = false;
     this.ended = false;
     this.view = null;
@@ -783,6 +785,8 @@ class Client {
     try { this.ws?.close(); } catch { /* gone */ }
     this.term?.dispose();
     this.unbind?.();
+    this.gone.abort();
+    this.resizes?.disconnect();
     $("stools").textContent = "";
     $("xfers").textContent = "";
     $("ftable").textContent = "";
@@ -1098,9 +1102,11 @@ class Client {
     this.layout();
     // The host's pointer drawn where the mouse is away stays over its place as the picture
     // moves or changes size (a notice above it, the window resized, a zoomed picture panned).
-    new ResizeObserver(() => this.pointerLook()).observe(canvas);
-    $("vscreen").addEventListener("scroll", () => this.pointerLook(), { passive: true });
-    window.addEventListener("resize", () => this.pointerLook());
+    const signal = this.gone.signal;
+    this.resizes = new ResizeObserver(() => this.pointerLook());
+    this.resizes.observe(canvas);
+    $("vscreen").addEventListener("scroll", () => this.pointerLook(), { passive: true, signal });
+    window.addEventListener("resize", () => this.pointerLook(), { signal });
     this.show = painter(canvas, () => { if (!this.pictured) { this.pictured = true; this.screenWait(); } }, seq => this.send({ drawn: seq }), () => this.layout());
     const send = v => { if (!this.viewOnly) this.send(v); };
     // Pointer positions in the picture's pixels: past the bars around a fitted picture, or
@@ -1178,8 +1184,8 @@ class Client {
       }
       if (fingers.size < 2) pair = null;
     };
-    canvas.addEventListener("pointerenter", () => { this.overCanvas = true; this.pointerLook(); });
-    canvas.addEventListener("pointerleave", () => { this.overCanvas = false; this.pointerLook(); });
+    canvas.addEventListener("pointerenter", () => { this.overCanvas = true; this.pointerLook(); }, { signal });
+    canvas.addEventListener("pointerleave", () => { this.overCanvas = false; this.pointerLook(); }, { signal });
     canvas.onpointermove = e => {
       if (!this.overCanvas) { this.overCanvas = true; this.pointerLook(); }
       if (e.pointerType === "touch") { touchMove(e); return; }
@@ -1280,14 +1286,14 @@ class Client {
     const typeText = t => { for (const ch of t) { const c = ch.codePointAt(0); tap(c < 0x100 ? c : 0x01000000 + c); } };
     // One space stays in the field so a phone's Backspace has something to delete, and says so.
     const reset = () => { kbd.value = " "; kbd.setSelectionRange(1, 1); };
-    kbd.addEventListener("compositionend", e => { if (e.data) typeText(e.data); reset(); });
+    kbd.addEventListener("compositionend", e => { if (e.data) typeText(e.data); reset(); }, { signal: this.gone.signal });
     kbd.addEventListener("input", e => {
       if (e.isComposing) return;
       if (e.inputType === "insertText" && e.data) typeText(e.data);
       else if (e.inputType === "insertLineBreak") tap(0xff0d);
       else if (e.inputType === "deleteContentBackward") tap(0xff08);
       reset();
-    });
+    }, { signal: this.gone.signal });
     reset();
     // Keys still down when the page loses focus come up, so none sticks on the host.
     this.releaseKeys = () => { for (const k of held.values()) this.send({ key: [k, 0] }); held.clear(); };
