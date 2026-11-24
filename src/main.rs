@@ -56,7 +56,7 @@ mod lan;
 #[cfg(windows)]
 #[cfg(feature = "gui")]
 mod keygrab;
-#[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
+#[cfg(feature = "remote")]
 mod keys;
 mod update;
 mod modules;

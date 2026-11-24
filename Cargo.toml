@@ -8,11 +8,11 @@ repository = "https://github.com/sshremote-dev/sshremote"
 homepage = "https://sshremote.dev"
 
 [dependencies]
-alacritty_terminal = { version = "0.25", default-features = false }
+alacritty_terminal = { optional = true, version = "0.25", default-features = false }
 arboard = { optional = true, version = "3", default-features = false, features = ["image-data"] }
 chacha20poly1305 = "0.10"
 cpal = { optional = true, version = "0.18.2" }
-crossterm = "0.29.0"
+crossterm = { optional = true, version = "0.29.0" }
 eframe = { optional = true, version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 qrcode = { optional = true, version = "0.15", default-features = false, features = ["std"] }
 getrandom = "0.2"
@@ -20,7 +20,7 @@ hkdf = { optional = true, version = "0.12" }
 curve25519-dalek = { optional = true, version = "4" }
 openh264 = { optional = true, version = "0.9" }
 opus = { optional = true, version = "0.3" }
-png = "0.17"
+png = { optional = true, version = "0.17" }
 # Pictures behind the terminal panes, as people have them (JPEG, PNG, WebP, BMP, GIF).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 # Lottie animations (JSON and .lottie) for the logo and the background, drawn on the CPU.
@@ -31,9 +31,9 @@ serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
-unicode-width = "0.2"
+unicode-width = { optional = true, version = "0.2" }
 spake2 = { optional = true, version = "0.4" }
-zstd = "0.14.3"
+zstd = { optional = true, version = "0.14.3" }
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "auto-dispatch"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -85,9 +85,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media",
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
+remote = ["dep:arboard", "dep:crossterm", "dep:png", "dep:unicode-width", "dep:zstd", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
-gui = ["dep:eframe", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle", "dep:winit"]
+gui = ["dep:alacritty_terminal", "dep:eframe", "dep:png", "dep:unicode-width", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle", "dep:winit"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.
 web = ["remote"]
 mcp = ["remote"]

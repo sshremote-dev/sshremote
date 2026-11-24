@@ -25,6 +25,8 @@ pub fn set(id: &str, on: bool) {
 }
 
 /// Whether this build carries the part (one built with fewer features has fewer).
+// Each arm is a constant, and which are true depends on the build.
+#[allow(clippy::match_like_matches_macro)]
 pub fn built_in(id: &str) -> bool {
     match id {
         "web" => cfg!(feature = "web"),
