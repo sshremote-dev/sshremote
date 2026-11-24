@@ -1,14 +1,13 @@
 #!/bin/bash
-# Release builds of the commit checked out here, for Linux and Windows (MinGW), into OUT:
-#   scripts/release.sh OUT
-# OUT gets sshremote-linux-x86_64 and sshremote-windows-x86_64.exe, the program with every part
-# in, which scripts/deploy.sh takes as $LINUX_BIN and $WINDOWS_BIN. With $GITHUB_TOKEN they are
-# the files GitHub Actions built, with build attestations, for the commit's tag (pushed first:
-# scripts/ci_files.py waits for that run); without it they build here, in target-full, so the
-# next release only builds what changed. With $MAC_HOST (a Mac reached by ssh, with
-# rustup, Xcode's command line tools and CMake; $MAC_PATH adds to its PATH), the commit is built
-# there too (scripts/macos.sh, in ~/sshremote-build, kept between releases): OUT gets
-# sshremote-macos.zip, deploy.sh's $MAC_ZIP.
+# The files of a release (release/platforms.json) of the commit checked out here, into OUT:
+#   GITHUB_TOKEN=... MAC_HOST=... scripts/release.sh OUT
+# With $GITHUB_TOKEN, the ones built `by: ci` are those GitHub Actions built and attested for the
+# commit's tag, which is pushed first (scripts/gh_release.py waits for the run's draft release).
+# Without it only Linux and Windows on x86_64 build here, in target-full, for a test: a release
+# needs every platform. $MAC_HOST is a Mac reached by ssh, with rustup, Xcode's command line tools
+# and CMake ($MAC_PATH adds to its PATH): the commit builds there (scripts/macos.sh, in
+# ~/sshremote-build, kept between releases) into sshremote-macos.zip, signed with its key there.
+# scripts/publish.sh then publishes OUT; see docs/releasing.md.
 set -eu
 OUT=$(mkdir -p "$1" && cd "$1" && pwd)
 cd "$(dirname "$0")/.."
@@ -27,7 +26,7 @@ build() { # PLATFORM
 }
 
 if [ -n "${GITHUB_TOKEN:-}" ]; then
-  python3 scripts/ci_files.py "$(git rev-parse HEAD)" "$OUT"
+  python3 scripts/gh_release.py fetch "$OUT"
 else
   # One after the other: both use the one target folder.
   build linux-x86_64
