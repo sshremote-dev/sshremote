@@ -399,6 +399,71 @@ async fn begin(index: Option<usize>, src: Src, own: bool) -> Result<Begun, Strin
     Ok(Begun { conn, session, stream_path, list, current, added })
 }
 
+/// A monitor GNOME adds while a stream of it is read (Mutter's RecordVirtual, as GNOME Remote
+/// Desktop's extended screens are made): the session making it and the reader taking its pictures
+/// and letting them go. The monitor goes when this does.
+pub struct Virtual {
+    session: Proxy<'static>,
+    pipe: gst::Pipeline,
+    _conn: Connection,
+}
+
+impl Drop for Virtual {
+    fn drop(&mut self) {
+        let _ = self.pipe.set_state(gst::State::Null);
+        let _ = zbus::block_on(self.session.call::<_, _, ()>("Stop", &()));
+    }
+}
+
+/// Adds a monitor of `w`x`h` (the size its stream is read at, which it takes) for as long as what
+/// this returns is kept; its connector.
+pub fn add_virtual(w: u16, h: u16) -> Result<(String, Virtual), String> {
+    ensure_env();
+    gst::init().map_err(|e| format!("GStreamer init: {e}"))?;
+    zbus::block_on(async {
+        let conn = Connection::session().await.map_err(err("session bus"))?;
+        let before: Vec<String> = monitors(&conn).await.into_iter().map(|m| m.0).collect();
+        let sc = Proxy::new(&conn, SC, "/org/gnome/Mutter/ScreenCast", SC).await.map_err(err("ScreenCast"))?;
+        let none: HashMap<&str, Variant> = HashMap::new();
+        let cpath: OwnedObjectPath = sc.call("CreateSession", &(none,)).await.map_err(err("ScreenCast session"))?;
+        let session = Proxy::new(&conn, SC, cpath, "org.gnome.Mutter.ScreenCast.Session").await.map_err(err("cast"))?;
+        let mut props: HashMap<&str, Variant> = HashMap::new();
+        props.insert("cursor-mode", Variant::U32(1));
+        // A monitor of the desktop's own, beside the others, not one only the stream sees.
+        props.insert("is-platform", Variant::Bool(true));
+        let stream: OwnedObjectPath = session.call("RecordVirtual", &(props,)).await.map_err(err("RecordVirtual"))?;
+        let sproxy = Proxy::new(&conn, SC, stream, "org.gnome.Mutter.ScreenCast.Stream").await.map_err(err("stream"))?;
+        let mut added = sproxy.receive_signal("PipeWireStreamAdded").await.map_err(err("signal"))?;
+        session.call::<_, _, ()>("Start", &()).await.map_err(err("Start"))?;
+        let made = async {
+            let msg = added.next().await.ok_or("GNOME did not publish the new monitor's stream")?;
+            let (node,): (u32,) = msg.body().deserialize().map_err(err("PipeWire node"))?;
+            let desc = format!("pipewiresrc path={node} do-timestamp=true keepalive-time=1000 ! video/x-raw,width={w},height={h} ! fakesink sync=false");
+            let pipe = gst::parse::launch(&desc)
+                .map_err(|e| format!("the new monitor's stream: {e}"))?
+                .downcast::<gst::Pipeline>()
+                .map_err(|_| "the new monitor's stream is no pipeline".to_string())?;
+            pipe.set_state(gst::State::Playing).map_err(|e| format!("the new monitor's stream did not start: {e}"))?;
+            // Its connector, once the desktop lists it.
+            for _ in 0..50 {
+                if let Some(m) = monitors(&conn).await.into_iter().find(|m| !before.contains(&m.0)) {
+                    return Ok((m.0, pipe));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = pipe.set_state(gst::State::Null);
+            Err("GNOME added no monitor".to_string())
+        };
+        match made.await {
+            Ok((connector, pipe)) => Ok((connector, Virtual { session, pipe, _conn: conn })),
+            Err(e) => {
+                let _ = session.call::<_, _, ()>("Stop", &()).await;
+                Err(e)
+            }
+        }
+    })
+}
+
 /// Connectors and current modes of the monitors, primary first, from Mutter's DisplayConfig.
 async fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> {
     let Ok(dc) = Proxy::new(
@@ -1002,6 +1067,16 @@ impl Capture for Gnome {
 
     fn screen_id(&self) -> Option<String> {
         self.monitors.get(self.current).map(|m| m.0.clone())
+    }
+
+    fn screen_ids(&self) -> Vec<String> {
+        self.monitors.iter().map(|m| m.0.clone()).collect()
+    }
+
+    fn screens_changed(&mut self) {
+        let shown = self.monitors.get(self.current).map(|m| m.0.clone());
+        self.monitors = zbus::block_on(monitors(&self.conn));
+        self.current = shown.and_then(|s| self.monitors.iter().position(|m| m.0 == s)).unwrap_or(0);
     }
 
     fn screen_changed(&mut self) {

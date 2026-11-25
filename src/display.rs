@@ -63,6 +63,18 @@ impl Way {
     fn set(&self, _id: &str, _w: u16, _h: u16) -> Result<(), String> {
         match *self {}
     }
+
+    fn adds(&self) -> bool {
+        match *self {}
+    }
+
+    fn add(&self, _w: u16, _h: u16) -> Result<Added, String> {
+        match *self {}
+    }
+
+    fn remove(&self, _a: Added) -> Result<(), String> {
+        match *self {}
+    }
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -149,18 +161,132 @@ impl Way {
             Way::Mac => mac::set(id, w, h),
         }
     }
+
+    /// Whether screens can be added here for a session.
+    fn adds(&self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Way::RandR | Way::Sway(_) | Way::Hypr(_) | Way::Mutter => true,
+            #[cfg(target_os = "macos")]
+            Way::Mac => mac::adds(),
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    /// Adds a screen of `w`x`h` right of the others.
+    fn add(&self, w: u16, h: u16) -> Result<Added, String> {
+        #[cfg(windows)]
+        let _ = (w, h);
+        match self {
+            #[cfg(target_os = "linux")]
+            Way::RandR => linux::randr_add(w, h).map(Added::named),
+            #[cfg(target_os = "linux")]
+            Way::Sway(sock) => linux::sway_add(sock, w, h).map(Added::named),
+            #[cfg(target_os = "linux")]
+            Way::Hypr(sig) => linux::hypr_add(sig, w, h).map(Added::named),
+            #[cfg(target_os = "linux")]
+            Way::Mutter => crate::capture::gnome_add_virtual(w, h).map(|(id, keep)| Added { id, _keep: Some(keep) }),
+            #[cfg(target_os = "macos")]
+            Way::Mac => mac::add(w, h).map(|(id, display)| Added { id, _display: Some(display) }),
+            #[allow(unreachable_patterns)]
+            _ => Err(NO_ADDING.into()),
+        }
+    }
+
+    fn remove(&self, a: Added) -> Result<(), String> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Way::RandR => linux::randr_remove(&a.id),
+            #[cfg(target_os = "linux")]
+            Way::Sway(sock) => linux::sway_remove(sock, &a.id),
+            #[cfg(target_os = "linux")]
+            Way::Hypr(sig) => linux::hypr_remove(sig, &a.id),
+            // The display goes with the object that made it.
+            #[allow(unreachable_patterns)]
+            _ => {
+                drop(a);
+                Ok(())
+            }
+        }
+    }
 }
 
-/// The screens a session set, set back as they were when it ends.
+const NO_ADDING: &str = "screens cannot be added to this computer's desktop from here";
+
+/// The most screens one session adds.
+const MOST_ADDED: usize = 4;
+
+/// A screen a session added (a virtual one, as a dummy plug gives), taken away when it ends.
+pub struct Added {
+    /// Its system name, as the capture's `screen_ids` gives it.
+    id: String,
+    /// The display itself, where it lasts as long as the object that made it (macOS).
+    #[cfg(target_os = "macos")]
+    _display: Option<mac::Virtual>,
+    /// GNOME's, which lasts as long as its stream is read.
+    #[cfg(target_os = "linux")]
+    _keep: Option<crate::capture::GnomeVirtual>,
+}
+
+impl Added {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn named(id: String) -> Added {
+        Added {
+            id,
+            #[cfg(target_os = "macos")]
+            _display: None,
+            #[cfg(target_os = "linux")]
+            _keep: None,
+        }
+    }
+}
+
+/// The screens a session set, set back as they were when it ends, and those it added, taken away.
 pub struct Session {
     way: Option<Way>,
     /// Each screen set, and the resolution it had before.
     own: Vec<(String, (u16, u16))>,
+    added: Vec<Added>,
 }
 
 impl Session {
     pub fn new(backend: &str) -> Session {
-        Session { way: Way::find(backend), own: Vec::new() }
+        Session { way: Way::find(backend), own: Vec::new(), added: Vec::new() }
+    }
+
+    /// Whether screens can be added to this desktop (`add`).
+    pub fn adds(&self) -> bool {
+        self.way.as_ref().is_some_and(Way::adds)
+    }
+
+    /// Adds a screen of `w`x`h` for this session, right of the others; its system name, as the
+    /// capture's `screen_ids` will give it once the capture hears of it.
+    pub fn add(&mut self, w: u16, h: u16) -> Result<String, String> {
+        let way = self.way.as_ref().filter(|w| w.adds()).ok_or(NO_ADDING)?;
+        if self.added.len() >= MOST_ADDED {
+            return Err(format!("{MOST_ADDED} screens added are the most"));
+        }
+        if !(640..=7680).contains(&w) || !(480..=4320).contains(&h) {
+            return Err(format!("{w}x{h} is no size for a screen"));
+        }
+        let a = way.add(w, h)?;
+        let id = a.id.clone();
+        self.added.push(a);
+        Ok(id)
+    }
+
+    /// Takes away screen `id`, one this session added.
+    pub fn remove(&mut self, id: &str) -> Result<(), String> {
+        let i = self.added.iter().position(|a| a.id == id).ok_or("only a screen added from here can be taken away")?;
+        let a = self.added.remove(i);
+        self.own.retain(|(s, _)| s != id);
+        self.way.as_ref().ok_or(NO_ADDING)?.remove(a)
+    }
+
+    /// Whether screen `id` is one this session added.
+    pub fn added(&self, id: &str) -> bool {
+        self.added.iter().any(|a| a.id == id)
     }
 
     /// The screen shown: as the capture names it, else the only one there is.
@@ -230,6 +356,9 @@ impl Drop for Session {
                 let _ = way.set(&id, w, h);
             }
         }
+        for a in self.added.drain(..).rev() {
+            let _ = way.remove(a);
+        }
     }
 }
 
@@ -243,6 +372,81 @@ mod mac {
         CGBeginDisplayConfiguration, CGCancelDisplayConfiguration, CGCompleteDisplayConfiguration, CGConfigureDisplayWithDisplayMode, CGConfigureOption, CGDisplayConfigRef,
         CGDisplayCopyAllDisplayModes, CGDisplayCopyDisplayMode, CGDisplayMode, CGError, CGGetActiveDisplayList, kCGDisplayShowDuplicateLowResolutionModes,
     };
+
+    /// A display added for a session (Core Graphics' virtual display, which DeskPad and
+    /// BetterDisplay make too, through classes macOS does not document): it lasts as long as this.
+    pub struct Virtual {
+        _display: objc2::rc::Retained<objc2::runtime::AnyObject>,
+        _queue: dispatch2::DispatchRetained<dispatch2::DispatchQueue>,
+    }
+
+    // SAFETY: only kept and let go; macOS serves the display on its own queue.
+    unsafe impl Send for Virtual {}
+
+    fn class(name: &std::ffi::CStr) -> Option<&'static objc2::runtime::AnyClass> {
+        objc2::runtime::AnyClass::get(name)
+    }
+
+    /// Where macOS has the classes, and a Metal GPU: without one (a virtual machine's display)
+    /// WindowServer draws such a display in software and dies in it, ending the session.
+    pub fn adds() -> bool {
+        static METAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        #[link(name = "Metal", kind = "framework")]
+        unsafe extern "C" {
+            fn MTLCreateSystemDefaultDevice() -> *mut objc2::runtime::AnyObject;
+        }
+        class(c"CGVirtualDisplay").is_some()
+            && *METAL.get_or_init(|| {
+                // SAFETY: a plain call; the device it makes is let go at once.
+                unsafe { objc2::rc::Retained::from_raw(MTLCreateSystemDefaultDevice()) }.is_some()
+            })
+    }
+
+    /// Adds a display of `w`x`h`: its Core Graphics number, and what keeps it.
+    pub fn add(w: u16, h: u16) -> Result<(String, Virtual), String> {
+        use objc2::msg_send;
+        use objc2::rc::{Allocated, Retained};
+        use objc2::runtime::{AnyObject, Bool};
+        use objc2_core_foundation::CGSize;
+        static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let no = "this macOS cannot add displays";
+        let (descriptor, display, settings, mode) =
+            (class(c"CGVirtualDisplayDescriptor").ok_or(no)?, class(c"CGVirtualDisplay").ok_or(no)?, class(c"CGVirtualDisplaySettings").ok_or(no)?, class(c"CGVirtualDisplayMode").ok_or(no)?);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let queue = dispatch2::DispatchQueue::new("dev.sshremote.display", None);
+        // SAFETY: the classes' own methods with the types they take (as DeskPad calls them); every
+        // object made here is kept until it is no longer needed.
+        unsafe {
+            let desc: Retained<AnyObject> = msg_send![descriptor, new];
+            let q: *mut AnyObject = (&*queue as *const dispatch2::DispatchQueue).cast_mut().cast();
+            let _: () = msg_send![&*desc, setQueue: q];
+            let name = objc2_foundation::NSString::from_str("SSH Remote");
+            let _: () = msg_send![&*desc, setName: &*name];
+            let _: () = msg_send![&*desc, setMaxPixelsWide: w as u32];
+            let _: () = msg_send![&*desc, setMaxPixelsHigh: h as u32];
+            // 96 dots to the inch, as an ordinary monitor has.
+            let _: () = msg_send![&*desc, setSizeInMillimeters: CGSize::new(w as f64 * 25.4 / 96.0, h as f64 * 25.4 / 96.0)];
+            let _: () = msg_send![&*desc, setVendorID: 0x5352u32];
+            let _: () = msg_send![&*desc, setProductID: 0x0001u32];
+            let _: () = msg_send![&*desc, setSerialNum: serial];
+            let made: Allocated<AnyObject> = msg_send![display, alloc];
+            let made: Option<Retained<AnyObject>> = msg_send![made, initWithDescriptor: &*desc];
+            let made = made.ok_or("macOS did not add a display")?;
+            let s: Retained<AnyObject> = msg_send![settings, new];
+            let _: () = msg_send![&*s, setHiDPI: 0u32];
+            let m: Allocated<AnyObject> = msg_send![mode, alloc];
+            let m: Option<Retained<AnyObject>> = msg_send![m, initWithWidth: w as u32, height: h as u32, refreshRate: 60.0f64];
+            let m = m.ok_or("macOS did not take the display's size")?;
+            let modes = objc2_foundation::NSArray::from_retained_slice(&[m]);
+            let _: () = msg_send![&*s, setModes: &*modes];
+            let ok: Bool = msg_send![&*made, applySettings: &*s];
+            if !ok.as_bool() {
+                return Err(format!("macOS did not give the new display {w}x{h}"));
+            }
+            let id: u32 = msg_send![&*made, displayID];
+            Ok((id.to_string(), Virtual { _display: made, _queue: queue }))
+        }
+    }
 
     pub fn screens() -> Vec<String> {
         let (mut ids, mut n) = ([0u32; 16], 0u32);
@@ -575,6 +779,67 @@ mod linux {
         if done.status.success() && String::from_utf8_lossy(&done.stdout).trim() == "ok" { Ok(()) } else { Err(format!("Hyprland did not set {w}x{h}")) }
     }
 
+    /// Adds a headless output of `w`x`h` right of the others; its name.
+    pub(super) fn sway_add(sock: &Path, w: u16, h: u16) -> Result<String, String> {
+        let msg = |cmd: &str| run(Command::new("swaymsg").arg("-s").arg(sock).arg(cmd)).map(|o| o.status.success());
+        let all = || json(Command::new("swaymsg").arg("-s").arg(sock).args(["-t", "get_outputs", "-r"])).unwrap_or(Value::Null);
+        let names = |all: &Value| -> Vec<String> { all.as_array().into_iter().flatten().filter_map(|o| o["name"].as_str().map(str::to_string)).collect() };
+        let before = all();
+        let right = before
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|o| o["active"].as_bool() == Some(true))
+            .map(|o| o["rect"]["x"].as_i64().unwrap_or(0) + o["rect"]["width"].as_i64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if !msg("create_output")? {
+            return Err("Sway did not add a screen".into());
+        }
+        let had = names(&before);
+        let name = names(&all()).into_iter().find(|n| !had.contains(n)).ok_or("Sway added no screen")?;
+        if !msg(&format!("output \"{name}\" mode --custom {w}x{h} position {right} 0"))? {
+            let _ = sway_remove(sock, &name);
+            return Err(format!("Sway did not give the new screen {w}x{h}"));
+        }
+        Ok(name)
+    }
+
+    pub(super) fn sway_remove(sock: &Path, id: &str) -> Result<(), String> {
+        let done = run(Command::new("swaymsg").arg("-s").arg(sock).arg(format!("output \"{id}\" unplug")))?;
+        if done.status.success() { Ok(()) } else { Err(format!("Sway did not take {id} away")) }
+    }
+
+    /// Adds a headless monitor of `w`x`h` right of the others; its name.
+    pub(super) fn hypr_add(sig: &str, w: u16, h: u16) -> Result<String, String> {
+        let names = || -> Vec<String> {
+            json(hyprctl(sig).args(["-j", "monitors", "all"])).and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|m| m["name"].as_str().map(str::to_string)).collect()
+        };
+        let had = names();
+        if !run(hyprctl(sig).args(["output", "create", "headless"]))?.status.success() {
+            return Err("Hyprland did not add a screen".into());
+        }
+        let name = (0..20)
+            .find_map(|i| {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                names().into_iter().find(|n| !had.contains(n))
+            })
+            .ok_or("Hyprland added no screen")?;
+        let done = run(hyprctl(sig).args(["keyword", "monitor", &format!("{name},{w}x{h}@60,auto-right,1")]))?;
+        if !(done.status.success() && String::from_utf8_lossy(&done.stdout).trim() == "ok") {
+            let _ = hypr_remove(sig, &name);
+            return Err(format!("Hyprland did not give the new screen {w}x{h}"));
+        }
+        Ok(name)
+    }
+
+    pub(super) fn hypr_remove(sig: &str, id: &str) -> Result<(), String> {
+        let done = run(hyprctl(sig).args(["output", "remove", id]))?;
+        if done.status.success() { Ok(()) } else { Err(format!("Hyprland did not take {id} away")) }
+    }
+
     /// KDE's tool, which reaches KWin through the session's Wayland display (Qt's other ways to
     /// draw find no screens, or hang).
     fn kscreen_doctor() -> Command {
@@ -740,6 +1005,91 @@ mod linux {
         }
         if !grows && (right != geo.width as i32 || bottom != geo.height as i32) {
             sized(&conn)?;
+        }
+        conn.flush().map_err(|x| e(&x))?;
+        Ok(())
+    }
+
+    /// X with RandR 1.5, which lists and sets monitors apart from outputs.
+    fn x15() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
+        let (conn, screen) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots[screen].root;
+        let v = conn.randr_query_version(1, 5).ok()?.reply().ok()?;
+        (v.major_version > 1 || v.minor_version >= 5).then_some((conn, root))
+    }
+
+    /// The X screen's millimetres for `px` pixels across (or down), as it has them now.
+    fn mm(conn: &x11rb::rust_connection::RustConnection, root: u32, px: i32, across: bool) -> u32 {
+        let Some(s) = conn.setup().roots.iter().find(|s| s.root == root) else { return 1 };
+        let (p, m) = if across { (s.width_in_pixels, s.width_in_millimeters) } else { (s.height_in_pixels, s.height_in_millimeters) };
+        ((px as f64 * m as f64 / p.max(1) as f64).round() as u32).max(1)
+    }
+
+    /// Adds a monitor of `w`x`h` right of the others, a part of the X screen grown to hold it (no
+    /// output shows it, but windows go to it, are maximized on it and are read from it as on any
+    /// monitor); its name.
+    pub(super) fn randr_add(w: u16, h: u16) -> Result<String, String> {
+        let e = |e: &dyn std::fmt::Display| format!("X11: {e}");
+        let (conn, root) = x15().ok_or("this X server cannot add monitors (it has no RandR 1.5)")?;
+        let mons = conn.randr_get_monitors(root, true).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.monitors;
+        let names: Vec<String> = mons.iter().filter_map(|m| conn.get_atom_name(m.name).ok()?.reply().ok()).map(|n| String::from_utf8_lossy(&n.name).into_owned()).collect();
+        let name = (1..).map(|n| format!("VIRTUAL-{n}")).find(|n| !names.contains(n)).unwrap_or_default();
+        let right = mons.iter().map(|m| m.x as i32 + m.width as i32).max().unwrap_or(0).max(0);
+        let geo = conn.get_geometry(root).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?;
+        let (nw, nh) = ((right + w as i32).max(geo.width as i32), (h as i32).max(geo.height as i32));
+        let range = conn.randr_get_screen_size_range(root).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?;
+        if nw > range.max_width as i32 || nh > range.max_height as i32 || right > i16::MAX as i32 {
+            return Err(format!("the X screen can be at most {}x{}: no room for another {w}x{h}", range.max_width, range.max_height));
+        }
+        if (nw, nh) != (geo.width as i32, geo.height as i32) {
+            conn.randr_set_screen_size(root, nw as u16, nh as u16, mm(&conn, root, nw, true), mm(&conn, root, nh, false))
+                .map_err(|x| e(&x))?
+                .check()
+                .map_err(|x| e(&x))?;
+        }
+        let atom = conn.intern_atom(false, name.as_bytes()).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.atom;
+        let m = randr::MonitorInfo {
+            name: atom,
+            primary: false,
+            automatic: false,
+            x: right as i16,
+            y: 0,
+            width: w,
+            height: h,
+            width_in_millimeters: mm(&conn, root, w as i32, true),
+            height_in_millimeters: mm(&conn, root, h as i32, false),
+            outputs: Vec::new(),
+        };
+        conn.randr_set_monitor(root, m).map_err(|x| e(&x))?.check().map_err(|x| e(&x))?;
+        // The part the X screen grew by holds what its memory held: black, then the desktop's
+        // background where it has one (asked to draw it again).
+        let black = conn.setup().roots.iter().find(|s| s.root == root).map_or(0, |s| s.black_pixel);
+        if let Ok(gc) = conn.generate_id() {
+            let _ = conn.create_gc(gc, root, &x11rb::protocol::xproto::CreateGCAux::new().foreground(black).subwindow_mode(x11rb::protocol::xproto::SubwindowMode::CLIP_BY_CHILDREN));
+            let _ = conn.poly_fill_rectangle(root, gc, &[x11rb::protocol::xproto::Rectangle { x: right as i16, y: 0, width: w, height: nh as u16 }]);
+            let _ = conn.free_gc(gc);
+        }
+        let _ = conn.clear_area(true, root, right as i16, 0, w, nh as u16);
+        conn.flush().map_err(|x| e(&x))?;
+        Ok(name)
+    }
+
+    /// Takes monitor `id` away, and the X screen back to what the others span.
+    pub(super) fn randr_remove(id: &str) -> Result<(), String> {
+        let e = |e: &dyn std::fmt::Display| format!("X11: {e}");
+        let (conn, root) = x15().ok_or("no X display with RandR 1.5")?;
+        let atom = conn.intern_atom(true, id.as_bytes()).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.atom;
+        if atom == 0 {
+            return Ok(());
+        }
+        conn.randr_delete_monitor(root, atom).map_err(|x| e(&x))?.check().map_err(|x| e(&x))?;
+        let mons = conn.randr_get_monitors(root, true).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?.monitors;
+        let right = mons.iter().map(|m| m.x as i32 + m.width as i32).max().unwrap_or(0);
+        let bottom = mons.iter().map(|m| m.y as i32 + m.height as i32).max().unwrap_or(0);
+        let geo = conn.get_geometry(root).map_err(|x| e(&x))?.reply().map_err(|x| e(&x))?;
+        if right > 0 && bottom > 0 && (right < geo.width as i32 || bottom < geo.height as i32) {
+            // Not smaller than the outputs need, which the server refuses; then it stays as large.
+            let _ = conn.randr_set_screen_size(root, right as u16, bottom as u16, mm(&conn, root, right, true), mm(&conn, root, bottom, false)).map(|c| c.check());
         }
         conn.flush().map_err(|x| e(&x))?;
         Ok(())
@@ -962,5 +1312,50 @@ mod tests {
             println!("{id}: {m:?}");
             assert!(m.list.contains(&m.current) && own == m.current, "{m:?}");
         }
+    }
+
+    /// A display added for a session: macOS lists it, the capture finds and shows it at its size
+    /// (only the size is looked at), and it is gone once taken away, or once the session ends.
+    /// Run as the signed app (mactest.sh), which may take the screen's pictures.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn a_mac_gets_a_display_for_the_session() {
+        let soon = |what: &dyn Fn() -> bool| (0..40).any(|_| what() || { std::thread::sleep(std::time::Duration::from_millis(100)); false });
+        // The capture first, as a session has it.
+        let mut cap = crate::capture::open("mac").expect("the capture");
+        let mut s = Session::new("mac");
+        // Not on a Mac without Metal (this test's virtual machine): there WindowServer died.
+        if !s.adds() {
+            assert!(s.add(1280, 720).is_err());
+            println!("no displays added here (no Metal)");
+            return;
+        }
+        let id = s.add(1280, 720).expect("a display added");
+        assert!(soon(&|| mac::screens().contains(&id)), "listed: {:?}", mac::screens());
+        let sized = soon(&|| s.modes(&id).is_some_and(|(m, _)| m.current == (1280, 720)));
+        assert!(sized, "its mode: {:?}", s.modes(&id));
+        let at = (0..40).find_map(|_| {
+            cap.screens_changed();
+            let at = cap.screen_ids().iter().position(|x| *x == id);
+            if at.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            at
+        });
+        let at = at.expect("the capture lists it");
+        cap.select(at).expect("shown");
+        assert_eq!(cap.desktop_size(), (1280, 720));
+        let picture = (0..50).find_map(|_| cap.grab().ok().flatten().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(100)); None }));
+        let p = picture.expect("a picture of it");
+        println!("added {id}: picture {}x{}", p.w, p.h);
+        cap.select(0).expect("back on the first");
+        s.remove(&id).expect("taken away");
+        assert!(soon(&|| !mac::screens().contains(&id)), "gone: {:?}", mac::screens());
+        // One added and left: the session's end takes it away.
+        let id = s.add(1920, 1080).expect("another");
+        assert!(soon(&|| mac::screens().contains(&id)));
+        drop(s);
+        assert!(soon(&|| !mac::screens().contains(&id)), "gone with the session");
     }
 }

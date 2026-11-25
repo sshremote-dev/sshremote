@@ -22,10 +22,15 @@ use super::{Capture, Image, Input, Monitor};
 /// A monitor as the compositor tells it: its name, mode (pixels), place (layout points) and scale.
 struct Out {
     output: WlOutput,
+    /// The registry's name for it, by which it is said to be gone.
+    global: u32,
     name: String,
     size: (i32, i32),
     at: (i32, i32),
     scale: i32,
+    /// Unplugged (a screen a session added and took away): kept, as monitors go by their place
+    /// in this list, but no longer shown.
+    gone: bool,
 }
 
 /// What a frame being copied has said so far.
@@ -52,17 +57,23 @@ struct State {
 
 impl Dispatch<WlRegistry, ()> for State {
     fn event(s: &mut State, r: &WlRegistry, e: wl_registry::Event, _: &(), _: &Connection, qh: &QueueHandle<State>) {
-        if let wl_registry::Event::Global { name, interface, version } = e {
-            match interface.as_str() {
+        match e {
+            wl_registry::Event::Global { name, interface, version } => match interface.as_str() {
                 "zwlr_screencopy_manager_v1" => s.manager = Some((r.bind(name, version.min(3), qh, ()), version.min(3))),
                 "wl_shm" => s.shm = Some(r.bind(name, 1, qh, ())),
                 "wl_output" => {
                     let n = s.outs.len();
                     let output = r.bind(name, version.min(4), qh, n);
-                    s.outs.push(Out { output, name: format!("output {}", n + 1), size: (0, 0), at: (0, 0), scale: 1 });
+                    s.outs.push(Out { output, global: name, name: format!("output {}", n + 1), size: (0, 0), at: (0, 0), scale: 1, gone: false });
                 }
                 _ => {}
+            },
+            wl_registry::Event::GlobalRemove { name } => {
+                for o in s.outs.iter_mut().filter(|o| o.global == name) {
+                    o.gone = true;
+                }
             }
+            _ => {}
         }
     }
 }
@@ -144,10 +155,17 @@ struct Told {
     size: (i32, i32),
     at: (i32, i32),
     scale: i32,
+    gone: bool,
 }
 
 fn told(outs: &[Out]) -> Vec<Told> {
-    outs.iter().map(|o| Told { name: o.name.clone(), size: o.size, at: o.at, scale: o.scale }).collect()
+    outs.iter().map(|o| Told { name: o.name.clone(), size: o.size, at: o.at, scale: o.scale, gone: o.gone }).collect()
+}
+
+/// The places in `outs` of the monitors still there: a monitor's number as the viewer has it is
+/// its place in this list.
+fn live(outs: &[Told]) -> Vec<usize> {
+    (0..outs.len()).filter(|&i| !outs[i].gone).collect()
 }
 
 /// What the copying thread and the capture share.
@@ -546,13 +564,14 @@ impl Capture for WlrCopy {
             .lock()
             .outs
             .iter()
+            .filter(|o| !o.gone)
             .enumerate()
             .map(|(i, o)| Monitor { name: o.name.clone(), w: o.size.0.max(0) as usize, h: o.size.1.max(0) as usize, primary: i == 0, at: Some(o.at) })
             .collect()
     }
 
     fn current(&self) -> usize {
-        self.current
+        live(&self.shared.lock().outs).iter().position(|&i| i == self.current).unwrap_or(0)
     }
 
     fn screen_id(&self) -> Option<String> {
@@ -560,14 +579,15 @@ impl Capture for WlrCopy {
     }
 
     fn select(&mut self, index: usize) -> Result<(), String> {
-        {
+        let index = {
             let mut l = self.shared.lock();
-            if index >= l.outs.len() {
+            let Some(&index) = live(&l.outs).get(index) else {
                 return Err("no such monitor".into());
-            }
+            };
             l.want = (index, l.want.1 + 1);
             l.fresh = false;
-        }
+            index
+        };
         (self.current, self.last) = (index, Image { w: 0, h: 0, stride: 0, data: Vec::new() });
         self.take(Some(Duration::from_secs(5)))?;
         (self.desk, self.target, self.again) = ((self.last.w, self.last.h), (self.last.w, self.last.h), true);
@@ -612,7 +632,8 @@ impl Capture for WlrCopy {
         {
             let placed = {
                 let l = self.shared.lock();
-                l.outs.get(self.current).filter(|_| l.outs.len() > 1).map(|o| placed(&l.outs, o, (x, y)))
+                let outs: Vec<Told> = l.outs.iter().filter(|o| !o.gone).cloned().collect();
+                l.outs.get(self.current).filter(|_| outs.len() > 1).map(|o| placed(&outs, o, (x, y)))
             };
             if let Some(((x, y), extent)) = placed {
                 return self.input.input(Input::Move { x, y }, extent);
@@ -661,7 +682,7 @@ mod tests {
     /// each land in the box around them all.
     #[test]
     fn points_are_placed_among_the_monitors() {
-        let told = |at, size, scale| Told { name: String::new(), size, at, scale };
+        let told = |at, size, scale| Told { name: String::new(), size, at, scale, gone: false };
         let outs = [told((0, 0), (1920, 1080), 1), told((-1280, 0), (1280, 1024), 1), told((1920, 0), (3840, 2160), 2)];
         assert_eq!(placed(&outs, &outs[0], (10.0, 20.0)), ((1290.0, 20.0), (5120, 1080)));
         assert_eq!(placed(&outs, &outs[1], (0.0, 1000.0)), ((0.0, 1000.0), (5120, 1080)));

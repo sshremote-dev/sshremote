@@ -487,6 +487,10 @@ impl Capture for X11 {
         self.screens.get(self.current).map(|(m, ..)| m.name.clone())
     }
 
+    fn screens_changed(&mut self) {
+        self.screen_changed();
+    }
+
     fn screen_changed(&mut self) {
         // The X screen's new size and its monitors' new places, the same monitor found by name,
         // and memory shared with the server as large as the screen is now.

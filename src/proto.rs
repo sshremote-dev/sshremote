@@ -43,6 +43,8 @@ pub const KIND_TRUST_ME: u8 = 54;
 /// The agent goes on with a transfer the connection broke off (`ToAgent::FileResume`,
 /// `ToAgent::FetchFrom`), told in `ToClient::Can`.
 pub const CAN_RESUME: u32 = 1;
+/// The agent adds screens to the host for the session and takes them away (`ToAgent::AddScreen`).
+pub const CAN_SCREENS: u32 = 2;
 
 pub struct Preset {
     pub name: &'static str,
@@ -283,6 +285,14 @@ pub enum ToAgent {
         w: u16,
         h: u16,
     },
+    /// Adds a screen of that size to the host (a virtual one, as a dummy plug gives), which goes
+    /// when the session ends; the new list follows in `Monitors`.
+    AddScreen {
+        w: u16,
+        h: u16,
+    },
+    /// Takes away a screen `AddScreen` added, by its name in `Monitors`.
+    RemoveScreen(String),
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -339,6 +349,8 @@ pub struct MonitorInfo {
     pub primary: bool,
     /// Its top left on the host's desktop (None from an agent older than 0.25.38, or a camera).
     pub at: Option<(i32, i32)>,
+    /// Added for this session (`ToAgent::AddScreen`), to be taken away again.
+    pub added: bool,
 }
 
 impl MonitorInfo {
@@ -889,6 +901,15 @@ impl ToAgent {
                 b.extend_from_slice(&h.to_le_bytes());
                 49
             }
+            ToAgent::AddScreen { w, h } => {
+                b.extend_from_slice(&w.to_le_bytes());
+                b.extend_from_slice(&h.to_le_bytes());
+                57
+            }
+            ToAgent::RemoveScreen(name) => {
+                b.extend_from_slice(name.as_bytes());
+                58
+            }
             ToAgent::Host { act, on } => {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
@@ -959,6 +980,8 @@ impl ToAgent {
             47 => ToAgent::Apps,
             48 => ToAgent::Launch { kind: c.u8()?, text: String::from_utf8_lossy(c.rest()).into_owned() },
             49 => ToAgent::SetMode { w: c.u16()?, h: c.u16()? },
+            57 => ToAgent::AddScreen { w: c.u16()?, h: c.u16()? },
+            58 => ToAgent::RemoveScreen(String::from_utf8_lossy(c.rest()).into_owned()),
             45 => ToAgent::ClipImage(c.rest().to_vec()),
             46 => ToAgent::Density(c.u16()?),
             12 => ToAgent::SecureAttention,
@@ -1363,6 +1386,10 @@ impl ToClient {
                     b.extend_from_slice(&x.to_le_bytes());
                     b.extend_from_slice(&y.to_le_bytes());
                 }
+                // And after the places (0.25.45): which were added for the session.
+                for m in list {
+                    b.push(m.added as u8);
+                }
                 112
             }
             ToClient::FileDone { id, ok, text } => {
@@ -1582,12 +1609,17 @@ impl ToClient {
                 let n = c.u32()? as usize;
                 let mut list = Vec::with_capacity(n.min(64));
                 for _ in 0..n {
-                    list.push(MonitorInfo { name: c.str()?, w: c.u16()?, h: c.u16()?, primary: c.u8()? != 0, at: None });
+                    list.push(MonitorInfo { name: c.str()?, w: c.u16()?, h: c.u16()?, primary: c.u8()? != 0, at: None, added: false });
                 }
                 if c.d.len() - c.p >= list.len() * 9 {
                     for m in list.iter_mut() {
                         let (known, x, y) = (c.u8()? != 0, c.u32()? as i32, c.u32()? as i32);
                         m.at = known.then_some((x, y));
+                    }
+                }
+                if c.d.len() - c.p >= list.len() {
+                    for m in list.iter_mut() {
+                        m.added = c.u8()? != 0;
                     }
                 }
                 ToClient::Monitors { list, current }
@@ -1663,6 +1695,8 @@ mod tests {
             ToAgent::Apps,
             ToAgent::Launch { kind: 1, text: "gnome-calculator".into() },
             ToAgent::SetMode { w: 1280, h: 720 },
+            ToAgent::AddScreen { w: 1920, h: 1080 },
+            ToAgent::RemoveScreen("HEADLESS-2".into()),
             ToAgent::Host { act: 4, on: true },
             ToAgent::Call(true),
             ToAgent::Voice(vec![7, 8]),
@@ -1734,7 +1768,11 @@ mod tests {
             ToClient::PortClosed { id: 2 },
             ToClient::ClipFiles(vec![ClipFile { path: "C:/a.txt".into(), size: 5, dir: false }, ClipFile { path: "/home/x/photos".into(), size: 1 << 33, dir: true }]),
             ToClient::Monitors {
-                list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((-1920, 0)) }, MonitorInfo { name: "Camera: front".into(), w: 0, h: 0, primary: false, at: None }],
+                list: vec![
+                    MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((-1920, 0)), added: false },
+                    MonitorInfo { name: "Camera: front".into(), w: 0, h: 0, primary: false, at: None, added: false },
+                    MonitorInfo { name: "HEADLESS-1".into(), w: 1920, h: 1080, primary: false, at: Some((2560, 0)), added: true },
+                ],
                 current: 0,
             },
             ToClient::Modes { list: vec![(2560, 1440), (1920, 1080)], current: (1920, 1080), own: (2560, 1440) },
@@ -1752,10 +1790,15 @@ mod tests {
             let (k, p) = m.encode();
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);
         }
-        // An older agent's list of screens, without their places, still reads; its places are unknown.
-        let list = vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((0, 0)) }];
+        // An older agent's list of screens, without their places or what it added, still reads;
+        // its places are unknown and it added none.
+        let list = vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((0, 0)), added: true }];
         let (k, p) = ToClient::Monitors { list, current: 0 }.encode();
-        match ToClient::decode(k, &p[..p.len() - 9]).unwrap() {
+        match ToClient::decode(k, &p[..p.len() - 1]).unwrap() {
+            ToClient::Monitors { list, .. } => assert_eq!((list[0].at, list[0].added), (Some((0, 0)), false)),
+            m => panic!("{m:?}"),
+        }
+        match ToClient::decode(k, &p[..p.len() - 10]).unwrap() {
             ToClient::Monitors { list, .. } => assert_eq!((list.len(), list[0].w, list[0].at), (1, 2560, None)),
             m => panic!("{m:?}"),
         }

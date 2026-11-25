@@ -1307,6 +1307,24 @@ impl Capture for Mac {
         Some(self.display().id.to_string())
     }
 
+    fn screen_ids(&self) -> Vec<String> {
+        self.displays.iter().map(|d| d.id.to_string()).collect()
+    }
+
+    fn screens_changed(&mut self) {
+        // ScreenCaptureKit's list too, which a display added since is not in yet.
+        if self.content.is_some()
+            && let Ok(c) = shareable()
+        {
+            self.content = Some(c);
+        }
+        let all = displays_now(self.content.as_deref());
+        let id = self.display().id;
+        if let Some(i) = all.iter().position(|x| x.id == id) {
+            (self.displays, self.current) = (all, i);
+        }
+    }
+
     fn screen_changed(&mut self) {
         self.follow_display(true);
     }

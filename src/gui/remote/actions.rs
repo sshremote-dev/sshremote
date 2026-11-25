@@ -449,6 +449,32 @@ fn menus_remote() {
     }
 }
 
+/// A host that adds screens: its screens' menu offers sizes to add one and takes away the one
+/// added; picked, a size goes to the agent (which answers with the new list: here a stand-in).
+#[test]
+#[ignore]
+fn screens_are_added_and_taken_away_from_the_menu() {
+    let mut h = Harness::new(Vec2::new(1280.0, 800.0));
+    let screen = |name: &str, added: bool| crate::proto::MonitorInfo { name: name.into(), w: 1280, h: 800, primary: !added, at: Some((0, 0)), added };
+    h.r.adds_screens = true;
+    h.r.monitors = vec![screen("DP-1", false), screen("HEADLESS-2", true)];
+    h.tool(ic::SQUARES_FOUR).unwrap();
+    for _ in 0..6 {
+        h.frame(Vec::new()).unwrap();
+    }
+    assert!(h.find("Take away screen 2").is_some(), "the added screen can be taken away");
+    h.click("Add a screen").unwrap();
+    for _ in 0..6 {
+        h.frame(Vec::new()).unwrap();
+    }
+    if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) {
+        h.snap.save(&h.ctx, h.size, &dir.join("screens_add_menu.png"));
+    }
+    assert!(h.find("1920 \u{d7} 1080").is_some(), "sizes to add");
+    h.click("2560 \u{d7} 1440").unwrap();
+    assert!(h.find("Add a screen").is_none(), "the menu closes");
+}
+
 /// An upload and a folder's download cut off by a broken connection go on in the next one from
 /// where they were, as the workspace carries them over, and arrive whole.
 #[test]

@@ -411,8 +411,9 @@ fn serve_with(
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
-    send(enc, &ToClient::Can(crate::proto::CAN_RESUME)).map_err(io_err)?;
-    send(enc, &monitors(cap.as_ref())).map_err(io_err)?;
+    let can = crate::proto::CAN_RESUME | if screens.adds() { crate::proto::CAN_SCREENS } else { 0 };
+    send(enc, &ToClient::Can(can)).map_err(io_err)?;
+    send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
     if cap.name() == "none"
         && let Err(why) = cap.windows()
@@ -517,7 +518,7 @@ fn serve_with(
     macro_rules! resized {
         () => {
             desk = cap.desktop_size();
-            announce(enc, cap.as_mut(), desk, settings, &mut size)?;
+            announce(enc, cap.as_mut(), screens, desk, settings, &mut size)?;
             (prev, last) = (None, None);
             vid.reset();
         };
@@ -974,6 +975,35 @@ fn serve_with(
                     }
                     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
                     // Said at once, also to a viewer whose pictures are paused (one taking screenshots).
+                    if cap.desktop_size() != desk {
+                        resized!();
+                    }
+                }
+                ToAgent::AddScreen { w, h } => {
+                    match screens.add(w, h) {
+                        // The viewer hears of it once the capture lists it.
+                        Ok(id) => hear_of(cap.as_mut(), &id, true),
+                        Err(e) => send(enc, &ToClient::Notice(e)).map_err(io_err)?,
+                    }
+                    send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
+                }
+                ToAgent::RemoveScreen(name) => {
+                    // Named as the viewer has it in `Monitors`; the system's name for it is its id.
+                    let id = cap.monitors().iter().position(|m| m.name == name).and_then(|i| cap.screen_ids().get(i).cloned()).unwrap_or(name);
+                    // Shown here: the first screen of the computer's own shows in its place.
+                    if screens.added(&id)
+                        && cap.screen_id().as_deref() == Some(id.as_str())
+                        && let Some(i) = cap.screen_ids().iter().position(|s| !screens.added(s))
+                        && cap.select(i).is_ok()
+                    {
+                        send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
+                        resized!();
+                    }
+                    match screens.remove(&id) {
+                        Ok(()) => hear_of(cap.as_mut(), &id, false),
+                        Err(e) => send(enc, &ToClient::Notice(e)).map_err(io_err)?,
+                    }
+                    send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
                     if cap.desktop_size() != desk {
                         resized!();
                     }
@@ -1573,19 +1603,35 @@ fn modes(cap: &dyn capture::Capture, screens: &crate::display::Session) -> ToCli
     }
 }
 
-fn monitors(cap: &dyn capture::Capture) -> ToClient {
+fn monitors(cap: &dyn capture::Capture, screens: &crate::display::Session) -> ToClient {
+    let ids = cap.screen_ids();
     let list = cap
         .monitors()
         .into_iter()
-        .map(|m| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary, at: m.at })
+        .enumerate()
+        .map(|(i, m)| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary, at: m.at, added: ids.get(i).is_some_and(|id| screens.added(id)) })
         .collect();
     ToClient::Monitors { list, current: cap.current() as u8 }
+}
+
+/// Waits (up to three seconds) for the capture to list screen `id`, or (`there` false) no longer.
+fn hear_of(cap: &mut dyn capture::Capture, id: &str, there: bool) {
+    for i in 0..30 {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        cap.screens_changed();
+        if cap.screen_ids().iter().any(|s| s == id) == there {
+            return;
+        }
+    }
 }
 
 /// Tells the viewer the new picture size and fits the capture to it.
 fn announce(
     enc: &mut Wire,
     cap: &mut dyn capture::Capture,
+    screens: &crate::display::Session,
     desk: (usize, usize),
     settings: Option<Settings>,
     size: &mut (usize, usize),
@@ -1593,7 +1639,7 @@ fn announce(
     let io_err = |e: io::Error| e.to_string();
     let hello = ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() };
     send(enc, &hello).map_err(io_err)?;
-    send(enc, &monitors(cap)).map_err(io_err)?;
+    send(enc, &monitors(cap, screens)).map_err(io_err)?;
     if let Some(s) = settings {
         *size = target(desk, &s, cap.resizable());
         cap.set_target(size.0, size.1)?;

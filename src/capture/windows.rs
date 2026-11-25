@@ -671,6 +671,10 @@ impl Capture for Gdi {
         self.screens.get(self.current).map(|s| s.info.name.clone())
     }
 
+    fn screen_ids(&self) -> Vec<String> {
+        self.screens.iter().map(|s| s.info.name.clone()).collect()
+    }
+
     fn screen_changed(&mut self) {
         // Its new size is read now, not within the second the monitors are next looked at.
         self.layout_at = None;

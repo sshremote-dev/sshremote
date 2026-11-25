@@ -278,7 +278,10 @@ What is opened goes into the workspace:
   monitors": full screen does it by itself for a host with several screens and a viewer with several
   monitors, each screen on the monitor that lies where it lies on the host, and leaving full screen
   in one ends it in all; Settings can turn it off; or all side by side in one tab, as they lie on
-  the host), sharing one window or application with its menus and dialogs, special keys (a Mac's
+  the host), screens added to the host for the session (a virtual monitor, as a dummy plug gives,
+  of a size picked in the screens menu, for a computer without a monitor or a screen of one's own
+  beside its person's; taken away again when the session ends; GNOME, Sway, Hyprland and X11
+  desktops, and Macs with a Metal GPU), sharing one window or application with its menus and dialogs, special keys (a Mac's
   own for a Mac: lock screen, Spotlight, Force Quit and more; between a Mac and another computer
   Ctrl and the command key trade places, so Ctrl+C here is Cmd+C on the Mac, and Cmd+C on a Mac is
   Ctrl+C on the other; a box in the keys menu turns it off), chat,
@@ -402,7 +405,9 @@ The agent starts a helper in the logged-on user's console session. `sshremote --
 
 `sshremote mcp HOST` (or `mcp --here` for this computer) lets an AI agent read the window in front
 as text (accessibility tree) and act on its controls, with screenshots only when needed. Its
-`resolution` tool lists the shown screen's resolutions or sets one (set back when it disconnects).
+`resolution` tool lists the shown screen's resolutions or sets one (set back when it disconnects);
+`add_screen` gives it a screen of its own to work on beside the person's (taken away again with
+`remove_screen` or when it disconnects).
 
 ```json
 {"mcpServers": {"remote-pc": {"command": "sshremote", "args": ["mcp", "user@host"]}}}

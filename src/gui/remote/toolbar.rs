@@ -321,14 +321,16 @@ impl Remote {
                 }
             }
         }
-        // The host's screens, when it has several: which one shows here, or all, a window each.
-        if self.monitors.len() > 1 {
+        // The host's screens, when it has several: which one shows here, or all, a window each;
+        // and screens added to it for the session, where it can have them.
+        if self.monitors.len() > 1 || self.adds_screens {
             let screens = icon_menu(ui, ic::SQUARES_FOUR, |ui| {
                 ui.label(RichText::new("Its screens").strong());
                 for (i, m) in self.monitors.iter().enumerate() {
                     let primary = if m.primary { ", primary" } else { "" };
                     // A camera: to look at, shown by its name alone.
-                    let text = if m.camera() { format!("{}  {}", ic::CAMERA, m.name) } else { format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h) };
+                    let added = if m.added { ", added" } else { "" };
+                    let text = if m.camera() { format!("{}  {}", ic::CAMERA, m.name) } else { format!("{}  {} ({}x{}{primary}{added})", i + 1, m.name, m.w, m.h) };
                     if ui.selectable_label(i == self.monitor, text).clicked() {
                         *action = Some(Box::new(move |r, _| r.show_monitor(i)));
                         ui.close();
@@ -358,6 +360,36 @@ impl Remote {
                     }));
                     ui.close();
                 }
+                }
+                if self.adds_screens {
+                    ui.separator();
+                    // This computer's monitor first: the screen added fills it in full screen.
+                    let mine = crate::sys::monitors().iter().find(|m| m.primary).map(|m| (m.w.clamp(640, 7680) as u16, m.h.clamp(480, 4320) as u16));
+                    let mut sizes: Vec<(u16, u16)> = mine.into_iter().collect();
+                    for s in [(1920, 1080), (2560, 1440), (3840, 2160), (1366, 768), (1280, 800)] {
+                        if !sizes.contains(&s) {
+                            sizes.push(s);
+                        }
+                    }
+                    let tip = "A screen of its own for this session, as a monitor plugged in there, with none needed: windows go to it and it shows here as its other screens do. It goes when you leave";
+                    ui.menu_button(format!("{}  Add a screen", ic::PLUS), |ui| {
+                        for &(w, h) in &sizes {
+                            let here = if Some((w, h)) == mine { "  (this monitor's)" } else { "" };
+                            if ui.button(format!("{w} \u{d7} {h}{here}")).clicked() {
+                                *action = Some(Box::new(move |r, _| r.send(ToAgent::AddScreen { w, h })));
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(tip);
+                    for (i, m) in self.monitors.iter().enumerate().filter(|(_, m)| m.added) {
+                        if ui.button(format!("{}  Take away screen {} ({}x{})", ic::X, i + 1, m.w, m.h)).on_hover_text("Unplugs the screen added: its windows go to the others").clicked() {
+                            let name = m.name.clone();
+                            *action = Some(Box::new(move |r, _| r.send(ToAgent::RemoveScreen(name))));
+                            ui.close();
+                        }
+                    }
                 }
             });
             screens.on_hover_text(format!("Its screens: {} of {} shows here; Ctrl+Alt+Shift+1, 2, ... picks one", self.monitor + 1, self.monitors.len()));

@@ -124,6 +124,10 @@ fn all_tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "select_monitor", "description": "Show another monitor (index from monitors).",
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
+        {"name": "add_screen", "description": "Add a screen to the remote computer for this connection, as a monitor plugged in there (a virtual one: none is needed), to work on beside its person's screens; select_monitor shows it. It is taken away when the connection ends. Sway, Hyprland, X11 desktops and macOS.",
+         "inputSchema": {"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}}},
+        {"name": "remove_screen", "description": "Take away a screen add_screen added (index from monitors).",
+         "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
         {"name": "resolution", "description": "The shown screen's own resolution (its display mode, not the picture's size): without arguments, the ones it can be set to; with width and height, set it to one (0 and 0: back to the one it had). It is set back when the connection ends.",
          "inputSchema": {"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}}},
         {"name": "windows", "description": "List the remote windows that can be shared on their own (id, program, title, size).",
@@ -525,9 +529,29 @@ impl Server {
                     .monitors
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| format!("{i}: {} {}x{}{}", m.name, m.w, m.h, if m.primary { " primary" } else { "" }))
+                    .map(|(i, m)| format!("{i}: {} {}x{}{}{}", m.name, m.w, m.h, if m.primary { " primary" } else { "" }, if m.added { " added" } else { "" }))
                     .collect();
                 Ok(text_result(if list.is_empty() { "one screen".to_string() } else { list.join("\n") }))
+            }
+            "add_screen" | "remove_screen" => {
+                self.settle()?;
+                let had: Vec<String> = self.monitors.iter().map(|m| m.name.clone()).collect();
+                if name == "add_screen" {
+                    let num = |k: &str, or: u16| args.get(k).and_then(Value::as_u64).map_or(or, |v| v.min(u16::MAX as u64) as u16);
+                    self.send(ToAgent::AddScreen { w: num("width", 1920), h: num("height", 1080) })?;
+                } else {
+                    let i = args.get("index").and_then(Value::as_u64).ok_or("missing index")? as usize;
+                    let m = self.monitors.get(i).filter(|m| m.added).ok_or("only a screen add_screen added can be taken away")?;
+                    self.send(ToAgent::RemoveScreen(m.name.clone()))?;
+                }
+                // The new list comes once the desktop has made the change; why it did not, as a
+                // notice, ends the wait as an error.
+                let until = Instant::now() + Duration::from_secs(6);
+                while Instant::now() < until && self.monitors.iter().map(|m| &m.name).eq(had.iter()) {
+                    self.drain(Some(Instant::now() + Duration::from_millis(150)))?;
+                }
+                let list: Vec<String> = self.monitors.iter().enumerate().map(|(i, m)| format!("{i}: {} {}x{}{}", m.name, m.w, m.h, if m.added { " added" } else { "" })).collect();
+                Ok(text_result(format!("its screens now:\n{}", list.join("\n"))))
             }
             "resolution" => {
                 let num = |k: &str| args.get(k).and_then(Value::as_u64).map(|v| v.min(u16::MAX as u64) as u16);

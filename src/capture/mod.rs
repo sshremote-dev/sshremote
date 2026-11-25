@@ -4,6 +4,8 @@ pub mod camera;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod gnome;
+#[cfg(target_os = "linux")]
+pub(crate) use gnome::{Virtual as GnomeVirtual, add_virtual as gnome_add_virtual};
 
 /// The GNOME helper extension brought up to date where it is installed (GNOME loads it at the
 /// next login).
@@ -143,6 +145,13 @@ pub trait Capture {
     fn screen_id(&self) -> Option<String> {
         None
     }
+    /// Each monitor's system name, as `screen_id` gives the shown one's, in `monitors` order.
+    fn screen_ids(&self) -> Vec<String> {
+        self.monitors().into_iter().map(|m| m.name).collect()
+    }
+    /// A screen was added or taken away (`display::Session::add`): the monitors are listed again
+    /// where the backend does not hear of it by itself.
+    fn screens_changed(&mut self) {}
     /// The monitor shown is about to get another resolution (`screen_changed` follows).
     fn screen_changing(&mut self) {}
     /// The monitor shown was given another resolution (or was not after all): it is looked at again.

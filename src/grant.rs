@@ -55,7 +55,9 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::InstallHelper
         | ToAgent::Apps
         | ToAgent::Launch { .. }
-        | ToAgent::SetMode { .. } => CONTROL,
+        | ToAgent::SetMode { .. }
+        | ToAgent::AddScreen { .. }
+        | ToAgent::RemoveScreen(_) => CONTROL,
         ToAgent::Clipboard(_) | ToAgent::ClipImage(_) => CLIPBOARD,
         ToAgent::FileStart { .. }
         | ToAgent::FileData { .. }

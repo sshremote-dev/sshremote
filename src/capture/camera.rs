@@ -177,6 +177,15 @@ impl Capture for WithCameras {
     fn screen_id(&self) -> Option<String> {
         if self.cam.is_some() { None } else { self.screen.screen_id() }
     }
+    fn screen_ids(&self) -> Vec<String> {
+        let mut ids = self.screen.screen_ids();
+        ids.resize(self.screens(), String::new());
+        ids.extend(self.cams.iter().map(|c| format!("Camera: {}", c.name)));
+        ids
+    }
+    fn screens_changed(&mut self) {
+        self.screen.screens_changed()
+    }
     fn screen_changing(&mut self) {
         self.screen.screen_changing()
     }
