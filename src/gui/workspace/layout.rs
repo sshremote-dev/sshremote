@@ -30,6 +30,31 @@ impl Node {
         }
     }
 
+    /// Puts `node` where pane `at` is; whether it was found.
+    pub(super) fn replace(&mut self, at: u64, node: Node) -> bool {
+        match self {
+            Node::Leaf(id) if *id == at => {
+                *self = node;
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { a, b, .. } => {
+                if a.leaves_contain(at) {
+                    a.replace(at, node)
+                } else {
+                    b.replace(at, node)
+                }
+            }
+        }
+    }
+
+    fn leaves_contain(&self, id: u64) -> bool {
+        match self {
+            Node::Leaf(x) => *x == id,
+            Node::Split { a, b, .. } => a.leaves_contain(id) || b.leaves_contain(id),
+        }
+    }
+
     /// The layout without `id`, or nothing when it was the last pane.
     pub(super) fn remove(self, id: u64) -> Option<Node> {
         match self {

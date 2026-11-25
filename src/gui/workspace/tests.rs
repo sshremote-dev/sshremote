@@ -1570,3 +1570,36 @@ fn full_screen_uses_all_my_monitors_for_a_host_with_several_screens() {
     h.until("closed", |w| w.panes.is_empty());
     crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = None);
 }
+
+/// All of a host's screens side by side in this tab: the other screen opens beside the shown
+/// one, on the side where it lies on the host, each half as wide as its screen; full screen keeps
+/// both in view.
+#[test]
+#[ignore]
+fn all_screens_open_side_by_side_in_the_tab() {
+    let mut h = Harness::new();
+    let launch = Launch::Agent { target: Target::Local { capture: "synthetic2".into() }, label: "Two screens".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(launch, Place::Tab, PaneStart::default());
+    h.until("connected", |w| live(w, 0));
+    h.until("its two screens known", |w| matches!(&w.panes[0].state, State::Live(r) if r.monitors().0 == 2));
+    let first = h.w.panes[0].id;
+    h.bar(ic::SQUARES_FOUR);
+    for _ in 0..3 {
+        h.frame(Vec::new());
+    }
+    h.item("All its screens here, side by side");
+    h.until("two panes in the tab", |w| w.order(0).len() == 2);
+    assert_eq!(h.w.tabs.len(), 1, "in the same tab");
+    let order = h.w.order(0);
+    assert_eq!(order[0], first, "the first screen, at the host's left, on the left");
+    match &h.w.tabs[0].root {
+        Node::Split { below, ratio, .. } => assert_eq!((*below, *ratio), (false, 0.5)),
+        Node::Leaf(_) => panic!("one pane"),
+    }
+    h.until("the second showing its screen 2", |w| matches!(&w.panes[1].state, State::Live(r) if r.monitors().1 == 1));
+    assert!(h.w.panes[1].label.ends_with("screen 2"));
+    let ctx = h.ctx.clone();
+    h.w.set_full(&ctx, true);
+    assert!(h.w.full.on && h.w.zoom.is_none(), "full screen keeps both");
+    h.w.close_all();
+}

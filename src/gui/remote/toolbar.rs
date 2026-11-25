@@ -339,6 +339,14 @@ impl Remote {
                     }));
                     ui.close();
                 }
+                let tip = "Each of the host's screens beside the others in this tab, as they lie on the host, sized to fit; full screen keeps them together";
+                if ui.button(format!("{}  All its screens here, side by side", ic::SPLIT_SIDE)).on_hover_text(tip).clicked() {
+                    *action = Some(Box::new(|r, _| {
+                        r.beside_asked = true;
+                        Ok(())
+                    }));
+                    ui.close();
+                }
                 }
             });
             screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));

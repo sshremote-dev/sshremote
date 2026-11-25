@@ -327,6 +327,8 @@ pub(super) struct Workspace {
     pub(super) group_left: bool,
     /// The group ended elsewhere: this window leaves full screen too, or closes if opened for it.
     pub(super) leave_group: bool,
+    /// Panes showing one host's screens side by side in a tab: full screen keeps them together.
+    beside: Vec<u64>,
     /// Frames to wait before full screen (the window is being moved to its monitor first).
     full_later: Option<u32>,
     /// A tab let go away from this bar, and where on the screen: the app moves it into the
@@ -407,6 +409,7 @@ impl Workspace {
             group_member: false,
             group_left: false,
             leave_group: false,
+            beside: Vec::new(),
             full_later: None,
             dropped: None,
             strip_screen: Rect::NOTHING,
@@ -465,6 +468,46 @@ impl Workspace {
         }
     }
 
+    /// Pane `id`, showing screen `shown` of its host, gets the host's other screens beside it in
+    /// its tab, a pane each, laid out as they lie on the host (left to right, or one above the
+    /// other), each part as wide (or high) as its screen.
+    #[allow(clippy::too_many_arguments)]
+    fn side_by_side(&mut self, id: u64, target: Target, label: &str, ssh_cmd: Option<Vec<String>>, shown: usize, places: &[Option<(i32, i32)>], sizes: &[(u16, u16)], prefs: Vec<remote::Prefs>) {
+        let n = prefs.len();
+        let Some(t) = self.tab_of(id) else { return };
+        let mut ids = vec![0u64; n];
+        for (m, p) in prefs.into_iter().enumerate() {
+            if m == shown {
+                ids[m] = id;
+                continue;
+            }
+            let launch = Launch::Agent { target: target.clone(), label: format!("{label} \u{00b7} screen {}", m + 1), ssh_cmd: ssh_cmd.clone(), mode: PaneMode::Screen };
+            let Some(new) = self.new_pane(launch, PaneStart::default()) else { return };
+            if let Some(i) = self.index(new) {
+                self.panes[i].prefs = Some(p);
+            }
+            ids[m] = new;
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        let known = places.len() == n && places.iter().all(Option::is_some);
+        if known {
+            order.sort_by_key(|&m| places[m]);
+        }
+        // One above the other when they all start at one x; else side by side.
+        let below = known && n > 1 && places.iter().all(|p| p.map(|p| p.0) == places[0].map(|p| p.0));
+        let span = |m: usize| sizes.get(m).map_or(1.0, |s| if below { s.1 } else { s.0 } as f32).max(1.0);
+        let mut node = Node::Leaf(ids[order[n - 1]]);
+        let mut rest = span(order[n - 1]);
+        for &m in order[..n - 1].iter().rev() {
+            let first = span(m);
+            node = Node::Split { below, ratio: first / (first + rest), a: Box::new(Node::Leaf(ids[m])), b: Box::new(node) };
+            rest += first;
+        }
+        self.tabs[t].root.replace(id, node);
+        self.beside.extend(ids);
+        self.zoom = None;
+    }
+
     /// A window in full screen (from the start, `--fullscreen`) learns its host has several
     /// screens: they spread over this computer's monitors as full screen would have.
     #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
@@ -485,7 +528,8 @@ impl Workspace {
     /// monitors: its screens spread over them instead, a window each (the active pane's).
     #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
     fn spread_instead(&mut self) -> bool {
-        if self.group.is_some() || !super::dock::all_monitors() {
+        // Its screens already side by side here (chosen so) stay so, on one monitor.
+        if self.group.is_some() || !super::dock::all_monitors() || self.order(self.current).iter().all(|id| self.beside.contains(id)) {
             return false;
         }
         let Some(i) = self.active_id().and_then(|a| self.index(a)) else { return false };
@@ -1239,7 +1283,10 @@ impl Workspace {
         }
         let active = self.active_id();
         let screen = active.and_then(|id| self.index(id)).is_some_and(|i| self.mode_of_pane(i) == PaneMode::Screen);
-        if screen && self.zoom.is_none() && self.order(self.current).len() > 1 {
+        let order = self.order(self.current);
+        // One host's screens side by side stay together, as RustDesk shows all of them.
+        let beside = order.iter().all(|id| self.beside.contains(id));
+        if screen && !beside && self.zoom.is_none() && order.len() > 1 {
             self.zoom = active;
             self.full.zoomed = active;
         }
@@ -1357,6 +1404,19 @@ impl Workspace {
     // (Without screens to show, the stand-in viewer leaves all of this unreachable.)
     #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
     fn spread_screens(&mut self) {
+        let mut beside = Vec::new();
+        for p in &mut self.panes {
+            if let State::Live(r) = &mut p.state
+                && std::mem::take(&mut r.beside_asked)
+            {
+                let (n, shown) = r.monitors();
+                let prefs: Vec<remote::Prefs> = (0..n).map(|m| r.prefs_on(m as u8)).collect();
+                beside.push((p.id, p.target.clone(), p.label.clone(), p.ssh_cmd.clone(), shown, r.screen_places(), r.screen_sizes(), prefs));
+            }
+        }
+        for (id, target, label, ssh_cmd, shown, places, sizes, prefs) in beside {
+            self.side_by_side(id, target, &label, ssh_cmd, shown, &places, &sizes, prefs);
+        }
         for p in &mut self.panes {
             if let State::Live(r) = &mut p.state
                 && std::mem::take(&mut r.spread_asked)

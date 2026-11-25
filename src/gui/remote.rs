@@ -135,6 +135,8 @@ pub(super) struct Remote {
     /// Every monitor of the host was asked for, each in a window of its own (taken by the
     /// workspace, which opens them).
     pub(super) spread_asked: bool,
+    /// Every monitor of the host was asked for side by side in this tab, as they lie.
+    pub(super) beside_asked: bool,
     /// The host turned out to have several screens (its list came, or grew): a window already in
     /// full screen spreads them over this computer's monitors then.
     pub(super) screens_heard: bool,
@@ -385,6 +387,7 @@ impl Remote {
             modes_heard: false,
             chosen_monitor: None,
             spread_asked: false,
+            beside_asked: false,
             screens_heard: false,
             allowed: crate::grant::ALL,
             host: None,
@@ -1302,6 +1305,11 @@ impl Remote {
     /// Where the host's screens (its cameras apart) lie beside each other, where it says.
     pub(super) fn screen_places(&self) -> Vec<Option<(i32, i32)>> {
         self.monitors.iter().filter(|m| !m.camera()).map(|m| m.at).collect()
+    }
+
+    /// The host's screens' sizes (its cameras apart).
+    pub(super) fn screen_sizes(&self) -> Vec<(u16, u16)> {
+        self.monitors.iter().filter(|m| !m.camera()).map(|m| (m.w, m.h)).collect()
     }
 
     /// What the user chose here, for another connection to the host that shows its monitor `m`.
