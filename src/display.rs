@@ -585,10 +585,11 @@ mod win {
 }
 
 /// Screens added on Windows: Amyuni's virtual display driver (usbmmidd v2, signed through
-/// Microsoft; RustDesk adds its screens with it too), unpacked from this program and installed
-/// with the service (the helper; `service::install`), which has an administrator's rights, and
-/// removed with it. Without it no screen is added. Each screen is one `enableidd 1` of its tool;
-/// `enableidd 0` takes the last one added away.
+/// Microsoft), unpacked from this program; its device made with the service (the helper;
+/// `service::install`), which has an administrator's rights, where none is there, and removed with
+/// it. RustDesk adds its screens with the same driver: a device of its own there is used as it is,
+/// and neither it nor the driver is ever removed from here. Without one no screen is added. Each
+/// screen is one `enableidd 1` of its tool; `enableidd 0` takes the last one added away.
 #[cfg(windows)]
 pub(crate) mod amyuni {
     use std::path::PathBuf;
@@ -611,10 +612,9 @@ pub(crate) mod amyuni {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    /// Not offered yet until tried on a real Windows computer (SSHREMOTE_VIRTUAL_SCREENS=1 turns
-    /// it on); for x64 only, as Amyuni has no Arm driver.
+    /// For x64 only: Amyuni has no Arm driver.
     fn offered() -> bool {
-        cfg!(target_arch = "x86_64") && std::env::var_os("SSHREMOTE_VIRTUAL_SCREENS").is_some()
+        cfg!(target_arch = "x86_64")
     }
 
     /// Where the driver is installed (by the service's installation).
@@ -627,57 +627,99 @@ pub(crate) mod amyuni {
         offered() && !installed()
     }
 
-    /// Installs the driver, with the service (an administrator's rights): once, quietly.
+    /// The devices this program made, kept to remove them and no other.
+    fn ours() -> PathBuf {
+        folder().join("usbmmidd-devices.txt")
+    }
+
+    /// The driver's devices, by instance (`ROOT\DISPLAY\0001`), as its tool lists them.
+    fn devices() -> Vec<String> {
+        tool_says(&["findall", "usbmmidd"])
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split_once(" : ").or_else(|| l.split_once(": ")).map(|(id, _)| id.trim().to_string()))
+            .filter(|id| id.contains('\\'))
+            .collect()
+    }
+
+    /// Makes the driver's device where none works yet, with the service (an administrator's
+    /// rights): once, quietly; the one made is noted.
     pub fn install() -> Result<(), String> {
         if !offered() || installed() {
             return Ok(());
         }
+        let before = devices();
         tool(&["install", "usbmmidd.inf", "usbmmidd"])?;
-        if installed() { Ok(()) } else { Err("the virtual display driver was not installed".into()) }
+        let made: Vec<String> = devices().into_iter().filter(|d| !before.contains(d)).collect();
+        if !made.is_empty() {
+            let _ = std::fs::write(ours(), made.join("\n"));
+        }
+        let up = (0..50).any(|_| installed() || { std::thread::sleep(std::time::Duration::from_millis(100)); false });
+        if up { Ok(()) } else { Err("the virtual display driver did not start".into()) }
     }
 
-    /// Removes the driver and its unpacked files, with the service.
+    /// Removes the device made here and the unpacked files, with the service; the driver itself
+    /// and anyone else's device stay.
     pub fn uninstall() {
-        if installed() {
-            let _ = tool(&["stop", "usbmmidd"]);
-            let _ = tool(&["remove", "usbmmidd"]);
+        let made = std::fs::read_to_string(ours()).unwrap_or_default();
+        for id in made.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let _ = tool(&["remove", &format!("@{id}")]);
         }
+        let _ = std::fs::remove_file(ours());
         let _ = std::fs::remove_dir_all(folder().join("usbmmidd_v2"));
     }
 
-    fn installed() -> bool {
-        let mut key: HKEY = std::ptr::null_mut();
-        // SAFETY: a key opened for reading and closed again.
-        unsafe {
-            let ok = RegOpenKeyExW(HKEY_LOCAL_MACHINE, wide(SIZES).as_ptr(), 0, KEY_READ, &mut key) == 0;
-            if ok {
-                RegCloseKey(key);
-            }
-            ok
-        }
+    /// Whether the driver works here: a device of it is there, with its way in.
+    pub(super) fn installed() -> bool {
+        use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW, CR_SUCCESS};
+        // The driver's device interface ({b5ffd75f-da40-4353-8ff8-b6daf6f1d8ca}).
+        let guid = windows_sys::core::GUID { data1: 0xb5ffd75f, data2: 0xda40, data3: 0x4353, data4: [0x8f, 0xf8, 0xb6, 0xda, 0xf6, 0xf1, 0xd8, 0xca] };
+        let mut len = 0u32;
+        // SAFETY: asks the length of the list of that interface's present instances.
+        let r = unsafe { CM_Get_Device_Interface_List_SizeW(&mut len, &guid, std::ptr::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
+        // An empty list is its one closing nul.
+        r == CR_SUCCESS && len > 1
     }
 
+    /// Beside the service's program, under Program Files, which only administrators change: the
+    /// tool runs as an administrator or SYSTEM, so nobody else may have put it there.
     fn folder() -> PathBuf {
-        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("SSH Remote")
+        crate::service::installed_exe()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\SSH Remote"))
     }
 
-    /// The driver's files, unpacked once under ProgramData.
+    /// The driver's files, unpacked by an administrator; its tool used only while it is the one
+    /// this program carries, byte for byte.
     fn unpack() -> Result<PathBuf, String> {
         let base = folder();
         let dir = base.join("usbmmidd_v2");
-        if !dir.join("deviceinstaller64.exe").exists() {
-            let mut z = zip::ZipArchive::new(std::io::Cursor::new(ZIP)).map_err(|e| e.to_string())?;
-            z.extract(&base).map_err(|e| format!("the virtual display driver could not be unpacked: {e}"))?;
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(ZIP)).map_err(|e| e.to_string())?;
+        let mut tool = Vec::new();
+        std::io::Read::read_to_end(&mut z.by_name("usbmmidd_v2/deviceinstaller64.exe").map_err(|e| e.to_string())?, &mut tool).map_err(|e| e.to_string())?;
+        if std::fs::read(dir.join("deviceinstaller64.exe")).is_ok_and(|on| on == tool) {
+            return Ok(dir);
         }
+        if !crate::admin::elevated() {
+            return Err("the virtual display driver's files are not there: install the helper".into());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        z.extract(&base).map_err(|e| format!("the virtual display driver could not be unpacked: {e}"))?;
         Ok(dir)
     }
 
-    fn tool(args: &[&str]) -> Result<(), String> {
+    /// What the driver's tool says to `args`.
+    fn tool_says(args: &[&str]) -> Result<String, String> {
         let dir = unpack()?;
         let mut cmd = Command::new(dir.join("deviceinstaller64.exe"));
         cmd.args(args).current_dir(&dir);
         let out = crate::sys::quiet(&mut cmd).output().map_err(|e| format!("the virtual display driver's tool: {e}"))?;
-        if out.status.success() { Ok(()) } else { Err(format!("the virtual display driver's tool said: {}", String::from_utf8_lossy(&out.stdout).trim())) }
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() { Ok(said) } else { Err(format!("the virtual display driver's tool said: {said}")) }
+    }
+
+    fn tool(args: &[&str]) -> Result<(), String> {
+        tool_says(args).map(drop)
     }
 
     /// Makes `w`x`h` one of the sizes its screens offer, in place of the last where it is not.
@@ -704,8 +746,21 @@ pub(crate) mod amyuni {
         }
     }
 
+    /// Display `id`'s size and place on the desktop, as Windows has them now.
+    #[cfg(test)]
+    pub(super) fn current(id: &str) -> Option<((u32, u32), (i32, i32))> {
+        // SAFETY: as in `place`.
+        let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+        dm.dmSize = size_of::<DEVMODEW>() as u16;
+        if unsafe { EnumDisplaySettingsExW(wide(&format!(r"\\.\{id}")).as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm, 0) } == 0 {
+            return None;
+        }
+        let at = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
+        Some(((dm.dmPelsWidth, dm.dmPelsHeight), (at.x, at.y)))
+    }
+
     /// The display devices with a monitor, by name (`DISPLAY5`), and whether each is on the desktop.
-    fn displays() -> Vec<(String, bool)> {
+    pub(super) fn displays() -> Vec<(String, bool)> {
         let mut out = Vec::new();
         for i in 0.. {
             // SAFETY: a zeroed DISPLAY_DEVICEW with its size set, as the call expects.
@@ -1529,6 +1584,45 @@ mod tests {
             println!("{id}: {m:?}");
             assert!(m.list.contains(&m.current) && own == m.current, "{m:?}");
         }
+    }
+
+    /// Windows' virtual display driver installed (as the service's installation does), a screen
+    /// added and placed right of the others at its size, taken away; another of a size the driver
+    /// does not list at first, taken away by the session's end; the device made removed again
+    /// (the driver, and a device another program made, stay). It changes the display: run with its
+    /// person's yes, in the signed-in session as an administrator. Nothing on the screen is pictured.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn a_windows_screen_is_added_and_taken_away() {
+        let soon = |what: &dyn Fn() -> bool| (0..50).any(|_| what() || { std::thread::sleep(std::time::Duration::from_millis(100)); false });
+        let on = |id: &str| amyuni::displays().iter().any(|(n, attached)| n == id && *attached);
+        println!("before: {:?}", amyuni::displays());
+        amyuni::install().expect("the driver installed");
+        assert!(amyuni::installed());
+        let mut s = Session::new("windows");
+        assert!(s.adds(), "screens are added with the driver there");
+        let id = s.add(1920, 1080).expect("a screen added");
+        assert!(soon(&|| on(&id)), "{id} on the desktop: {:?}", amyuni::displays());
+        let (size, at) = amyuni::current(&id).expect("its settings");
+        println!("added {id}: {size:?} at {at:?}; all {:?}", amyuni::displays());
+        assert_eq!(size, (1920, 1080));
+        let others = amyuni::displays().into_iter().filter(|(n, a)| *a && *n != id).filter_map(|(n, _)| amyuni::current(&n)).map(|(s, at)| at.0 + s.0 as i32).max().unwrap_or(0);
+        assert_eq!(at, (others, 0), "right of the others");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        s.remove(&id).expect("taken away");
+        assert!(soon(&|| !on(&id)), "{id} gone: {:?}", amyuni::displays());
+        let id = s.add(1280, 800).expect("another, of a size offered for it");
+        assert!(soon(&|| on(&id)));
+        println!("added {id}: {:?}", amyuni::current(&id));
+        assert_eq!(amyuni::current(&id).map(|c| c.0), Some((1280, 800)));
+        drop(s);
+        assert!(soon(&|| !on(&id)), "gone with the session: {:?}", amyuni::displays());
+        if std::env::var_os("SSHREMOTE_KEEP_DRIVER").is_none() {
+            amyuni::uninstall();
+            assert!(!amyuni::installed(), "the driver removed");
+        }
+        println!("after: {:?}", amyuni::displays());
     }
 
     /// A display added for a session: macOS lists it, the capture finds and shows it at its size

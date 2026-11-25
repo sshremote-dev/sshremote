@@ -281,7 +281,9 @@ What is opened goes into the workspace:
   the host), screens added to the host for the session (a virtual monitor, as a dummy plug gives,
   of a size picked in the screens menu, for a computer without a monitor or a screen of one's own
   beside its person's; taken away again when the session ends; GNOME, Sway, Hyprland and X11
-  desktops, and Macs with a Metal GPU), sharing one window or application with its menus and dialogs, special keys (a Mac's
+  desktops, Macs with a Metal GPU, and Windows with the helper service installed, which brings
+  Amyuni Technologies' virtual display driver, usbmmidd, along; until then the menu says so),
+  sharing one window or application with its menus and dialogs, special keys (a Mac's
   own for a Mac: lock screen, Spotlight, Force Quit and more; between a Mac and another computer
   Ctrl and the command key trade places, so Ctrl+C here is Cmd+C on the Mac, and Cmd+C on a Mac is
   Ctrl+C on the other; a box in the keys menu turns it off), chat,

@@ -124,7 +124,7 @@ fn all_tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "select_monitor", "description": "Show another monitor (index from monitors).",
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},
-        {"name": "add_screen", "description": "Add a screen to the remote computer for this connection, as a monitor plugged in there (a virtual one: none is needed), to work on beside its person's screens; select_monitor shows it. It is taken away when the connection ends. Sway, Hyprland, X11 desktops and macOS.",
+        {"name": "add_screen", "description": "Add a screen to the remote computer for this connection, as a monitor plugged in there (a virtual one: none is needed), to work on beside its person's screens; select_monitor shows it. It is taken away when the connection ends. GNOME, Sway, Hyprland, X11 desktops, Macs with Metal, and Windows with the helper service installed.",
          "inputSchema": {"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}}},
         {"name": "remove_screen", "description": "Take away a screen add_screen added (index from monitors).",
          "inputSchema": {"type": "object", "required": ["index"], "properties": {"index": {"type": "integer"}}}},

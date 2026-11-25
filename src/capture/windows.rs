@@ -1210,7 +1210,7 @@ mod tests {
         let mut g = Gdi::open().expect("GDI");
         let (dw, dh) = g.desk;
         let mut lines = Dib::new(g.screen, dw, dh).expect("a bitmap");
-        for (i, px) in lines.pixels().chunks_exact_mut(4).enumerate() {
+        for (i, px) in lines.pixels().as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let v = if i % dw % 2 == 0 { 0 } else { 255 };
             px.copy_from_slice(&[v, v, v, 255]);
         }
