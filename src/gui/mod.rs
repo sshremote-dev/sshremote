@@ -478,6 +478,11 @@ fn boot(native: eframe::NativeOptions, make: impl FnOnce(&eframe::CreationContex
     drive::start();
     let r = eframe::run_native("sshremote", native, Box::new(move |cc| Ok(Box::new(make(cc)))))
         .map_err(|e| e.to_string());
+    if let Err(e) = &r
+        && gpu::retry(e)
+    {
+        return Ok(());
+    }
     crate::exthost::stop_all();
     // Updated and asked to start again: the new version, once this one has let go of everything.
     if let Some(exe) = home::RESTART.get() {

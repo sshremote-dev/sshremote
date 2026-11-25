@@ -2,7 +2,8 @@
 //! driver that dies in it. Direct3D 12 is the first choice; some drivers crash in it as the first
 //! frame is made (an Intel UHD 630 driver of 2020 did, and in Vulkan too, while its OpenGL works).
 //! A crash before the window's first frames starts the program again on OpenGL, which it keeps
-//! from then on (the `renderer` setting).
+//! from then on (the `renderer` setting). OpenGL in turn finds no adapter while the screen is
+//! locked, where Direct3D 12 works: a window that cannot open on OpenGL tries Direct3D 12 once.
 
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// What the program starting again after such a crash is told, so it keeps OpenGL.
 #[cfg(windows)]
 const FELL_BACK: &str = "SSHREMOTE_GPU_FELL_BACK";
+/// Set in a program started again on Direct3D 12 after OpenGL found no adapter: it does not
+/// start again on OpenGL if Direct3D 12 crashes too.
+#[cfg(windows)]
+const TRIED: &str = "SSHREMOTE_GPU_TRIED";
+#[cfg(windows)]
+static LAST_TRY: AtomicBool = AtomicBool::new(false);
 
 /// The window has drawn its first frames: a crash from now on is not the driver refusing to start.
 #[cfg(windows)]
@@ -31,11 +38,26 @@ pub(crate) fn choose() {
             // SAFETY: as above.
             unsafe { std::env::set_var("WGPU_BACKEND", if gl { "gl" } else { "dx12" }) };
         }
+        LAST_TRY.store(std::env::var_os(TRIED).is_some(), Ordering::Relaxed);
         if std::env::var("WGPU_BACKEND").is_ok_and(|b| b != "gl") {
             // SAFETY: a plain call; the filter is a function for the life of the program.
             unsafe { windows_sys::Win32::System::Diagnostics::Debug::SetUnhandledExceptionFilter(Some(crashed)) };
         }
     }
+}
+
+/// The window could not open: on OpenGL for want of an adapter (a locked screen), the same
+/// command line once more on Direct3D 12. Whether it was started.
+pub(crate) fn retry(err: &str) -> bool {
+    #[cfg(windows)]
+    if std::env::var("WGPU_BACKEND").is_ok_and(|b| b == "gl") && err.contains("graphics adapter") && std::env::var_os(TRIED).is_none() {
+        let Ok(exe) = std::env::current_exe() else { return false };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(std::env::args_os().skip(1)).env("WGPU_BACKEND", "dx12").env(TRIED, "1");
+        return crate::sys::quiet(&mut cmd).spawn().is_ok();
+    }
+    let _ = err;
+    false
 }
 
 /// A frame is being made: after a few, the interface has shown it works.
@@ -54,7 +76,7 @@ unsafe extern "system" fn crashed(_: *const windows_sys::Win32::System::Diagnost
     use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
     const CONTINUE_SEARCH: i32 = 0;
     const EXECUTE_HANDLER: i32 = 1;
-    if DRAWN.load(Ordering::Relaxed) {
+    if DRAWN.load(Ordering::Relaxed) || LAST_TRY.load(Ordering::Relaxed) {
         return CONTINUE_SEARCH;
     }
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();

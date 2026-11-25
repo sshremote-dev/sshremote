@@ -392,6 +392,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
         }),
     )
     .map_err(|e| e.to_string())
+    .or_else(|e| if crate::gui::gpu::retry(&e) { Ok(()) } else { Err(e) })
 }
 
 #[cfg(feature = "gui")]
