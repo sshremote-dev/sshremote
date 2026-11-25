@@ -307,6 +307,20 @@ impl Remote {
         };
         display.on_hover_text(format!("Display: {}{resolution}; view {}", self.ctl.describe(), self.fit.label()));
 
+        // A few screens: one button each, the one shown lit, as RustDesk has them.
+        let screens: Vec<usize> = self.monitors.iter().enumerate().filter(|(_, m)| !m.camera()).map(|(i, _)| i).collect();
+        if (2..=4).contains(&screens.len()) {
+            for (n, &i) in screens.iter().enumerate() {
+                let m = &self.monitors[i];
+                let on = i == self.monitor && self.sharing.0 == 0;
+                let digit = format!("{}", n + 1);
+                let b = crate::gui::tool_button(&digit, on).min_size(Vec2::new(24.0, 30.0));
+                let primary = if m.primary { ", primary" } else { "" };
+                if ui.add(b).on_hover_text(format!("Its screen {}: {} ({}x{}{primary}). Ctrl+Alt+Shift+{}", n + 1, m.name, m.w, m.h, n + 1)).clicked() && !on {
+                    *action = Some(Box::new(move |r, _| r.show_monitor(i)));
+                }
+            }
+        }
         // The host's screens, when it has several: which one shows here, or all, a window each.
         if self.monitors.len() > 1 {
             let screens = icon_menu(ui, ic::SQUARES_FOUR, |ui| {
@@ -316,10 +330,7 @@ impl Remote {
                     // A camera: to look at, shown by its name alone.
                     let text = if m.camera() { format!("{}  {}", ic::CAMERA, m.name) } else { format!("{}  {} ({}x{}{primary})", i + 1, m.name, m.w, m.h) };
                     if ui.selectable_label(i == self.monitor, text).clicked() {
-                        *action = Some(Box::new(move |r, _| {
-                            r.chosen_monitor = Some(i as u8);
-                            r.send(ToAgent::SelectMonitor(i as u8))
-                        }));
+                        *action = Some(Box::new(move |r, _| r.show_monitor(i)));
                         ui.close();
                     }
                 }
@@ -349,7 +360,7 @@ impl Remote {
                 }
                 }
             });
-            screens.on_hover_text(format!("Its screens: {} of {} shows here", self.monitor + 1, self.monitors.len()));
+            screens.on_hover_text(format!("Its screens: {} of {} shows here; Ctrl+Alt+Shift+1, 2, ... picks one", self.monitor + 1, self.monitors.len()));
         }
 
         // By ID: through the relay, or straight once a path through the routers was found.

@@ -195,8 +195,9 @@ impl Remote {
                 }
             }
             match e {
-                // Full screen here: the host does not see this one key.
+                // Full screen here, and the host's screen by its number: the host does not see these.
                 Event::Key { key: Key::Enter, modifiers, .. } if modifiers.ctrl && modifiers.alt => {}
+                Event::Key { key, physical_key, modifiers, .. } if super::screen_key(physical_key.unwrap_or(key), modifiers).is_some() => {}
                 // Files alone on the clipboard make no paste event, only the V let go after it.
                 Event::Key { key: Key::V, pressed: false, modifiers, .. } if !local && modifiers.command && !std::mem::take(&mut self.paste_seen) => {
                     let files = if self.share_clipboard { crate::clip::files_here() } else { Vec::new() };

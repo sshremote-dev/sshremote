@@ -498,6 +498,12 @@ impl Remote {
         self.sess.send(m).map_err(|e| format!("connection lost: {e}"))
     }
 
+    /// The host's screen `i` here from now on (kept for the next connection too).
+    pub(in crate::gui) fn show_monitor(&mut self, i: usize) -> Result<(), String> {
+        self.chosen_monitor = Some(i as u8);
+        self.send(ToAgent::SelectMonitor(i as u8))
+    }
+
     pub(super) fn notify(&mut self, text: &str) {
         self.toasts.push(text);
     }
@@ -641,6 +647,19 @@ impl Remote {
         }
         self.hold_pointer(&ctx, shown.filter(|_| keys && !term_keys))?;
         // Full screen on or off (F11 is the host's here).
+        // Ctrl+Alt+Shift and a digit: the host's screen of that number (cameras left out).
+        if self.active
+            && let Some(n) = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    Event::Key { key, physical_key, pressed: true, modifiers, .. } => screen_key(physical_key.unwrap_or(*key), *modifiers),
+                    _ => None,
+                })
+            })
+            && let Some(i) = self.monitors.iter().enumerate().filter(|(_, m)| !m.camera()).map(|(i, _)| i).nth(n)
+            && i != self.monitor
+        {
+            self.show_monitor(i)?;
+        }
         if self.active && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, Key::Enter)) {
             self.full_toggle = true;
         }
@@ -1460,4 +1479,13 @@ impl Remote {
 /// is a Mac and the other is not.
 fn swap_by_default(backend: &str) -> bool {
     cfg!(target_os = "macos") != (backend == "mac")
+}
+
+/// Which of the host's screens Ctrl+Alt+Shift with a digit asks for (from 0), with Shift as well
+/// as Ctrl+Alt, as AltGr (Ctrl+Alt) with a digit types a character on many keyboards.
+pub(super) fn screen_key(key: Key, m: Modifiers) -> Option<usize> {
+    if !(m.ctrl && m.alt && m.shift) {
+        return None;
+    }
+    [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].iter().position(|&k| k == key)
 }

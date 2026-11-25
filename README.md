@@ -272,7 +272,8 @@ What is opened goes into the workspace:
   pictures and lags no round trip; GNOME and
   KDE send it beside their PipeWire frames, which the agent reads itself through libpipewire; in the
   browser it is the page's own pointer), system keys (Win or Super, Alt+Tab, Alt+Esc, Ctrl+Esc, Print Screen) going
-  to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (or
+  to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (a
+  button each in the toolbar for up to four, or Ctrl+Alt+Shift and the screen's number; or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
   monitors": full screen does it by itself for a host with several screens and a viewer with several
   monitors, each screen on the monitor that lies where it lies on the host, and leaving full screen

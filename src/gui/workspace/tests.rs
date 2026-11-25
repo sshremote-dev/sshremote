@@ -1522,6 +1522,41 @@ fn all_screens_open_each_in_a_window_of_its_own() {
     other.w.close_all();
 }
 
+/// A host with two screens: a button for each in the title bar, as RustDesk has them; a click
+/// shows that screen, as does Ctrl+Alt+Shift with its number.
+#[test]
+#[ignore]
+fn a_button_or_key_for_each_screen() {
+    let mut h = Harness::new();
+    let launch = Launch::Agent { target: Target::Local { capture: "synthetic2".into() }, label: "Two screens".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(launch, Place::Tab, PaneStart::default());
+    h.until("connected", |w| live(w, 0));
+    let screens = |w: &Workspace| match &w.panes[0].state {
+        State::Live(r) => r.monitors(),
+        _ => (0, 0),
+    };
+    h.until("its two screens known", |w| screens(w).0 == 2);
+    h.frame(Vec::new());
+    // The digit alone, small, in the title bar.
+    let two = h.snap.find("2").into_iter().find(|r| r.width() < 14.0 && r.center().y < super::super::chrome::HEIGHT).expect("a button for screen 2");
+    h.click_at(two.center(), PointerButton::Primary);
+    h.until("showing the second screen", |w| screens(w).1 == 1);
+    if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) {
+        h.frame(Vec::new());
+        h.snap.save(&h.ctx, h.size, &dir.join("screen_buttons.png"));
+    }
+    let key = |pressed| Event::Key {
+        key: egui::Key::Exclamationmark,
+        physical_key: Some(egui::Key::Num1),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+    };
+    h.frame(vec![key(true), key(false)]);
+    h.until("back on the first screen", |w| screens(w).1 == 0);
+    h.w.close_all();
+}
+
 /// A saved computer's pane is labelled with its name, but its typed password waits under its
 /// host: the reached connection is told by the host, so the password is kept.
 #[test]
