@@ -308,7 +308,8 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
         }
     }
     let title = if asking { "SSH Remote: someone wants to connect" } else if by_id { CONNECTED_TITLE } else { "SSH Remote chat" };
-    let mut native = crate::gui::native_options(title, [400.0, if asking { 600.0 } else { 460.0 }]);
+    let size = [400.0, if asking { 600.0 } else { 460.0 }];
+    let mut native = crate::gui::native_options(title, size);
     native.viewport = native.viewport.with_always_on_top();
     // A window manager that tiles would give it a share of the screen, rearranging the person's
     // windows; a dialog it floats over them.
@@ -338,6 +339,15 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
             // What gives the keyboard back if the window takes it, started with its first frame.
             #[cfg(target_os = "linux")]
             let give_back = if quiet { x11_no_focus(cc).or_else(wayland_give_back) } else { None };
+            // Sway and Hyprland would tile it among the person's windows: it floats there instead.
+            #[cfg(target_os = "linux")]
+            let give_back = match (wayland_float(size, asking), give_back) {
+                (Some(float), Some(back)) => Some(Box::new(move || {
+                    float();
+                    back();
+                }) as Box<dyn FnOnce() + Send>),
+                (float, back) => float.or(back),
+            };
             #[cfg(not(target_os = "linux"))]
             let give_back = None;
             let ctx = cc.egui_ctx.clone();
@@ -367,6 +377,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
                 minimized_once: false,
                 code,
                 give_back,
+                placed: false,
             }))
         }),
     )
@@ -400,6 +411,8 @@ struct ChatApp {
     /// Started when the window first draws (it shows right after): gives the keyboard back to
     /// the window that had it, where the desktop gives it to this one anyway.
     give_back: Option<Box<dyn FnOnce() + Send>>,
+    /// Moved to the screen's corner (once its size is known).
+    placed: bool,
 }
 
 /// Tests: the window shown on the remote screen, as one connected by ID sees it (asking first,
@@ -421,6 +434,7 @@ pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut 
         minimized_once: false,
         code: asking.then(|| "482913".to_string()),
         give_back: None,
+        placed: true,
     };
     move |ui| app.draw(ui)
 }
@@ -546,6 +560,91 @@ fn x11_no_focus(cc: &eframe::CreationContext<'_>) -> Option<Box<dyn FnOnce() + S
             });
         }))
     }
+}
+
+/// Where the compositor tiles new windows and can be told otherwise (Sway's swaymsg, Hyprland's
+/// hyprctl): once it shows this window, it floats it at `size` in its monitor's bottom right
+/// corner, as the window is placed elsewhere (a question in the middle), rather than taking a
+/// share of the screen and moving the person's windows.
+#[cfg(all(feature = "gui", target_os = "linux"))]
+fn wayland_float(size: [f32; 2], middle: bool) -> Option<Box<dyn FnOnce() + Send>> {
+    use serde_json::Value;
+    use std::process::Command;
+    if !wayland_here() {
+        return None;
+    }
+    let run = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_default();
+    let newest = |dir: &std::path::Path, keep: &dyn Fn(&str) -> bool| {
+        std::fs::read_dir(dir).ok()?.flatten().filter(|e| keep(&e.file_name().to_string_lossy())).max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok()).map(|e| e.path())
+    };
+    let json = |cmd: &mut Command| cmd.output().ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok());
+    let me = u64::from(std::process::id());
+    let (w, h) = (size[0].round() as i64, size[1].round() as i64);
+    let corner = move |rect: (i64, i64, i64, i64)| {
+        if middle { (rect.0 + (rect.2 - w).max(0) / 2, rect.1 + (rect.3 - h).max(0) / 2) } else { (rect.0 + (rect.2 - w - 16).max(0), rect.1 + (rect.3 - h - 16).max(0)) }
+    };
+    let wait = |find: &dyn Fn() -> bool| {
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if find() {
+                return;
+            }
+        }
+    };
+    let rect = |v: &Value| Some((v.get("x")?.as_i64()?, v.get("y")?.as_i64()?, v.get("width")?.as_i64()?, v.get("height")?.as_i64()?));
+    if let Some(sock) = std::env::var_os("SWAYSOCK").map(std::path::PathBuf::from).or_else(|| newest(&run, &|n| n.starts_with("sway-ipc.") && n.ends_with(".sock"))) {
+        // This window's id and the rectangle of the output it is on.
+        fn find(v: &Value, me: u64, output: Option<(i64, i64, i64, i64)>, rect: &dyn Fn(&Value) -> Option<(i64, i64, i64, i64)>) -> Option<(u64, (i64, i64, i64, i64))> {
+            let output = if v.get("type").and_then(Value::as_str) == Some("output") { v.get("rect").and_then(rect) } else { output };
+            if v.get("pid").and_then(Value::as_u64) == Some(me) {
+                return Some((v.get("id")?.as_u64()?, output?));
+            }
+            ["nodes", "floating_nodes"].iter().filter_map(|k| v.get(*k)?.as_array()).flatten().find_map(|n| find(n, me, output, rect))
+        }
+        return Some(Box::new(move || {
+            std::thread::spawn(move || {
+                let found = std::cell::Cell::new(None);
+                wait(&|| {
+                    found.set(json(Command::new("swaymsg").arg("-s").arg(&sock).args(["-t", "get_tree", "-r"])).and_then(|t| find(&t, me, None, &rect)));
+                    found.get().is_some()
+                });
+                if let Some((id, out)) = found.get() {
+                    let (x, y) = corner(out);
+                    let _ = Command::new("swaymsg").arg("-s").arg(&sock).arg(format!("[con_id={id}] floating enable, resize set width {w} px height {h} px, move absolute position {x} px {y} px")).output();
+                }
+            });
+        }));
+    }
+    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().filter(|s| !s.is_empty()).or_else(|| Some(newest(&run.join("hypr"), &|_| true)?.file_name()?.to_string_lossy().into_owned()))?;
+    Some(Box::new(move || {
+        std::thread::spawn(move || {
+            let hyprctl = |args: &[&str]| {
+                let mut c = Command::new("hyprctl");
+                c.env("HYPRLAND_INSTANCE_SIGNATURE", &sig).args(args);
+                c
+            };
+            let found = std::cell::RefCell::new(None);
+            wait(&|| {
+                *found.borrow_mut() = json(&mut hyprctl(&["-j", "clients"])).and_then(|all| {
+                    let c = all.as_array()?.iter().find(|c| c.get("pid").and_then(Value::as_u64) == Some(me))?.clone();
+                    Some((c.get("address")?.as_str()?.to_string(), c.get("monitor")?.as_i64()?))
+                });
+                found.borrow().is_some()
+            });
+            let Some((address, monitor)) = found.into_inner() else { return };
+            // The monitor's area in the layout's (logical) pixels.
+            let out = json(&mut hyprctl(&["-j", "monitors"])).and_then(|all| {
+                let m = all.as_array()?.iter().find(|m| m.get("id").and_then(Value::as_i64) == Some(monitor))?.clone();
+                let scale = m.get("scale").and_then(Value::as_f64).filter(|s| *s > 0.0).unwrap_or(1.0);
+                let (x, y, mw, mh) = rect(&m)?;
+                Some((x, y, (mw as f64 / scale).round() as i64, (mh as f64 / scale).round() as i64))
+            });
+            let Some(out) = out else { return };
+            let (x, y) = corner(out);
+            let batch = format!("dispatch setfloating address:{address} ; dispatch resizewindowpixel exact {w} {h},address:{address} ; dispatch movewindowpixel exact {x} {y},address:{address}");
+            let _ = hyprctl(&["--batch", &batch]).output();
+        });
+    }))
 }
 
 /// Where the compositor takes the window in front and has a way to be told otherwise (Sway's
@@ -832,6 +931,23 @@ impl ChatApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        // Out of the way in the bottom right corner, as the desktop's own notices are: the person
+        // there, and whoever connected, go on seeing the middle of the screen. A question stays
+        // where the desktop puts it, to be answered; a desktop that places windows itself
+        // (Wayland) takes no position.
+        if !self.placed && self.asking.is_none() {
+            let (monitor, outer) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().outer_rect));
+            if let (Some(m), Some(o)) = (monitor, outer) {
+                self.placed = true;
+                // Above the taskbar or the Dock. The monitor's own origin is not known here, so
+                // only a window on the primary one (at the origin) is moved.
+                let below = if cfg!(target_os = "macos") { 96.0 } else { 64.0 };
+                if egui::Rect::from_min_size(egui::Pos2::ZERO, m).contains(o.min) {
+                    let at = egui::pos2((m.x - o.width() - 16.0).max(0.0), (m.y - o.height() - below).max(0.0));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(at));
+                }
             }
         }
         if let Some(since) = self.asking {
