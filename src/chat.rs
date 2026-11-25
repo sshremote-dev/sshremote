@@ -308,8 +308,16 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
         }
     }
     let title = if asking { "SSH Remote: someone wants to connect" } else if by_id { CONNECTED_TITLE } else { "SSH Remote chat" };
-    let size = [400.0, if asking { 600.0 } else { 460.0 }];
+    // Only telling that someone is connected, with nothing said yet: the header and the line to
+    // write in, out of the way; it grows when there is something to read. Under Wayland it opens
+    // only when there is (a notification says the rest).
+    #[cfg(target_os = "linux")]
+    let compact = quiet && early.is_empty() && !wayland_here();
+    #[cfg(not(target_os = "linux"))]
+    let compact = quiet;
+    let size = [400.0, if asking { 600.0 } else if compact { COMPACT_HEIGHT } else { FULL_HEIGHT }];
     let mut native = crate::gui::native_options(title, size);
+    native.viewport = native.viewport.with_min_inner_size([320.0, COMPACT_HEIGHT.min(240.0)]);
     native.viewport = native.viewport.with_always_on_top();
     // A window manager that tiles would give it a share of the screen, rearranging the person's
     // windows; a dialog it floats over them.
@@ -378,6 +386,8 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
                 code,
                 give_back,
                 placed: false,
+                compact,
+                cornered: false,
             }))
         }),
     )
@@ -413,16 +423,24 @@ struct ChatApp {
     give_back: Option<Box<dyn FnOnce() + Send>>,
     /// Moved to the screen's corner (once its size is known).
     placed: bool,
+    /// Only the header and the line to write in, until there is more to show.
+    compact: bool,
+    /// It was put in the bottom right corner, so it grows upwards.
+    cornered: bool,
 }
+
+/// The window's height with the chat, and with nothing said yet.
+const FULL_HEIGHT: f32 = 460.0;
+const COMPACT_HEIGHT: f32 = 260.0;
 
 /// Tests: the window shown on the remote screen, as one connected by ID sees it (asking first,
 /// or with what they may do unfolded), drawn into `ui`.
 #[cfg(all(test, feature = "gui"))]
-pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut egui::Ui) {
+pub fn host_window_for_test(asking: bool, rights_open: bool, compact: bool) -> impl FnMut(&mut egui::Ui) {
     let (_tx, rx) = mpsc::channel();
     let mut app = ChatApp {
         incoming: rx,
-        lines: vec![(true, "Hello, I am looking at the printer settings.".into(), now())],
+        lines: if compact { Vec::new() } else { vec![(true, "Hello, I am looking at the printer settings.".into(), now())] },
         input: String::new(),
         ended: None,
         name: "Someone connected by this computer's ID".into(),
@@ -435,6 +453,8 @@ pub fn host_window_for_test(asking: bool, rights_open: bool) -> impl FnMut(&mut 
         code: asking.then(|| "482913".to_string()),
         give_back: None,
         placed: true,
+        compact,
+        cornered: false,
     };
     move |ui| app.draw(ui)
 }
@@ -947,7 +967,18 @@ impl ChatApp {
                 if egui::Rect::from_min_size(egui::Pos2::ZERO, m).contains(o.min) {
                     let at = egui::pos2((m.x - o.width() - 16.0).max(0.0), (m.y - o.height() - below).max(0.0));
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(at));
+                    self.cornered = true;
                 }
+            }
+        }
+        // Something to read or to change: the window grows to show it (upwards in the corner).
+        if self.compact && self.ended.is_none() && (!self.lines.is_empty() || self.rights_open || self.call.is_some()) {
+            self.compact = false;
+            let grow = FULL_HEIGHT - COMPACT_HEIGHT;
+            let outer = ctx.input(|i| i.viewport().outer_rect);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(ctx.input(|i| i.viewport().inner_rect.map_or(400.0, |r| r.width())), FULL_HEIGHT)));
+            if let (true, Some(o)) = (self.cornered, outer) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(o.min.x, (o.min.y - grow).max(0.0))));
             }
         }
         if let Some(since) = self.asking {
@@ -959,7 +990,7 @@ impl ChatApp {
         }
         let card = ui.visuals().window_fill;
         let header = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(16, 10));
-        egui::Panel::top("chat-header").frame(header).show(ui, |ui| {
+        egui::Panel::top("chat-header").frame(header).show_separator_line(!self.compact).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::Vec2::splat(34.0), egui::Sense::hover());
                 let icon = egui::FontId::proportional(22.0);
@@ -1034,7 +1065,7 @@ impl ChatApp {
             }
         });
         let footer = egui::Frame::new().fill(card).inner_margin(egui::Margin::symmetric(12, 10));
-        egui::Panel::bottom("chat-input").frame(footer).show(ui, |ui| {
+        egui::Panel::bottom("chat-input").frame(footer).show_separator_line(!self.compact).show(ui, |ui| {
             if let Some(text) = input_row(ui, &mut self.input, self.ended.is_none()) {
                 println!("{}", escape(&text));
                 use std::io::Write;
@@ -1042,8 +1073,12 @@ impl ChatApp {
                 self.lines.push((false, text, now()));
             }
         });
-        let body = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));
+        // Compact, the header's colour fills what is between it and the line to write in.
+        let body = egui::Frame::new().fill(if self.compact { card } else { ui.visuals().panel_fill }).inner_margin(egui::Margin::symmetric(14, 10));
         egui::CentralPanel::default().frame(body).show(ui, |ui| {
+            if self.compact {
+                return;
+            }
             // What they may do takes the chat's place, scrolled when the window is small.
             if self.rights_open && self.by_id && self.ended.is_none() {
                 egui::ScrollArea::vertical().id_salt("rights").auto_shrink([false, false]).show(ui, |ui| {

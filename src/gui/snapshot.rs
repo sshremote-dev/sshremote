@@ -338,10 +338,14 @@ mod pictures {
     fn menus_host_window() {
         for dark in [true, false] {
             for (asking, open, name) in [(true, false, "asking"), (false, true, "rights"), (false, false, "chat")] {
-                let mut draw = crate::chat::host_window_for_test(asking, open);
+                let mut draw = crate::chat::host_window_for_test(asking, open, false);
                 let mut s = Shot::new("host", Vec2::new(380.0, 360.0), dark, |ui| draw(ui));
                 s.save(name);
             }
+            // The notice before anything is said: its header and the line to write in, whole.
+            let mut draw = crate::chat::host_window_for_test(false, false, true);
+            let mut s = Shot::new("host", Vec2::new(400.0, 260.0), dark, |ui| draw(ui));
+            s.save("notice");
         }
     }
 
