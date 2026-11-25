@@ -1,6 +1,8 @@
-- Builds for Windows on Arm and Linux on Arm, each built and run on its own system by GitHub Actions before it ships, with a build attestation like the others (`gh attestation verify FILE -R sshremote-dev/sshremote`).
-- Homebrew: `brew install --cask sshremote-dev/tap/sshremote` on macOS (the app, and `sshremote` on `PATH`), `brew install sshremote-dev/tap/sshremote` on Linux.
-- The program now updates from a list signed with a new release key, kept on the project's Mac, and takes the file for its system and processor from this GitHub release. Versions up to 0.25.35 keep updating from the list they know.
-- Every release is now built and attested by GitHub Actions and published from its draft by scripts that follow one list of platforms (see `docs/releasing.md`).
+- MCP `focus_window` now brings windows to the front on every desktop it was tried on: through the window manager under X11 (MATE, Xfce, LXQt, Cinnamon, i3, KDE), and through the compositor under Wayland on Sway, Hyprland and KDE Plasma. `windows` and `state` list only real windows, not panels or the desktop itself.
+- MCP `state` takes the window in front as the one the person or agent last brought there, not an empty frame of the desktop's panel (Xfce, KDE).
+- The notice that someone connected by this computer's ID opens small in the screen's bottom right corner, out of the way, and grows when there is something to read. It floats over tiling window managers (i3, Sway, Hyprland) instead of taking a tile and moving the person's windows.
+- A screen-sharing question on the host (KDE Plasma, COSMIC and other portal desktops) that nobody answers is given up after three minutes; it no longer keeps the session, and its notice that someone is connected, waiting for ever.
+- When GNOME's screen is locked it shares no picture: the viewer and MCP's `screenshot` now say so, and that it needs unlocking at the computer.
+- `sshremote remote-access run` started by hand says when the computer cannot be reached because the relay refused it, and when it is online again.
 
 Install with one line (`irm https://sshremote.dev/install.ps1 | iex` in PowerShell, `curl -fsSL https://sshremote.dev/install.sh | sh` on macOS and Linux), or download the file for your system below. An installed copy updates itself with `sshremote update`. `SHA256SUMS` lists every file's SHA-256, as does the signed [list](https://sshremote.dev/download/latest.json) the program updates from.
