@@ -8,7 +8,8 @@ choose from it, and the package managers' entries are made from it.
 ## Steps
 
 1. Write what changed in [`release/notes.md`](../release/notes.md), raise `version` in
-   `Cargo.toml`, commit, then tag and push:
+   `Cargo.toml` (after a dependency changed, run `scripts/licenses.py` for the program's
+   `THIRD-PARTY-NOTICES.txt`; CI fails until it is current), commit, then tag and push:
 
    ```sh
    git tag v0.25.36 && git push origin main v0.25.36

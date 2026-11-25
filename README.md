@@ -123,7 +123,10 @@ computers SSH cannot reach.
 
 Issues and pull requests are welcome; see [CONTRIBUTING.md](https://github.com/sshremote-dev/.github/blob/main/CONTRIBUTING.md).
 Report security problems privately, as [SECURITY.md](https://github.com/sshremote-dev/.github/blob/main/SECURITY.md)
-describes. SSH Remote is under the [MIT license](LICENSE).
+describes. SSH Remote is under the [MIT license](LICENSE). The licenses of the open-source software
+built into it are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which `sshremote licenses`
+prints and Settings opens (Open-source licenses); `scripts/licenses.py` makes it from Cargo.lock,
+and CI checks it is current.
 
 ## Feature reference
 

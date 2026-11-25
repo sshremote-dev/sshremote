@@ -28,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --release --tests --locked -- -D warnings
       - run: cargo test --release --locked
+      # The program carries the licenses of what it is built with: they follow Cargo.lock.
+      - run: python3 scripts/licenses.py --check
 
   windows:
     name: Windows (cross-built clippy)

@@ -119,6 +119,9 @@ mod xk;
 
 use color::Mode;
 
+/// The licenses of everything built into the program (scripts/licenses.py makes the file).
+pub const NOTICES: &str = include_str!("../THIRD-PARTY-NOTICES.txt");
+
 const USAGE: &str = "\
 usage: sshremote                       open the window: connect screen, recent hosts
        sshremote [options] HOST        view HOST's desktop over ssh in this terminal
@@ -143,6 +146,7 @@ usage: sshremote                       open the window: connect screen, recent h
        sshremote ext run ID COMMAND [TEXT]  run an extension's command and print what it returns
        sshremote --version             which version this is
        sshremote update [--check]      put the newer version from sshremote.dev in place of this one
+       sshremote licenses              the licenses of the open-source software built into this program
        sshremote --agent [--capture B] remote side, started by the viewer
        sshremote remote-access [status|log|idle MIN|off|trusted [forget]|proxy URL|off|on|off|run|id|password [NEW]|relay HOST|ask on|off|allow RIGHTS|
                                 straight|lan|direct|requests|cameras|record on|off|passwords lasting|one-time|both|one-time|
@@ -506,6 +510,11 @@ fn run(args: &[String]) -> Result<(), String> {
         // Extensions: list, install from a file or the registry, update, remove, pack.
         "ext" => ext::cli(&args[1..]),
         "update" => update::cli(&args[1..]),
+        "licenses" => {
+            // Into a pager that may stop reading early.
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), NOTICES.as_bytes());
+            Ok(())
+        }
         "module" => modules::cli(&args[1..]),
         "here" => here::cli(),
         // Computers nearby with remote access on, and waking one by its network card.

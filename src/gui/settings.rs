@@ -389,6 +389,13 @@ impl App {
             ui.horizontal(|ui| {
                 ui.hyperlink_to("sshremote.dev", "https://sshremote.dev");
                 ui.hyperlink_to("Documentation", "https://sshremote.dev/docs.html");
+                // MIT itself; what is built into it, under each one's own license.
+                if ui.link("Open-source licenses").on_hover_text("SSH Remote is under the MIT license; the licenses of the open-source software built into it open in a text editor").clicked() {
+                    let path = crate::hosts::config_dir().unwrap_or_else(std::env::temp_dir).join("THIRD-PARTY-NOTICES.txt");
+                    if crate::sys::write_whole(&path, crate::NOTICES.as_bytes(), false, false).is_ok() {
+                        crate::tools::open_path(&path);
+                    }
+                }
             });
             let mut on = crate::hosts::setting("updates").is_none_or(|v| v != "off");
             if ui
