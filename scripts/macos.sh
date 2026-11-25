@@ -6,7 +6,8 @@
 # (cert.pem, key.pem; by default ~/dev/sign) through rcodesign, so that macOS keeps what the
 # person allowed it (recording the screen, control) from one version to the next; without them
 # it is signed ad hoc, and each version is asked about again.
-# Needs Xcode's command line tools, rustup, and CMake on PATH (Opus is built with it).
+# Needs Xcode's command line tools, rustup, CMake (Opus and libaom are built with it) and NASM
+# (libaom's x86 code) on PATH.
 set -eu
 OUT=$(mkdir -p "$1" && cd "$1" && pwd)
 cd "$(dirname "$0")/.."

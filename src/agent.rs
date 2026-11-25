@@ -705,6 +705,12 @@ fn serve_with(
                         vid.reset();
                     }
                     cap.set_fps(s.fps);
+                    // Films in AV1 for a viewer that reads it; one that switched gets a key frame.
+                    let av1 = s.formats & crate::proto::FORMAT_AV1 != 0;
+                    if vid.av1 != av1 {
+                        vid.av1 = av1;
+                        vid.restart();
+                    }
                     settings = Some(s);
                     // A page laid out at the new size: the viewer hears its new size.
                     if cap.resizable() && cap.desktop_size() != desk {

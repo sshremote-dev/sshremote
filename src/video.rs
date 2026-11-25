@@ -1,6 +1,7 @@
 //! Video regions: an area that keeps changing frame after frame (a playing
-//! video, an animation, a scrolling photo) is sent as H.264 instead of lossless
-//! tiles. When it calms down the agent sends the area losslessly once more.
+//! video, an animation, a scrolling photo) is sent as a film (AV1 where the viewer reads it,
+//! else H.264) instead of lossless tiles. When it calms down the agent sends the area
+//! losslessly once more.
 
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,9 @@ pub struct Video {
     heat: Vec<u8>,
     pub region: Option<Rect>,
     enc: Option<Encoder>,
+    /// The viewer reads AV1: films go in it (`aom`), else in H.264 (`enc`).
+    pub av1: bool,
+    aom: Option<crate::av1::Encoder>,
     yuv: Option<YUVBuffer>,
     crop: Vec<u8>,
     last_change: Instant,
@@ -58,6 +62,8 @@ impl Video {
             heat: Vec::new(),
             region: None,
             enc: None,
+            av1: false,
+            aom: None,
             yuv: None,
             crop: Vec::new(),
             last_change: Instant::now(),
@@ -67,7 +73,9 @@ impl Video {
 
     /// Forgets everything, as after a size or colour mode change.
     pub fn reset(&mut self) {
+        let av1 = self.av1;
         *self = Video::new();
+        self.av1 = av1;
     }
 
     /// Updates tile heat from this frame's changed rectangles and moves the region. The rows a
@@ -113,7 +121,7 @@ impl Video {
             let plain = rects.iter().any(|r| overlaps(r, &reg)) && !rich(&reg);
             if plain || now.saturating_duration_since(self.last_change) > QUIET {
                 self.region = None;
-                self.enc = None;
+                (self.enc, self.aom) = (None, None);
                 // Heat only decays on processed frames; start the area cold so it is not taken back at once.
                 for ty in reg.y / TILE..(reg.y + reg.h).div_ceil(TILE) {
                     for tx in reg.x / TILE..(reg.x + reg.w).div_ceil(TILE) {
@@ -181,9 +189,20 @@ impl Video {
         Event::None
     }
 
-    /// Encodes the region from a BGRx capture, in grey if asked; returns the H.264 access unit.
+    /// Encodes the region from a BGRx capture, in grey if asked; returns its access unit (AV1
+    /// or H.264, as `av1` says). `bitrate` is H.264's; half of it is AV1's ceiling, which a film
+    /// seldom reaches (`av1::FLOOR`).
     pub fn encode(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool) -> Result<Vec<u8>, String> {
         let r = self.region.ok_or("no video region")?;
+        if self.av1 {
+            if self.aom.is_none() {
+                self.aom = Some(crate::av1::Encoder::new(r.w, r.h, fps, bitrate / 2)?);
+                self.yuv = Some(YUVBuffer::new(r.w, r.h));
+            }
+            self.convert(img, r, grey);
+            let yuv = self.yuv.as_ref().unwrap();
+            return self.aom.as_mut().unwrap().encode(yuv.y(), yuv.u(), yuv.v(), yuv.strides());
+        }
         if self.enc.is_none() {
             let config = EncoderConfig::new()
                 .usage_type(UsageType::ScreenContentRealTime)
@@ -194,6 +213,14 @@ impl Video {
             self.enc = Some(Encoder::with_api_config(OpenH264API::from_source(), config).map_err(|e| e.to_string())?);
             self.yuv = Some(YUVBuffer::new(r.w, r.h));
         }
+        self.convert(img, r, grey);
+        let yuv = self.yuv.as_ref().unwrap();
+        let enc = self.enc.as_mut().unwrap();
+        Ok(enc.encode(yuv).map_err(|e| e.to_string())?.to_vec())
+    }
+
+    /// The region of `img` into `yuv`, in grey if asked.
+    fn convert(&mut self, img: &Image, r: Rect, grey: bool) {
         self.crop.clear();
         for y in r.y..r.y + r.h {
             let o = y * img.stride + r.x * 4;
@@ -205,10 +232,7 @@ impl Video {
                 (px[0], px[1], px[2]) = (l, l, l);
             }
         }
-        let yuv = self.yuv.as_mut().unwrap();
-        yuv.read_bgra8(BgraSliceU8::new(&self.crop, (r.w, r.h)));
-        let enc = self.enc.as_mut().unwrap();
-        Ok(enc.encode(&*yuv).map_err(|e| e.to_string())?.to_vec())
+        self.yuv.as_mut().unwrap().read_bgra8(BgraSliceU8::new(&self.crop, (r.w, r.h)));
     }
 
     /// Whether the region has been still long enough to end, though no new picture came to say
@@ -219,7 +243,7 @@ impl Video {
 
     /// Asks for a key frame, as after the viewer lost its picture.
     pub fn restart(&mut self) {
-        self.enc = None;
+        (self.enc, self.aom) = (None, None);
     }
 }
 
@@ -276,15 +300,26 @@ pub fn subtract(r: &Rect, cut: &Rect) -> Vec<Rect> {
 pub struct Player {
     rect: Option<(usize, usize, usize, usize)>,
     dec: Option<Decoder>,
+    aom: Option<crate::av1::Decoder>,
     rgb: Vec<u8>,
 }
 
 impl Player {
     /// Decodes one access unit for `rect`; returns its RGB pixels when a picture is ready.
     pub fn decode(&mut self, rect: (usize, usize, usize, usize), data: &[u8]) -> Result<Option<&[u8]>, String> {
-        if self.rect != Some(rect) || self.dec.is_none() {
-            self.dec = Some(Decoder::new().map_err(|e| e.to_string())?);
+        if self.rect != Some(rect) {
+            (self.dec, self.aom) = (None, None);
             self.rect = Some(rect);
+        }
+        if data.first() == Some(&crate::av1::MARK) {
+            if self.aom.is_none() {
+                self.aom = Some(crate::av1::Decoder::new()?);
+            }
+            let shown = self.aom.as_mut().unwrap().decode(data, rect.2, rect.3, &mut self.rgb)?;
+            return Ok(shown.then_some(&self.rgb[..]));
+        }
+        if self.dec.is_none() {
+            self.dec = Some(Decoder::new().map_err(|e| e.to_string())?);
         }
         let dec = self.dec.as_mut().unwrap();
         let Some(pic) = dec.decode(data).map_err(|e| e.to_string())? else { return Ok(None) };
@@ -314,23 +349,38 @@ mod tests {
 
     #[test]
     fn a_busy_area_becomes_a_region_and_round_trips() {
-        let (w, h) = (640, 360);
-        let mut v = Video::new();
-        let busy = [Rect { x: 64, y: 64, w: 256, h: 192 }];
-        for _ in 0..8 {
-            v.observe(w, h, &busy, false, &|_| true, &|_| true);
+        // In H.264, and in AV1 for a viewer that reads it: one player takes either.
+        for av1 in [false, true] {
+            let (w, h) = (640, 360);
+            let mut v = Video::new();
+            v.av1 = av1;
+            let busy = [Rect { x: 64, y: 64, w: 256, h: 192 }];
+            for _ in 0..8 {
+                v.observe(w, h, &busy, false, &|_| true, &|_| true);
+            }
+            let r = v.region.expect("region");
+            assert_eq!((r.x, r.y, r.w, r.h), (64, 64, 256, 192));
+            // Smooth, as a photograph is: what a film keeps.
+            let px = |x: usize, y: usize| [(x / 3 + 20) as u8, (y % 200 + 30) as u8, 90];
+            let mut img = Image { w, h, stride: w * 4, data: vec![0; w * h * 4] };
+            for (i, p) in img.data.chunks_mut(4).enumerate() {
+                let [b, g, r] = px(i % w, i / w);
+                p.copy_from_slice(&[b, g, r, 255]);
+            }
+            let au = v.encode(&img, 30, 2_000_000, false).unwrap();
+            assert_eq!(au.first() == Some(&crate::av1::MARK), av1);
+            let mut p = Player::default();
+            let rgb = p.decode((r.x, r.y, r.w, r.h), &au).unwrap().expect("picture").to_vec();
+            assert_eq!(rgb.len(), r.w * r.h * 3);
+            // Near the region's own pixels (BGRx in, RGB out).
+            let at = |x: usize, y: usize| {
+                let [b, g, red] = px(r.x + x, r.y + y);
+                [red, g, b]
+            };
+            let points: Vec<(usize, usize)> = (0..r.h).step_by(7).flat_map(|y| (0..r.w).step_by(5).map(move |x| (x, y))).collect();
+            let off = points.iter().map(|&(x, y)| (0..3).map(|c| (rgb[(y * r.w + x) * 3 + c] as i32 - at(x, y)[c] as i32).abs()).sum::<i32>()).sum::<i32>() as f64 / (points.len() * 3) as f64;
+            assert!(off < 8.0, "av1 {av1}: off by {off} on average");
         }
-        let r = v.region.expect("region");
-        assert_eq!((r.x, r.y, r.w, r.h), (64, 64, 256, 192));
-        let mut img = Image { w, h, stride: w * 4, data: vec![0; w * h * 4] };
-        for (i, p) in img.data.chunks_mut(4).enumerate() {
-            p.copy_from_slice(&[(i % 251) as u8, (i / w % 200) as u8, 90, 255]);
-        }
-        let au = v.encode(&img, 30, 2_000_000, false).unwrap();
-        assert!(!au.is_empty());
-        let mut p = Player::default();
-        let rgb = p.decode((r.x, r.y, r.w, r.h), &au).unwrap().expect("picture");
-        assert_eq!(rgb.len(), r.w * r.h * 3);
     }
 
     #[test]

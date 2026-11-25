@@ -95,7 +95,8 @@ sshremote mcp user@host                    # an MCP server for AI agents
 There is one program. On the viewer it is the window (or the terminal viewer, the browser gateway,
 the MCP server); on the host it is the agent, started over SSH as `ssh -T HOST sshremote --agent`.
 The agent sends an exact copy of the screen as changed rectangles and moves in one zstd stream
-(H.264 only for areas that keep moving), along with terminals, files, clipboard and sound. Over SSH
+(AV1, or H.264 for older viewers, only for areas that keep moving), along with terminals, files,
+clipboard and sound. Over SSH
 there is no relay, ID server or open port. Remote access by ID runs the same protocol through
 [sshremote-relay](https://github.com/sshremote-dev/sshremote-relay), sealed end to end, for
 computers SSH cannot reach.
@@ -129,7 +130,7 @@ describes. SSH Remote is under the [MIT license](LICENSE).
 Remote control over the SSH login you already have: a terminal, the host's screen with keyboard and
 mouse, files, and an MCP server for AI agents. Over SSH there is no relay, ID server or open port:
 the viewer runs `ssh -T HOST sshremote --agent` and keeps an exact copy of the screen from changed rectangles and
-moves sent in one zstd stream (H.264 only for areas that keep moving).
+moves sent in one zstd stream (AV1, or H.264 for older viewers, only for areas that keep moving).
 
 Hosts: Windows (GDI capture, SendInput); GNOME on Wayland (Mutter RemoteDesktop, PipeWire); X11
 desktops such as Xfce, MATE, LXQt, Cinnamon, i3, and KDE or GNOME on Xorg (MIT-SHM, XDamage, XFixes,
@@ -346,11 +347,17 @@ frame, which the stream's compression finds), changed areas side by side go as o
 (so rows of text stay whole), scrolls are moves past the scroll bar, so is the rest of a line a
 character is typed into (where the program draws its glyphs on whole pixels, as GTK 3, terminals
 and most Windows programs do), small updates are compressed harder than whole new screens, only
-areas that look like photographs become H.264, and two paints a moment apart go as one.
+areas that look like photographs become a film (AV1 through libaom's real-time mode, at a fixed
+sharpness: on the bench's film the same 45.4 dB as RustDesk's own AV1 settings for 2.7 times fewer
+bits a frame; H.264 for viewers older than 0.25.38), and two paints a moment apart go as one.
 
 ## Building
 
-`cargo build --release` builds the one program with every part in. Packagers can leave parts out
+`cargo build --release` builds the one program with every part in. The `remote` part builds the
+OpenH264 and libaom codecs from their sources: it needs a C/C++ compiler, CMake, and NASM on x86
+(on Debian and Ubuntu `apt install cmake nasm`, with Homebrew `brew install cmake nasm`; the
+Linux build also wants the GStreamer, ALSA, xkbcommon and Wayland development packages the CI
+workflow installs). Packagers can leave parts out
 with `--no-default-features` and a choice of the features `gui`, `remote`, `web` and `mcp` (a
 headless server: `--features web,mcp`); what is left out says so when asked for.
 

@@ -32,8 +32,10 @@ pub const FORMAT_POINTER: u8 = 2;
 pub const FORMAT_SIDEWAYS: u8 = 4;
 /// A palette of more than 256 colours (`color::WIDE`), for text smoothed in many shades.
 pub const FORMAT_WIDE: u8 = 8;
+/// Video regions in AV1 (`av1`), told from H.264 by their first byte.
+pub const FORMAT_AV1: u8 = 16;
 /// Every form this program reads.
-pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE;
+pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE | FORMAT_AV1;
 
 /// `ToAgent::TrustMe`'s kind, which remote access looks for in the viewer's stream.
 pub const KIND_TRUST_ME: u8 = 54;
@@ -376,7 +378,8 @@ pub struct Frame {
     /// every tile's data starts with its form (`color::Palette`).
     pub palette: Option<(bool, crate::color::Slots)>,
     pub tiles: Vec<Tile>,
-    /// One H.264 access unit for the video region, which no tile covers.
+    /// One access unit for the video region, which no tile covers: H.264, or AV1 for a viewer
+    /// that reads it (`FORMAT_AV1`).
     pub video: Option<Tile>,
 }
 

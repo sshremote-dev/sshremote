@@ -1885,6 +1885,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "libaom-sys"
+version = "0.18.1+libaom.3.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fb571e6ba72de3f95bf11a86724aecb2e21a7aa396a205c84e65fb7ac1c842b"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3565,6 +3574,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "image",
+ "libaom-sys",
  "libc",
  "objc2 0.6.5",
  "objc2-core-foundation",

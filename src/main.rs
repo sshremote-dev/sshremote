@@ -24,6 +24,8 @@ mod client;
 mod clip;
 // What the remote parts use is unused without them.
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
+#[cfg(feature = "remote")]
+mod av1;
 mod color;
 #[cfg(windows)]
 #[cfg(feature = "remote")]

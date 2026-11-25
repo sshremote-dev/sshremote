@@ -4,8 +4,8 @@
 # With $GITHUB_TOKEN, the ones built `by: ci` are those GitHub Actions built and attested for the
 # commit's tag, which is pushed first (scripts/gh_release.py waits for the run's draft release).
 # Without it only Linux and Windows on x86_64 build here, in target-full, for a test: a release
-# needs every platform. $MAC_HOST is a Mac reached by ssh, with rustup, Xcode's command line tools
-# and CMake ($MAC_PATH adds to its PATH): the commit builds there (scripts/macos.sh, in
+# needs every platform. $MAC_HOST is a Mac reached by ssh, with rustup, Xcode's command line tools,
+# CMake and NASM ($MAC_PATH adds to its PATH): the commit builds there (scripts/macos.sh, in
 # ~/sshremote-build, kept between releases) into sshremote-macos.zip, signed with its key there.
 # scripts/publish.sh then publishes OUT; see docs/releasing.md.
 set -eu

@@ -955,8 +955,8 @@ pub fn run(opt: Options) -> Result<(), String> {
     let mut type_start = (0u64, 0u32);
     // When the last input went, and how long each took to come back as a changed picture.
     let (mut sent_at, mut answers): (Option<Instant>, Vec<f64>) = (None, Vec::new());
-    // The pictures' bytes as film and as tiles.
-    let (mut film, mut tiles) = (0usize, 0usize);
+    // The pictures' bytes as film (and how many film pictures) and as tiles.
+    let (mut film, mut films, mut tiles) = (0usize, 0usize, 0usize);
     let r = (|| -> io::Result<()> {
         v.push_settings()?;
         if opt.sound {
@@ -995,6 +995,7 @@ pub fn run(opt: Options) -> Result<(), String> {
                         answers.extend(sent_at.take().map(|t| t.elapsed().as_secs_f64() * 1000.0));
                     }
                     film += f.video.as_ref().map_or(0, |v| v.data.len());
+                    films += f.video.is_some() as usize;
                     tiles += f.tiles.iter().map(|t| t.data.len()).sum::<usize>();
                     v.apply(f)?
                 }
@@ -1024,7 +1025,7 @@ pub fn run(opt: Options) -> Result<(), String> {
             }
         }
         if v.probe.is_some() {
-            eprintln!("probe: pictures as film {:.1} KB, as tiles {:.1} KB (before the link's compression)", film as f64 / 1024.0, tiles as f64 / 1024.0);
+            eprintln!("probe: pictures as film {:.1} KB in {films} frames, as tiles {:.1} KB (before the link's compression)", film as f64 / 1024.0, tiles as f64 / 1024.0);
         }
         if opt.sound && v.probe.is_some() {
             eprintln!("probe: sound {:.1} KB", v.audio_bytes as f64 / 1024.0);
