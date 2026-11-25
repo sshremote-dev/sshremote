@@ -2486,6 +2486,25 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             }
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
             eprintln!("remote access as {} through {}", crate::computers::spaced(&c.id), c.relay);
+            // Run by hand: the line to the relay as it changes, so a refusal (the relay full, the
+            // ID taken) is not left unsaid while the computer cannot be reached.
+            if !service {
+                thread::spawn(|| {
+                    let mut said: Option<State> = None;
+                    loop {
+                        let now = STATE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if now != said {
+                            match &now {
+                                Some(State::Online) => eprintln!("remote access: online"),
+                                Some(State::Failed(why)) => eprintln!("remote access: not reachable: {why}"),
+                                _ => {}
+                            }
+                            said = now;
+                        }
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                });
+            }
             // The service says how it stands, for the icon in the notification area.
             if service {
                 thread::spawn(|| {
