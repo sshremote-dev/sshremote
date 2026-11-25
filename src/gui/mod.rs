@@ -988,7 +988,11 @@ impl eframe::App for App {
         {
             self.open_project(&p);
         }
-        if (!self.queued.is_empty() || !self.queued_tabs.is_empty()) && matches!(self.screen, Screen::Connect) && !maximized && !fullscreen {
+        if (!self.queued.is_empty() || !self.queued_tabs.is_empty()) && matches!(self.screen, Screen::Connect) && (maximized || fullscreen) {
+            // Maximized while it grew (a tiling window manager under X11 says so of its tiles):
+            // the size it has is the one it keeps.
+            self.growing = None;
+        } else if (!self.queued.is_empty() || !self.queued_tabs.is_empty()) && matches!(self.screen, Screen::Connect) {
             match self.growing {
                 None => {
                     self.growing = Some((grow_on_screen(&ctx, Vec2::from(WORK_SIZE)), 0));
