@@ -349,8 +349,9 @@ frame, which the stream's compression finds), changed areas side by side go as o
 character is typed into (where the program draws its glyphs on whole pixels, as GTK 3, terminals
 and most Windows programs do), small updates are compressed harder than whole new screens, only
 areas that look like photographs become a film (AV1 through libaom's real-time mode, at a fixed
-sharpness: on the bench's film the same 45.4 dB as RustDesk's own AV1 settings for 2.7 times fewer
-bits a frame; H.264 for viewers older than 0.25.38), and two paints a moment apart go as one.
+sharpness: on the bench's film 42.0 dB for 5.8 kbit a picture where RustDesk 1.5.3's viewer showed
+40.6 dB for 8.0 kbit; H.264 for viewers older than 0.25.38), a film's area grows with it, and two
+paints a moment apart go as one.
 
 ## Building
 

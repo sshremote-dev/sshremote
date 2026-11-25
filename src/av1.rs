@@ -1,8 +1,8 @@
 //! AV1 for the video regions, through libaom in its real-time mode. The quantizer never goes
-//! below `FLOOR`, so a film keeps one sharpness and spends only what that takes: on the bench's
-//! film (848x480, 30 fps) 183 kbit/s at 46.1 dB, where openh264 gave 43.3 dB at 324 kbit/s and
-//! RustDesk's own AV1 settings ("balanced") 46.0 dB at 534 kbit/s; the bitrate asked for is a
-//! ceiling for harder films. Viewers that read it say so (`proto::FORMAT_AV1`); an access unit
+//! below `FLOOR`, so a film keeps one sharpness and spends only what that takes; the bitrate
+//! asked for is a ceiling for harder films. On the bench's film as the agent encodes it, 5.8
+//! kbit a picture at 42.0 dB, where RustDesk 1.5.3 showed 40.6 dB for 8.0 kbit (its viewer's own
+//! pictures, 2026-11-25) and openh264 gave 41.5 dB for 13.2 kbit. Viewers that read it say so (`proto::FORMAT_AV1`); an access unit
 //! starts with a temporal delimiter (0x12), never with H.264's start code, so the viewer tells
 //! the two apart by the first byte.
 
@@ -14,8 +14,9 @@ use libaom_sys::*;
 /// The first byte of every access unit libaom writes: a temporal delimiter OBU with its size.
 pub const MARK: u8 = 0x12;
 
-/// The finest quantizer a film gets (of 63): sharp enough, without bytes no one sees.
-const FLOOR: u32 = 20;
+/// The finest quantizer a film gets (of 63): sharper than RustDesk's films for fewer bytes
+/// (20 gave 43.7 dB for 10.4 kbit a picture, 24 43.0 for 8.0, 32 41.0 for 4.3).
+const FLOOR: u32 = 28;
 
 fn err(ctx: *const aom_codec_ctx_t, what: &str, code: aom_codec_err_t) -> String {
     // SAFETY: libaom's error strings are static or kept in the context, NUL-terminated.
