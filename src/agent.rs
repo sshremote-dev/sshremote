@@ -1027,6 +1027,9 @@ fn serve_with(
                             // The window manager brings it forward where the screen can ask it;
                             // the focus accessibility gave is all there is elsewhere.
                             let raised = cap.windows().ok().and_then(|list| list.into_iter().find(|w| w.title == title)).map(|w| cap.bring_forward(w.id));
+                            // Under Wayland the compositor, where it can be asked.
+                            #[cfg(target_os = "linux")]
+                            let raised = raised.or_else(|| crate::ui::raise::by_title(&title));
                             match raised {
                                 Some(Ok(())) => ToClient::UiDone { ok: true, text: format!("brought \"{title}\" to the front") },
                                 _ if focused => ToClient::UiDone { ok: true, text: "asked the window to come forward".into() },

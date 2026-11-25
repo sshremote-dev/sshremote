@@ -9,6 +9,8 @@ use crate::proto::UiAction;
 
 #[cfg(target_os = "linux")]
 mod atspi;
+#[cfg(target_os = "linux")]
+pub mod raise;
 #[cfg(windows)]
 mod win;
 
