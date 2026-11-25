@@ -310,6 +310,12 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
     let title = if asking { "SSH Remote: someone wants to connect" } else if by_id { CONNECTED_TITLE } else { "SSH Remote chat" };
     let mut native = crate::gui::native_options(title, [400.0, if asking { 600.0 } else { 460.0 }]);
     native.viewport = native.viewport.with_always_on_top();
+    // A window manager that tiles would give it a share of the screen, rearranging the person's
+    // windows; a dialog it floats over them.
+    #[cfg(target_os = "linux")]
+    if !wayland_here() && x11_tiles() {
+        native.viewport = native.viewport.with_window_type(egui::X11WindowType::Dialog);
+    }
     // Windows and macOS open it without the keyboard when asked; X11 is told below.
     if quiet {
         native.viewport = native.viewport.with_active(false);
@@ -427,6 +433,48 @@ fn wayland_here() -> bool {
     let path = std::path::PathBuf::from(&name);
     let path = if path.is_absolute() { path } else { std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_default().join(path) };
     std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+/// Whether the X11 window manager is one that tiles windows (i3, bspwm, awesome...), by the name
+/// it gives itself (`_NET_SUPPORTING_WM_CHECK`).
+#[cfg(all(feature = "gui", target_os = "linux"))]
+fn x11_tiles() -> bool {
+    use std::os::raw::{c_int, c_uchar, c_ulong};
+    use x11_dl::xlib::{AnyPropertyType, Xlib};
+    const TILING: [&str; 9] = ["i3", "bspwm", "awesome", "xmonad", "qtile", "herbstluftwm", "spectrwm", "leftwm", "dwm"];
+    let Ok(xlib) = Xlib::open() else { return false };
+    // SAFETY: a connection of its own, closed here; properties read as X lays them out (32-bit
+    // ones as longs).
+    unsafe {
+        let d = (xlib.XOpenDisplay)(std::ptr::null());
+        if d.is_null() {
+            return false;
+        }
+        let property = |window: c_ulong, name: &std::ffi::CStr| -> Option<Vec<u8>> {
+            let atom = (xlib.XInternAtom)(d, name.as_ptr(), 0);
+            let (mut kind, mut format, mut n, mut after, mut data): (c_ulong, c_int, c_ulong, c_ulong, *mut c_uchar) = (0, 0, 0, 0, std::ptr::null_mut());
+            let ok = (xlib.XGetWindowProperty)(d, window, atom, 0, 64, 0, AnyPropertyType as c_ulong, &mut kind, &mut format, &mut n, &mut after, &mut data) == 0;
+            if !ok || data.is_null() {
+                return None;
+            }
+            let size = match format {
+                8 => n as usize,
+                32 => n as usize * std::mem::size_of::<c_ulong>(),
+                _ => 0,
+            };
+            let bytes = std::slice::from_raw_parts(data, size).to_vec();
+            (xlib.XFree)(data.cast());
+            Some(bytes)
+        };
+        let root = (xlib.XDefaultRootWindow)(d);
+        let name = property(root, c"_NET_SUPPORTING_WM_CHECK")
+            .and_then(|w| Some(c_ulong::from_ne_bytes(w.get(..std::mem::size_of::<c_ulong>())?.try_into().ok()?)))
+            .and_then(|wm| property(wm, c"_NET_WM_NAME"))
+            .map(|n| String::from_utf8_lossy(&n).to_lowercase())
+            .unwrap_or_default();
+        (xlib.XCloseDisplay)(d);
+        TILING.iter().any(|t| name.starts_with(t))
+    }
 }
 
 /// Asks the X11 window manager not to give the keyboard to the window when it shows
