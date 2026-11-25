@@ -130,6 +130,22 @@ impl Video {
                 }
                 return Event::Ended(reg);
             }
+            // A film larger than the area first taken for it (its first frames changed only part
+            // of it, or it grew): the tiles around it that keep changing join it, else they would
+            // go losslessly frame after frame.
+            if let Some(grown) = self.grown(reg, w, h, rich) {
+                self.region = Some(grown);
+                (self.enc, self.aom) = (None, None);
+                return Event::None;
+            }
+            // An area taken wrongly (the page that changed as the film began, with part of the
+            // film): the region moves to where the changes keep coming now, and what it leaves
+            // goes once more losslessly.
+            if let Some(film) = self.refit(reg, w, h, rich) {
+                self.region = Some(film);
+                (self.enc, self.aom) = (None, None);
+                return Event::Ended(reg);
+            }
             return Event::None;
         }
         let tiles = |hot: &dyn Fn(u8) -> bool| -> Vec<(usize, usize)> {
@@ -172,8 +188,22 @@ impl Video {
             let b = near.fold((x0, x1, y0, y1), |b, (tx, ty)| (b.0.min(tx), b.1.max(tx + 1), b.2.min(ty), b.3.max(ty + 1)));
             Some(b).filter(|b| (b.1 - b.0) * (b.3 - b.2) * 4 < cols * rows * 3)
         };
+        // Most of a film's cells look like a photograph: not a page that kept changing as the film
+        // began, beside part of it (which `rich`'s few samples can take for one).
+        let mostly_photo = |b: &(usize, usize, usize, usize)| {
+            let r = box_of(*b);
+            let (mut cells, mut photos) = (0, 0);
+            for cy in (r.y..r.y + r.h).step_by(CELL) {
+                for cx in (r.x..r.x + r.w).step_by(CELL) {
+                    cells += 1;
+                    photos += cell(&Rect { x: cx, y: cy, w: CELL.min(r.x + r.w - cx), h: CELL.min(r.y + r.h - cy) }) as usize;
+                }
+            }
+            photos * 5 >= cells * 3
+        };
         let Some((x0, x1, y0, y1)) = dense(&tiles(&|heat| heat.count_ones() >= HOT), MIN_TILES)
-            .or_else(|| dense(&tiles(&|heat| heat & 3 == 3), FAST_TILES))
+            .filter(&mostly_photo)
+            .or_else(|| dense(&tiles(&|heat| heat & 3 == 3), FAST_TILES).filter(&mostly_photo))
             .or_else(first)
             .filter(|b| rich(&box_of(*b)))
         else {
@@ -187,6 +217,82 @@ impl Video {
         self.region = Some(Rect { x: x0 * TILE, y: y0 * TILE, w: rw, h: rh });
         self.last_change = now;
         Event::None
+    }
+
+    /// The region `reg` with the tiles near it (two tiles or less from it, again and again) that
+    /// changed in most of the last frames, if there are any and the whole still looks like a
+    /// photograph and is not most of the screen.
+    fn grown(&self, reg: Rect, w: usize, h: usize, rich: &dyn Fn(&Rect) -> bool) -> Option<Rect> {
+        let (cols, rows) = (self.cols, self.rows);
+        let hot = |tx: usize, ty: usize| self.heat[ty * cols + tx].count_ones() >= HOT;
+        let start = (reg.x / TILE, (reg.x + reg.w).div_ceil(TILE), reg.y / TILE, (reg.y + reg.h).div_ceil(TILE));
+        let mut b = start;
+        loop {
+            let (x0, x1, y0, y1) = b;
+            let mut n = b;
+            for ty in y0.saturating_sub(2)..(y1 + 2).min(rows) {
+                for tx in x0.saturating_sub(2)..(x1 + 2).min(cols) {
+                    if (tx < x0 || tx >= x1 || ty < y0 || ty >= y1) && hot(tx, ty) {
+                        n = (n.0.min(tx), n.1.max(tx + 1), n.2.min(ty), n.3.max(ty + 1));
+                    }
+                }
+            }
+            if n == b {
+                break;
+            }
+            b = n;
+        }
+        let (x0, x1, y0, y1) = b;
+        if b == start || (x1 - x0) * (y1 - y0) * 4 >= cols * rows * 3 {
+            return None;
+        }
+        let r = Rect { x: x0 * TILE, y: y0 * TILE, w: ((x1 * TILE).min(w) - x0 * TILE) & !1, h: ((y1 * TILE).min(h) - y0 * TILE) & !1 };
+        rich(&r).then_some(r)
+    }
+
+    /// Where a film is by the changes alone, when that reaches out of `reg`: the box of the
+    /// largest group of tiles that changed in most of the last frames (two tiles apart at most),
+    /// when the group overlaps `reg`, fills most of its box, looks like a photograph and is not
+    /// most of the screen.
+    fn refit(&self, reg: Rect, w: usize, h: usize, rich: &dyn Fn(&Rect) -> bool) -> Option<Rect> {
+        let (cols, rows) = (self.cols, self.rows);
+        let hot = |i: usize| self.heat[i].count_ones() >= HOT;
+        let mut seen = vec![false; self.heat.len()];
+        let mut best: Vec<usize> = Vec::new();
+        for start in (0..self.heat.len()).filter(|&i| hot(i)) {
+            if seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let (mut group, mut todo) = (Vec::new(), vec![start]);
+            while let Some(i) = todo.pop() {
+                group.push(i);
+                let (tx, ty) = (i % cols, i / cols);
+                for ny in ty.saturating_sub(2)..(ty + 3).min(rows) {
+                    for nx in tx.saturating_sub(2)..(tx + 3).min(cols) {
+                        let j = ny * cols + nx;
+                        if !seen[j] && hot(j) {
+                            seen[j] = true;
+                            todo.push(j);
+                        }
+                    }
+                }
+            }
+            if group.len() > best.len() {
+                best = group;
+            }
+        }
+        if best.len() < MIN_TILES {
+            return None;
+        }
+        let (x0, x1) = (best.iter().map(|i| i % cols).min()?, best.iter().map(|i| i % cols).max()? + 1);
+        let (y0, y1) = (best.iter().map(|i| i / cols).min()?, best.iter().map(|i| i / cols).max()? + 1);
+        if best.len() * 2 < (x1 - x0) * (y1 - y0) || (x1 - x0) * (y1 - y0) * 4 >= cols * rows * 3 {
+            return None;
+        }
+        let r = Rect { x: x0 * TILE, y: y0 * TILE, w: ((x1 * TILE).min(w) - x0 * TILE) & !1, h: ((y1 * TILE).min(h) - y0 * TILE) & !1 };
+        let inside = r.x >= reg.x && r.y >= reg.y && r.x + r.w <= reg.x + reg.w && r.y + r.h <= reg.y + reg.h;
+        (!inside && overlaps(&r, &reg) && rich(&r)).then_some(r)
     }
 
     /// Encodes the region from a BGRx capture, in grey if asked; returns its access unit (AV1
@@ -381,6 +487,75 @@ mod tests {
             let off = points.iter().map(|&(x, y)| (0..3).map(|c| (rgb[(y * r.w + x) * 3 + c] as i32 - at(x, y)[c] as i32).abs()).sum::<i32>()).sum::<i32>() as f64 / (points.len() * 3) as f64;
             assert!(off < 8.0, "av1 {av1}: off by {off} on average");
         }
+    }
+
+    /// A film first taken from part of it (its first frames changed only its top) takes in the
+    /// rest as it keeps changing, so no part of it goes losslessly frame after frame; changes far
+    /// from it do not join it.
+    #[test]
+    fn a_region_grows_over_the_rest_of_its_film() {
+        let (w, h) = (1280, 800);
+        let t = Instant::now();
+        let mut v = Video::new();
+        let top = [Rect { x: 224, y: 160, w: 832, h: 256 }];
+        v.observe_at(w, h, &top, false, &|_| true, &|_| true, t);
+        v.observe_at(w, h, &top, false, &|_| true, &|_| true, t + Duration::from_millis(33));
+        let r = v.region.expect("a region");
+        assert_eq!((r.y, r.h), (160, 256), "the top alone at first");
+        let film = [Rect { x: 224, y: 160, w: 832, h: 480 }, Rect { x: 0, y: 760, w: 64, h: 32 }];
+        for k in 2..10 {
+            v.observe_at(w, h, &film, false, &|_| true, &|_| true, t + Duration::from_millis(33 * k));
+        }
+        let r = v.region.expect("still a region");
+        assert_eq!((r.x, r.y, r.w, r.h), (224, 160, 832, 480), "the whole film, not the clock in the corner");
+    }
+
+    /// A region taken wrongly, a strip of the page that changed as the film began with part of the
+    /// film, moves to the film once the changes show where it is; the strip goes once losslessly.
+    #[test]
+    fn a_region_taken_wrongly_moves_to_the_film() {
+        let (w, h) = (1280, 800);
+        let t = Instant::now();
+        let mut v = Video::new();
+        let strip = [Rect { x: 0, y: 0, w: 512, h: 800 }];
+        v.observe_at(w, h, &strip, false, &|_| true, &|_| true, t);
+        v.observe_at(w, h, &strip, false, &|_| true, &|_| true, t + Duration::from_millis(33));
+        let r = v.region.expect("a region");
+        assert_eq!((r.x, r.w, r.h), (0, 512, 800), "the strip at first");
+        // The film beside the page: the strip and the film together do not look like one photograph.
+        let film = [Rect { x: 224, y: 160, w: 832, h: 480 }];
+        let photo = |r: &Rect| r.y >= 128 && r.y + r.h <= 672;
+        let mut moved = None;
+        for k in 2..12 {
+            if let Event::Ended(old) = v.observe_at(w, h, &film, false, &photo, &|_| true, t + Duration::from_millis(33 * k)) {
+                moved = Some(old);
+            }
+        }
+        assert_eq!(moved.map(|o| (o.x, o.w, o.h)), Some((0, 512, 800)), "the strip goes once losslessly");
+        let r = v.region.expect("a region");
+        assert_eq!((r.x, r.y, r.w, r.h), (224, 160, 832, 480), "on the film");
+    }
+
+    /// Pages turned fast and then a film: the page's strip, which kept changing, is not taken
+    /// with part of the film for a film; the film is.
+    #[test]
+    fn a_page_turned_fast_is_not_taken_for_the_film_beside_it() {
+        let (w, h) = (1280, 800);
+        let t = Instant::now();
+        let mut v = Video::new();
+        let page = [Rect { x: 0, y: 0, w: 512, h: 800 }];
+        // Text until the film comes: then its cells look like a photograph.
+        let film_on = std::cell::Cell::new(false);
+        let photo = |r: &Rect| film_on.get() && r.x >= 192 && r.y >= 128 && r.x + r.w <= 1088 && r.y + r.h <= 672;
+        for k in 0..4 {
+            v.observe_at(w, h, &page, false, &|_| true, &photo, t + Duration::from_millis(300 * k));
+        }
+        assert!(v.region.is_none(), "pages are no film");
+        film_on.set(true);
+        let film = [Rect { x: 0, y: 0, w: 1280, h: 800 }];
+        v.observe_at(w, h, &film, false, &|_| true, &photo, t + Duration::from_millis(1200));
+        let r = v.region.expect("a region");
+        assert!(r.x >= 128 && r.x + r.w <= 1152, "the film, not the page: {r:?}");
     }
 
     #[test]
