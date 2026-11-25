@@ -98,9 +98,14 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
         if t.md_bottom {
             // At the bottom it stays there, with this document's height, not the last one's.
             scroll = scroll.vertical_scroll_offset((content - view_rect.height()).max(0.0));
-        } else if t.collect.prepended > 0 {
-            // Rows added above: what is in view stays where it is.
-            scroll = scroll.vertical_scroll_offset(t.md_offset + (end - t.md_end).max(0.0));
+        } else if let Some(a) = t.md_anchor {
+            // What is in view stays where it is, whatever came above it (a program scrolled back)
+            // or changed below it: the document's height alone would also count what changed below.
+            if let Some(y) = heights.place(doc, &a, t.collect.prepended > 0) {
+                scroll = scroll.vertical_scroll_offset(y);
+            } else if t.collect.prepended > 0 {
+                scroll = scroll.vertical_scroll_offset(t.md_offset + (end - t.md_end).max(0.0));
+            }
         }
         t.collect.prepended = 0;
     }
@@ -127,6 +132,9 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
     let hits: Vec<(usize, bool)> = t.find.as_ref().map(|f| f.hits.iter().enumerate().map(|(i, &n)| (n, i == f.at)).collect()).unwrap_or_default();
     let wheel = if ui.rect_contains_pointer(view_rect) { wheel_lines(ui, ch, 10.0) } else { 0 };
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(view_rect));
+    // No springing back from past the top (a trackpad on macOS): there the wheel goes on to the
+    // program, and the bounce read as the view sliding back down.
+    child.spacing_mut().scroll.kinetic.rubber_band = false;
     let shown = scroll.show_viewport(&mut child, |ui, view| {
         let origin = ui.max_rect().min;
         let hl = egui::Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 40);
@@ -162,6 +170,7 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
     let (at_top, at_bottom) = (offset <= 1.0, offset >= room - 2.0);
     t.md_offset = offset;
     t.md_bottom = at_bottom;
+    t.md_anchor = t.md_heights.anchor(doc, offset, t.md_anchor);
     // At either end of the record the wheel goes on to a program that scrolls itself.
     if alt && program_scrolls(t) && t.exited.is_none() && ((wheel > 0 && at_top) || (wheel < 0 && at_bottom)) {
         let grid = t.term.grid();
@@ -183,7 +192,22 @@ fn record_md(t: &mut Tab) -> Vec<(String, bool)> {
         // Markdown source (a file open in an editor) is read as it is, not from its colours.
         let source = rows.iter().any(|k| k.plain.trim_start().starts_with("```"))
             || rows.iter().filter(|k| ["# ", "## ", "### "].iter().any(|h| k.plain.starts_with(h))).count() >= 2;
-        return rows.into_iter().map(|k| if source { (k.plain, false) } else { k.md }).collect();
+        if !source {
+            return rows.into_iter().map(|k| k.md).collect();
+        }
+        let mut rows: Vec<(String, bool)> = rows.into_iter().map(|k| (k.plain, false)).collect();
+        // Gathered from inside a code block (the program was scrolled into one): its closing fence
+        // would open one and turn everything after it inside out, so the block is opened above. It
+        // shows as a fence naming a language (which only opens one) where a block would be open.
+        let mut open = false;
+        for l in rows.iter().map(|r| r.0.trim()).filter(|l| l.starts_with("```")) {
+            if open && l.len() > 3 {
+                rows.insert(0, ("```".into(), false));
+                break;
+            }
+            open = !open;
+        }
+        return rows;
     }
     sync_rows(t);
     let last = last_written(t);

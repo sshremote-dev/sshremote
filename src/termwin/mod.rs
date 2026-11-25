@@ -437,6 +437,8 @@ struct Tab {
     /// The Markdown view's scroll offset and the document's height, last frame.
     md_offset: f32,
     md_end: f32,
+    /// Where the Markdown view begins, kept in place as the document is built anew.
+    md_anchor: Option<crate::markdown::Anchor>,
     /// The Markdown view's search.
     find: Option<reader::Find>,
     /// Whether the Markdown view was at the bottom: it stays there as the document changes.
@@ -780,6 +782,7 @@ impl TermWindow {
             md_copy: false,
             md_offset: 0.0,
             md_end: 0.0,
+            md_anchor: None,
             find: None,
             md_bottom: true,
             md_laid: 0,

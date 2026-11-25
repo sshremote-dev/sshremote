@@ -1184,3 +1184,117 @@ fn markdown_tools_picture() {
     }
     snap.save(&ctx, size, &dir.join("markdown-tools.png"));
 }
+
+/// A program showing Markdown source (a pager), scrolled back from the top of the Markdown view, its
+/// paragraphs wrapped by the terminal so the record begins with the tail of one, or inside a code
+/// block: what is in view never moves against the wheel as rows come above it (it did, when the
+/// record began inside a code block and its closing fence turned the rest inside out).
+#[test]
+fn rows_coming_above_leave_the_markdown_view_where_it_is() {
+    let ctx = egui::Context::default();
+    crate::gui::style(&ctx);
+    let mut w = TermWindow::new(None);
+    let mut clock = 0.0;
+    let mut tick = |w: &mut TermWindow, events: Vec<Event>| {
+        clock += 1.0 / 60.0;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 600.0))),
+            focused: true,
+            time: Some(clock),
+            events,
+            ..Default::default()
+        };
+        ctx.run_test(input, |ui| {
+            w.embedded(ui);
+        })
+    };
+    tick(&mut w, Vec::new());
+    let (cols, n) = {
+        let g = w.tabs[0].term.grid();
+        (g.columns(), g.screen_lines())
+    };
+    // The document as the program's screen rows: (text, starts a line), long lines wrapped.
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for k in 0..40 {
+        let mut lines = vec![format!("## Part {k}"), String::new(), format!("Paragraph {k}: {}", "words that run on and on ".repeat(1 + k % 5)), String::new()];
+        if k % 3 == 0 {
+            lines.extend(["```rust".to_string(), "fn main() {".into(), format!("    println!(\"part {k}\");"), "}".into(), "```".into(), String::new()]);
+        }
+        for line in lines {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.is_empty() {
+                rows.push((String::new(), true));
+            }
+            for (c, piece) in chars.chunks(cols).enumerate() {
+                rows.push((piece.iter().collect(), c == 0));
+            }
+        }
+    }
+    // A screen showing rows from `top`: each run of a line's rows written at once, so the terminal
+    // wraps them, the first one cut wherever the screen begins.
+    let end = rows.len() - n;
+    let show = |t: &mut Tab, top: usize| {
+        let mut out = String::from("\x1b[H\x1b[2J");
+        let mut r = 0;
+        while r < n && top + r < rows.len() {
+            out.push_str(&format!("\x1b[{};1H", r + 1));
+            out.push_str(&rows[top + r].0);
+            r += 1;
+            while r < n && top + r < rows.len() && !rows[top + r].1 {
+                out.push_str(&rows[top + r].0);
+                r += 1;
+            }
+        }
+        t.parser.advance(&mut t.term, out.as_bytes());
+        t.rev += 1;
+    };
+    let t = &mut w.tabs[0];
+    t.parser.advance(&mut t.term, b"\x1b[?1049h");
+    let mut top = end;
+    show(t, top);
+    w.tabs[0].view = View::Markdown;
+    for _ in 0..120 {
+        tick(&mut w, Vec::new());
+    }
+    let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, 120.0), modifiers: Default::default(), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+    tick(&mut w, vec![Event::PointerMoved(Pos2::new(450.0, 300.0))]);
+    // Each line of the document drawn, by its words (those drawn once), and where.
+    let parts = |out: &egui::FullOutput| -> std::collections::HashMap<String, f32> {
+        let mut m: std::collections::HashMap<String, Option<f32>> = std::collections::HashMap::new();
+        for c in &out.shapes {
+            if let egui::Shape::Text(s) = &c.shape {
+                for r in &s.galley.rows {
+                    let words: String = r.row.glyphs.iter().map(|g| g.chr).collect();
+                    if words.contains("Part ") || words.contains("Paragraph ") || words.contains("println") {
+                        m.entry(words).and_modify(|y| *y = None).or_insert(Some(s.pos.y + r.pos.y));
+                    }
+                }
+            }
+        }
+        m.into_iter().filter_map(|(k, y)| Some((k, y?))).collect()
+    };
+    let (mut last, mut came, mut against) = (std::collections::HashMap::new(), 0, Vec::new());
+    for k in 0..1500 {
+        let sent = k % 6 == 0;
+        let out = tick(&mut w, if sent { vec![wheel.clone()] } else { Vec::new() });
+        let now = parts(&out);
+        for (name, y) in &now {
+            if let Some(was) = last.get(name)
+                && y - was < -1.5
+            {
+                against.push(format!("frame {k}: {name} {was:.0} -> {y:.0}"));
+            }
+        }
+        last = now;
+        // The program scrolls back three rows when the wheel reaches it at the top.
+        let t = &mut w.tabs[0];
+        if sent && t.md_offset <= 1.0 && top > 0 {
+            top = top.saturating_sub(3);
+            show(t, top);
+            came += 1;
+        }
+    }
+    assert!(came > 20, "the program was scrolled back {came} times");
+    assert!(top == 0, "the wheel went on to the start, at row {top}");
+    assert!(against.is_empty(), "moved against the wheel: {against:#?}");
+}

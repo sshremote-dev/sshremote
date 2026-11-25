@@ -1329,10 +1329,60 @@ pub struct Heights {
     layout: Option<Layout>,
 }
 
+/// Where a view begins, to keep it there when the document is built anew: three blocks in a row
+/// from the first that starts in it (each block's words' hash, and how far below its top the view
+/// begins), so one changed by rows that came above it still leaves the next to go by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    doc: u64,
+    n: usize,
+    hash: [u64; 4],
+    into: [f32; 3],
+    blocks: usize,
+}
+
+fn hash_of(b: Option<&Block>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    h.finish()
+}
+
 impl Heights {
     /// Each block's top and height in the document last laid out.
     pub fn tops(&self) -> &[(f32, f32)] {
         self.layout.as_ref().map_or(&[], |l| l.2.as_slice())
+    }
+
+    /// Where a view at `offset` begins in `doc`, as laid out now: by the first block that starts in
+    /// it, as one cut at the view's top or the document's first (which rows from above join) may
+    /// change. `last` is the frame before's, whose hashes stand while it is the same block of the
+    /// same document.
+    pub fn anchor(&self, doc: &Doc, offset: f32, last: Option<Anchor>) -> Option<Anchor> {
+        let (key, tops) = self.layout.as_ref().map(|l| (l.0, &l.2))?;
+        let n = tops.partition_point(|&(y, _)| y < offset).max(1).min(tops.len().checked_sub(1)?);
+        let hash = match last {
+            Some(a) if a.doc == key && a.n == n => a.hash,
+            _ => std::array::from_fn(|k| hash_of(doc.blocks.get(n + k))),
+        };
+        let into = std::array::from_fn(|k| tops.get(n + k).map_or(0.0, |t| offset - t.0));
+        Some(Anchor { doc: key, n, hash, into, blocks: doc.blocks.len() })
+    }
+
+    /// The offset that shows `a` where it was, in `doc` as laid out now: by the first of its blocks
+    /// found with the one after it (alone, the last), nearest to where it is expected (further down
+    /// by the blocks added when rows came `above` it).
+    pub fn place(&self, doc: &Doc, a: &Anchor, above: bool) -> Option<f32> {
+        let tops = self.tops();
+        let last = tops.len().checked_sub(1)?;
+        let ahead = if above { doc.blocks.len().saturating_sub(a.blocks) } else { 0 };
+        let none = hash_of(None);
+        (0..3).filter(|&k| a.hash[k] != none).find_map(|k| {
+            let want = (a.n + k + ahead).min(last);
+            let same = |j: usize| hash_of(doc.blocks.get(j)) == a.hash[k] && (k == 2 || hash_of(doc.blocks.get(j + 1)) == a.hash[k + 1]);
+            let j = (0..tops.len()).flat_map(|d| [want.checked_add(d), want.checked_sub(d)]).flatten().filter(|&j| j <= last).find(|&j| same(j))?;
+            Some((tops[j].0 + a.into[k].min(tops[j].1)).max(0.0))
+        })
     }
 
     fn key(blocks: &[Block], n: usize, width: f32) -> (u64, bool, u32) {
