@@ -358,7 +358,14 @@ struct Begun {
 async fn begin(index: Option<usize>, src: Src, own: bool) -> Result<Begun, String> {
     let conn = Connection::session().await.map_err(err("session bus"))?;
     let rd = Proxy::new(&conn, RD, "/org/gnome/Mutter/RemoteDesktop", RD).await.map_err(err("RemoteDesktop"))?;
-    let spath: OwnedObjectPath = rd.call("CreateSession", &()).await.map_err(err("CreateSession"))?;
+    let spath: OwnedObjectPath = rd.call("CreateSession", &()).await.map_err(|e| {
+        // GNOME Shell holds remote desktop back while its screen is locked or at its login screen.
+        if e.to_string().contains("inhibited") {
+            "GNOME shares no screen while it is locked (unlock it at the computer, then connect again)".to_string()
+        } else {
+            err("CreateSession")(e)
+        }
+    })?;
     let session = Proxy::new(&conn, RD, spath, "org.gnome.Mutter.RemoteDesktop.Session").await.map_err(err("session"))?;
     let sid: String = session.get_property("SessionId").await.map_err(err("SessionId"))?;
 

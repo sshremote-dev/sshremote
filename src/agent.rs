@@ -794,6 +794,8 @@ fn serve_with(
                     let m = match last.as_ref().map(crate::shot::png_from_bgrx) {
                         Some(Ok(png)) => ToClient::Snapshot(png),
                         Some(Err(e)) => ToClient::Notice(format!("Screenshot: {e}")),
+                        // No screen to share at all: why (what NoScreen holds).
+                        None if cap.name() == "none" => ToClient::Notice(format!("Screenshot: no screen to share: {}", cap.windows().err().unwrap_or_default())),
                         None => ToClient::Notice("Screenshot: no picture yet".into()),
                     };
                     send(enc, &m).map_err(io_err)?;
