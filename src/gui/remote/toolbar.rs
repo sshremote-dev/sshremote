@@ -323,7 +323,7 @@ impl Remote {
         }
         // The host's screens, when it has several: which one shows here, or all, a window each;
         // and screens added to it for the session, where it can have them.
-        if self.monitors.len() > 1 || self.adds_screens {
+        if self.monitors.len() > 1 || self.adds_screens || self.screens_need_helper {
             let screens = icon_menu(ui, ic::SQUARES_FOUR, |ui| {
                 ui.label(RichText::new("Its screens").strong());
                 for (i, m) in self.monitors.iter().enumerate() {
@@ -360,6 +360,12 @@ impl Remote {
                     }));
                     ui.close();
                 }
+                }
+                if self.screens_need_helper {
+                    ui.separator();
+                    ui.add_enabled(false, egui::Button::new(format!("{}  Add a screen", ic::PLUS))).on_disabled_hover_text(
+                        "That computer adds screens with a virtual display driver that comes with the helper: install the helper there (remote access started with the computer), then connect again",
+                    );
                 }
                 if self.adds_screens {
                     ui.separator();

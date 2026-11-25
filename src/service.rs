@@ -172,6 +172,10 @@ pub fn install() -> Result<(), String> {
     );
     // The service shows its icon at each sign-in; the start at sign-in older versions set is gone.
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+    // The virtual display driver, for screens a viewer adds; the rest works without it.
+    if let Err(e) = crate::display::amyuni::install() {
+        eprintln!("sshremote: {e}");
+    }
     run("sc", &["start", NAME])?;
     if let Some(e) = failed {
         return Err(e);
@@ -183,6 +187,8 @@ pub fn install() -> Result<(), String> {
 pub fn uninstall() -> Result<(), String> {
     let _ = run("sc", &["stop", NAME]);
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
+    // The virtual display driver goes with it, before the folder its tool is in.
+    crate::display::amyuni::uninstall();
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
     let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);

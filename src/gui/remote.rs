@@ -128,8 +128,10 @@ pub(super) struct Remote {
     /// The picture was paused because the pane is not drawn (another tab, behind a zoomed pane).
     hidden_paused: bool,
     monitors: Vec<crate::proto::MonitorInfo>,
-    /// The agent adds screens to the host for the session (`CAN_SCREENS`).
+    /// The agent adds screens to the host for the session (`CAN_SCREENS`), or would once the
+    /// helper is installed there (`CAN_SCREENS_WITH_HELPER`).
     adds_screens: bool,
+    screens_need_helper: bool,
     monitor: usize,
     /// The resolutions the shown screen can be set to, the one it has and its own (`Modes`).
     modes: crate::proto::ScreenModes,
@@ -389,6 +391,7 @@ impl Remote {
             hidden_paused: false,
             monitors: Vec::new(),
             adds_screens: false,
+            screens_need_helper: false,
             monitor: 0,
             modes: (Vec::new(), (0, 0), (0, 0)),
             modes_heard: false,
@@ -733,6 +736,7 @@ impl Remote {
             match ev {
                 Ok(Ev::Net(ToClient::Can(bits))) => {
                     self.adds_screens = bits & crate::proto::CAN_SCREENS != 0;
+                    self.screens_need_helper = bits & crate::proto::CAN_SCREENS_WITH_HELPER != 0;
                     self.can(bits)?
                 }
                 Ok(Ev::Net(ToClient::Trusted(token))) => self.trusted(token),

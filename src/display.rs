@@ -264,6 +264,15 @@ impl Session {
         self.way.as_ref().is_some_and(Way::adds)
     }
 
+    /// Whether they could be, once the helper is installed here (Windows' driver comes with it).
+    pub fn adds_with_helper(&self) -> bool {
+        #[cfg(windows)]
+        if matches!(self.way, Some(Way::Windows)) {
+            return amyuni::without_driver();
+        }
+        false
+    }
+
     /// Adds a screen of `w`x`h` for this session, right of the others; its system name, as the
     /// capture's `screen_ids` will give it once the capture hears of it.
     pub fn add(&mut self, w: u16, h: u16) -> Result<String, String> {
@@ -576,11 +585,12 @@ mod win {
 }
 
 /// Screens added on Windows: Amyuni's virtual display driver (usbmmidd v2, signed through
-/// Microsoft; RustDesk adds its screens with it too), unpacked from this program and installed the
-/// first time a screen is added, which needs an administrator (the service is one). Each screen is
-/// one `enableidd 1` of its tool; `enableidd 0` takes the last one added away.
+/// Microsoft; RustDesk adds its screens with it too), unpacked from this program and installed
+/// with the service (the helper; `service::install`), which has an administrator's rights, and
+/// removed with it. Without it no screen is added. Each screen is one `enableidd 1` of its tool;
+/// `enableidd 0` takes the last one added away.
 #[cfg(windows)]
-mod amyuni {
+pub(crate) mod amyuni {
     use std::path::PathBuf;
     use std::process::Command;
     use windows_sys::Win32::Foundation::POINTL;
@@ -589,6 +599,8 @@ mod amyuni {
         DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsExW,
     };
     use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
+
+    pub const NO_DRIVER: &str = "screens are added to Windows by a driver installed with the helper: install it there (remote access started with the computer)";
 
     /// The driver as Amyuni gives it, unchanged (its signature covers its files).
     const ZIP: &[u8] = include_bytes!("../assets/windows/usbmmidd_v2.zip");
@@ -599,10 +611,38 @@ mod amyuni {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
-    /// For x64 (Amyuni has no Arm driver), installed already or able to install it. Not offered
-    /// yet until tried on a real Windows computer (SSHREMOTE_VIRTUAL_SCREENS=1 turns it on).
+    /// Not offered yet until tried on a real Windows computer (SSHREMOTE_VIRTUAL_SCREENS=1 turns
+    /// it on); for x64 only, as Amyuni has no Arm driver.
+    fn offered() -> bool {
+        cfg!(target_arch = "x86_64") && std::env::var_os("SSHREMOTE_VIRTUAL_SCREENS").is_some()
+    }
+
+    /// Where the driver is installed (by the service's installation).
     pub fn adds() -> bool {
-        cfg!(target_arch = "x86_64") && std::env::var_os("SSHREMOTE_VIRTUAL_SCREENS").is_some() && (installed() || crate::admin::elevated())
+        offered() && installed()
+    }
+
+    /// Where it would be, once the service is installed with it.
+    pub fn without_driver() -> bool {
+        offered() && !installed()
+    }
+
+    /// Installs the driver, with the service (an administrator's rights): once, quietly.
+    pub fn install() -> Result<(), String> {
+        if !offered() || installed() {
+            return Ok(());
+        }
+        tool(&["install", "usbmmidd.inf", "usbmmidd"])?;
+        if installed() { Ok(()) } else { Err("the virtual display driver was not installed".into()) }
+    }
+
+    /// Removes the driver and its unpacked files, with the service.
+    pub fn uninstall() {
+        if installed() {
+            let _ = tool(&["stop", "usbmmidd"]);
+            let _ = tool(&["remove", "usbmmidd"]);
+        }
+        let _ = std::fs::remove_dir_all(folder().join("usbmmidd_v2"));
     }
 
     fn installed() -> bool {
@@ -617,9 +657,13 @@ mod amyuni {
         }
     }
 
+    fn folder() -> PathBuf {
+        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("SSH Remote")
+    }
+
     /// The driver's files, unpacked once under ProgramData.
     fn unpack() -> Result<PathBuf, String> {
-        let base = PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("SSH Remote");
+        let base = folder();
         let dir = base.join("usbmmidd_v2");
         if !dir.join("deviceinstaller64.exe").exists() {
             let mut z = zip::ZipArchive::new(std::io::Cursor::new(ZIP)).map_err(|e| e.to_string())?;
@@ -718,10 +762,7 @@ mod amyuni {
 
     pub fn add(w: u16, h: u16) -> Result<String, String> {
         if !installed() {
-            if !crate::admin::elevated() {
-                return Err("Windows adds screens with a driver installed once by an administrator: connect as one, or to remote access started with the computer".into());
-            }
-            tool(&["install", "usbmmidd.inf", "usbmmidd"])?;
+            return Err(NO_DRIVER.into());
         }
         if crate::admin::elevated() {
             offer(w, h);

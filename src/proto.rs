@@ -45,6 +45,9 @@ pub const KIND_TRUST_ME: u8 = 54;
 pub const CAN_RESUME: u32 = 1;
 /// The agent adds screens to the host for the session and takes them away (`ToAgent::AddScreen`).
 pub const CAN_SCREENS: u32 = 2;
+/// It would, once its computer has the helper (on Windows the virtual display driver comes with
+/// the service): the viewer says so in place of the choice.
+pub const CAN_SCREENS_WITH_HELPER: u32 = 4;
 
 pub struct Preset {
     pub name: &'static str,

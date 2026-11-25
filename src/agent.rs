@@ -411,7 +411,9 @@ fn serve_with(
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
-    let can = crate::proto::CAN_RESUME | if screens.adds() { crate::proto::CAN_SCREENS } else { 0 };
+    let can = crate::proto::CAN_RESUME
+        | if screens.adds() { crate::proto::CAN_SCREENS } else { 0 }
+        | if screens.adds_with_helper() { crate::proto::CAN_SCREENS_WITH_HELPER } else { 0 };
     send(enc, &ToClient::Can(can)).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
