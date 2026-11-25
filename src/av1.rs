@@ -28,6 +28,16 @@ fn err(ctx: *const aom_codec_ctx_t, what: &str, code: aom_codec_err_t) -> String
     format!("AV1 {what}: {text}")
 }
 
+/// The speed of the first picture of a film, which is coded whole: libaom's fastest, a quarter of
+/// the time (5.8 ms instead of 20.5 for the bench's film) for 0.3 dB less in it and the few after
+/// it. The film's start is where a viewer waits longest.
+const FIRST_SPEED: i32 = 11;
+
+/// The speed of the pictures after: faster on larger ones; both well within a frame's time.
+fn speed(w: usize, h: usize) -> i32 {
+    if w * h > 1280 * 720 { 10 } else { 9 }
+}
+
 /// Threads for a picture of `pixels`: more for larger ones, never more than the computer has.
 fn threads(pixels: usize) -> u32 {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
@@ -82,8 +92,7 @@ impl Encoder {
                 return Err(err(ptr::null(), "encoder", r));
             }
             let c: *mut aom_codec_ctx_t = &mut *ctx;
-            // Faster on larger pictures; both well within a frame's time (2-5 ms at 848x480).
-            aom_codec_control(c, AOME_SET_CPUUSED as i32, if w * h > 1280 * 720 { 10 } else { 9 });
+            aom_codec_control(c, AOME_SET_CPUUSED as i32, FIRST_SPEED);
             aom_codec_control(c, AV1E_SET_ROW_MT as i32, 1u32);
             aom_codec_control(c, AV1E_SET_TILE_COLUMNS as i32, if w >= 1280 { 1u32 } else { 0u32 });
             aom_codec_control(c, AV1E_SET_AQ_MODE as i32, 3u32);
@@ -119,6 +128,9 @@ impl Encoder {
             let r = aom_codec_encode(c, img, self.pts, 1, 0);
             if r != 0 {
                 return Err(err(c, "encoding", r));
+            }
+            if self.pts == 0 {
+                aom_codec_control(c, AOME_SET_CPUUSED as i32, speed(w, h));
             }
             self.pts += 1;
             let mut it: aom_codec_iter_t = ptr::null();
