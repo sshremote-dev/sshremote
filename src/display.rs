@@ -165,6 +165,8 @@ impl Way {
     /// Whether screens can be added here for a session.
     fn adds(&self) -> bool {
         match self {
+            #[cfg(windows)]
+            Way::Windows => amyuni::adds(),
             #[cfg(target_os = "linux")]
             Way::RandR | Way::Sway(_) | Way::Hypr(_) | Way::Mutter => true,
             #[cfg(target_os = "macos")]
@@ -176,9 +178,9 @@ impl Way {
 
     /// Adds a screen of `w`x`h` right of the others.
     fn add(&self, w: u16, h: u16) -> Result<Added, String> {
-        #[cfg(windows)]
-        let _ = (w, h);
         match self {
+            #[cfg(windows)]
+            Way::Windows => amyuni::add(w, h).map(Added::named),
             #[cfg(target_os = "linux")]
             Way::RandR => linux::randr_add(w, h).map(Added::named),
             #[cfg(target_os = "linux")]
@@ -196,6 +198,8 @@ impl Way {
 
     fn remove(&self, a: Added) -> Result<(), String> {
         match self {
+            #[cfg(windows)]
+            Way::Windows => amyuni::remove(&a.id),
             #[cfg(target_os = "linux")]
             Way::RandR => linux::randr_remove(&a.id),
             #[cfg(target_os = "linux")]
@@ -230,7 +234,7 @@ pub struct Added {
 }
 
 impl Added {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     fn named(id: String) -> Added {
         Added {
             id,
@@ -568,6 +572,178 @@ mod win {
         // Not saved: what Windows keeps for the screen is not changed.
         let r = unsafe { ChangeDisplaySettingsExW(dev.as_ptr(), &dm, std::ptr::null_mut(), 0, std::ptr::null()) };
         if r == DISP_CHANGE_SUCCESSFUL { Ok(()) } else { Err(format!("Windows did not set {w}x{h} (code {r})")) }
+    }
+}
+
+/// Screens added on Windows: Amyuni's virtual display driver (usbmmidd v2, signed through
+/// Microsoft; RustDesk adds its screens with it too), unpacked from this program and installed the
+/// first time a screen is added, which needs an administrator (the service is one). Each screen is
+/// one `enableidd 1` of its tool; `enableidd 0` takes the last one added away.
+#[cfg(windows)]
+mod amyuni {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use windows_sys::Win32::Foundation::POINTL;
+    use windows_sys::Win32::Graphics::Gdi::{
+        CDS_NORESET, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_PELSHEIGHT,
+        DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsExW,
+    };
+    use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
+
+    /// The driver as Amyuni gives it, unchanged (its signature covers its files).
+    const ZIP: &[u8] = include_bytes!("../assets/windows/usbmmidd_v2.zip");
+    /// The sizes its screens offer, which it reads as one is added (up to ten).
+    const SIZES: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\usbmmIdd\Parameters\Monitors";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// For x64 (Amyuni has no Arm driver), installed already or able to install it. Not offered
+    /// yet until tried on a real Windows computer (SSHREMOTE_VIRTUAL_SCREENS=1 turns it on).
+    pub fn adds() -> bool {
+        cfg!(target_arch = "x86_64") && std::env::var_os("SSHREMOTE_VIRTUAL_SCREENS").is_some() && (installed() || crate::admin::elevated())
+    }
+
+    fn installed() -> bool {
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: a key opened for reading and closed again.
+        unsafe {
+            let ok = RegOpenKeyExW(HKEY_LOCAL_MACHINE, wide(SIZES).as_ptr(), 0, KEY_READ, &mut key) == 0;
+            if ok {
+                RegCloseKey(key);
+            }
+            ok
+        }
+    }
+
+    /// The driver's files, unpacked once under ProgramData.
+    fn unpack() -> Result<PathBuf, String> {
+        let base = PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("SSH Remote");
+        let dir = base.join("usbmmidd_v2");
+        if !dir.join("deviceinstaller64.exe").exists() {
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(ZIP)).map_err(|e| e.to_string())?;
+            z.extract(&base).map_err(|e| format!("the virtual display driver could not be unpacked: {e}"))?;
+        }
+        Ok(dir)
+    }
+
+    fn tool(args: &[&str]) -> Result<(), String> {
+        let dir = unpack()?;
+        let mut cmd = Command::new(dir.join("deviceinstaller64.exe"));
+        cmd.args(args).current_dir(&dir);
+        let out = crate::sys::quiet(&mut cmd).output().map_err(|e| format!("the virtual display driver's tool: {e}"))?;
+        if out.status.success() { Ok(()) } else { Err(format!("the virtual display driver's tool said: {}", String::from_utf8_lossy(&out.stdout).trim())) }
+    }
+
+    /// Makes `w`x`h` one of the sizes its screens offer, in place of the last where it is not.
+    fn offer(w: u16, h: u16) {
+        let want = format!("{w},{h}");
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: a key opened, read and written as text values, and closed again.
+        unsafe {
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, wide(SIZES).as_ptr(), 0, KEY_READ | KEY_SET_VALUE, &mut key) != 0 {
+                return;
+            }
+            let read = |name: &str| {
+                let mut buf = [0u16; 64];
+                let mut len = (buf.len() * 2) as u32;
+                (RegQueryValueExW(key, wide(name).as_ptr(), std::ptr::null(), std::ptr::null_mut(), buf.as_mut_ptr() as _, &mut len) == 0)
+                    .then(|| String::from_utf16_lossy(&buf[..(len as usize / 2)]).trim_end_matches('\0').to_string())
+            };
+            if !(0..10).any(|i| read(&i.to_string()).as_deref() == Some(want.as_str())) {
+                let slot = (0..10).find(|i| read(&i.to_string()).is_none()).unwrap_or(9).to_string();
+                let data = wide(&want);
+                RegSetValueExW(key, wide(&slot).as_ptr(), 0, REG_SZ, data.as_ptr() as _, (data.len() * 2) as u32);
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    /// The display devices with a monitor, by name (`DISPLAY5`), and whether each is on the desktop.
+    fn displays() -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        for i in 0.. {
+            // SAFETY: a zeroed DISPLAY_DEVICEW with its size set, as the call expects.
+            let mut d: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+            d.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+            if unsafe { EnumDisplayDevicesW(std::ptr::null(), i, &mut d, 0) } == 0 {
+                break;
+            }
+            let n = d.DeviceName.iter().position(|&c| c == 0).unwrap_or(d.DeviceName.len());
+            let name = String::from_utf16_lossy(&d.DeviceName[..n]);
+            let mut m: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+            m.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+            if unsafe { EnumDisplayDevicesW(wide(&name).as_ptr(), 0, &mut m, 0) } != 0 {
+                out.push((name.trim_start_matches(r"\\.\").to_string(), d.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0));
+            }
+        }
+        out
+    }
+
+    /// Screen `id` on the desktop right of the others, at `w`x`h` where it has that size.
+    fn place(id: &str, w: u16, h: u16) -> Result<(), String> {
+        let dev = |name: &str| wide(&format!(r"\\.\{name}"));
+        let mut right = 0;
+        for (name, on) in displays() {
+            if !on || name == id {
+                continue;
+            }
+            // SAFETY: a zeroed DEVMODEW with its size set; the position is read from its union as
+            // the display's (not a printer's) settings.
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = size_of::<DEVMODEW>() as u16;
+            if unsafe { EnumDisplaySettingsExW(dev(&name).as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm, 0) } != 0 {
+                let at = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
+                right = right.max(at.x + dm.dmPelsWidth as i32);
+            }
+        }
+        let set = |fields, (w, h): (u16, u16)| {
+            // SAFETY: as above, the union written as a display's.
+            let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+            dm.dmSize = size_of::<DEVMODEW>() as u16;
+            dm.dmFields = fields;
+            (dm.dmPelsWidth, dm.dmPelsHeight) = (w as u32, h as u32);
+            dm.Anonymous1.Anonymous2.dmPosition = POINTL { x: right, y: 0 };
+            unsafe { ChangeDisplaySettingsExW(dev(id).as_ptr(), &dm, std::ptr::null_mut(), CDS_UPDATEREGISTRY | CDS_NORESET, std::ptr::null()) }
+        };
+        // Its size where it offers it, else the one it has; then where it goes.
+        if set(DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION, (w, h)) != 0 && set(DM_POSITION, (0, 0)) != 0 {
+            return Err("Windows did not place the new screen".into());
+        }
+        // SAFETY: applies what was set above.
+        unsafe { ChangeDisplaySettingsExW(std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), 0, std::ptr::null()) };
+        Ok(())
+    }
+
+    pub fn add(w: u16, h: u16) -> Result<String, String> {
+        if !installed() {
+            if !crate::admin::elevated() {
+                return Err("Windows adds screens with a driver installed once by an administrator: connect as one, or to remote access started with the computer".into());
+            }
+            tool(&["install", "usbmmidd.inf", "usbmmidd"])?;
+        }
+        if crate::admin::elevated() {
+            offer(w, h);
+        }
+        let before: Vec<String> = displays().into_iter().map(|d| d.0).collect();
+        tool(&["enableidd", "1"])?;
+        let new = (0..50)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                displays().into_iter().map(|d| d.0).find(|d| !before.contains(d))
+            })
+            .ok_or("Windows added no screen (four are the most)")?;
+        if let Err(e) = place(&new, w, h) {
+            let _ = tool(&["enableidd", "0"]);
+            return Err(e);
+        }
+        Ok(new)
+    }
+
+    /// Takes away the screen added last (the driver's way); the session takes them away in turn.
+    pub fn remove(_id: &str) -> Result<(), String> {
+        tool(&["enableidd", "0"])
     }
 }
 

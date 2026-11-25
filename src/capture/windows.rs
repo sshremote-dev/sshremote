@@ -680,6 +680,15 @@ impl Capture for Gdi {
         self.layout_at = None;
     }
 
+    fn screens_changed(&mut self) {
+        let shown = self.screen_id();
+        self.screens = screens();
+        self.layout_at = None;
+        if let Some(i) = shown.and_then(|s| self.screens.iter().position(|x| x.info.name == s)) {
+            self.current = i;
+        }
+    }
+
     fn select(&mut self, index: usize) -> Result<(), String> {
         self.screens = screens();
         let s = self.screens.get(index).ok_or("no such monitor")?;

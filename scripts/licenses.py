@@ -214,7 +214,8 @@ def main():
             groups.setdefault(read(path), []).append(f"{name}: {rel}")
     # What the repository carries itself.
     for rel, what in [("assets/fonts/LICENSE-phosphor.txt", "Phosphor icons (assets/fonts)"),
-                      ("web/LICENSE-xterm.txt", "xterm.js and its fit addon (web)")]:
+                      ("web/LICENSE-xterm.txt", "xterm.js and its fit addon (web)"),
+                      ("assets/windows/LICENSE-usbmmidd.txt", "Amyuni's virtual display driver usbmmidd v2 (assets/windows, Windows screens added for a session)")]:
         groups.setdefault(read(os.path.join(ROOT, rel)), []).append(what)
     out = ["SSH Remote is under the MIT license (see LICENSE). It is built with the open-source software",
            "listed below; their licenses follow, each text once, with what it covers.",
