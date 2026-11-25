@@ -48,6 +48,65 @@ fn err(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
     move |e| format!("screen-sharing portal {what}: {e}")
 }
 
+/// How long the person at the screen has to answer the portal's dialog. Nobody there (or a
+/// viewer gone meanwhile) must not keep the agent, and its notice that someone is connected,
+/// waiting for ever: the session goes on without the screen.
+const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Ready once `d` has passed, kept by a thread of its own (zbus's executor has no timers); the
+/// thread ends early when this is dropped.
+struct After {
+    state: std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>,
+    thread: std::thread::Thread,
+}
+
+fn after(d: std::time::Duration) -> After {
+    let state = std::sync::Arc::new(std::sync::Mutex::new((false, None::<std::task::Waker>)));
+    let shared = std::sync::Arc::downgrade(&state);
+    let until = std::time::Instant::now() + d;
+    let thread = std::thread::spawn(move || {
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            // Dropped: nothing waits any more.
+            let Some(s) = shared.upgrade() else { return };
+            if left.is_zero() {
+                let mut g = s.lock().unwrap_or_else(|e| e.into_inner());
+                g.0 = true;
+                if let Some(w) = g.1.take() {
+                    w.wake();
+                }
+                return;
+            }
+            drop(s);
+            std::thread::park_timeout(left);
+        }
+    })
+    .thread()
+    .clone();
+    After { state, thread }
+}
+
+impl std::future::Future for After {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if g.0 {
+            return std::task::Poll::Ready(());
+        }
+        g.1 = Some(cx.waker().clone());
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for After {
+    fn drop(&mut self) {
+        // The state let go first, so the thread, woken, finds nothing to keep.
+        drop(std::mem::replace(&mut self.state, std::sync::Arc::new(std::sync::Mutex::new((true, None)))));
+        self.thread.unpark();
+    }
+}
+
 /// Calls a portal method that answers through a Request object, and waits for the answer.
 async fn request<B>(
     conn: &Connection,
@@ -65,7 +124,14 @@ where
     let mut answers = req.receive_signal("Response").await.map_err(err(method))?;
     let p = Proxy::new(conn, DEST, PATH, iface).await.map_err(err(method))?;
     let _: OwnedObjectPath = p.call(method, body).await.map_err(err(method))?;
-    let msg = answers.next().await.ok_or("the screen-sharing portal went away")?;
+    let msg = match futures_util::future::select(answers.next(), std::pin::pin!(after(ANSWER_WITHIN))).await {
+        futures_util::future::Either::Left((msg, _)) => msg.ok_or("the screen-sharing portal went away")?,
+        futures_util::future::Either::Right(_) => {
+            // Its dialog goes too, rather than asking for a viewer who may be gone.
+            let _: Result<(), _> = req.call("Close", &()).await;
+            return Err(format!("nobody answered the screen-sharing question on the SSH host's screen within {} minutes", ANSWER_WITHIN.as_secs() / 60));
+        }
+    };
     let (code, results): (u32, HashMap<String, OwnedVariant>) = msg.body().deserialize().map_err(err(method))?;
     match code {
         0 => Ok(results),
@@ -308,5 +374,29 @@ impl Drop for Portal {
             let p = Proxy::new(&self.conn, DEST, self.session.as_str(), "org.freedesktop.portal.Session").await?;
             p.call_noreply("Close", &()).await
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deadline_beside_a_wait_comes_when_due_and_its_thread_ends_with_it() {
+        let started = std::time::Instant::now();
+        zbus::block_on(after(std::time::Duration::from_millis(80)));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(80));
+        // Something answering first wins, and the deadline's thread goes at once.
+        let started = std::time::Instant::now();
+        let first = zbus::block_on(async {
+            let answer = std::pin::pin!(async { 7 });
+            let deadline = std::pin::pin!(after(std::time::Duration::from_secs(60)));
+            match futures_util::future::select(answer, deadline).await {
+                futures_util::future::Either::Left((n, _)) => Some(n),
+                futures_util::future::Either::Right(_) => None,
+            }
+        });
+        assert_eq!(first, Some(7));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
