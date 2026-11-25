@@ -422,7 +422,7 @@ impl Remote {
     pub(in crate::gui) fn upload(&mut self, ctx: &egui::Context, resized: bool, f: &crate::proto::Frame) {
         let (w, h) = (self.fb.w, self.fb.h);
         self.fb_dirty = true;
-        let opts = TextureOptions::LINEAR;
+        let opts = self.tex_filter;
         match self.tex.as_mut() {
             Some(t) if !resized && t.size() == [w, h] => {
                 // Tiles of one row band go up as one span, and a frame that changed most of the

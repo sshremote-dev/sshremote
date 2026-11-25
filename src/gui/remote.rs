@@ -61,6 +61,9 @@ pub(super) struct Remote {
     ctl: Control,
     fb: Framebuffer,
     tex: Option<TextureHandle>,
+    /// How `tex` is sampled: texel for texel where the picture is drawn at its own size (the same
+    /// picture as smoothing, at a fraction of a software renderer's work), smoothed where larger.
+    pub(in crate::gui) tex_filter: TextureOptions,
     /// The picture made smaller here for a pane smaller than the host's screen, and whether the
     /// host's picture changed since.
     small: Option<Small>,
@@ -345,6 +348,7 @@ impl Remote {
             ctl,
             fb: Framebuffer::default(),
             tex: None,
+            tex_filter: TextureOptions::LINEAR,
             small: None,
             fb_dirty: false,
             pointer_tex: None,
@@ -540,12 +544,12 @@ impl Remote {
         let screen = ui.available_rect_before_wrap();
         let area = screen;
         let ppp = ctx.pixels_per_point();
-        ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(18, 19, 23));
         // Around the picture (scaled down, or of another shape), the background layers show, as
         // behind the terminals; black when there are none. They move only where a tenth of the
         // pane or more shows them: hidden, moving layers had the window drawn up to 40 times a
-        // second under a still screen (each of their frames made on the CPU).
-        super::look::backdrop(ui, area, Color32::BLACK, self.backdrop_shows);
+        // second under a still screen (each of their frames made on the CPU). Under the picture
+        // (where it was last frame) nothing is painted.
+        super::look::backdrop_around(ui, area, self.last_shown, Color32::BLACK, self.backdrop_shows);
         let inline = self.term_inline && self.terms.is_some();
         // Side panels, as in an editor: the chat on the right, the terminal along the bottom; the
         // picture takes what is left, so both can be used while watching.
@@ -1025,11 +1029,12 @@ impl Remote {
             s.shrink.run(&self.fb.rgb, self.fb.w, self.fb.h, self.fb.w * 3, w, h);
             let out = s.shrink.result();
             match (&mut s.tex, s.shrink.drawn) {
+                // Drawn pixel for pixel: taken texel for texel.
                 (Some(t), Some((y0, y1))) if !fresh => {
-                    t.set_partial([0, y0], ColorImage::from_rgb([w, y1 - y0], &out[y0 * w * 3..y1 * w * 3]), TextureOptions::LINEAR)
+                    t.set_partial([0, y0], ColorImage::from_rgb([w, y1 - y0], &out[y0 * w * 3..y1 * w * 3]), TextureOptions::NEAREST)
                 }
                 (Some(_), None) if !fresh => {}
-                _ => s.tex = Some(ctx.load_texture("remote-small", ColorImage::from_rgb([w, h], out), TextureOptions::LINEAR)),
+                _ => s.tex = Some(ctx.load_texture("remote-small", ColorImage::from_rgb([w, h], out), TextureOptions::NEAREST)),
             }
         }
         s.tex.as_ref().map(|t| t.id())
@@ -1037,7 +1042,7 @@ impl Remote {
 
     /// Draws the remote screen; returns where it is, in points.
     pub(super) fn picture(&mut self, ui: &mut egui::Ui, area: Rect, ppp: f32) -> Option<Rect> {
-        let tex = self.tex.as_ref()?;
+        self.tex.as_ref()?;
         let size = Vec2::new(self.fb.w as f32, self.fb.h as f32) / ppp;
         let rect = match self.fit {
             Fit::Window if self.fill_full && self.filling => area,
@@ -1068,10 +1073,17 @@ impl Remote {
         let px = (rect.size() * ppp).round();
         let (w, h) = (px.x as usize, px.y as usize);
         let (id, rect) = if w > 0 && h > 0 && w <= self.fb.w && h <= self.fb.h && (w, h) != (self.fb.w, self.fb.h) {
-            let id = tex.id();
-            (self.small_texture(ui.ctx(), w, h).unwrap_or(id), Rect::from_min_size(rect.min, px / ppp))
+            let id = self.tex.as_ref()?.id();
+            (self.small_texture(ui.ctx(), w, h).unwrap_or(id), Rect::from_min_size(on_pixels(rect.min, ppp), px / ppp))
         } else {
-            (tex.id(), rect)
+            let want = if (w, h) == (self.fb.w, self.fb.h) { TextureOptions::NEAREST } else { TextureOptions::LINEAR };
+            if want != self.tex_filter && self.fb.rgb.len() >= self.fb.w * self.fb.h * 3 {
+                self.tex_filter = want;
+                if let Some(t) = self.tex.as_mut() {
+                    t.set(ColorImage::from_rgb([self.fb.w, self.fb.h], &self.fb.rgb[..self.fb.w * self.fb.h * 3]), want);
+                }
+            }
+            (self.tex.as_ref()?.id(), rect)
         };
         let painter = ui.painter().with_clip_rect(area);
         painter.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
