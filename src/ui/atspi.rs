@@ -37,7 +37,13 @@ pub struct Ui {
     enabled: bool,
     /// While a window or program is shared: that window, or that application, as it was in front then.
     pinned: Option<(Ref, Option<Ref>)>,
+    /// The window last brought forward, taken as the one in front until another says it is
+    /// (the window manager may not have handed it the focus yet).
+    raised: Option<Ref>,
 }
+
+/// The desktop's own shells and panels, whose frames are not application windows.
+const SHELLS: [&str; 8] = ["gnome-shell", "plasmashell", "xfce4-panel", "mate-panel", "lxqt-panel", "cinnamon", "budgie-panel", "waybar"];
 
 fn err(e: zbus::Error) -> String {
     format!("accessibility bus: {e}")
@@ -78,7 +84,7 @@ fn informative(role: &str) -> bool {
 
 impl Ui {
     pub fn new() -> Self {
-        Ui { conn: None, elems: Vec::new(), windows: Vec::new(), enabled: false, pinned: None }
+        Ui { conn: None, elems: Vec::new(), windows: Vec::new(), enabled: false, pinned: None, raised: None }
     }
 
     /// Follows what is shared: 1 and 3 a window, 2 and 4 a program, 0 the whole screen.
@@ -195,7 +201,7 @@ impl Ui {
         let pinned = self.pinned.clone();
         for app in Self::children(conn, &root).await {
             // The shell's own panels and overlays are not application windows.
-            if Self::name(conn, &app).await == "gnome-shell" {
+            if SHELLS.contains(&Self::name(conn, &app).await.as_str()) {
                 continue;
             }
             // Sharing a program: only its windows.
@@ -211,8 +217,15 @@ impl Ui {
                 }
             }
         }
-        // Nothing marked active (no focus yet): the most recently opened window on screen.
-        if active.is_none() {
+        // Nothing marked active (no focus yet): the window just brought forward, else the most
+        // recently opened window on screen.
+        if let Some(r) = active.as_ref() {
+            if self.raised.as_ref() != Some(r) {
+                self.raised = None;
+            }
+        } else if let Some(i) = self.raised.as_ref().and_then(|r| windows.iter().position(|w| w == r)) {
+            active = Some(windows.remove(i));
+        } else {
             active = windows.pop();
         }
         // Sharing one window: that window, and nothing else to go to.
@@ -319,7 +332,11 @@ impl Ui {
 
     pub fn act(&mut self, target: u64, act: UiAction, text: &str) -> Result<Outcome, String> {
         let conn = self.conn()?.clone();
-        zbus::block_on(self.act_on(&conn, target, act, text))
+        let done = zbus::block_on(self.act_on(&conn, target, act, text));
+        if matches!(done, Ok(Outcome::Raise { .. })) {
+            self.raised = self.windows.get((target as usize).wrapping_sub(1)).cloned();
+        }
+        done
     }
 
     async fn act_on(&self, conn: &Connection, target: u64, act: UiAction, text: &str) -> Result<Outcome, String> {
