@@ -1,6 +1,6 @@
 [package]
 name = "sshremote"
-version = "0.25.44"
+version = "0.25.45"
 edition = "2024"
 description = "A workspace for many servers and projects: terminals, Markdown, screens and files over SSH"
 license = "MIT"
