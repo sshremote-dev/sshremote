@@ -446,8 +446,32 @@ fn read_frames(path: &str) -> Result<Vec<(egui::ColorImage, f64)>, String> {
 /// as chosen, moving if `play`. Returns the colour to fill with from then on: clear over a
 /// picture, else `base`.
 pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32, play: bool) -> Color32 {
+    backdrop_in(ui, rect, rect, base, play)
+}
+
+/// `backdrop` over `rect` but for `hole`, where something opaque is drawn anyway (a remote
+/// screen): under it, the background cost a software renderer two thirds of each frame.
+pub(crate) fn backdrop_around(ui: &egui::Ui, rect: Rect, hole: Option<Rect>, base: Color32, play: bool) {
+    let Some(h) = hole.map(|h| h.intersect(rect)).filter(|h| h.is_positive()) else {
+        backdrop(ui, rect, base, play);
+        return;
+    };
+    // Above, below, left of and right of the hole.
+    let strips = [
+        Rect::from_min_max(rect.min, Pos2::new(rect.max.x, h.min.y)),
+        Rect::from_min_max(Pos2::new(rect.min.x, h.max.y), rect.max),
+        Rect::from_min_max(Pos2::new(rect.min.x, h.min.y), Pos2::new(h.min.x, h.max.y)),
+        Rect::from_min_max(Pos2::new(h.max.x, h.min.y), Pos2::new(rect.max.x, h.max.y)),
+    ];
+    for s in strips.into_iter().filter(|s| s.is_positive()) {
+        backdrop_in(ui, rect, s, base, play);
+    }
+}
+
+/// The background of `rect` (where a pane's own picture is placed), painted within `clip` only.
+fn backdrop_in(ui: &egui::Ui, rect: Rect, clip: Rect, base: Color32, play: bool) -> Color32 {
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::ZERO, base);
+    painter.rect_filled(clip, CornerRadius::ZERO, base);
     if !PICTURE.load(Ordering::Relaxed) {
         return base;
     }
@@ -459,7 +483,7 @@ pub(crate) fn backdrop(ui: &egui::Ui, rect: Rect, base: Color32, play: bool) -> 
             Scope::Pane => rect,
             Scope::Window => ui.ctx().content_rect(),
         };
-        shown |= layer(ui, rect, place, &b.src, b.fit, b.strength, play);
+        shown |= layer(ui, clip, place, &b.src, b.fit, b.strength, play);
     }
     if shown { Color32::TRANSPARENT } else { base }
 }

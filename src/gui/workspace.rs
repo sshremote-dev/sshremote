@@ -1488,7 +1488,8 @@ impl Workspace {
             self.hold_pointer(&ctx, false);
             return Out { empty: true, grab: false };
         }
-        ui.painter().rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill);
+        // The panes' ground, painted once it is known whether anything shows it.
+        let ground = ui.painter().add(egui::Shape::Noop);
         // A zoom is of a pane in the tab shown; one left from another tab (or a closed pane) goes.
         if self.zoom.is_some_and(|z| self.tab_of(z) != Some(self.current)) {
             self.zoom = None;
@@ -1498,6 +1499,13 @@ impl Workspace {
         match self.zoom {
             Some(z) => rects.push((z, area)),
             None => tab.root.layout(ui, area, 0, &mut rects),
+        }
+        // A remote screen alone in the tab covers it all: the ground under it cost a software
+        // renderer a whole window of drawing each frame.
+        let screen_alone = matches!(rects.as_slice(), [(id, r)] if *r == area
+            && self.panes.iter().any(|p| p.id == *id && matches!(&p.state, State::Live(rm) if rm.mode() == PaneMode::Screen)));
+        if !screen_alone {
+            ui.painter().set(ground, egui::Shape::rect_filled(area, CornerRadius::ZERO, ui.visuals().panel_fill));
         }
         // Files dropped go to the pane they were dropped on, which becomes the active one.
         if ctx.input(|i| !i.raw.dropped_files.is_empty())
