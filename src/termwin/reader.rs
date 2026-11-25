@@ -734,6 +734,23 @@ pub(super) fn status_row(t: &Tab) -> bool {
     !default && (0..grid.columns()).all(|c| row[Column(c)].bg == first)
 }
 
+/// Whether the screen's last row is a pager's prompt (less's `:`, `(END)`, more's `--More--`,
+/// less -M's `lines 1-30/120`), the cursor on it: not text of what is paged through.
+pub(super) fn pager_prompt(t: &Tab) -> bool {
+    let grid = t.term.grid();
+    let last = grid.screen_lines() as i32 - 1;
+    if grid.cursor.point.line != Line(last) {
+        return false;
+    }
+    let plain = row_plain(t, last);
+    let s = plain.trim();
+    s.starts_with(':') && s.chars().count() <= grid.columns() / 3
+        || s == "(END)"
+        || s.ends_with("(END)")
+        || s.starts_with("--More--")
+        || s.split_whitespace().any(|w| w == "lines") && s.chars().any(|c| c == '/') && s.ends_with('%')
+}
+
 /// Markers an agent puts before a line, kept as they are ahead of the line's own formatting.
 pub(super) const LINE_MARKERS: [&str; 6] = ["● ", "⏺ ", "❯ ", "› ", "• ", "▎ "];
 

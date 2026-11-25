@@ -1298,3 +1298,28 @@ fn rows_coming_above_leave_the_markdown_view_where_it_is() {
     assert!(top == 0, "the wheel went on to the start, at row {top}");
     assert!(against.is_empty(), "moved against the wheel: {against:#?}");
 }
+
+/// A pager's prompt (less's `:`, its cursor there) is no text of what it pages through: it stays
+/// out of the record, where scrolling back once wrote it over a row of the document each time.
+#[test]
+fn a_pagers_prompt_is_not_part_of_the_record() {
+    let mut w = TermWindow::new(None);
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))), ..Default::default() };
+    egui::Context::default().run_test(input, |ui| {
+        w.embedded(ui);
+    });
+    let t = &mut w.tabs[0];
+    t.parser.advance(&mut t.term, b"\x1b[?1049h");
+    let n = t.term.grid().screen_lines();
+    let mut rows: Vec<String> = (0..n - 1).map(|k| format!("Line {k} of the file")).collect();
+    rows.push(":".into());
+    draw(t, &rows);
+    assert!(reader::pager_prompt(t), "less's prompt, the cursor after it");
+    // The same row with the cursor elsewhere is the file's own text.
+    t.parser.advance(&mut t.term, b"\x1b[1;1H");
+    assert!(!reader::pager_prompt(t));
+    let mut rows: Vec<String> = (0..n - 1).map(|k| format!("Line {k}")).collect();
+    rows.push("(END)".into());
+    draw(t, &rows);
+    assert!(reader::pager_prompt(t), "at the file's end");
+}

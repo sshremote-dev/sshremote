@@ -183,7 +183,7 @@ fn content_rows(t: &Tab) -> (usize, Vec<bool>) {
     if let Some(r2) = (low..n).rev().find(|&p| rule(p)) {
         end = (r2.saturating_sub(6).max(low)..r2).rev().find(|&p| rule(p)).unwrap_or(r2);
     }
-    if status_row(t) {
+    if status_row(t) || pager_prompt(t) {
         end = end.min(n - 1);
     }
     let skip = (0..n)
