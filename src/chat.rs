@@ -903,6 +903,7 @@ impl eframe::App for ChatApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        crate::gui::gpu::frame();
         if let Some(f) = self.give_back.take() {
             f();
         }

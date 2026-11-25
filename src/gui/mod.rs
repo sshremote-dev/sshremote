@@ -43,6 +43,7 @@ pub(crate) mod project;
 pub(crate) mod wl_drop;
 mod extui;
 mod dock;
+pub(crate) mod gpu;
 pub(crate) mod held;
 pub(crate) mod launcher;
 mod toast;
@@ -504,11 +505,8 @@ pub fn run_tray() -> Result<(), String> {
 }
 
 pub fn native_options(title: &str, size: [f32; 2]) -> eframe::NativeOptions {
-    #[cfg(windows)]
-    if std::env::var_os("WGPU_BACKEND").is_none() {
-        // Direct3D 12 works on every Windows 10/11 GPU, including drivers whose Vulkan or OpenGL is broken.
-        unsafe { std::env::set_var("WGPU_BACKEND", "dx12") };
-    }
+    // Direct3D 12 on Windows, OpenGL where its driver died in it.
+    gpu::choose();
     let mut native = eframe::NativeOptions {
         // Every window draws its own title bar (see chrome).
         viewport: chrome::framed(egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_min_inner_size([320.0, 240.0])),
@@ -955,6 +953,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        gpu::frame();
         (self.unseen, self.drawn) = (0, std::time::Instant::now());
         lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
