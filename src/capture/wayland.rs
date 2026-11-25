@@ -127,7 +127,7 @@ impl Capture for Wayland {
         self.screens()
             .iter()
             .enumerate()
-            .map(|(i, s)| super::Monitor { name: format!("screen {}", i + 1), w: s.size.0.max(0) as usize, h: s.size.1.max(0) as usize, primary: i == 0 })
+            .map(|(i, s)| super::Monitor { name: format!("screen {}", i + 1), w: s.size.0.max(0) as usize, h: s.size.1.max(0) as usize, primary: i == 0, at: Some(s.at) })
             .collect()
     }
 

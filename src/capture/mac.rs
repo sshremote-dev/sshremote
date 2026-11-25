@@ -1274,7 +1274,7 @@ impl Capture for Mac {
 
     fn monitors(&self) -> Vec<Monitor> {
         let main = CGMainDisplayID();
-        self.displays.iter().enumerate().map(|(i, d)| Monitor { name: format!("display {}", i + 1), w: d.pixels.0, h: d.pixels.1, primary: d.id == main }).collect()
+        self.displays.iter().enumerate().map(|(i, d)| Monitor { name: format!("display {}", i + 1), w: d.pixels.0, h: d.pixels.1, primary: d.id == main, at: Some((d.at.0 as i32, d.at.1 as i32)) }).collect()
     }
 
     fn current(&self) -> usize {

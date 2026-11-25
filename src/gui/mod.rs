@@ -1053,10 +1053,11 @@ impl eframe::App for App {
                 self.error = Some(e);
             }
             self.quick_open(&ctx, &mut w);
-            self.spread_screens(&ctx, None, &mut w);
+            self.spread_screens(&ctx, &mut w);
             self.screen = Screen::Work(w);
         }
         let window_grab = self.other_windows(&ctx, window_keys, &mut reached);
+        self.end_groups();
         // The main window closing (told yes) ends the app: other windows' programs are asked first.
         if closing && !self.quit_waits && !self.quitting && !self.ask_programs() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -1286,39 +1287,77 @@ impl App {
         self.keep_session(main);
     }
 
-    /// A window of its own for a tab dragged out, its tab under the screen point `at`.
     /// Opens the host's other screens workspace `w` asked for, each in a window of its own. With
-    /// several monitors here, each window goes full screen on the monitor numbered as its screen
-    /// is (the asking window too), as Remote Desktop's "use all my monitors"; with one, they open
-    /// side by side.
-    fn spread_screens(&mut self, ctx: &egui::Context, from: Option<egui::ViewportId>, w: &mut workspace::Workspace) {
+    /// several monitors here, each window goes full screen on the monitor that lies where its
+    /// screen does on the host (the asking window too), as Remote Desktop's "use all my
+    /// monitors"; leaving full screen in one of them ends it in all. With one, they open side by side.
+    fn spread_screens(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
         if w.spread.is_empty() {
             return;
         }
         let locals = crate::sys::monitors();
-        let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
-        // A window's top left for the middle of monitor `n` here, in points.
-        let on = |n: usize| locals.get(n).map(|&(x, y, wd, h)| Pos2::new((x + wd / 2) as f32 / ppp - 550.0, (y + h / 2) as f32 / ppp - 360.0));
         let full = locals.len() > 1;
+        let pairs = dock::pair(&w.spread_layout, &locals);
+        let target = |screen: usize| pairs.get(screen).copied().flatten().map(|l| locals[l]).filter(|_| full);
+        self.windows_made += 1;
+        let group = self.windows_made;
         if let Some(shown) = w.spread_from.take()
-            && full
-            && let Some(at) = on(shown)
+            && let Some(m) = target(shown)
         {
-            ctx.send_viewport_cmd_to(from.unwrap_or(egui::ViewportId::ROOT), ViewportCommand::OuterPosition(at));
-            w.full_screen_soon();
+            w.group = Some(group);
+            w.full_on(ctx, m.index);
         }
         for (k, s) in w.spread.drain(..).enumerate() {
             let mut screen = workspace::Workspace::new(self.options());
             screen.set_preset(self.form.preset);
-            let start = PaneStart { fullscreen: full && s.screen < locals.len(), ..Default::default() };
-            screen.add_with(s.launch, s.prefs, start);
-            let at = on(s.screen).unwrap_or(Pos2::new(140.0 + 48.0 * k as f32, 120.0 + 48.0 * k as f32));
+            let to = target(s.screen);
+            screen.add_with(s.launch, s.prefs, PaneStart { fullscreen: to.is_some(), ..Default::default() });
+            if let Some(m) = to {
+                (screen.group, screen.group_member) = (Some(group), true);
+                screen.full_on(ctx, m.index);
+            }
             self.windows_made += 1;
             let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
-            self.windows.push((id, Box::new(screen), at));
+            self.windows.push((id, Box::new(screen), Pos2::new(140.0 + 48.0 * k as f32, 120.0 + 48.0 * k as f32)));
         }
     }
 
+    /// Full screen on all monitors ended in one window of a group: it ends in the others too.
+    fn end_groups(&mut self) {
+        let mut ended = Vec::new();
+        let mut note = |w: &mut workspace::Workspace| {
+            if std::mem::take(&mut w.group_left)
+                && let Some(g) = w.group.take()
+            {
+                ended.push(g);
+                if w.group_member {
+                    w.leave_group = true;
+                    w.group = Some(g);
+                }
+            }
+        };
+        if let Screen::Work(w) = &mut self.screen {
+            note(w);
+        }
+        for (_, w, _) in &mut self.windows {
+            note(w);
+        }
+        if ended.is_empty() {
+            return;
+        }
+        if let Screen::Work(w) = &mut self.screen
+            && w.group.is_some_and(|g| ended.contains(&g))
+        {
+            w.leave_group = true;
+        }
+        for (_, w, _) in &mut self.windows {
+            if w.group.is_some_and(|g| ended.contains(&g)) {
+                w.leave_group = true;
+            }
+        }
+    }
+
+    /// A window of its own for a tab dragged out, its tab under the screen point `at`.
     fn tear_off(&mut self, w: workspace::Workspace, at: Pos2) {
         self.windows_made += 1;
         let id = egui::ViewportId::from_hash_of(("workspace-window", self.windows_made));
@@ -1430,7 +1469,13 @@ impl App {
         windows.retain_mut(|(id, w, at)| {
             let mut keep = true;
             let mut builder = chrome::framed(
-                egui::ViewportBuilder::default().with_title("SSH Remote").with_inner_size([1100.0, 720.0]).with_min_inner_size(MIN_WORK).with_position(*at),
+                egui::ViewportBuilder::default()
+                    .with_title("SSH Remote")
+                    // As the main window's: one app to the desktop's task bar under Wayland.
+                    .with_app_id("sshremote")
+                    .with_inner_size([1100.0, 720.0])
+                    .with_min_inner_size(MIN_WORK)
+                    .with_position(*at),
             );
             if let Some(icon) = app_icon() {
                 builder = builder.with_icon(icon);
@@ -1457,7 +1502,7 @@ impl App {
                     grab = Some(*id);
                 }
                 self.quick_open(&ctx, w);
-                self.spread_screens(&ctx, Some(*id), w);
+                self.spread_screens(&ctx, w);
             });
             keep
         });

@@ -58,10 +58,48 @@ pub fn pointer_on_screen() -> Option<(i32, i32)> {
     None
 }
 
-/// This computer's monitors as the system places them, in pixels (left, top, width, height):
-/// the primary first, then from left to right, as the agent numbers a host's. Windows only (a
-/// Wayland session does not let a program place its windows); empty elsewhere.
-pub fn monitors() -> Vec<(i32, i32, i32, i32)> {
+/// One of this computer's monitors as the system places it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Local {
+    /// Its number in the windowing library's own order: what `ViewportCommand::SetMonitor` takes.
+    pub index: usize,
+    /// Its top left and size: pixels, points on macOS, the compositor's units under Wayland.
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub primary: bool,
+}
+
+/// This computer's monitors: the primary first, then from left to right, as the agent numbers a
+/// host's. Empty where they cannot be read.
+pub fn monitors() -> Vec<Local> {
+    #[cfg(test)]
+    if let Some(list) = TEST_MONITORS.with(|t| t.borrow().clone()) {
+        return list;
+    }
+    // Read again at most every two seconds: a menu asks each frame it is open.
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Vec<Local>)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, list)) = last.as_ref()
+        && at.elapsed() < std::time::Duration::from_secs(2)
+    {
+        return list.clone();
+    }
+    let mut list = monitors_listed();
+    list.sort_by_key(|m| (!m.primary, m.x, m.y));
+    *last = Some((std::time::Instant::now(), list.clone()));
+    list
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the monitors this computer seems to have.
+    pub static TEST_MONITORS: std::cell::RefCell<Option<Vec<Local>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The monitors in the order winit lists them (`available_monitors`), so `index` is its own.
+fn monitors_listed() -> Vec<Local> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{LPARAM, RECT};
@@ -69,23 +107,146 @@ pub fn monitors() -> Vec<(i32, i32, i32, i32)> {
         use windows_sys::core::BOOL;
         unsafe extern "system" fn add(m: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
             // SAFETY: `list` is the vector handed to EnumDisplayMonitors below, alive for its call.
-            let list = unsafe { &mut *(list as *mut Vec<(bool, i32, i32, i32, i32)>) };
+            let list = unsafe { &mut *(list as *mut Vec<Local>) };
             let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
             mi.cbSize = size_of::<MONITORINFO>() as u32;
             if unsafe { GetMonitorInfoW(m, &mut mi) } != 0 {
                 let r = mi.rcMonitor;
-                list.push((mi.dwFlags & 1 != 0, r.left, r.top, r.right - r.left, r.bottom - r.top));
+                let index = list.len();
+                list.push(Local { index, x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top, primary: mi.dwFlags & 1 != 0 });
             }
             1
         }
-        let mut list: Vec<(bool, i32, i32, i32, i32)> = Vec::new();
+        let mut list: Vec<Local> = Vec::new();
         // SAFETY: the callback only writes into `list`, which outlives the call.
         unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(add), &mut list as *mut _ as LPARAM) };
-        list.sort_by_key(|m| (!m.0, m.1, m.2));
-        list.into_iter().map(|m| (m.1, m.2, m.3, m.4)).collect()
+        list
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", feature = "remote"))]
+    {
+        use objc2_core_graphics::{CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID};
+        let (mut ids, mut n) = ([0u32; 16], 0u32);
+        // SAFETY: room for 16 displays; their count is written back.
+        unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+        let main = CGMainDisplayID();
+        ids[..(n as usize).min(16)]
+            .iter()
+            .enumerate()
+            .map(|(index, &id)| {
+                let b = CGDisplayBounds(id);
+                let (x, y, w, h) = (b.origin.x as i32, b.origin.y as i32, b.size.width as i32, b.size.height as i32);
+                Local { index, x, y, w, h, primary: id == main }
+            })
+            .collect()
+    }
+    #[cfg(all(target_os = "linux", feature = "remote", feature = "gui"))]
+    {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty()) || std::env::var_os("WAYLAND_SOCKET").is_some();
+        if wayland && let Some(list) = wayland_outputs() {
+            return list;
+        }
+        x11_monitors().unwrap_or_default()
+    }
+    #[cfg(not(any(windows, all(target_os = "macos", feature = "remote"), all(target_os = "linux", feature = "remote", feature = "gui"))))]
     Vec::new()
+}
+
+/// X11: the CRTCs that show something, as winit lists them; the primary is the one whose first
+/// output RandR names primary, else the first.
+#[cfg(all(target_os = "linux", feature = "remote", feature = "gui"))]
+fn x11_monitors() -> Option<Vec<Local>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::randr::ConnectionExt;
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen)?.root;
+    let res = conn.randr_get_screen_resources_current(root).ok()?.reply().ok()?;
+    let primary = conn.randr_get_output_primary(root).ok()?.reply().ok()?.output;
+    let mut list = Vec::new();
+    for crtc in res.crtcs {
+        let Some(c) = conn.randr_get_crtc_info(crtc, x11rb::CURRENT_TIME).ok().and_then(|c| c.reply().ok()) else { continue };
+        if c.width == 0 || c.height == 0 || c.outputs.is_empty() {
+            continue;
+        }
+        let index = list.len();
+        list.push(Local { index, x: c.x as i32, y: c.y as i32, w: c.width as i32, h: c.height as i32, primary: c.outputs[0] == primary });
+    }
+    if !list.iter().any(|m| m.primary)
+        && let Some(first) = list.first_mut()
+    {
+        first.primary = true;
+    }
+    Some(list)
+}
+
+/// Wayland: the outputs in the order the compositor announces them, as winit binds them, placed
+/// where xdg-output says (wl_output's own place is 0,0 under wlroots); none is primary there, so
+/// the one at the far left takes its place.
+#[cfg(all(target_os = "linux", feature = "remote", feature = "gui"))]
+fn wayland_outputs() -> Option<Vec<Local>> {
+    use wayland_client::protocol::wl_output::{self, WlOutput};
+    use wayland_client::protocol::wl_registry::{self, WlRegistry};
+    use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+    use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
+    use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
+    #[derive(Default)]
+    struct Outs {
+        list: Vec<(WlOutput, Local)>,
+        manager: Option<ZxdgOutputManagerV1>,
+    }
+    impl Dispatch<WlRegistry, ()> for Outs {
+        fn event(s: &mut Self, reg: &WlRegistry, ev: wl_registry::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
+            if let wl_registry::Event::Global { name, interface, version } = ev {
+                if interface == "wl_output" {
+                    let index = s.list.len();
+                    let out = reg.bind::<WlOutput, usize, Self>(name, version.min(4), qh, index);
+                    s.list.push((out, Local { index, x: 0, y: 0, w: 0, h: 0, primary: false }));
+                } else if interface == "zxdg_output_manager_v1" {
+                    s.manager = Some(reg.bind::<ZxdgOutputManagerV1, (), Self>(name, version.min(3), qh, ()));
+                }
+            }
+        }
+    }
+    impl Dispatch<WlOutput, usize> for Outs {
+        fn event(s: &mut Self, _: &WlOutput, ev: wl_output::Event, index: &usize, _: &Connection, _: &QueueHandle<Self>) {
+            let Some((_, m)) = s.list.get_mut(*index) else { return };
+            match ev {
+                wl_output::Event::Geometry { x, y, .. } => (m.x, m.y) = (x, y),
+                wl_output::Event::Mode { flags: WEnum::Value(f), width, height, .. } if f.contains(wl_output::Mode::Current) => (m.w, m.h) = (width, height),
+                _ => {}
+            }
+        }
+    }
+    impl Dispatch<ZxdgOutputManagerV1, ()> for Outs {
+        fn event(_: &mut Self, _: &ZxdgOutputManagerV1, _: <ZxdgOutputManagerV1 as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    }
+    impl Dispatch<ZxdgOutputV1, usize> for Outs {
+        fn event(s: &mut Self, _: &ZxdgOutputV1, ev: zxdg_output_v1::Event, index: &usize, _: &Connection, _: &QueueHandle<Self>) {
+            let Some((_, m)) = s.list.get_mut(*index) else { return };
+            match ev {
+                zxdg_output_v1::Event::LogicalPosition { x, y } => (m.x, m.y) = (x, y),
+                zxdg_output_v1::Event::LogicalSize { width, height } => (m.w, m.h) = (width, height),
+                _ => {}
+            }
+        }
+    }
+    let conn = Connection::connect_to_env().ok()?;
+    let mut queue = conn.new_event_queue();
+    let qh = queue.handle();
+    conn.display().get_registry(&qh, ());
+    let mut outs = Outs::default();
+    queue.roundtrip(&mut outs).ok()?;
+    queue.roundtrip(&mut outs).ok()?;
+    if let Some(manager) = outs.manager.clone() {
+        for (i, (out, _)) in outs.list.iter().enumerate() {
+            manager.get_xdg_output(out, &qh, i);
+        }
+        queue.roundtrip(&mut outs).ok()?;
+    }
+    let mut list: Vec<Local> = outs.list.into_iter().map(|(_, m)| m).collect();
+    if let Some(left) = list.iter().map(|m| (m.x, m.y, m.index)).min().map(|l| l.2) {
+        list[left].primary = true;
+    }
+    Some(list)
 }
 
 /// Now, in seconds since 1970.

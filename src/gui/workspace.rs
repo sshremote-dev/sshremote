@@ -317,6 +317,16 @@ pub(super) struct Workspace {
     /// screen this window shows, to put it on the matching monitor here.
     pub(super) spread: Vec<Spread>,
     pub(super) spread_from: Option<usize>,
+    /// Where the host's screens lie beside each other (its cameras apart), for the spread asked.
+    pub(super) spread_layout: Vec<Option<(i32, i32)>>,
+    /// Full screen on all monitors: the windows showing one host's screens together share this.
+    pub(super) group: Option<u64>,
+    /// This window was opened for such a group, and closes when it ends.
+    pub(super) group_member: bool,
+    /// Full screen ended here while in a group: the app ends it in the group's other windows.
+    pub(super) group_left: bool,
+    /// The group ended elsewhere: this window leaves full screen too, or closes if opened for it.
+    pub(super) leave_group: bool,
     /// Frames to wait before full screen (the window is being moved to its monitor first).
     full_later: Option<u32>,
     /// A tab let go away from this bar, and where on the screen: the app moves it into the
@@ -392,6 +402,11 @@ impl Workspace {
             drag_out: None,
             spread: Vec::new(),
             spread_from: None,
+            spread_layout: Vec::new(),
+            group: None,
+            group_member: false,
+            group_left: false,
+            leave_group: false,
             full_later: None,
             dropped: None,
             strip_screen: Rect::NOTHING,
@@ -426,6 +441,60 @@ impl Workspace {
     /// Goes full screen in a few frames, once the window stands on the monitor it was moved to.
     pub(super) fn full_screen_soon(&mut self) {
         self.full_later = Some(3);
+    }
+
+    /// Full screen on monitor `monitor` here (the windowing library's number for it), once the
+    /// window has settled.
+    pub(super) fn full_on(&mut self, ctx: &egui::Context, monitor: usize) {
+        self.full.monitor = Some(monitor);
+        // A window in full screen is let out first: X11 window managers keep a full-screen
+        // window where it is when it is moved.
+        self.full.set(ctx, false);
+        self.full_screen_soon();
+    }
+
+    /// The group of windows in full screen on all monitors ended: out of full screen, or closed
+    /// if this window was opened for it.
+    fn end_group(&mut self, ctx: &egui::Context) {
+        self.group = None;
+        self.full.monitor = None;
+        if std::mem::take(&mut self.group_member) {
+            self.close_all();
+        } else if self.full.on {
+            self.set_full(ctx, false);
+        }
+    }
+
+    /// A window in full screen (from the start, `--fullscreen`) learns its host has several
+    /// screens: they spread over this computer's monitors as full screen would have.
+    #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
+    fn spread_late(&mut self) {
+        let active = self.active_id();
+        let mut heard = false;
+        for p in &mut self.panes {
+            if let State::Live(r) = &mut p.state {
+                heard |= std::mem::take(&mut r.screens_heard) && Some(p.id) == active;
+            }
+        }
+        if heard && self.full.on {
+            self.spread_instead();
+        }
+    }
+
+    /// Full screen asked for a host with several screens while this computer has several
+    /// monitors: its screens spread over them instead, a window each (the active pane's).
+    #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
+    fn spread_instead(&mut self) -> bool {
+        if self.group.is_some() || !super::dock::all_monitors() {
+            return false;
+        }
+        let Some(i) = self.active_id().and_then(|a| self.index(a)) else { return false };
+        let State::Live(r) = &mut self.panes[i].state else { return false };
+        if r.mode() != PaneMode::Screen || r.monitors().0 < 2 || crate::sys::monitors().len() < 2 {
+            return false;
+        }
+        r.spread_asked = true;
+        true
     }
 
     /// Opens what the home window or Quick open chose, in a new tab or beside the active pane.
@@ -1193,8 +1262,14 @@ impl Workspace {
             self.toasts.push(&format!("Not full screen: {why}"));
             return;
         }
+        if on && !self.full.on && self.spread_instead() {
+            return;
+        }
         if !self.full.set(ctx, on) {
             return;
+        }
+        if !on && self.group.is_some() {
+            self.group_left = true;
         }
         if on {
             self.dock.greet(ctx.input(|i| i.time));
@@ -1287,6 +1362,7 @@ impl Workspace {
                 && std::mem::take(&mut r.spread_asked)
             {
                 let (n, shown) = r.monitors();
+                self.spread_layout = r.screen_places();
                 for m in (0..n).filter(|m| *m != shown) {
                     let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
                     self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
@@ -1299,6 +1375,9 @@ impl Workspace {
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, grabbed: Vec<(u32, bool)>) -> Out {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
+        if std::mem::take(&mut self.leave_group) {
+            self.end_group(&ctx);
+        }
         if self.tabs.is_empty() {
             self.hold_pointer(&ctx, false);
             return Out { empty: true, grab: false };
@@ -1314,6 +1393,9 @@ impl Workspace {
         let mut remote_action: Option<(u64, remote::Deferred)> = None;
         if self.full.follow_system(&ctx) {
             self.left_full();
+            if self.group.is_some() {
+                self.group_left = true;
+            }
         }
         // A tab come to the front (or a program opened) in full screen that it would hide.
         if self.full.on
@@ -1492,6 +1574,7 @@ impl Workspace {
         {
             lost.push((i, e));
         }
+        self.spread_late();
         self.spread_screens();
         if let Some(n) = self.full_later.as_mut() {
             if *n == 0 {

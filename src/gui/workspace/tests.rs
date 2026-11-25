@@ -1530,3 +1530,43 @@ fn a_named_computer_is_reached_as_its_host() {
     assert_eq!(reached_as(&ssh, "Build box"), "dev@build");
     assert_eq!(reached_as(&Target::Local { capture: "auto".into() }, "This computer"), "This computer");
 }
+
+/// Full screen asked for a host with two screens, with two monitors here: its screens spread
+/// over them instead, a window each, as they lie; the window goes full screen on its monitor once
+/// the app has grouped it, and leaving full screen there ends the group.
+#[test]
+#[ignore]
+fn full_screen_uses_all_my_monitors_for_a_host_with_several_screens() {
+    let mut h = Harness::new();
+    let launch = Launch::Agent { target: Target::Local { capture: "synthetic2".into() }, label: "Two screens".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(launch, Place::Tab, PaneStart::default());
+    h.until("connected", |w| live(w, 0));
+    h.until("its two screens known", |w| matches!(&w.panes[0].state, State::Live(r) if r.monitors().0 == 2));
+    let monitor = |index, x| crate::sys::Local { index, x, y: 0, w: 1920, h: 1080, primary: index == 0 };
+    crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = Some(vec![monitor(0, 1920), monitor(1, 0)]));
+    let ctx = h.ctx.clone();
+    h.w.set_full(&ctx, true);
+    assert!(!h.w.full.on, "not full screen on one monitor");
+    assert_eq!((h.w.spread.len(), h.w.spread_from), (0, None), "asked of the pane, gathered next frame");
+    h.frame(Vec::new());
+    assert_eq!((h.w.spread.len(), h.w.spread_from), (1, Some(0)));
+    assert_eq!(h.w.spread_layout, [Some((0, 0)), Some((1280, 0))], "two 1280-wide screens side by side");
+    // The host's left screen goes on the monitor at the left here (its number 1).
+    let locals = crate::sys::monitors();
+    let pairs = crate::gui::dock::pair(&h.w.spread_layout, &locals);
+    assert_eq!(pairs.iter().map(|p| p.map(|l| locals[l].index)).collect::<Vec<_>>(), [Some(1), Some(0)]);
+    // What the app does: the window joins a group and goes full screen on its monitor.
+    h.w.spread.clear();
+    h.w.group = Some(7);
+    h.w.full_on(&ctx, 1);
+    h.until("full screen", |w| w.full.on);
+    assert_eq!(h.w.full.monitor, Some(1));
+    // Out of full screen here: the app is told, to end it in the group's other windows.
+    h.w.set_full(&ctx, false);
+    assert!(h.w.group_left && !h.w.full.on);
+    // A window opened for the group closes when it ends.
+    h.w.group_member = true;
+    h.w.leave_group = true;
+    h.until("closed", |w| w.panes.is_empty());
+    crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = None);
+}

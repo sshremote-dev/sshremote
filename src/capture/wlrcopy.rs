@@ -547,7 +547,7 @@ impl Capture for WlrCopy {
             .outs
             .iter()
             .enumerate()
-            .map(|(i, o)| Monitor { name: o.name.clone(), w: o.size.0.max(0) as usize, h: o.size.1.max(0) as usize, primary: i == 0 })
+            .map(|(i, o)| Monitor { name: o.name.clone(), w: o.size.0.max(0) as usize, h: o.size.1.max(0) as usize, primary: i == 0, at: Some(o.at) })
             .collect()
     }
 

@@ -25,6 +25,9 @@ pub(super) struct FullScreen {
     seen: bool,
     /// The pane zoomed on the way in (a screen in a split tab), zoomed out again on the way out.
     pub zoomed: Option<u64>,
+    /// The monitor here to cover (the windowing library's number for it), when one is meant: full
+    /// screen on all monitors puts each window on its own.
+    pub monitor: Option<usize>,
 }
 
 impl FullScreen {
@@ -40,7 +43,10 @@ impl FullScreen {
             if self.was_maximized {
                 ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
             }
-            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
+            ctx.send_viewport_cmd(match self.monitor {
+                Some(m) => ViewportCommand::SetMonitor(m),
+                None => ViewportCommand::Fullscreen(true),
+            });
         } else {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             if self.was_maximized {
@@ -64,6 +70,31 @@ impl FullScreen {
         }
         false
     }
+}
+
+/// Whether full screen spreads a host's several screens over this computer's several monitors, a
+/// window each, as Remote Desktop's "use all my monitors" (the setting; on unless turned off).
+pub(super) fn all_monitors() -> bool {
+    crate::hosts::setting("all_monitors").is_none_or(|v| v != "no")
+}
+
+/// Which of this computer's monitors (an index into `locals`) each of a host's screens covers.
+/// Both are taken as they lie, left to right, then top to bottom: the n-th of the host's on the
+/// n-th here, so the pointer crosses from one picture to the next where it would on the host.
+/// Without the host's places (an older agent), its own order meets this computer's (the primary
+/// first, then left to right). A screen beyond the monitors here gets none.
+pub(super) fn pair(host: &[Option<(i32, i32)>], locals: &[crate::sys::Local]) -> Vec<Option<usize>> {
+    let mut theirs: Vec<usize> = (0..host.len()).collect();
+    let mut ours: Vec<usize> = (0..locals.len()).collect();
+    if host.iter().all(Option::is_some) {
+        theirs.sort_by_key(|&i| host[i]);
+        ours.sort_by_key(|&i| (locals[i].x, locals[i].y));
+    }
+    let mut out = vec![None; host.len()];
+    for (&h, &l) in theirs.iter().zip(&ours) {
+        out[h] = Some(l);
+    }
+    out
 }
 
 /// What the folded dock says about the active pane.
@@ -326,5 +357,33 @@ pub(super) fn rtt_colour(rtt: f32) -> Color32 {
         r if r < 80.0 => super::good(),
         r if r < 250.0 => super::warn(),
         _ => super::bad(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pair;
+    use crate::sys::Local;
+
+    fn at(index: usize, x: i32, y: i32, primary: bool) -> Local {
+        Local { index, x, y, w: 1920, h: 1080, primary }
+    }
+
+    #[test]
+    fn a_hosts_screens_cover_the_monitors_here_as_both_lie() {
+        // Here: the primary on the right, listed first; the other on the left.
+        let here = [at(0, 1920, 0, true), at(1, 0, 0, false)];
+        // The host's primary is on the left: its left screen goes left here, its right one right.
+        assert_eq!(pair(&[Some((0, 0)), Some((2560, 0))], &here), [Some(1), Some(0)]);
+        // Its primary on the right, listed first.
+        assert_eq!(pair(&[Some((1920, 0)), Some((-1920, 200))], &here), [Some(0), Some(1)]);
+        // Three of its screens on two monitors: the one at its right gets none.
+        assert_eq!(pair(&[Some((0, 0)), Some((1920, 0)), Some((3840, 0))], &here), [Some(1), Some(0), None]);
+        // An older agent tells no places: its order meets this computer's.
+        assert_eq!(pair(&[None, None], &here), [Some(0), Some(1)]);
+        // One above the other here and there.
+        let stacked = [at(0, 0, 0, true), at(1, 0, -1080, false)];
+        assert_eq!(pair(&[Some((0, 0)), Some((0, 1440))], &stacked), [Some(1), Some(0)]);
+        assert_eq!(pair(&[Some((0, 0))], &[]), [None]);
     }
 }

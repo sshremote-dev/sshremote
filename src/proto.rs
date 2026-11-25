@@ -335,6 +335,8 @@ pub struct MonitorInfo {
     pub w: u16,
     pub h: u16,
     pub primary: bool,
+    /// Its top left on the host's desktop (None from an agent older than 0.25.38, or a camera).
+    pub at: Option<(i32, i32)>,
 }
 
 impl MonitorInfo {
@@ -1351,6 +1353,13 @@ impl ToClient {
                     b.extend_from_slice(&m.h.to_le_bytes());
                     b.push(m.primary as u8);
                 }
+                // Appended after the list, so older viewers still read it.
+                for m in list {
+                    let (x, y) = m.at.unwrap_or_default();
+                    b.push(m.at.is_some() as u8);
+                    b.extend_from_slice(&x.to_le_bytes());
+                    b.extend_from_slice(&y.to_le_bytes());
+                }
                 112
             }
             ToClient::FileDone { id, ok, text } => {
@@ -1570,7 +1579,13 @@ impl ToClient {
                 let n = c.u32()? as usize;
                 let mut list = Vec::with_capacity(n.min(64));
                 for _ in 0..n {
-                    list.push(MonitorInfo { name: c.str()?, w: c.u16()?, h: c.u16()?, primary: c.u8()? != 0 });
+                    list.push(MonitorInfo { name: c.str()?, w: c.u16()?, h: c.u16()?, primary: c.u8()? != 0, at: None });
+                }
+                if c.d.len() - c.p >= list.len() * 9 {
+                    for m in list.iter_mut() {
+                        let (known, x, y) = (c.u8()? != 0, c.u32()? as i32, c.u32()? as i32);
+                        m.at = known.then_some((x, y));
+                    }
                 }
                 ToClient::Monitors { list, current }
             }
@@ -1716,7 +1731,7 @@ mod tests {
             ToClient::PortClosed { id: 2 },
             ToClient::ClipFiles(vec![ClipFile { path: "C:/a.txt".into(), size: 5, dir: false }, ClipFile { path: "/home/x/photos".into(), size: 1 << 33, dir: true }]),
             ToClient::Monitors {
-                list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true }],
+                list: vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((-1920, 0)) }, MonitorInfo { name: "Camera: front".into(), w: 0, h: 0, primary: false, at: None }],
                 current: 0,
             },
             ToClient::Modes { list: vec![(2560, 1440), (1920, 1080)], current: (1920, 1080), own: (2560, 1440) },
@@ -1734,8 +1749,15 @@ mod tests {
             let (k, p) = m.encode();
             assert_eq!(ToAgent::decode(k, &p).unwrap(), m);
         }
+        // An older agent's list of screens, without their places, still reads; its places are unknown.
+        let list = vec![MonitorInfo { name: "DP-1".into(), w: 2560, h: 1440, primary: true, at: Some((0, 0)) }];
+        let (k, p) = ToClient::Monitors { list, current: 0 }.encode();
+        match ToClient::decode(k, &p[..p.len() - 9]).unwrap() {
+            ToClient::Monitors { list, .. } => assert_eq!((list.len(), list[0].w, list[0].at), (1, 2560, None)),
+            m => panic!("{m:?}"),
+        }
         // A picture no screen sends is refused before anything is allocated for it.
-        let huge = ToClient::Frame(Frame { id: 1, w: 65535, h: 65535, mode: Mode::Mono, moves: vec![], palette: None, tiles: vec![], video: None });
+        let huge =ToClient::Frame(Frame { id: 1, w: 65535, h: 65535, mode: Mode::Mono, moves: vec![], palette: None, tiles: vec![], video: None });
         let (k, p) = huge.encode();
         assert!(ToClient::decode(k, &p).is_err());
         let wide = ToClient::Frame(Frame { id: 1, w: 15360, h: 2160, mode: Mode::Mono, moves: vec![], palette: None, tiles: vec![], video: None });

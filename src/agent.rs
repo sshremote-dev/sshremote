@@ -1571,7 +1571,7 @@ fn monitors(cap: &dyn capture::Capture) -> ToClient {
     let list = cap
         .monitors()
         .into_iter()
-        .map(|m| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary })
+        .map(|m| crate::proto::MonitorInfo { name: m.name, w: m.w as u16, h: m.h as u16, primary: m.primary, at: m.at })
         .collect();
     ToClient::Monitors { list, current: cap.current() as u8 }
 }

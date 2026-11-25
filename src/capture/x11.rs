@@ -248,7 +248,7 @@ impl X11 {
         };
         x.screens = x.read_monitors().unwrap_or_default();
         if x.screens.is_empty() {
-            x.screens.push((Monitor { name: "screen".into(), w, h, primary: true }, 0, 0));
+            x.screens.push((Monitor { name: "screen".into(), w, h, primary: true, at: Some((0, 0)) }, 0, 0));
         }
         x.current = x.screens.iter().position(|(m, ..)| m.primary).unwrap_or(0);
         x.target = (x.screens[x.current].0.w, x.screens[x.current].0.h);
@@ -271,7 +271,7 @@ impl X11 {
             .iter()
             .map(|m| {
                 let name = self.conn.get_atom_name(m.name).ok().and_then(|c| c.reply().ok()).map_or_else(|| "screen".to_string(), |n| String::from_utf8_lossy(&n.name).into_owned());
-                (Monitor { name, w: m.width as usize, h: m.height as usize, primary: m.primary }, m.x, m.y)
+                (Monitor { name, w: m.width as usize, h: m.height as usize, primary: m.primary, at: Some((m.x as i32, m.y as i32)) }, m.x, m.y)
             })
             .collect())
     }

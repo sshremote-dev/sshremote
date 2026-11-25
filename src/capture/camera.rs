@@ -139,9 +139,9 @@ impl Capture for WithCameras {
         let mut list = self.screen.monitors();
         if list.is_empty() {
             let (w, h) = self.screen.desktop_size();
-            list.push(Monitor { name: "Screen".into(), w, h, primary: true });
+            list.push(Monitor { name: "Screen".into(), w, h, primary: true, at: None });
         }
-        list.extend(self.cams.iter().map(|c| Monitor { name: format!("Camera: {}", c.name), w: 0, h: 0, primary: false }));
+        list.extend(self.cams.iter().map(|c| Monitor { name: format!("Camera: {}", c.name), w: 0, h: 0, primary: false, at: None }));
         list
     }
     fn current(&self) -> usize {

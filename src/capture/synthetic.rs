@@ -126,7 +126,7 @@ impl Capture for Synthetic {
         if self.screens < 2 {
             return Vec::new();
         }
-        (0..self.screens).map(|i| super::Monitor { name: format!("Synthetic {}", i + 1), w: W, h: H, primary: i == 0 }).collect()
+        (0..self.screens).map(|i| super::Monitor { name: format!("Synthetic {}", i + 1), w: W, h: H, primary: i == 0, at: Some(((i * W) as i32, 0)) }).collect()
     }
 
     fn current(&self) -> usize {

@@ -58,6 +58,7 @@ unsafe extern "system" fn add_monitor(m: HMONITOR, _: HDC, _: *mut RECT, list: L
                 w: (r.right - r.left) as usize,
                 h: (r.bottom - r.top) as usize,
                 primary: mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+                at: Some((r.left, r.top)),
             },
             left: r.left,
             top: r.top,

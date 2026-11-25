@@ -286,6 +286,18 @@ impl App {
                     crate::hosts::set_setting("agent_command", self.form.remote.trim());
                 }
             });
+            // A host's several screens over this computer's several monitors.
+            #[cfg(feature = "remote")]
+            kit::row(ui, "Full screen", |ui| {
+                let mut on = super::dock::all_monitors();
+                if ui
+                    .checkbox(&mut on, "Use all my monitors for a computer with several screens")
+                    .on_hover_text("Full screen puts each of its screens on one of this computer's monitors, where it lies on the computer, a window each; leaving full screen in one ends it in all. Off: full screen shows the one screen chosen.")
+                    .changed()
+                {
+                    crate::hosts::set_setting("all_monitors", if on { "yes" } else { "no" });
+                }
+            });
             // Computers by ID: past the relay when a path through both routers is found.
             #[cfg(feature = "remote")]
             kit::row(ui, "By ID", |ui| {

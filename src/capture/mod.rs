@@ -80,6 +80,8 @@ pub struct Monitor {
     pub w: usize,
     pub h: usize,
     pub primary: bool,
+    /// Its top left on the host's desktop, when known: how the screens lie beside each other.
+    pub at: Option<(i32, i32)>,
 }
 
 /// What a click outside the shared window or program answers, so the viewer can tell the way out.

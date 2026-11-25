@@ -428,7 +428,7 @@ async fn monitors(conn: &Connection) -> Vec<(String, Monitor, (i32, i32, f64))> 
             let primary = primary.contains(&connector);
             let at = place(&connector);
             let (w, h) = if sideways(&connector) { (current.2, current.1) } else { (current.1, current.2) };
-            Some((connector, Monitor { name, w: w as usize, h: h as usize, primary }, at))
+            Some((connector, Monitor { name, w: w as usize, h: h as usize, primary, at: Some((at.0, at.1)) }, at))
         })
         .collect();
     out.sort_by_key(|m| !m.1.primary);

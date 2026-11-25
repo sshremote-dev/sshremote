@@ -270,7 +270,9 @@ What is opened goes into the workspace:
   browser it is the page's own pointer), system keys (Win or Super, Alt+Tab, Alt+Esc, Ctrl+Esc, Print Screen) going
   to the host while its screen is the active pane, on Linux while the pointer is over it, monitors (or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
-  monitors"), sharing one window or application with its menus and dialogs, special keys (a Mac's
+  monitors": full screen does it by itself for a host with several screens and a viewer with several
+  monitors, each screen on the monitor that lies where it lies on the host, and leaving full screen
+  in one ends it in all; Settings can turn it off), sharing one window or application with its menus and dialogs, special keys (a Mac's
   own for a Mac: lock screen, Spotlight, Force Quit and more; between a Mac and another computer
   Ctrl and the command key trade places, so Ctrl+C here is Cmd+C on the Mac, and Cmd+C on a Mac is
   Ctrl+C on the other; a box in the keys menu turns it off), chat,
