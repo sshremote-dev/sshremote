@@ -5,7 +5,11 @@ mod dxgi;
 #[cfg(target_os = "linux")]
 mod gnome;
 #[cfg(target_os = "linux")]
-pub(crate) use gnome::{Virtual as GnomeVirtual, add_virtual as gnome_add_virtual};
+pub(crate) use gnome::add_virtual as gnome_add_virtual;
+#[cfg(target_os = "linux")]
+mod kwin;
+#[cfg(target_os = "linux")]
+pub(crate) use kwin::add as kwin_add;
 
 /// The GNOME helper extension brought up to date where it is installed (GNOME loads it at the
 /// next login).

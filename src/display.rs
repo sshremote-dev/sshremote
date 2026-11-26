@@ -168,7 +168,7 @@ impl Way {
             #[cfg(windows)]
             Way::Windows => amyuni::adds(),
             #[cfg(target_os = "linux")]
-            Way::RandR | Way::Sway(_) | Way::Hypr(_) | Way::Mutter => true,
+            Way::RandR | Way::Sway(_) | Way::Hypr(_) | Way::Mutter | Way::KScreen => true,
             #[cfg(target_os = "macos")]
             Way::Mac => mac::adds(),
             #[allow(unreachable_patterns)]
@@ -188,7 +188,9 @@ impl Way {
             #[cfg(target_os = "linux")]
             Way::Hypr(sig) => linux::hypr_add(sig, w, h).map(Added::named),
             #[cfg(target_os = "linux")]
-            Way::Mutter => crate::capture::gnome_add_virtual(w, h).map(|(id, keep)| Added { id, _keep: Some(keep) }),
+            Way::Mutter => crate::capture::gnome_add_virtual(w, h).map(|(id, keep)| Added { id, _keep: Some(Box::new(keep)) }),
+            #[cfg(target_os = "linux")]
+            Way::KScreen => crate::capture::kwin_add(w, h).map(|(id, keep)| Added { id, _keep: Some(Box::new(keep)) }),
             #[cfg(target_os = "macos")]
             Way::Mac => mac::add(w, h).map(|(id, display)| Added { id, _display: Some(display) }),
             #[allow(unreachable_patterns)]
@@ -228,9 +230,9 @@ pub struct Added {
     /// The display itself, where it lasts as long as the object that made it (macOS).
     #[cfg(target_os = "macos")]
     _display: Option<mac::Virtual>,
-    /// GNOME's, which lasts as long as its stream is read.
+    /// GNOME's and KWin's, each lasting as long as what made it.
     #[cfg(target_os = "linux")]
-    _keep: Option<crate::capture::GnomeVirtual>,
+    _keep: Option<Box<dyn Send>>,
 }
 
 impl Added {

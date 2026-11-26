@@ -75,6 +75,9 @@ raw-window-handle = { optional = true, version = "0.6" }
 # Input for wlroots desktops (Sway, Hyprland), whose portal takes none.
 wayland-protocols-wlr = { optional = true, version = "0.3", features = ["client"] }
 wayland-protocols-misc = { optional = true, version = "0.3", features = ["client"] }
+# KDE Plasma: screens added for a session as KWin's virtual outputs, and the pointer put on them
+# (already in the build through winit).
+wayland-protocols-plasma = { optional = true, version = "0.3", features = ["client"] }
 zbus = { optional = true, version = "6.5", default-features = false, features = ["proxy", "service", "default-rt"] }
 # The next message of a zbus stream (already in the build through GStreamer).
 futures-util = { optional = true, version = "0.3", default-features = false }
@@ -90,7 +93,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media",
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:crossterm", "dep:png", "dep:unicode-width", "dep:zstd", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:libaom-sys", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:futures-util", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
+remote = ["dep:arboard", "dep:crossterm", "dep:png", "dep:unicode-width", "dep:zstd", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:libaom-sys", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:futures-util", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:wayland-protocols-plasma", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:alacritty_terminal", "dep:eframe", "dep:png", "dep:unicode-width", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle", "dep:winit"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

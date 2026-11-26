@@ -15,6 +15,9 @@ use super::{Capture, Image, Input};
 enum Feed {
     Own(super::pw::Stream),
     Gst(Pipe),
+    /// A screen added for the session (KWin's virtual output, `kwin`), by its own stream; the
+    /// portal's session stays for keys and clicks.
+    Extra(Pipe, super::kwin::Extra),
 }
 
 /// The portal's session and the stream it gives (the stream ends first).
@@ -91,6 +94,19 @@ impl Wayland {
             _ => &[],
         }
     }
+
+    /// How many screens the portal shares (one where it lists none apart).
+    fn shared(&self) -> usize {
+        self.live.as_ref().map_or(1, |l| l.portal.screens.len().max(1))
+    }
+
+    /// The added screen shown, if one is.
+    fn extra(&self) -> Option<&super::kwin::Extra> {
+        match self.live.as_ref().map(|l| &l.feed) {
+            Some(Feed::Extra(_, e)) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// The stream `node` of `portal` read, and its first picture.
@@ -124,23 +140,81 @@ impl Capture for Wayland {
     }
 
     fn monitors(&self) -> Vec<super::Monitor> {
-        self.screens()
+        let mut list: Vec<super::Monitor> = self
+            .screens()
             .iter()
             .enumerate()
             .map(|(i, s)| super::Monitor { name: format!("screen {}", i + 1), w: s.size.0.max(0) as usize, h: s.size.1.max(0) as usize, primary: i == 0, at: Some(s.at) })
-            .collect()
+            .collect();
+        let extras = super::kwin::extras();
+        if !extras.is_empty() {
+            // The one screen shared, listed now that there are others.
+            if list.is_empty() {
+                let one = self.live.as_ref().and_then(|l| l.portal.screens.first());
+                let (w, h) = one.map_or((self.desk.0 as i32, self.desk.1 as i32), |s| s.size);
+                list.push(super::Monitor { name: "screen 1".into(), w: w.max(0) as usize, h: h.max(0) as usize, primary: true, at: Some(one.map_or((0, 0), |s| s.at)) });
+            }
+            list.extend(extras.into_iter().map(|e| super::Monitor { name: e.name, w: e.size.0.max(0) as usize, h: e.size.1.max(0) as usize, primary: false, at: Some(e.at) }));
+        }
+        list
     }
 
     fn current(&self) -> usize {
+        if let Some(e) = self.extra() {
+            return self.shared() + super::kwin::extras().iter().position(|x| x.name == e.name).unwrap_or(0);
+        }
         let node = self.live.as_ref().map_or(0, |l| l.portal.node);
         self.screens().iter().position(|s| s.node == node).unwrap_or(0)
     }
 
     fn select(&mut self, index: usize) -> Result<(), String> {
+        let shared = self.shared();
         let Some(live) = self.live.as_ref() else { return Err("the screen sharing is not on now".into()) };
-        let s = live.portal.screens.get(index).cloned().ok_or("that computer has no such monitor")?;
+        if index >= shared {
+            // An added screen, by its own stream; the one shown ends first (KWin feeds one at once).
+            let e = super::kwin::extras().get(index - shared).cloned().ok_or("that computer has no such monitor")?;
+            let Some(Live { feed, portal }) = self.live.take() else { unreachable!() };
+            let was = match &feed {
+                Feed::Extra(_, x) => Err(x.clone()),
+                _ => Ok(portal.node),
+            };
+            drop(feed);
+            let opened = pipeline(&format!("path={}", e.node), None).and_then(|pipe| {
+                let first = pipe.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture from the added screen within 10 s")?;
+                Ok((pipe, to_image(&first)?))
+            });
+            return match opened {
+                Ok((pipe, img)) => {
+                    self.live = Some(Live { feed: Feed::Extra(pipe, e), portal });
+                    (self.desk, self.last, self.again, self.sent_shape) = ((img.w, img.h), img, true, 0);
+                    Ok(())
+                }
+                Err(why) => {
+                    // Back to what was shown.
+                    let back = match was {
+                        Ok(node) => feed_for(&portal, node),
+                        Err(x) => pipeline(&format!("path={}", x.node), None).and_then(|p| {
+                            let first = p.sink.try_pull_sample(gst::ClockTime::from_seconds(10)).ok_or("no picture")?;
+                            Ok((Feed::Extra(p, x), to_image(&first)?))
+                        }),
+                    };
+                    match back {
+                        Ok((feed, img)) => {
+                            self.live = Some(Live { feed, portal });
+                            (self.desk, self.last, self.again) = ((img.w, img.h), img, true);
+                        }
+                        Err(_) => {
+                            drop(portal);
+                            self.screen_changed();
+                        }
+                    }
+                    Err(format!("that monitor's picture did not come: {why}"))
+                }
+            };
+        }
+        let s = live.portal.screens.get(index).or(live.portal.screens.first()).cloned().ok_or("that computer has no such monitor")?;
         let was = live.portal.node;
-        if s.node == was {
+        if s.node == was && !matches!(live.feed, Feed::Extra(..)) {
             return Ok(());
         }
         // The stream shown ends first: a desktop may not feed two at once (KWin's second one gets
@@ -169,6 +243,9 @@ impl Capture for Wayland {
     }
 
     fn origin(&self) -> (i32, i32) {
+        if let Some(e) = self.extra() {
+            return e.at;
+        }
         let node = self.live.as_ref().map_or(0, |l| l.portal.node);
         self.screens().iter().find(|s| s.node == node).map_or((0, 0), |s| s.at)
     }
@@ -238,10 +315,10 @@ impl Capture for Wayland {
         // The stream read now (one opened again after a resolution change too) wakes the agent.
         match &live.feed {
             Feed::Own(s) => s.wake_with(&self.wake),
-            Feed::Gst(pipe) => pipe.wake_with(&self.wake),
+            Feed::Gst(pipe) | Feed::Extra(pipe, _) => pipe.wake_with(&self.wake),
         }
         let fresh = match &live.feed {
-            Feed::Gst(pipe) => match pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
+            Feed::Gst(pipe) | Feed::Extra(pipe, _) => match pipe.sink.try_pull_sample(gst::ClockTime::ZERO) {
                 Some(sample) => {
                     self.last = to_image(&sample)?;
                     true
@@ -291,6 +368,12 @@ impl Capture for Wayland {
     }
 
     fn input(&mut self, ev: Input) -> Result<(), String> {
+        // On an added screen the pointer goes there by KWin's fake input (the portal's session
+        // reaches only its own screens); clicks and keys go as on the others, where it is.
+        if let (Some(e), Input::Move { x, y }) = (self.extra(), &ev) {
+            let (sx, sy) = (e.size.0 as f64 / self.desk.0.max(1) as f64, e.size.1 as f64 / self.desk.1.max(1) as f64);
+            return super::kwin::pointer_at(e.at.0 as f64 + x * sx, e.at.1 as f64 + y * sy);
+        }
         // A desktop that only lets its screen be seen: said once, when the session starts.
         let key = matches!(ev, Input::Key { .. } | Input::KeyState { .. });
         if let Some(wl) = self.wl.as_mut().filter(|w| key || w.has_pointer()) {
