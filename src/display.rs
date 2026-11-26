@@ -1627,6 +1627,27 @@ mod tests {
         println!("after: {:?}", amyuni::displays());
     }
 
+    /// A screen added and held for SSHREMOTE_HOLD_SECS (its device made, and removed after), to try
+    /// this computer as one with two monitors meanwhile; its name is written to the file
+    /// SSHREMOTE_HOLD_NOTE names once it is there. Same conditions as the test above.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn a_windows_screen_held_for_a_while() {
+        let secs = std::env::var("SSHREMOTE_HOLD_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        amyuni::install().expect("the driver installed");
+        let mut s = Session::new("windows");
+        let id = s.add(1920, 1080).expect("a screen added");
+        println!("added {id}: {:?}; all {:?}", amyuni::current(&id), amyuni::displays());
+        if let Some(note) = std::env::var_os("SSHREMOTE_HOLD_NOTE") {
+            std::fs::write(note, &id).expect("the note");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        drop(s);
+        amyuni::uninstall();
+        println!("after: {:?}", amyuni::displays());
+    }
+
     /// A display added for a session: macOS lists it, the capture finds and shows it at its size
     /// (only the size is looked at), and it is gone once taken away, or once the session ends.
     /// Run as the signed app (mactest.sh), which may take the screen's pictures.

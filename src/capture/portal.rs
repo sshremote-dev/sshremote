@@ -239,7 +239,7 @@ async fn start_on(types: u32, restore: Option<&str>, input: bool, apart: bool) -
 
     let fd: OwnedFd =
         sc.call("OpenPipeWireRemote", &(&sp, HashMap::<&str, Variant>::new())).await.map_err(err("OpenPipeWireRemote"))?;
-    let rd = if input {
+    let rd: Option<Proxy<'static>> = if input {
         Some(
             zbus::proxy::Builder::new(&conn)
                 .destination(DEST)
@@ -255,6 +255,15 @@ async fn start_on(types: u32, restore: Option<&str>, input: bool, apart: bool) -
     };
     // The one at the left first, as monitors are listed.
     let node = screens.first().map_or(node, |s| s.node);
+    // COSMIC's portal drops the first pointer events while it readies the pointer they come by
+    // (a viewer's first click was lost): readied now by a move by nothing.
+    let cosmic = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("COSMIC")));
+    if let Some(rd) = rd.as_ref().filter(|_| cosmic) {
+        let none: HashMap<&str, Variant> = HashMap::new();
+        if rd.call_method("NotifyPointerMotion", &(ObjectPath::from(&session), none, 0.0f64, 0.0f64)).await.is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
     Ok(Portal { conn, session, node, screens, monitor, fd, rd, restore, apart })
 }
 
