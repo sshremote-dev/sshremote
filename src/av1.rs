@@ -174,6 +174,8 @@ impl Decoder {
             if r != 0 {
                 return Err(err(ptr::null(), "decoder", r));
             }
+            // Row threads zero a quarter megabyte a superblock on a film's first picture, for no faster ones after.
+            aom_codec_control(&mut *ctx, AV1D_SET_ROW_MT as i32, 0u32);
             Ok(Decoder { ctx })
         }
     }
