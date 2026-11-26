@@ -30,11 +30,12 @@ pub enum Want {
 }
 
 pub fn wanted() -> Want {
-    match std::env::var("SSHREMOTE_HW_ENCODE").as_deref() {
+    static WANT: std::sync::OnceLock<Want> = std::sync::OnceLock::new();
+    *WANT.get_or_init(|| match std::env::var("SSHREMOTE_HW_ENCODE").as_deref() {
         Ok("0") => Want::Never,
         Ok("1") => Want::Always,
         _ => Want::WhenBehind,
-    }
+    })
 }
 
 /// An encoder for `w`x`h` pictures at `fps` and about `bitrate` bits a second, or why there is
