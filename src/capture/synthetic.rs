@@ -1,6 +1,6 @@
 //! Deterministic test desktop: text-like rows, a ticking progress bar, a pointer
 //! and typed characters. Lets the whole pipeline run without a real desktop. Opened as
-//! "synthetic2" it has two screens, the second with a bar of another colour.
+//! "synthetic2" it has two screens, the second with a bar of another colour ("synthetic3" three).
 
 use std::time::Instant;
 

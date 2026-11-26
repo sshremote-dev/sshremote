@@ -97,6 +97,19 @@ pub(super) fn pair(host: &[Option<(i32, i32)>], locals: &[crate::sys::Local]) ->
     out
 }
 
+/// The monitor here each of a host's screens goes to in full screen: as `pair` matches them, and
+/// the screens left over where the host has more than this computer has monitors to the last
+/// monitor (the furthest right, then down) with them, side by side there, rather than to a
+/// window nobody sees behind the full-screen ones.
+pub(super) fn assign(host: &[Option<(i32, i32)>], locals: &[crate::sys::Local]) -> Vec<Option<usize>> {
+    let mut out = pair(host, locals);
+    let last = out.iter().flatten().copied().max_by_key(|&l| (locals[l].x, locals[l].y));
+    for o in out.iter_mut().filter(|o| o.is_none()) {
+        *o = last;
+    }
+    out
+}
+
 /// What the folded dock says about the active pane.
 pub(super) struct Status {
     pub glyph: &'static str,
@@ -362,7 +375,7 @@ pub(super) fn rtt_colour(rtt: f32) -> Color32 {
 
 #[cfg(test)]
 mod tests {
-    use super::pair;
+    use super::{assign, pair};
     use crate::sys::Local;
 
     fn at(index: usize, x: i32, y: i32, primary: bool) -> Local {
@@ -385,5 +398,19 @@ mod tests {
         let stacked = [at(0, 0, 0, true), at(1, 0, -1080, false)];
         assert_eq!(pair(&[Some((0, 0)), Some((0, 1440))], &stacked), [Some(1), Some(0)]);
         assert_eq!(pair(&[Some((0, 0))], &[]), [None]);
+    }
+
+    /// More screens there than monitors here: the ones left over share the furthest monitor with
+    /// the screen there, side by side, rather than open where nobody sees them.
+    #[test]
+    fn screens_beyond_the_monitors_here_share_the_last_one() {
+        let here = [at(0, 1920, 0, true), at(1, 0, 0, false)];
+        // Three side by side there: its left one on the left here, the other two on the right.
+        assert_eq!(assign(&[Some((0, 0)), Some((1920, 0)), Some((3840, 0))], &here), [Some(1), Some(0), Some(0)]);
+        // Four there on two here.
+        assert_eq!(assign(&[Some((0, 0)), Some((1920, 0)), Some((3840, 0)), Some((5760, 0))], &here), [Some(1), Some(0), Some(0), Some(0)]);
+        // As many as here: as `pair` has them.
+        assert_eq!(assign(&[Some((0, 0)), Some((2560, 0))], &here), [Some(1), Some(0)]);
+        assert_eq!(assign(&[Some((0, 0))], &[]), [None]);
     }
 }

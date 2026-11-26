@@ -92,6 +92,18 @@ pub(super) struct Spread {
     pub(super) screen: usize,
 }
 
+/// The pane a spread came from, and what puts more of its host's screens beside one of them:
+/// its connection, name, and the screens' places and sizes on the host.
+#[derive(Clone)]
+pub(super) struct SpreadSource {
+    pane: u64,
+    target: Target,
+    label: String,
+    ssh_cmd: Option<Vec<String>>,
+    places: Vec<Option<(i32, i32)>>,
+    sizes: Vec<(u16, u16)>,
+}
+
 /// What a new pane opens with (--open): the terminal panel, the chat beside the screen, full screen.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub(super) struct PaneStart {
@@ -319,6 +331,8 @@ pub(super) struct Workspace {
     pub(super) spread_from: Option<usize>,
     /// Where the host's screens lie beside each other (its cameras apart), for the spread asked.
     pub(super) spread_layout: Vec<Option<(i32, i32)>>,
+    /// The pane the spread asked came from.
+    pub(super) spread_source: Option<SpreadSource>,
     /// Full screen on all monitors: the windows showing one host's screens together share this.
     pub(super) group: Option<u64>,
     /// This window was opened for such a group, and closes when it ends.
@@ -405,6 +419,7 @@ impl Workspace {
             spread: Vec::new(),
             spread_from: None,
             spread_layout: Vec::new(),
+            spread_source: None,
             group: None,
             group_member: false,
             group_left: false,
@@ -468,44 +483,48 @@ impl Workspace {
         }
     }
 
-    /// Pane `id`, showing screen `shown` of its host, gets the host's other screens beside it in
-    /// its tab, a pane each, laid out as they lie on the host (left to right, or one above the
-    /// other), each part as wide (or high) as its screen.
+    /// Pane `id`, showing screen `shown` of its host, gets `others` of the host's screens (each
+    /// with what to open it with) beside it in its tab, a pane each, laid out as they lie on the
+    /// host (left to right, or one above the other), each part as wide (or high) as its screen.
     #[allow(clippy::too_many_arguments)]
-    fn side_by_side(&mut self, id: u64, target: Target, label: &str, ssh_cmd: Option<Vec<String>>, shown: usize, places: &[Option<(i32, i32)>], sizes: &[(u16, u16)], prefs: Vec<remote::Prefs>) {
-        let n = prefs.len();
+    fn side_by_side(&mut self, id: u64, target: Target, label: &str, ssh_cmd: Option<Vec<String>>, shown: usize, others: Vec<(usize, remote::Prefs)>, places: &[Option<(i32, i32)>], sizes: &[(u16, u16)]) {
         let Some(t) = self.tab_of(id) else { return };
-        let mut ids = vec![0u64; n];
-        for (m, p) in prefs.into_iter().enumerate() {
-            if m == shown {
-                ids[m] = id;
-                continue;
-            }
+        let mut ids = vec![(shown, id)];
+        for (m, p) in others {
             let launch = Launch::Agent { target: target.clone(), label: format!("{label} \u{00b7} screen {}", m + 1), ssh_cmd: ssh_cmd.clone(), mode: PaneMode::Screen };
             let Some(new) = self.new_pane(launch, PaneStart::default()) else { return };
             if let Some(i) = self.index(new) {
                 self.panes[i].prefs = Some(p);
             }
-            ids[m] = new;
+            ids.push((m, new));
         }
-        let mut order: Vec<usize> = (0..n).collect();
-        let known = places.len() == n && places.iter().all(Option::is_some);
+        let place = |m: usize| places.get(m).copied().flatten();
+        let known = ids.iter().all(|&(m, _)| place(m).is_some());
         if known {
-            order.sort_by_key(|&m| places[m]);
+            ids.sort_by_key(|&(m, _)| place(m));
         }
         // One above the other when they all start at one x; else side by side.
-        let below = known && n > 1 && places.iter().all(|p| p.map(|p| p.0) == places[0].map(|p| p.0));
+        let below = known && ids.len() > 1 && ids.iter().all(|&(m, _)| place(m).map(|p| p.0) == place(ids[0].0).map(|p| p.0));
         let span = |m: usize| sizes.get(m).map_or(1.0, |s| if below { s.1 } else { s.0 } as f32).max(1.0);
-        let mut node = Node::Leaf(ids[order[n - 1]]);
-        let mut rest = span(order[n - 1]);
-        for &m in order[..n - 1].iter().rev() {
+        let (last, last_id) = ids[ids.len() - 1];
+        let mut node = Node::Leaf(last_id);
+        let mut rest = span(last);
+        for &(m, pid) in ids[..ids.len() - 1].iter().rev() {
             let first = span(m);
-            node = Node::Split { below, ratio: first / (first + rest), a: Box::new(Node::Leaf(ids[m])), b: Box::new(node) };
+            node = Node::Split { below, ratio: first / (first + rest), a: Box::new(Node::Leaf(pid)), b: Box::new(node) };
             rest += first;
         }
         self.tabs[t].root.replace(id, node);
-        self.beside.extend(ids);
+        self.beside.extend(ids.into_iter().map(|(_, pid)| pid));
         self.zoom = None;
+    }
+
+    /// Screens `with` of the spread's host beside screen `shown` in this window: in the pane the
+    /// spread came from, or (a window opened for it) the one it has.
+    pub(super) fn beside_spread(&mut self, source: &SpreadSource, shown: usize, with: Vec<Spread>) {
+        let Some(id) = self.index(source.pane).map(|_| source.pane).or_else(|| self.active_id()) else { return };
+        let others = with.into_iter().map(|s| (s.screen, s.prefs)).collect();
+        self.side_by_side(id, source.target.clone(), &source.label, source.ssh_cmd.clone(), shown, others, &source.places, &source.sizes);
     }
 
     /// A window in full screen (from the start, `--fullscreen`) learns its host has several
@@ -1410,12 +1429,12 @@ impl Workspace {
                 && std::mem::take(&mut r.beside_asked)
             {
                 let (n, shown) = r.monitors();
-                let prefs: Vec<remote::Prefs> = (0..n).map(|m| r.prefs_on(m as u8)).collect();
-                beside.push((p.id, p.target.clone(), p.label.clone(), p.ssh_cmd.clone(), shown, r.screen_places(), r.screen_sizes(), prefs));
+                let others: Vec<(usize, remote::Prefs)> = (0..n).filter(|&m| m != shown).map(|m| (m, r.prefs_on(m as u8))).collect();
+                beside.push((p.id, p.target.clone(), p.label.clone(), p.ssh_cmd.clone(), shown, r.screen_places(), r.screen_sizes(), others));
             }
         }
-        for (id, target, label, ssh_cmd, shown, places, sizes, prefs) in beside {
-            self.side_by_side(id, target, &label, ssh_cmd, shown, &places, &sizes, prefs);
+        for (id, target, label, ssh_cmd, shown, places, sizes, others) in beside {
+            self.side_by_side(id, target, &label, ssh_cmd, shown, others, &places, &sizes);
         }
         for p in &mut self.panes {
             if let State::Live(r) = &mut p.state
@@ -1423,6 +1442,7 @@ impl Workspace {
             {
                 let (n, shown) = r.monitors();
                 self.spread_layout = r.screen_places();
+                self.spread_source = Some(SpreadSource { pane: p.id, target: p.target.clone(), label: p.label.clone(), ssh_cmd: p.ssh_cmd.clone(), places: r.screen_places(), sizes: r.screen_sizes() });
                 for m in (0..n).filter(|m| *m != shown) {
                     let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
                     self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });

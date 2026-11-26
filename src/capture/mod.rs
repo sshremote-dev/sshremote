@@ -301,6 +301,7 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         // A web app in a pane: a page of a browser run with no window.
         n if n.starts_with("browser:") => Ok(Box::new(browser::Browser::open(&n["browser:".len()..])?)),
         "synthetic2" => Ok(Box::new(synthetic::Synthetic::with_screens(2))),
+        "synthetic3" => Ok(Box::new(synthetic::Synthetic::with_screens(3))),
         #[cfg(target_os = "linux")]
         "gnome" => Ok(Box::new(gnome::Gnome::open()?)),
         #[cfg(target_os = "linux")]

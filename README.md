@@ -276,8 +276,9 @@ What is opened goes into the workspace:
   button each in the toolbar for up to four, or Ctrl+Alt+Shift and the screen's number; or
   all of them, a window each, full screen on one monitor each here as Remote Desktop's "use all my
   monitors": full screen does it by itself for a host with several screens and a viewer with several
-  monitors, each screen on the monitor that lies where it lies on the host, and leaving full screen
-  in one ends it in all; Settings can turn it off; or all side by side in one tab, as they lie on
+  monitors, each screen on the monitor that lies where it lies on the host, those beyond the
+  monitors here side by side on the last one, and leaving full screen in one ends it in all;
+  Settings can turn it off; or all side by side in one tab, as they lie on
   the host), screens added to the host for the session (a virtual monitor, as a dummy plug gives,
   of a size picked in the screens menu, for a computer without a monitor or a screen of one's own
   beside its person's; taken away again when the session ends; GNOME, KDE Plasma, Sway, Hyprland

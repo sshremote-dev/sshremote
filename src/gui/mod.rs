@@ -1301,21 +1301,42 @@ impl App {
         }
         let locals = crate::sys::monitors();
         let full = locals.len() > 1;
-        let pairs = dock::pair(&w.spread_layout, &locals);
-        let target = |screen: usize| pairs.get(screen).copied().flatten().map(|l| locals[l]).filter(|_| full);
+        let places = dock::assign(&w.spread_layout, &locals);
+        let target = |screen: usize| places.get(screen).copied().flatten().map(|l| locals[l]).filter(|_| full);
         self.windows_made += 1;
         let group = self.windows_made;
+        // The screens bound for one monitor: one window there, side by side in it.
+        let mut windows: Vec<(Option<crate::sys::Local>, Vec<workspace::Spread>)> = Vec::new();
+        for s in w.spread.drain(..) {
+            let to = target(s.screen);
+            match windows.iter_mut().find(|(m, _)| to.is_some() && m.map(|m| m.index) == to.map(|t| t.index)) {
+                Some((_, list)) => list.push(s),
+                None => windows.push((to, vec![s])),
+            }
+        }
+        let source = w.spread_source.take();
         if let Some(shown) = w.spread_from.take()
             && let Some(m) = target(shown)
         {
             w.group = Some(group);
             w.full_on(ctx, m.index);
+            if let Some(k) = windows.iter().position(|(t, _)| t.is_some_and(|t| t.index == m.index))
+                && let Some(source) = &source
+            {
+                let (_, with) = windows.remove(k);
+                w.beside_spread(source, shown, with);
+            }
         }
-        for (k, s) in w.spread.drain(..).enumerate() {
+        for (k, (to, mut list)) in windows.into_iter().enumerate() {
+            let s = list.remove(0);
             let mut screen = workspace::Workspace::new(self.options());
             screen.set_preset(self.form.preset);
-            let to = target(s.screen);
             screen.add_with(s.launch, s.prefs, PaneStart { fullscreen: to.is_some(), ..Default::default() });
+            if !list.is_empty()
+                && let Some(source) = &source
+            {
+                screen.beside_spread(source, s.screen, list);
+            }
             if let Some(m) = to {
                 (screen.group, screen.group_member) = (Some(group), true);
                 screen.full_on(ctx, m.index);

@@ -1606,6 +1606,49 @@ fn full_screen_uses_all_my_monitors_for_a_host_with_several_screens() {
     crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = None);
 }
 
+/// Full screen for a host with three screens on two monitors here: its left screen on the left
+/// monitor, alone; its other two side by side in one window on the right one, which the app opens
+/// for them, rather than the third in a window nobody sees behind the full-screen ones.
+#[test]
+#[ignore]
+fn screens_beyond_the_monitors_here_share_the_last_one_side_by_side() {
+    let mut h = Harness::new();
+    let launch = Launch::Agent { target: Target::Local { capture: "synthetic3".into() }, label: "Three screens".into(), ssh_cmd: None, mode: PaneMode::Screen };
+    h.w.add(launch, Place::Tab, PaneStart::default());
+    h.until("connected", |w| live(w, 0));
+    h.until("its three screens known", |w| matches!(&w.panes[0].state, State::Live(r) if r.monitors().0 == 3));
+    let monitor = |index, x| crate::sys::Local { index, x, y: 0, w: 1920, h: 1080, primary: index == 0 };
+    crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = Some(vec![monitor(0, 1920), monitor(1, 0)]));
+    let ctx = h.ctx.clone();
+    h.w.set_full(&ctx, true);
+    h.frame(Vec::new());
+    assert_eq!((h.w.spread.len(), h.w.spread_from), (2, Some(0)), "its two other screens to place");
+    let locals = crate::sys::monitors();
+    let to: Vec<Option<usize>> = crate::gui::dock::assign(&h.w.spread_layout, &locals).into_iter().map(|l| l.map(|l| locals[l].index)).collect();
+    assert_eq!(to, [Some(1), Some(0), Some(0)], "the left one on the left monitor, the other two on the right");
+    // What the app does with the two bound for the right monitor: one window, side by side.
+    let source = h.w.spread_source.clone().expect("where the spread came from");
+    let mut spread: Vec<Spread> = std::mem::take(&mut h.w.spread);
+    let first = spread.remove(0);
+    let mut other = Harness::new();
+    other.w.add_with(first.launch, first.prefs, PaneStart::default());
+    other.w.beside_spread(&source, first.screen, spread);
+    assert_eq!(other.w.order(0).len(), 2, "two panes in its tab");
+    other.until("both connected", |w| w.panes.iter().all(|p| matches!(&p.state, State::Live(_))));
+    other.until("showing its screens 2 and 3, left to right", |w| {
+        let shown: Vec<usize> = w.order(0).iter().filter_map(|id| w.panes.iter().find(|p| p.id == *id)).filter_map(|p| match &p.state {
+            State::Live(r) => Some(r.monitors().1),
+            _ => None,
+        }).collect();
+        shown == [1, 2]
+    });
+    other.w.set_full(&ctx, true);
+    assert!(other.w.zoom.is_none(), "full screen keeps both");
+    crate::sys::TEST_MONITORS.with(|t| *t.borrow_mut() = None);
+    h.w.close_all();
+    other.w.close_all();
+}
+
 /// All of a host's screens side by side in this tab: the other screen opens beside the shown
 /// one, on the side where it lies on the host, each half as wide as its screen; full screen keeps
 /// both in view.
