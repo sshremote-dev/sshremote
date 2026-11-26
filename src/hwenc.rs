@@ -6,6 +6,8 @@
 
 #[cfg(windows)]
 mod mf;
+#[cfg(target_os = "macos")]
+mod vt;
 
 /// A hardware encoder for one film's size.
 pub trait Encoder: Send {
@@ -39,7 +41,9 @@ pub fn wanted() -> Want {
 pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
     #[cfg(windows)]
     return mf::open(w, h, fps, bitrate);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return vt::open(w, h, fps, bitrate);
+    #[cfg(not(any(windows, target_os = "macos")))]
     Err("no video hardware encoder is used on this system".into())
 }
 
@@ -47,6 +51,12 @@ pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn has_sps(au: &[u8]) -> bool {
     au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7)
+}
+
+/// Whether an access unit carries a key picture (an IDR slice, NAL type 5).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn is_key(au: &[u8]) -> bool {
+    au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 5)
 }
 
 #[cfg(test)]
@@ -57,6 +67,7 @@ mod tests {
     fn a_sequence_parameter_set_is_found() {
         assert!(has_sps(&[0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68]));
         assert!(!has_sps(&[0, 0, 0, 1, 0x65, 0x88]));
+        assert!(is_key(&[0, 0, 0, 1, 0x65, 0x88]) && !is_key(&[0, 0, 0, 1, 0x41, 0x9a]));
     }
 
     /// A moving picture through the hardware encoder here and back through the viewer's H.264
