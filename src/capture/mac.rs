@@ -428,7 +428,7 @@ unsafe extern "C" {
 /// Whether this Mac draws with Metal. Without it (virtual machines with no graphics card of their
 /// own) the window server composes in software, and a stream of one program's windows makes it
 /// abort (seen on macOS 26 in VMware: an assertion in CA::OGL::Context::push_surface).
-fn metal() -> bool {
+pub(super) fn metal() -> bool {
     static METAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // SAFETY: the device made here (or none) is owned and released at once.
     *METAL.get_or_init(|| unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }.is_some())
@@ -646,6 +646,8 @@ pub struct Mac {
     shape: (Option<i32>, Option<u64>),
     /// When the shown display was last measured, and what Core Graphics said of it then.
     measured: (Instant, Option<Measure>),
+    /// The privacy cover's turn the stream was made for (`macprivacy::cover`).
+    cover_turn: u64,
 }
 
 /// A display, its place and size in points and its pixels.
@@ -692,6 +694,7 @@ impl Mac {
             apart: false,
             shape: (None, None),
             measured: (Instant::now(), None),
+            cover_turn: super::macprivacy::cover().1,
         };
         mac.restart()?;
         mac.measured.1 = Some(measure(mac.display().id));
@@ -737,9 +740,15 @@ impl Mac {
         }
         let d = self.sc_display().ok_or("that display is gone")?;
         // SAFETY: a filter made from the display and program the content lists.
+        let cover = super::macprivacy::cover().0.filter(|_| metal()).and_then(|pid| unsafe { self.content.as_ref()?.applications() }.iter().find(|a| unsafe { a.processID() } == pid));
         let filter = unsafe {
             match self.scope.pid() {
-                None => SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &d, &NSArray::new()),
+                // Without Metal a filtered stream ends WindowServer: the cover is left out of the
+                // whole display's pictures by its sharing type alone there.
+                None => match cover {
+                    Some(app) => SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(SCContentFilter::alloc(), &d, &NSArray::from_retained_slice(&[app]), &NSArray::new()),
+                    None => SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &d, &NSArray::new()),
+                },
                 Some(pid) => {
                     let app: Retained<SCRunningApplication> =
                         self.content.as_ref().ok_or("no program can be shown alone here")?.applications().iter().find(|a| a.processID() == pid).ok_or("that program is gone")?;
@@ -974,6 +983,8 @@ impl Hands {
     fn source(&mut self) -> Option<CFRetained<CGEventSource>> {
         if self.source.is_none() {
             self.source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+            // Marked, so that keeping the Mac's own input out lets these through.
+            CGEventSource::set_user_data(self.source.as_deref(), super::macprivacy::MARK);
         }
         self.source.clone()
     }
@@ -1468,6 +1479,20 @@ impl Capture for Mac {
     fn grab(&mut self) -> Result<Option<Image>, String> {
         self.follow_display(false);
         self.follow();
+        // The privacy cover came or went: a stream that leaves it out, then it shows.
+        let turn = super::macprivacy::cover().1;
+        if turn != self.cover_turn {
+            self.cover_turn = turn;
+            if self.live.is_some() {
+                if let Ok(c) = shareable() {
+                    self.content = Some(c);
+                }
+                if let Err(e) = self.restart() {
+                    eprintln!("sshremote: {e}");
+                }
+            }
+            super::macprivacy::seen(turn);
+        }
         if !self.latest.fresh.swap(false, Ordering::AcqRel) {
             return Ok(None);
         }
@@ -1523,6 +1548,117 @@ impl Capture for Mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The share of a picture's pixels that are about black.
+    fn dark(img: &Image) -> f64 {
+        let px: Vec<&[u8]> = img.data.chunks(img.stride).flat_map(|r| r[..img.w * 4].chunks(4)).collect();
+        px.iter().filter(|p| p[..3].iter().all(|&b| b < 12)).count() as f64 / px.len().max(1) as f64
+    }
+
+    /// The last picture of `secs` seconds of them.
+    fn last_picture(m: &mut Mac, secs: f64) -> Option<Image> {
+        let until = Instant::now() + Duration::from_secs_f64(secs);
+        let mut last = None;
+        while Instant::now() < until {
+            if let Ok(Some(img)) = m.grab() {
+                last = Some(img);
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        last
+    }
+
+    /// The privacy cover is on the screen, black over everything, and the pictures still show
+    /// what is under it. Needs Screen Recording (run as the app) and SSHREMOTE_EXE, a built
+    /// sshremote, for the cover's process.
+    #[test]
+    #[ignore]
+    fn a_covered_mac_still_shows_its_screen() {
+        // Never without Metal: WindowServer dies there (and the session with it).
+        if !metal() {
+            eprintln!("no Metal here: the screen cannot be hidden");
+            return;
+        }
+        let mut m = Mac::open().unwrap();
+        let before = last_picture(&mut m, 2.0).expect("a picture");
+        super::super::macprivacy::set(false, true).unwrap();
+        let pid = super::super::macprivacy::cover().0.expect("the cover's process");
+        last_picture(&mut m, 4.0);
+        let covers = listed(None).into_iter().filter(|w| w.pid == pid).count();
+        // A new stream's first picture, taken with the cover up.
+        m.restart().unwrap();
+        let after = last_picture(&mut m, 2.0).expect("a picture with the cover up");
+        super::super::macprivacy::set(false, false).unwrap();
+        let gone = listed(None).into_iter().filter(|w| w.pid == pid).count();
+        eprintln!("cover windows on screen {covers}, after {gone}; dark before {:.3}, with the cover {:.3}", dark(&before), dark(&after));
+        assert!(covers > 0 && gone == 0);
+        assert!(dark(&after) < dark(&before) + 0.05, "the cover is in the pictures");
+    }
+
+    /// Keeping the Mac's own input out drops events this program did not post (a source without
+    /// its mark stands for the keyboard and mouse there), lets its own through, and Control+P
+    /// from the other source ends it. Needs Accessibility: run in the signed-in session.
+    #[test]
+    #[ignore]
+    fn a_mac_keeps_its_own_input_out() {
+        use std::sync::atomic::AtomicUsize;
+        // What gets past the HID tap, seen further on: the other source's events (marked 7 to be
+        // told apart) and this program's.
+        static FOREIGN: AtomicUsize = AtomicUsize::new(0);
+        static OURS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C-unwind" fn seen(_: objc2_core_graphics::CGEventTapProxy, _: CGEventType, e: std::ptr::NonNull<CGEvent>, _: *mut std::ffi::c_void) -> *mut CGEvent {
+            match CGEvent::integer_value_field(Some(unsafe { e.as_ref() }), CGEventField::EventSourceUserData) {
+                7 => FOREIGN.fetch_add(1, Ordering::Relaxed),
+                super::super::macprivacy::MARK => OURS.fetch_add(1, Ordering::Relaxed),
+                _ => 0,
+            };
+            e.as_ptr()
+        }
+        std::thread::spawn(|| {
+            let t = unsafe {
+                CGEvent::tap_create(CGEventTapLocation::SessionEventTap, objc2_core_graphics::CGEventTapPlacement::TailAppendEventTap, objc2_core_graphics::CGEventTapOptions::Default, !0, Some(seen), std::ptr::null_mut())
+            }
+            .expect("a tap to watch with");
+            let source = objc2_core_foundation::CFMachPort::new_run_loop_source(None, Some(&t), 0).unwrap();
+            objc2_core_foundation::CFRunLoop::current().unwrap().add_source(Some(&source), unsafe { objc2_core_foundation::kCFRunLoopCommonModes });
+            objc2_core_foundation::CFRunLoop::run();
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let here = || CGEvent::new(None).map(|e| CGEvent::location(Some(&e))).expect("where the pointer is");
+        let foreign = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        CGEventSource::set_user_data(foreign.as_deref(), 7);
+        let ours = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+        CGEventSource::set_user_data(ours.as_deref(), super::super::macprivacy::MARK);
+        let move_to = |src: &Option<CFRetained<CGEventSource>>, x: f64, y: f64| {
+            let e = CGEvent::new_mouse_event(src.as_deref(), CGEventType::MouseMoved, CGPoint::new(x, y), CGMouseButton::Left);
+            CGEvent::post(CGEventTapLocation::HIDEventTap, e.as_deref());
+            std::thread::sleep(Duration::from_millis(150));
+            here()
+        };
+        let start = move_to(&ours, 300.0, 300.0);
+        super::super::macprivacy::set(true, false).unwrap();
+        let (f0, o0) = (FOREIGN.load(Ordering::Relaxed), OURS.load(Ordering::Relaxed));
+        let foreign_moved = move_to(&foreign, 500.0, 400.0);
+        let ours_moved = move_to(&ours, 600.0, 450.0);
+        let (f1, o1) = (FOREIGN.load(Ordering::Relaxed) - f0, OURS.load(Ordering::Relaxed) - o0);
+        for down in [true, false] {
+            let e = CGEvent::new_keyboard_event(foreign.as_deref(), 0x23, down);
+            CGEvent::set_flags(e.as_deref(), CGEventFlags::MaskControl);
+            CGEvent::post(CGEventTapLocation::HIDEventTap, e.as_deref());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let back = super::super::macprivacy::taken_back();
+        let after = move_to(&foreign, 400.0, 350.0);
+        super::super::macprivacy::set(false, false).unwrap();
+        let f2 = FOREIGN.load(Ordering::Relaxed) - f0 - f1;
+        eprintln!("start {start:?}; kept out {foreign_moved:?}; ours {ours_moved:?}; taken back {back}; then {after:?}; past the tap while kept out: theirs {f1}, ours {o1}; theirs after {f2}");
+        assert_eq!((f1, f2 > 0), (0, true));
+        assert!(o1 > 0);
+        assert_eq!((foreign_moved.x, foreign_moved.y), (start.x, start.y));
+        assert_eq!((ours_moved.x, ours_moved.y), (600.0, 450.0));
+        assert!(back);
+        assert_eq!((after.x, after.y), (400.0, 350.0));
+    }
 
     #[test]
     fn keys_find_their_place_on_a_mac_keyboard() {

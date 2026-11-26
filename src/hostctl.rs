@@ -1,6 +1,7 @@
 //! What a viewer may do to the computer itself, beyond its screen: restart and lock it, keep its
-//! own keyboard and mouse out (on Windows), hide its screen from whoever sits there while the
-//! viewer still sees it (on Windows 10 2004 and later), and lock it when the viewer leaves.
+//! own keyboard and mouse out (on Windows and macOS), hide its screen from whoever sits there
+//! while the viewer still sees it (on Windows 10 2004 and later, and macOS), and lock it when the
+//! viewer leaves.
 
 /// The acts of `ToAgent::Host`.
 pub const QUERY: u8 = 0;
@@ -21,7 +22,7 @@ pub const fn bit(act: u8) -> u8 {
 /// What can be done here, as `bit`s.
 pub fn can() -> u8 {
     let both = bit(RESTART) | bit(LOCK) | bit(LOCK_ON_LEAVE);
-    if cfg!(windows) { both | bit(BLOCK) | bit(HIDE) } else { both }
+    both | (if os::BLOCKS { bit(BLOCK) } else { 0 }) | (if os::hides() { bit(HIDE) } else { 0 })
 }
 
 /// The computer's own state for one viewer; what is left on is undone as the viewer goes.
@@ -63,7 +64,7 @@ impl HostCtl {
 
     /// Whether the person at the computer took its keyboard and mouse back (Ctrl+P) since last asked.
     pub fn taken_back(&mut self) -> bool {
-        if !win::taken_back() {
+        if !os::taken_back() {
             return false;
         }
         (self.block, self.hide) = (false, false);
@@ -73,10 +74,10 @@ impl HostCtl {
 
     /// Hiding the screen keeps the keyboard and mouse out too.
     fn apply(&mut self) -> Result<(), String> {
-        let r = win::set(self.block || self.hide, self.hide);
+        let r = os::set(self.block || self.hide, self.hide);
         if r.is_err() {
             (self.block, self.hide) = (false, false);
-            let _ = win::set(false, false);
+            let _ = os::set(false, false);
         }
         r
     }
@@ -85,7 +86,7 @@ impl HostCtl {
 impl Drop for HostCtl {
     fn drop(&mut self) {
         if self.block || self.hide {
-            let _ = win::set(false, false);
+            let _ = os::set(false, false);
         }
         if self.lock_on_leave {
             let _ = lock();
@@ -152,8 +153,20 @@ fn lock() -> Result<(), String> {
     if out.status.success() { Ok(()) } else { Err("the screen could not be locked here".into()) }
 }
 
-#[cfg(not(windows))]
-mod win {
+#[cfg(target_os = "macos")]
+mod os {
+    pub use crate::capture::macprivacy::{hides, set, taken_back};
+    pub const BLOCKS: bool = true;
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod os {
+    pub const BLOCKS: bool = false;
+
+    pub fn hides() -> bool {
+        false
+    }
+
     pub fn set(block: bool, hide: bool) -> Result<(), String> {
         if block || hide {
             return Err("not on this computer: its desktop does not let a program keep out its keyboard or hide its screen".into());
@@ -170,7 +183,7 @@ mod win {
 /// computer's own input (not what this program injects), and the cover: a black window above all
 /// others that lets clicks through and that screen capture leaves out.
 #[cfg(windows)]
-mod win {
+mod os {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -192,6 +205,12 @@ mod win {
     };
 
     use crate::sys::wide;
+
+    pub const BLOCKS: bool = true;
+
+    pub fn hides() -> bool {
+        true
+    }
 
     /// Leaves a window out of screen capture (Windows 10 2004 and later).
     const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;

@@ -32,6 +32,8 @@ mod wlrcopy;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
+pub(crate) mod macprivacy;
+#[cfg(target_os = "macos")]
 pub(crate) use mac::outside_the_login_window;
 #[cfg(target_os = "macos")]
 pub(crate) use mac::sound as mac_sound;

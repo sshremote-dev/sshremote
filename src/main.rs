@@ -502,6 +502,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let code = args.iter().position(|a| a == "--code").and_then(|i| args.get(i + 1)).filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit())).cloned();
             chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant, code)
         }
+        // The black windows that hide a Mac's screen from whoever sits there (`hostctl`).
+        #[cfg(all(target_os = "macos", feature = "remote"))]
+        "--cover" => capture::macprivacy::run_cover(),
         // The load and the time every 2 s, for a viewer to show beside this host's terminals.
         #[cfg(feature = "gui")]
         "--stats" => gui::look::print_stats(),

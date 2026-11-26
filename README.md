@@ -290,8 +290,9 @@ What is opened goes into the workspace:
   Ctrl+C on the other; a box in the keys menu turns it off), chat,
   a voice call (the person there answers in their window), screenshot, recording to MP4, pause,
   view only, clipboard with files (copied in a file manager here, pasted there, and back), sound,
-  and the computer itself: lock it, restart it, keep its own keyboard and mouse out, hide its
-  screen from whoever sits there (Windows) and lock it on leaving. F11 and the other keys go to the host;
+  and the computer itself: lock it, restart it, keep its own keyboard and mouse out (Windows and
+  macOS), hide its screen from whoever sits there (Windows, and Macs with Metal graphics) and lock
+  it on leaving. F11 and the other keys go to the host;
   Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
   Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
