@@ -49,6 +49,8 @@ mod grant;
 #[cfg(feature = "remote")]
 mod hostctl;
 #[cfg(feature = "remote")]
+mod print;
+#[cfg(feature = "remote")]
 mod porttunnel;
 #[cfg(feature = "remote")]
 mod record;

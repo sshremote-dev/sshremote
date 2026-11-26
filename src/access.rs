@@ -2465,6 +2465,15 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("uninstall") => uninstall_service(),
+        // SSH Remote's printer: what is printed to it prints on the computer viewing this one.
+        Some("printer") => match args.get(1).map(String::as_str) {
+            Some(w @ ("on" | "off")) => crate::print::set_up(w == "on").map(|t| println!("{t}")),
+            None => {
+                println!("printer:  {}", if crate::print::installed() { format!("\"{}\" prints on the computer viewing this one", crate::print::NAME) } else { "none (remote-access printer on, as an administrator)".into() });
+                Ok(())
+            }
+            _ => Err("usage: sshremote remote-access printer [on|off]".into()),
+        },
         #[cfg(target_os = "macos")]
         Some("login-window") => match args.get(1).map(String::as_str) {
             Some(w @ ("on" | "off")) => login_window(w == "on").map(|()| println!("at the login window: {w}")),
@@ -2532,7 +2541,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | login-window on|off (macOS) | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | printer [on|off] | login-window on|off (macOS) | service start|stop]".into()),
     }
 }
 

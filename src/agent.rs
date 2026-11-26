@@ -411,9 +411,11 @@ fn serve_with(
     let mut desk = cap.desktop_size();
     let io_err = |e: io::Error| e.to_string();
     send(enc, &ToClient::Hello { w: desk.0 as u16, h: desk.1 as u16, backend: cap.name().into() }).map_err(io_err)?;
+    let printer = crate::print::installed();
     let can = crate::proto::CAN_RESUME
         | if screens.adds() { crate::proto::CAN_SCREENS } else { 0 }
-        | if screens.adds_with_helper() { crate::proto::CAN_SCREENS_WITH_HELPER } else { 0 };
+        | if screens.adds_with_helper() { crate::proto::CAN_SCREENS_WITH_HELPER } else { 0 }
+        | if printer { crate::proto::CAN_PRINT } else { 0 };
     send(enc, &ToClient::Can(can)).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
@@ -545,6 +547,9 @@ fn serve_with(
     let mut told_off = 0u8;
     // The computer itself: its own keyboard and mouse, its screen, locking as the viewer leaves.
     let mut host = crate::hostctl::HostCtl::default();
+    // What is printed here, for a viewer that prints it (`ToAgent::Prints`), and when it was
+    // last looked at.
+    let mut spool: Option<(crate::print::Spool, Instant)> = None;
     // Connections for the viewer's forwarded ports.
     let mut ports = crate::porttunnel::Ports::waking(poke.clone());
     // A voice call: ringing (None) or answered, with the microphone here and a player for theirs.
@@ -981,6 +986,14 @@ fn serve_with(
                         resized!();
                     }
                 }
+                ToAgent::Prints(on) => {
+                    spool = (on && printer).then(crate::print::Spool::new).flatten().map(|s| (s, Instant::now() - Duration::from_secs(1)));
+                }
+                ToAgent::Printed(id) => {
+                    if let Some((s, _)) = spool.as_mut() {
+                        s.done(id);
+                    }
+                }
                 ToAgent::AddScreen { w, h } => {
                     match screens.add(w, h) {
                         // The viewer hears of it once the capture lists it.
@@ -1143,6 +1156,12 @@ fn serve_with(
                 send(enc, &reply).map_err(io_err)?;
             }
         }
+        if let Some((s, looked)) = spool.as_mut().filter(|(_, t)| t.elapsed() >= Duration::from_secs(1)) {
+            *looked = Instant::now();
+            for (id, name, size, path) in s.poll() {
+                send(enc, &ToClient::PrintJob { id, size, name, path: path.to_string_lossy().into_owned() }).map_err(io_err)?;
+            }
+        }
         if host.taken_back() {
             send(enc, &ToClient::Notice("The person at that computer took its keyboard and mouse back (Ctrl+P).".into())).map_err(io_err)?;
             send(enc, &ToClient::HostState { can: crate::hostctl::can(), on: host.on() }).map_err(io_err)?;
@@ -1198,6 +1217,9 @@ fn serve_with(
                 }
                 if taken & crate::grant::POWER != 0 {
                     host = crate::hostctl::HostCtl::default();
+                }
+                if taken & crate::grant::FILES != 0 {
+                    spool = None;
                 }
                 if taken & crate::grant::PORTS != 0 {
                     ports = crate::porttunnel::Ports::waking(poke.clone());

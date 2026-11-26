@@ -5,6 +5,7 @@ use crate::capture::Share;
 
 mod input;
 mod panels;
+mod print;
 mod toolbar;
 mod transfer;
 pub(super) use input::pointer_grab;
@@ -204,6 +205,11 @@ pub(super) struct Remote {
     /// Local folder each tagged download request writes into.
     fetch_dirs: std::collections::HashMap<u32, std::path::PathBuf>,
     next_tag: u32,
+    /// The host's print jobs waiting to be asked about (id, size, name, its path there), those
+    /// being fetched (by tag), and what printing them here came to.
+    print_asks: Vec<(u32, u64, String, String)>,
+    print_fetching: std::collections::HashMap<u32, print::Fetching>,
+    print_done: (mpsc::Sender<String>, mpsc::Receiver<String>),
     /// Going on with the transfers a broken connection cut off.
     resume: transfer::Resume,
     /// The computer's address, asked to trust this one (`ToAgent::TrustMe`).
@@ -417,6 +423,9 @@ impl Remote {
             files: None,
             fetch_dirs: Default::default(),
             next_tag: 1,
+            print_asks: Vec::new(),
+            print_fetching: Default::default(),
+            print_done: mpsc::channel(),
             resume: Default::default(),
             trust_for: None,
             games: false,
@@ -620,9 +629,11 @@ impl Remote {
         let chat_rect = chat_rect.or(term_area);
         self.upload_overlay(&ctx, screen);
         self.tell_settled();
+        self.print_results();
         self.toasts.draw(&ctx, screen, &[], None);
         self.term_window(&ctx)?;
         self.share_picker(&ctx)?;
+        self.print_prompt(&ctx)?;
         if self.pick_at.is_some_and(|t| Instant::now() >= t) {
             self.pick_at = None;
             self.send(ToAgent::Share(Share::ActiveWindow))?;
@@ -737,7 +748,15 @@ impl Remote {
                 Ok(Ev::Net(ToClient::Can(bits))) => {
                     self.adds_screens = bits & crate::proto::CAN_SCREENS != 0;
                     self.screens_need_helper = bits & crate::proto::CAN_SCREENS_WITH_HELPER != 0;
+                    // What the host prints comes here (each job asked about first).
+                    if bits & crate::proto::CAN_PRINT != 0 {
+                        self.send(ToAgent::Prints(true))?;
+                    }
                     self.can(bits)?
+                }
+                Ok(Ev::Net(ToClient::PrintJob { id, size, name, path })) => {
+                    self.print_job(id, size, name, path);
+                    ctx.request_repaint();
                 }
                 Ok(Ev::Net(ToClient::Trusted(token))) => self.trusted(token),
                 Ok(Ev::Net(ToClient::FileFrom { id, from })) => self.file_from(id, from)?,
@@ -794,6 +813,9 @@ impl Remote {
                 }
                 Ok(Ev::Net(ToClient::FetchDone { tag })) => {
                     self.resume.done(tag);
+                    if self.print_fetched(tag)? {
+                        continue;
+                    }
                     if let Some((left, paths)) = self.clip_in.as_mut() {
                         left.retain(|t| *t != tag);
                         if left.is_empty() {
@@ -928,7 +950,8 @@ impl Remote {
                     let tag = self.downloads.iter().find(|d| d.0 == id).map_or(0, |d| d.2);
                     self.downloads.retain(|d| d.0 != id);
                     self.resume.came_to(tag, &name, true);
-                    let for_clipboard = self.clip_in.as_ref().is_some_and(|(left, _)| left.contains(&tag));
+                    // A file for the clipboard or a print job is not one to tell of as downloaded.
+                    let for_clipboard = self.clip_in.as_ref().is_some_and(|(left, _)| left.contains(&tag)) || self.print_fetching.contains_key(&tag);
                     match self.inbox.end(id, ok, &text) {
                         Some(crate::files::Note::Done { ok: true, .. }) if for_clipboard => {}
                         Some(crate::files::Note::Done { ok: true, .. }) => {

@@ -475,6 +475,39 @@ fn screens_are_added_and_taken_away_from_the_menu() {
     assert!(h.find("Add a screen").is_none(), "the menu closes");
 }
 
+/// A job the host printed asks what to do with it; kept as a PDF, it is fetched into Downloads
+/// under its own name (not the host's name for its file) and the question goes.
+#[test]
+#[ignore]
+fn a_print_job_is_asked_about_and_kept() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    let dir = std::env::temp_dir().join(format!("sshremote-printjob-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let job = dir.join("5-Report.pdf.123.taken");
+    std::fs::write(&job, b"%PDF-1.4 a test").unwrap();
+    crate::files::set_home(Some(dir.join("home")));
+    h.r.print_job(5, 15, "Report.pdf".into(), job.to_string_lossy().into_owned());
+    for _ in 0..4 {
+        h.frame(Vec::new()).unwrap();
+    }
+    if let Some(snaps) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) {
+        h.snap.save(&h.ctx, h.size, &snaps.join("print_job.png"));
+    }
+    assert!(h.find("test desktop printed").is_some() && h.find("Print here").is_some(), "the question");
+    h.click("Keep as PDF").unwrap();
+    let kept = dir.join("home").join("Downloads").join("Report.pdf");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !kept.exists() && std::time::Instant::now() < until {
+        h.frame(Vec::new()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    crate::files::set_home(None);
+    assert_eq!(std::fs::read(&kept).ok().as_deref(), Some(&b"%PDF-1.4 a test"[..]), "kept in Downloads");
+    assert!(h.find("Print here").is_none(), "asked once");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An upload and a folder's download cut off by a broken connection go on in the next one from
 /// where they were, as the workspace carries them over, and arrive whole.
 #[test]

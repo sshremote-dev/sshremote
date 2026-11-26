@@ -187,7 +187,7 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
 
 /// Creates a new file named `name` in `dir`, or "name (2)" and so on: the name is claimed when
 /// the file is created, so two transfers at once cannot take the same one.
-fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, PathBuf)> {
+pub(crate) fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, PathBuf)> {
     for n in 1..10_000 {
         let path = nth_name(dir, name, n);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {

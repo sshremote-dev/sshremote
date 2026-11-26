@@ -1,28 +1,41 @@
-# Remote printing (planned)
+# Remote printing
 
-What the host prints comes out of a printer of the computer viewing it, as RustDesk 1.4 does
-between two Windows computers. Not built yet; this note keeps where it plugs in.
+What the host prints comes out of a printer of the computer viewing it.
 
 ## Flow
 
-1. The host has a printer of SSH Remote's own. A document printed to it becomes a PDF in a spool
-   folder of the program.
-2. The agent sees the new job and tells the viewer (a new `ToClient` message: the job's name, its
-   size and its path in the spool).
-3. The viewer fetches it with the existing transfer (`ToAgent::Fetch`, with resume), then prints
-   it on the printer chosen there (or asks which), and the host deletes it from the spool.
+1. The host has a printer named "SSH Remote". A document printed to it becomes a PDF in a folder
+   of the user who printed it (`print::spool_dir`).
+2. The agent of a viewer that prints (`ToAgent::Prints`, sent when `ToClient::Can` has
+   `CAN_PRINT`) takes each new job by renaming it, so another viewer's agent does not, and tells
+   its viewer (`ToClient::PrintJob`: its number, name, size and path there).
+3. The viewer asks what to do: print it here on the default printer, keep it as a PDF in
+   Downloads, or let it go. It fetches the file with the ordinary transfer and answers
+   `ToAgent::Printed`, upon which the host deletes it. A job an agent took and never had an answer
+   for goes back for another viewer as that agent ends.
 
-## Where each part goes
+Both messages need the Files right.
 
-| Part | Place | Notes |
+## The host's printer
+
+| System | Printer | Set up |
 |---|---|---|
-| Messages | `src/proto.rs` | Kinds are a byte: about 100 of each side's are free. A viewer or agent older than the feature skips the new kind once with a notice (`proto::is_unknown`). |
-| Telling each side can | `ToClient::Can` (`CAN_*`, 31 bits free) and `Settings::formats` (3 bits free) | The viewer offers printing only to an agent that says it can, and the agent sends jobs only to a viewer that says it prints. |
-| The job's bytes | `ToAgent::Fetch` / `FetchStart` / `FetchAt` | Resumable already; a job is a file. |
-| Who may print | `src/grant.rs` | The rights byte is full (seven rights and the ask flag). Either printing counts as Files, or the rights grow to two bytes: `ToClient::Allowed` can take a second byte after the first (older viewers read one), `remote-access.json`'s `allow` is a number already, and the agent's `--grant` would parse a wider one. |
-| The host's printer, Windows | `src/service.rs` install and uninstall | Windows' own "Microsoft Print to PDF" driver on a local port that writes into the spool folder: no driver of our own to sign. The service (SYSTEM) owns the folder. |
-| The host's printer, macOS and Linux | the same install step | A CUPS queue whose backend writes the PDF to the spool folder (`lpadmin`, needs an administrator once). |
-| Watching the spool | a new `src/print/` module beside `capture/` | One file per system, as `capture/` does. |
-| Printing on the viewer | `src/print/` | macOS and Linux: `lp`. Windows: the PDF's pages drawn with `Windows.Data.Pdf` (in the `windows` crate already) onto the printer's page. |
-| Turning it off | `src/modules.rs` `ALL` | A part with an on/off switch, as Files or Sound. |
-| The window | `src/gui/remote/toolbar.rs`, Settings | The printer to use, and whether to ask each time. |
+| Windows 10/11 | Windows' own "Microsoft Print To PDF" driver on a local port that is the named pipe `\\.\pipe\sshremote-print`. Each job opens it once; the agent of a viewer that prints listens there and writes each job to `%LOCALAPPDATA%\SSH Remote\print`, its name from the print queue. With no agent listening, Windows keeps the job and tries again. | With the helper service (`--install-service`), or `remote-access printer on` as an administrator |
+| Linux | A CUPS queue `SSH_Remote` whose description makes CUPS turn every job into a PDF, and a backend script (`/usr/lib/cups/backend/sshremote`, run as root) that writes it to `/var/spool/sshremote-print/UID` for the user who printed it | `sudo sshremote remote-access printer on` |
+| macOS | None: CUPS's backend folder is on the sealed system volume. | |
+
+`remote-access printer off` takes it away; uninstalling the Windows service does too.
+
+## Printing on the viewer
+
+- Linux and macOS: `lp` to the default printer.
+- Windows: the PDF's pages drawn by Windows' own PDF renderer (`Windows.Data.Pdf`), fitted to the
+  printable area, onto the default printer through GDI.
+
+## Tests
+
+- `print::tests::a_page_printed_there_prints_here`: a page printed on the host to "SSH Remote"
+  goes through a local agent, is fetched, and printed on the default printer (CUPS in a container;
+  a Windows Server VM with the Print To PDF driver).
+- `gui::remote::actions::a_print_job_is_asked_about_and_kept`: the question, and a job kept in
+  Downloads under its own name.

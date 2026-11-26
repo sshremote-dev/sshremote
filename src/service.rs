@@ -176,6 +176,10 @@ pub fn install() -> Result<(), String> {
     if let Err(e) = crate::display::amyuni::install() {
         eprintln!("sshremote: {e}");
     }
+    // SSH Remote's printer, whose jobs print on the viewer; the rest works without it.
+    if let Err(e) = crate::print::set_up(true) {
+        eprintln!("sshremote: {e}");
+    }
     run("sc", &["start", NAME])?;
     if let Some(e) = failed {
         return Err(e);
@@ -189,6 +193,7 @@ pub fn uninstall() -> Result<(), String> {
     run("sc", &["delete", NAME]).map_err(|e| format!("{e}\n(run this from an elevated prompt)"))?;
     // The virtual display driver goes with it, before the folder its tool is in.
     crate::display::amyuni::uninstall();
+    let _ = crate::print::set_up(false);
     let _ = run("reg", &["delete", POLICY_KEY, "/v", "SoftwareSASGeneration", "/f"]);
     let _ = run("netsh", &["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL}")]);
     let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);

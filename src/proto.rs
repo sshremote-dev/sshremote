@@ -48,6 +48,9 @@ pub const CAN_SCREENS: u32 = 2;
 /// It would, once its computer has the helper (on Windows the virtual display driver comes with
 /// the service): the viewer says so in place of the choice.
 pub const CAN_SCREENS_WITH_HELPER: u32 = 4;
+/// Its computer has SSH Remote's printer: what is printed to it goes to a viewer that prints
+/// (`ToAgent::Prints`), as `ToClient::PrintJob`.
+pub const CAN_PRINT: u32 = 8;
 
 pub struct Preset {
     pub name: &'static str,
@@ -296,6 +299,11 @@ pub enum ToAgent {
     },
     /// Takes away a screen `AddScreen` added, by its name in `Monitors`.
     RemoveScreen(String),
+    /// This viewer prints what is printed to the host's SSH Remote printer (or stops).
+    Prints(bool),
+    /// The viewer has the print job `PrintJob` told of (printed it, saved it or let it go):
+    /// the host lets its file go.
+    Printed(u32),
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -482,6 +490,14 @@ pub enum ToClient {
     Trusted(String),
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
+    /// Something printed on the host to SSH Remote's printer, a PDF of `size` bytes at `path`
+    /// there (fetched as any file), named `name`; answered with `ToAgent::Printed`.
+    PrintJob {
+        id: u32,
+        size: u64,
+        name: String,
+        path: String,
+    },
     /// Where a `FileResume` goes on from: what is kept there, or 0 when nothing is (data from the
     /// start, into a new part).
     FileFrom {
@@ -913,6 +929,14 @@ impl ToAgent {
                 b.extend_from_slice(name.as_bytes());
                 58
             }
+            ToAgent::Prints(on) => {
+                b.push(*on as u8);
+                59
+            }
+            ToAgent::Printed(id) => {
+                b.extend_from_slice(&id.to_le_bytes());
+                60
+            }
             ToAgent::Host { act, on } => {
                 b.extend_from_slice(&[*act, *on as u8]);
                 38
@@ -985,6 +1009,8 @@ impl ToAgent {
             49 => ToAgent::SetMode { w: c.u16()?, h: c.u16()? },
             57 => ToAgent::AddScreen { w: c.u16()?, h: c.u16()? },
             58 => ToAgent::RemoveScreen(String::from_utf8_lossy(c.rest()).into_owned()),
+            59 => ToAgent::Prints(c.u8()? != 0),
+            60 => ToAgent::Printed(c.u32()?),
             45 => ToAgent::ClipImage(c.rest().to_vec()),
             46 => ToAgent::Density(c.u16()?),
             12 => ToAgent::SecureAttention,
@@ -1218,6 +1244,13 @@ impl ToClient {
             ToClient::Trusted(t) => {
                 b.extend_from_slice(t.as_bytes());
                 144
+            }
+            ToClient::PrintJob { id, size, name, path } => {
+                b.extend_from_slice(&id.to_le_bytes());
+                b.extend_from_slice(&size.to_le_bytes());
+                put_str(&mut b, name);
+                b.extend_from_slice(path.as_bytes());
+                145
             }
             ToClient::FileFrom { id, from } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -1517,6 +1550,7 @@ impl ToClient {
             126 => ToClient::FetchDone { tag: c.u32()? },
             141 => ToClient::Can(c.u32()?),
             144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
+            145 => ToClient::PrintJob { id: c.u32()?, size: c.u64()?, name: c.str()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
             143 => ToClient::FetchAt {
                 id: c.u32()?,
@@ -1700,6 +1734,8 @@ mod tests {
             ToAgent::SetMode { w: 1280, h: 720 },
             ToAgent::AddScreen { w: 1920, h: 1080 },
             ToAgent::RemoveScreen("HEADLESS-2".into()),
+            ToAgent::Prints(true),
+            ToAgent::Printed(4),
             ToAgent::Host { act: 4, on: true },
             ToAgent::Call(true),
             ToAgent::Voice(vec![7, 8]),
@@ -1726,6 +1762,7 @@ mod tests {
             ToClient::FetchDone { tag: 0x8000_0005 },
             ToClient::Can(crate::proto::CAN_RESUME),
             ToClient::Trusted("cd34".into()),
+            ToClient::PrintJob { id: 3, size: 52_000, name: "Report.pdf".into(), path: "/var/spool/sshremote-print/1000/3-Report.pdf".into() },
             ToClient::FileFrom { id: 7, from: 1 << 20 },
             ToClient::FetchAt { id: 8, size: 1 << 34, tag: 0x8000_0007, from: 65536, name: "x/y.bin".into() },
             ToClient::TermOutput { id: 1, data: b"\x1b[31mhi".to_vec() },

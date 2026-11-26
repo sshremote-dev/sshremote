@@ -292,7 +292,11 @@ What is opened goes into the workspace:
   view only, clipboard with files (copied in a file manager here, pasted there, and back), sound,
   and the computer itself: lock it, restart it, keep its own keyboard and mouse out (Windows and
   macOS), hide its screen from whoever sits there (Windows, and Macs with Metal graphics) and lock
-  it on leaving. F11 and the other keys go to the host;
+  it on leaving. Printing: what is printed on the host to its printer "SSH Remote" (on Windows it
+  comes with the helper service, through Windows' own Microsoft Print To PDF driver; on Linux
+  `sudo sshremote remote-access printer on` sets up a CUPS queue) asks here to be printed on this
+  computer's default printer (Windows, macOS, Linux), kept as a PDF in Downloads or let go; a job
+  printed while no viewer is there waits for one. F11 and the other keys go to the host;
   Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
   Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new

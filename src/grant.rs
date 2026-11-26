@@ -69,7 +69,9 @@ pub fn needed(m: &ToAgent) -> Option<u8> {
         | ToAgent::FileResume { .. }
         | ToAgent::FetchFrom { .. }
         | ToAgent::FileOp { .. }
-        | ToAgent::PasteFiles { .. } => FILES,
+        | ToAgent::PasteFiles { .. }
+        | ToAgent::Prints(_)
+        | ToAgent::Printed(_) => FILES,
         ToAgent::Audio(true) | ToAgent::Call(true) | ToAgent::Voice(_) => SOUND,
         ToAgent::TermOpen { .. } | ToAgent::TermInput { .. } | ToAgent::TermResize { .. } => TERMINAL,
         ToAgent::Host { act, .. } if *act != crate::hostctl::QUERY => POWER,
