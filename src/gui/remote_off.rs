@@ -29,6 +29,8 @@ pub(super) struct Remote {
     pub(super) grab_wanted: bool,
     pub(super) pane_closed: bool,
     pub(super) spread_asked: bool,
+    pub(super) beside_asked: bool,
+    pub(super) screens_heard: bool,
     never: Session,
 }
 
@@ -102,6 +104,12 @@ impl Remote {
         match self.never {}
     }
     pub(super) fn monitors(&self) -> (usize, usize) {
+        match self.never {}
+    }
+    pub(super) fn screen_places(&self) -> Vec<Option<(i32, i32)>> {
+        match self.never {}
+    }
+    pub(super) fn screen_sizes(&self) -> Vec<(u16, u16)> {
         match self.never {}
     }
     pub(super) fn restore(&mut self, _: Prefs) -> Result<(), String> {

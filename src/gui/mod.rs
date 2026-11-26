@@ -1295,6 +1295,7 @@ impl App {
     /// several monitors here, each window goes full screen on the monitor that lies where its
     /// screen does on the host (the asking window too), as Remote Desktop's "use all my
     /// monitors"; leaving full screen in one of them ends it in all. With one, they open side by side.
+    #[cfg_attr(not(feature = "remote"), allow(unreachable_code, unused_variables))]
     fn spread_screens(&mut self, ctx: &egui::Context, w: &mut workspace::Workspace) {
         if w.spread.is_empty() {
             return;
