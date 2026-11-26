@@ -47,6 +47,16 @@ pub struct Video {
     /// The viewer reads AV1: films go in it (`aom`), else in H.264 (`enc`).
     pub av1: bool,
     aom: Option<crate::av1::Encoder>,
+    /// The film's hardware encoder once it went there (`on_hw`); hardware that failed is not
+    /// asked again (`hw_failed`), nor for this film hardware that was no quicker (`hw_slower`).
+    hw: Option<Box<dyn crate::hwenc::Encoder>>,
+    on_hw: bool,
+    hw_failed: bool,
+    hw_slower: bool,
+    /// The time for a picture of this film (ms, on average, and over how many pictures) on the
+    /// processor and on the hardware.
+    slow: (f64, u32),
+    hw_time: (f64, u32),
     yuv: Option<YUVBuffer>,
     crop: Vec<u8>,
     last_change: Instant,
@@ -64,6 +74,12 @@ impl Video {
             enc: None,
             av1: false,
             aom: None,
+            hw: None,
+            on_hw: false,
+            hw_failed: false,
+            hw_slower: false,
+            slow: (0.0, 0),
+            hw_time: (0.0, 0),
             yuv: None,
             crop: Vec::new(),
             last_change: Instant::now(),
@@ -121,7 +137,7 @@ impl Video {
             let plain = rects.iter().any(|r| overlaps(r, &reg)) && !rich(&reg);
             if plain || now.saturating_duration_since(self.last_change) > QUIET {
                 self.region = None;
-                (self.enc, self.aom) = (None, None);
+                self.new_film();
                 // Heat only decays on processed frames; start the area cold so it is not taken back at once.
                 for ty in reg.y / TILE..(reg.y + reg.h).div_ceil(TILE) {
                     for tx in reg.x / TILE..(reg.x + reg.w).div_ceil(TILE) {
@@ -135,7 +151,7 @@ impl Video {
             // go losslessly frame after frame.
             if let Some(grown) = self.grown(reg, w, h, rich) {
                 self.region = Some(grown);
-                (self.enc, self.aom) = (None, None);
+                self.new_film();
                 return Event::None;
             }
             // An area taken wrongly (the page that changed as the film began, with part of the
@@ -143,7 +159,7 @@ impl Video {
             // goes once more losslessly.
             if let Some(film) = self.refit(reg, w, h, rich) {
                 self.region = Some(film);
-                (self.enc, self.aom) = (None, None);
+                self.new_film();
                 return Event::Ended(reg);
             }
             return Event::None;
@@ -300,6 +316,60 @@ impl Video {
     /// seldom reaches (`av1::FLOOR`).
     pub fn encode(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool) -> Result<Vec<u8>, String> {
         let r = self.region.ok_or("no video region")?;
+        let want = crate::hwenc::wanted();
+        // The processor spends more than half of each picture's time on the film: the video
+        // hardware takes it, in H.264.
+        let behind = self.slow.1 >= 10 && self.slow.0 > 500.0 / fps.max(1) as f64;
+        if !self.on_hw && !self.hw_failed && !self.hw_slower && (want == crate::hwenc::Want::Always || (want == crate::hwenc::Want::WhenBehind && behind)) {
+            self.on_hw = true;
+        }
+        if self.on_hw && self.hw.is_none() {
+            match crate::hwenc::open(r.w, r.h, fps, bitrate) {
+                Ok(e) => {
+                    eprintln!("sshremote: a {}x{} film goes to {} now", r.w, r.h, e.name());
+                    self.hw = Some(e);
+                }
+                Err(e) => {
+                    eprintln!("sshremote: {e}");
+                    (self.on_hw, self.hw_failed) = (false, true);
+                }
+            }
+        }
+        if self.hw.is_some() {
+            let began = Instant::now();
+            if self.yuv.as_ref().is_none_or(|y| y.dimensions() != (r.w, r.h)) {
+                self.yuv = Some(YUVBuffer::new(r.w, r.h));
+            }
+            self.convert(img, r, grey);
+            let yuv = self.yuv.as_ref().unwrap();
+            match self.hw.as_mut().unwrap().encode(yuv.y(), yuv.u(), yuv.v(), yuv.strides()) {
+                Ok(au) => {
+                    self.hw_time = average(self.hw_time, began.elapsed().as_secs_f64() * 1000.0);
+                    // No quicker than the processor (a fast one, a slow card): back to it, from
+                    // a key picture.
+                    if want != crate::hwenc::Want::Always && self.hw_time.1 >= 10 && self.hw_time.0 >= self.slow.0 {
+                        eprintln!("sshremote: the film goes back to the processor ({:.1} ms a picture there, {:.1} ms on the hardware)", self.slow.0, self.hw_time.0);
+                        (self.hw, self.on_hw, self.hw_slower) = (None, false, true);
+                        (self.enc, self.aom) = (None, None);
+                    }
+                    return Ok(au);
+                }
+                // Back to the processor, from a key picture.
+                Err(e) => {
+                    eprintln!("sshremote: {e}");
+                    (self.hw, self.on_hw, self.hw_failed) = (None, false, true);
+                    (self.enc, self.aom) = (None, None);
+                }
+            }
+        }
+        let began = Instant::now();
+        let au = self.encode_here(img, fps, bitrate, grey, r);
+        self.slow = average(self.slow, began.elapsed().as_secs_f64() * 1000.0);
+        au
+    }
+
+    /// The film's picture encoded by the processor.
+    fn encode_here(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool, r: Rect) -> Result<Vec<u8>, String> {
         if self.av1 {
             if self.aom.is_none() {
                 self.aom = Some(crate::av1::Encoder::new(r.w, r.h, fps, bitrate / 2)?);
@@ -349,8 +419,19 @@ impl Video {
 
     /// Asks for a key frame, as after the viewer lost its picture.
     pub fn restart(&mut self) {
-        (self.enc, self.aom) = (None, None);
+        (self.enc, self.aom, self.hw) = (None, None, None);
     }
+
+    /// A new film, or the same at another size: new encoders, the processor timed again.
+    fn new_film(&mut self) {
+        (self.enc, self.aom, self.hw) = (None, None, None);
+        (self.on_hw, self.hw_slower, self.slow, self.hw_time) = (false, false, (0.0, 0), (0.0, 0));
+    }
+}
+
+/// A running average (of the last pictures most) with one more `ms`, and the count.
+fn average((mean, n): (f64, u32), ms: f64) -> (f64, u32) {
+    if n == 0 { (ms, 1) } else { (mean * 0.8 + ms * 0.2, n + 1) }
 }
 
 /// The 32x32 tiles where two captures of one size differ.

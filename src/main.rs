@@ -26,6 +26,8 @@ mod clip;
 #[cfg_attr(not(feature = "remote"), allow(dead_code, unused_imports))]
 #[cfg(feature = "remote")]
 mod av1;
+#[cfg(feature = "remote")]
+mod hwenc;
 mod color;
 #[cfg(windows)]
 #[cfg(feature = "remote")]
