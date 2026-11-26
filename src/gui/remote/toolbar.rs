@@ -243,6 +243,37 @@ impl Remote {
                     *action = Some(Box::new(move |r, _| r.custom(mode, scale, fps)));
                 }
             });
+            // The codec of what moves like a film; text and drawings go losslessly whatever it is.
+            ui.separator();
+            ui.label(RichText::new("Films in").strong())
+                .on_hover_text("The codec for parts of the screen that move like a film (text and drawings always go losslessly). New connections take it too.");
+            {
+                use crate::proto::{CODEC_AUTO, CODEC_AV1, CODEC_H264, CODEC_H265};
+                let now = crate::proto::codec_of(self.ctl.s.formats);
+                let h265 = if !crate::hwdec::can_h265() {
+                    Some("This computer has no H.265 decoder (on Windows, the HEVC Video Extensions bring one)")
+                } else if !self.can_h265 {
+                    Some("That computer has no video hardware that encodes H.265, or SSH Remote there is older than 0.25.51")
+                } else {
+                    None
+                };
+                ui.horizontal_wrapped(|ui| {
+                    for (c, name, tip) in [
+                        (CODEC_AUTO, "Auto", "AV1, or the video hardware's H.264 there when its processor falls behind"),
+                        (CODEC_AV1, "AV1", "The fewest bytes for the same picture, from the processor there"),
+                        (CODEC_H264, "H.264", "From the processor there, or its video hardware when the processor falls behind"),
+                        (CODEC_H265, "H.265", "From the video hardware there, decoded by this computer's system"),
+                    ] {
+                        let can = c != CODEC_H265 || h265.is_none();
+                        let r = ui.add_enabled_ui(can, |ui| ui.selectable_label(now == c, name)).inner;
+                        let r = if can { r.on_hover_text(tip) } else { r.on_disabled_hover_text(h265.unwrap_or_default()) };
+                        if r.clicked() && now != c {
+                            *action = Some(Box::new(move |r, _| r.set_codec(c)));
+                            ui.close();
+                        }
+                    }
+                });
+            }
             // The screen's own resolution (its display mode), not the picture's size.
             let (list, current, own) = &self.modes;
             if !list.is_empty() {

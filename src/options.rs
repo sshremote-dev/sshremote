@@ -23,6 +23,8 @@ pub struct Options {
     pub mode: Option<Mode>,
     pub scale: Option<u8>,
     pub fps: Option<u8>,
+    /// The codec films come in (`proto::CODEC_*`), as `--codec` asks.
+    pub codec: u8,
     pub cell: Option<(usize, usize)>,
     /// Headless run: (seconds, view size, optional PPM dump of the final framebuffer).
     pub probe: Option<(f64, (u16, u16), Option<String>)>,

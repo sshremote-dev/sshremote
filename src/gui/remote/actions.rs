@@ -475,6 +475,26 @@ fn screens_are_added_and_taken_away_from_the_menu() {
     assert!(h.find("Add a screen").is_none(), "the menu closes");
 }
 
+/// The display menu offers the codecs; H.265 greyed while the host cannot encode it, and a
+/// choice goes to the agent and stays for new connections.
+#[test]
+#[ignore]
+fn the_codec_is_chosen_from_the_display_menu() {
+    let mut h = Harness::new(Vec2::new(1280.0, 800.0));
+    h.r.can_h265 = false;
+    h.tool(ic::MONITOR).unwrap();
+    for _ in 0..6 {
+        h.frame(Vec::new()).unwrap();
+    }
+    if let Some(dir) = std::env::var_os("SSHREMOTE_SNAP_DIR").map(std::path::PathBuf::from) {
+        h.snap.save(&h.ctx, h.size, &dir.join("codec_menu.png"));
+    }
+    assert!(h.find("Films in").is_some() && h.find("H.265").is_some(), "the codecs");
+    h.click("AV1").unwrap();
+    assert_eq!(crate::proto::codec_of(h.r.ctl.s.formats), crate::proto::CODEC_AV1);
+    assert_eq!(crate::hosts::setting("codec").as_deref(), Some("1"), "kept for new connections");
+}
+
 /// A job the host printed asks what to do with it; kept as a PDF, it is fetched into Downloads
 /// under its own name (not the host's name for its file) and the question goes.
 #[test]

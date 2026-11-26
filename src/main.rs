@@ -27,6 +27,8 @@ mod clip;
 #[cfg(feature = "remote")]
 mod av1;
 #[cfg(feature = "remote")]
+mod hwdec;
+#[cfg(feature = "remote")]
 mod hwenc;
 mod color;
 #[cfg(windows)]
@@ -171,6 +173,7 @@ options:
   --mode M        mono gray4 gray16 16c 256c true
   --scale P       capture scale in percent, 10-100
   --fps N         frame rate cap, 1-120
+  --codec C       films in: auto (default), av1, h264, h265 (on both sides' video hardware)
   --cell WxH      terminal cell size in pixels (default: ask the terminal, else 10x20)
   --capture B     agent capture backend: auto gnome windows synthetic
   --remote CMD    agent command on HOST (default: sshremote --agent)
@@ -198,6 +201,7 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
         mode: None,
         scale: None,
         fps: None,
+        codec: crate::proto::CODEC_AUTO,
         cell: None,
         probe: None,
         probe_type: String::new(),
@@ -233,6 +237,16 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
             "--mode" => o.mode = Some(Mode::parse(&val()?).ok_or("bad --mode")?),
             "--scale" => o.scale = Some(val()?.parse().map_err(|_| "bad --scale")?),
             "--fps" => o.fps = Some(val()?.parse().map_err(|_| "bad --fps")?),
+            "--codec" => {
+                use crate::proto::{CODEC_AUTO, CODEC_AV1, CODEC_H264, CODEC_H265};
+                o.codec = match val()?.as_str() {
+                    "auto" => CODEC_AUTO,
+                    "av1" => CODEC_AV1,
+                    "h264" => CODEC_H264,
+                    "h265" => CODEC_H265,
+                    _ => return Err("bad --codec: auto, av1, h264 or h265".into()),
+                }
+            }
             "--cell" => {
                 let v = val()?;
                 let (w, h) = v.split_once('x').ok_or("bad --cell")?;

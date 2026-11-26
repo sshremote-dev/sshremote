@@ -415,7 +415,8 @@ fn serve_with(
     let can = crate::proto::CAN_RESUME
         | if screens.adds() { crate::proto::CAN_SCREENS } else { 0 }
         | if screens.adds_with_helper() { crate::proto::CAN_SCREENS_WITH_HELPER } else { 0 }
-        | if printer { crate::proto::CAN_PRINT } else { 0 };
+        | if printer { crate::proto::CAN_PRINT } else { 0 }
+        | if crate::hwenc::wanted() != crate::hwenc::Want::Never && crate::hwenc::has_h265() { crate::proto::CAN_H265 } else { 0 };
     send(enc, &ToClient::Can(can)).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
@@ -713,12 +714,9 @@ fn serve_with(
                         vid.reset();
                     }
                     cap.set_fps(s.fps);
-                    // Films in AV1 for a viewer that reads it; one that switched gets a key frame.
-                    let av1 = s.formats & crate::proto::FORMAT_AV1 != 0;
-                    if vid.av1 != av1 {
-                        vid.av1 = av1;
-                        vid.restart();
-                    }
+                    // Films in AV1 for a viewer that reads it, or in the codec it chose; one that
+                    // switched gets a key frame.
+                    vid.choose(s.formats & crate::proto::FORMAT_AV1 != 0, crate::proto::codec_of(s.formats), s.formats & crate::proto::FORMAT_H265 != 0);
                     settings = Some(s);
                     // A page laid out at the new size: the viewer hears its new size.
                     if cap.resizable() && cap.desktop_size() != desk {

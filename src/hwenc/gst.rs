@@ -1,21 +1,35 @@
-//! GStreamer's hardware H.264 encoders on Linux, as the system has them: VA-API (`vah264enc`,
-//! `vaapih264enc`), NVIDIA's (`nvh264enc`) and Intel's (`qsvh264enc`), in a pipeline from NV12
-//! pictures to constrained-baseline Annex B units, one out for each picture in.
+//! GStreamer's hardware H.264 and H.265 encoders on Linux, as the system has them: VA-API
+//! (`vah264enc`, `vaapih264enc`), NVIDIA's (`nvh264enc`) and Intel's (`qsvh264enc`), and their
+//! H.265 twins, in a pipeline from NV12 pictures to Annex B units (H.264's constrained baseline,
+//! H.265's Main), one out for each picture in.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
-use super::Encoder;
+use super::{Codec, Encoder};
 
 /// The encoders tried, best first, with their low-latency settings (each names them its own
-/// way); `{kbps}` and `{gop}` filled in.
+/// way); `{kbps}` and `{gop}` filled in, `{c}` the codec's name in the element's.
 const ENCODERS: &[(&str, &str)] = &[
-    ("vah264enc", "rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 target-usage=7"),
-    ("vaapih264enc", "rate-control=cbr bitrate={kbps} keyframe-period={gop} max-bframes=0"),
-    ("nvh264enc", "rc-mode=cbr bitrate={kbps} gop-size={gop} bframes=0 zerolatency=true"),
-    ("qsvh264enc", "rate-control=cbr bitrate={kbps} gop-size={gop} b-frames=0"),
+    ("va{c}enc", "rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 target-usage=7"),
+    ("vaapi{c}enc", "rate-control=cbr bitrate={kbps} keyframe-period={gop} max-bframes=0"),
+    ("nv{c}enc", "rc-mode=cbr bitrate={kbps} gop-size={gop} bframes=0 zerolatency=true"),
+    ("qsv{c}enc", "rate-control=cbr bitrate={kbps} gop-size={gop} b-frames=0"),
 ];
+
+fn short(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "h264",
+        Codec::H265 => "h265",
+    }
+}
+
+/// Whether one of the hardware encoders of `codec` is there.
+pub fn has(codec: Codec) -> bool {
+    crate::capture::ensure_session_env();
+    gst::init().is_ok() && ENCODERS.iter().any(|(n, _)| gst::ElementFactory::find(&n.replace("{c}", short(codec))).is_some())
+}
 
 pub struct Gst {
     pipeline: gst::Pipeline,
@@ -28,17 +42,17 @@ pub struct Gst {
     step: gst::ClockTime,
 }
 
-pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
+pub fn open(codec: Codec, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
     crate::capture::ensure_session_env();
     gst::init().map_err(|e| format!("GStreamer: {e}"))?;
     let fps = fps.max(1) as u32;
     let (kbps, gop) = ((bitrate / 1000).max(100).to_string(), (fps * 600).to_string());
     // Tests take a software encoder on a computer without the hardware.
     #[cfg(test)]
-    let test = std::env::var("SSHREMOTE_TEST_H264").ok().and_then(|t| t.split_once(' ').map(|(n, s)| (n.to_string(), s.to_string())));
+    let test = std::env::var(if codec == Codec::H264 { "SSHREMOTE_TEST_H264" } else { "SSHREMOTE_TEST_H265" }).ok().and_then(|t| t.split_once(' ').map(|(n, s)| (n.to_string(), s.to_string())));
     #[cfg(not(test))]
     let test: Option<(String, String)> = None;
-    let tried: Vec<(String, String)> = test.into_iter().chain(ENCODERS.iter().map(|&(n, s)| (n.into(), s.into()))).collect();
+    let tried: Vec<(String, String)> = test.into_iter().chain(ENCODERS.iter().map(|&(n, s)| (n.replace("{c}", short(codec)), s.into()))).collect();
     let mut why = Vec::new();
     for (name, settings) in tried {
         if gst::ElementFactory::find(&name).is_none() {
@@ -47,20 +61,24 @@ pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder
         let settings = settings.replace("{kbps}", &kbps).replace("{gop}", &gop);
         // Its settings as asked, else as it comes (a version that names them otherwise).
         for s in [settings.as_str(), ""] {
-            match start(&name, s, w, h, fps) {
+            match start(codec, &name, s, w, h, fps) {
                 Ok(g) => return Ok(Box::new(g)),
                 Err(e) => why.push(format!("{name}: {e}")),
             }
         }
     }
-    Err(if why.is_empty() { "no video hardware here encodes H.264 through GStreamer".into() } else { why.join("; ") })
+    Err(if why.is_empty() { format!("no video hardware here encodes {codec:?} through GStreamer") } else { why.join("; ") })
 }
 
-fn start(name: &str, settings: &str, w: usize, h: usize, fps: u32) -> Result<Gst, String> {
+fn start(codec: Codec, name: &str, settings: &str, w: usize, h: usize, fps: u32) -> Result<Gst, String> {
+    let (c, profile) = match codec {
+        Codec::H264 => ("h264", "constrained-baseline"),
+        Codec::H265 => ("h265", "main"),
+    };
     let desc = format!(
         "appsrc name=src is-live=true format=time caps=video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 \
-         ! {name} {settings} ! video/x-h264,profile=constrained-baseline \
-         ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au \
+         ! {name} {settings} ! video/x-{c},profile={profile} \
+         ! {c}parse config-interval=-1 ! video/x-{c},stream-format=byte-stream,alignment=au \
          ! appsink name=sink sync=false max-buffers=8"
     );
     let pipeline = gst::parse::launch(&desc).map_err(|e| e.to_string())?.downcast::<gst::Pipeline>().map_err(|_| "no pipeline".to_string())?;

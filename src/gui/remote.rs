@@ -132,6 +132,8 @@ pub(super) struct Remote {
     /// The agent adds screens to the host for the session (`CAN_SCREENS`), or would once the
     /// helper is installed there (`CAN_SCREENS_WITH_HELPER`).
     adds_screens: bool,
+    /// The agent encodes films in H.265 on its video hardware (`CAN_H265`).
+    can_h265: bool,
     screens_need_helper: bool,
     monitor: usize,
     /// The resolutions the shown screen can be set to, the one it has and its own (`Modes`).
@@ -397,6 +399,7 @@ impl Remote {
             hidden_paused: false,
             monitors: Vec::new(),
             adds_screens: false,
+            can_h265: false,
             screens_need_helper: false,
             monitor: 0,
             modes: (Vec::new(), (0, 0), (0, 0)),
@@ -747,6 +750,7 @@ impl Remote {
             match ev {
                 Ok(Ev::Net(ToClient::Can(bits))) => {
                     self.adds_screens = bits & crate::proto::CAN_SCREENS != 0;
+                    self.can_h265 = bits & crate::proto::CAN_H265 != 0;
                     self.screens_need_helper = bits & crate::proto::CAN_SCREENS_WITH_HELPER != 0;
                     // What the host prints comes here (each job asked about first).
                     if bits & crate::proto::CAN_PRINT != 0 {
@@ -1351,6 +1355,14 @@ impl Remote {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Films in codec `c` (`proto::CODEC_*`) from now on, and in new connections.
+    pub(super) fn set_codec(&mut self, c: u8) -> Result<(), String> {
+        self.ctl.s.formats = crate::proto::with_codec(self.ctl.s.formats, c);
+        crate::hosts::set_setting("codec", &c.to_string());
+        let s = self.ctl.s;
+        self.send(ToAgent::Settings(s))
     }
 
     pub(super) fn custom(&mut self, mode: Mode, scale: u8, fps: u8) -> Result<(), String> {

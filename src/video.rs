@@ -37,6 +37,9 @@ pub enum Event {
     Ended(Rect),
 }
 
+/// The first byte of an H.265 film picture (AV1's is `av1::MARK`; H.264 starts with a zero).
+pub const H265_MARK: u8 = 0x13;
+
 pub struct Video {
     cols: usize,
     rows: usize,
@@ -46,12 +49,17 @@ pub struct Video {
     enc: Option<Encoder>,
     /// The viewer reads AV1: films go in it (`aom`), else in H.264 (`enc`).
     pub av1: bool,
+    /// The codec the viewer chose (`proto::CODEC_*`), and whether it reads H.265.
+    pub choice: u8,
+    pub reads_h265: bool,
     aom: Option<crate::av1::Encoder>,
     /// The film's hardware encoder once it went there (`on_hw`); hardware that failed is not
     /// asked again (`hw_failed`), nor for this film hardware that was no quicker (`hw_slower`).
     hw: Option<Box<dyn crate::hwenc::Encoder>>,
     on_hw: bool,
+    hw_codec: crate::hwenc::Codec,
     hw_failed: bool,
+    h265_failed: bool,
     hw_slower: bool,
     /// The time for a picture of this film (ms, on average, and over how many pictures) on the
     /// processor and on the hardware.
@@ -73,10 +81,14 @@ impl Video {
             region: None,
             enc: None,
             av1: false,
+            choice: crate::proto::CODEC_AUTO,
+            reads_h265: false,
             aom: None,
             hw: None,
             on_hw: false,
+            hw_codec: crate::hwenc::Codec::H264,
             hw_failed: false,
+            h265_failed: false,
             hw_slower: false,
             slow: (0.0, 0),
             hw_time: (0.0, 0),
@@ -89,9 +101,17 @@ impl Video {
 
     /// Forgets everything, as after a size or colour mode change.
     pub fn reset(&mut self) {
-        let av1 = self.av1;
+        let kept = (self.av1, self.choice, self.reads_h265, self.hw_failed, self.h265_failed);
         *self = Video::new();
-        self.av1 = av1;
+        (self.av1, self.choice, self.reads_h265, self.hw_failed, self.h265_failed) = kept;
+    }
+
+    /// What the viewer reads and chose; a change starts the film again from a key picture.
+    pub fn choose(&mut self, av1: bool, choice: u8, reads_h265: bool) {
+        if (self.av1, self.choice, self.reads_h265) != (av1, choice, reads_h265) {
+            (self.av1, self.choice, self.reads_h265) = (av1, choice, reads_h265);
+            self.new_film();
+        }
     }
 
     /// Updates tile heat from this frame's changed rectangles and moves the region. The rows a
@@ -315,23 +335,28 @@ impl Video {
     /// or H.264, as `av1` says). `bitrate` is H.264's; half of it is AV1's ceiling, which a film
     /// seldom reaches (`av1::FLOOR`).
     pub fn encode(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool) -> Result<Vec<u8>, String> {
+        use crate::hwenc::{Codec, Want};
+        use crate::proto::{CODEC_AV1, CODEC_H265};
         let r = self.region.ok_or("no video region")?;
         let want = crate::hwenc::wanted();
+        // Chosen by the viewer, H.265 comes from the video hardware only.
+        let h265 = self.choice == CODEC_H265 && self.reads_h265 && !self.h265_failed && want != Want::Never;
         // The processor spends more than half of each picture's time on the film: the video
-        // hardware takes it, in H.264.
+        // hardware takes it, in H.264 (unless the viewer chose AV1).
         let behind = self.slow.1 >= 10 && self.slow.0 > 500.0 / fps.max(1) as f64;
-        if !self.on_hw && !self.hw_failed && !self.hw_slower && (want == crate::hwenc::Want::Always || (want == crate::hwenc::Want::WhenBehind && behind)) {
-            self.on_hw = true;
+        let h264 = self.choice != CODEC_AV1 && !self.hw_failed && !self.hw_slower && (want == Want::Always || (want == Want::WhenBehind && behind));
+        if !self.on_hw && (h265 || h264) {
+            (self.on_hw, self.hw_codec) = (true, if h265 { Codec::H265 } else { Codec::H264 });
         }
         if self.on_hw && self.hw.is_none() {
-            match crate::hwenc::open(r.w, r.h, fps, bitrate) {
+            match crate::hwenc::open(self.hw_codec, r.w, r.h, fps, bitrate) {
                 Ok(e) => {
-                    eprintln!("sshremote: a {}x{} film goes to {} now", r.w, r.h, e.name());
+                    eprintln!("sshremote: a {}x{} film goes to {} now, in {:?}", r.w, r.h, e.name(), self.hw_codec);
                     self.hw = Some(e);
                 }
                 Err(e) => {
                     eprintln!("sshremote: {e}");
-                    (self.on_hw, self.hw_failed) = (false, true);
+                    self.failed();
                 }
             }
         }
@@ -345,9 +370,15 @@ impl Video {
             match self.hw.as_mut().unwrap().encode(yuv.y(), yuv.u(), yuv.v(), yuv.strides()) {
                 Ok(au) => {
                     self.hw_time = average(self.hw_time, began.elapsed().as_secs_f64() * 1000.0);
+                    if self.hw_codec == Codec::H265 {
+                        let mut out = Vec::with_capacity(au.len() + 1);
+                        out.push(H265_MARK);
+                        out.extend_from_slice(&au);
+                        return Ok(out);
+                    }
                     // No quicker than the processor (a fast one, a slow card): back to it, from
                     // a key picture.
-                    if want != crate::hwenc::Want::Always && self.hw_time.1 >= 10 && self.hw_time.0 >= self.slow.0 {
+                    if want != Want::Always && self.hw_time.1 >= 10 && self.hw_time.0 >= self.slow.0 {
                         eprintln!("sshremote: the film goes back to the processor ({:.1} ms a picture there, {:.1} ms on the hardware)", self.slow.0, self.hw_time.0);
                         (self.hw, self.on_hw, self.hw_slower) = (None, false, true);
                         (self.enc, self.aom) = (None, None);
@@ -357,7 +388,8 @@ impl Video {
                 // Back to the processor, from a key picture.
                 Err(e) => {
                     eprintln!("sshremote: {e}");
-                    (self.hw, self.on_hw, self.hw_failed) = (None, false, true);
+                    self.hw = None;
+                    self.failed();
                     (self.enc, self.aom) = (None, None);
                 }
             }
@@ -368,9 +400,19 @@ impl Video {
         au
     }
 
-    /// The film's picture encoded by the processor.
+    /// The hardware failed: not asked again for its codec this session.
+    fn failed(&mut self) {
+        match self.hw_codec {
+            crate::hwenc::Codec::H264 => self.hw_failed = true,
+            crate::hwenc::Codec::H265 => self.h265_failed = true,
+        }
+        self.on_hw = false;
+    }
+
+    /// The film's picture encoded by the processor: AV1 for a viewer that reads it (and did not
+    /// choose H.264), else H.264.
     fn encode_here(&mut self, img: &Image, fps: u8, bitrate: u32, grey: bool, r: Rect) -> Result<Vec<u8>, String> {
-        if self.av1 {
+        if self.av1 && self.choice != crate::proto::CODEC_H264 {
             if self.aom.is_none() {
                 self.aom = Some(crate::av1::Encoder::new(r.w, r.h, fps, bitrate / 2)?);
                 self.yuv = Some(YUVBuffer::new(r.w, r.h));
@@ -488,6 +530,8 @@ pub struct Player {
     rect: Option<(usize, usize, usize, usize)>,
     dec: Option<Decoder>,
     aom: Option<crate::av1::Decoder>,
+    /// The system's H.265 decoder, for films that come so (`H265_MARK`).
+    hevc: Option<Box<dyn crate::hwdec::Decoder>>,
     rgb: Vec<u8>,
 }
 
@@ -495,8 +539,15 @@ impl Player {
     /// Decodes one access unit for `rect`; returns its RGB pixels when a picture is ready.
     pub fn decode(&mut self, rect: (usize, usize, usize, usize), data: &[u8]) -> Result<Option<&[u8]>, String> {
         if self.rect != Some(rect) {
-            (self.dec, self.aom) = (None, None);
+            (self.dec, self.aom, self.hevc) = (None, None, None);
             self.rect = Some(rect);
+        }
+        if data.first() == Some(&H265_MARK) {
+            if self.hevc.is_none() {
+                self.hevc = Some(crate::hwdec::open_h265()?);
+            }
+            let shown = self.hevc.as_mut().unwrap().decode(&data[1..], rect.2, rect.3, &mut self.rgb)?;
+            return Ok(shown.then_some(&self.rgb[..]));
         }
         if data.first() == Some(&crate::av1::MARK) {
             if self.aom.is_none() {

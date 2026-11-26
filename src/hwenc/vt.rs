@@ -1,11 +1,12 @@
-//! VideoToolbox's hardware H.264 encoder on macOS: a real-time compression session, constrained
-//! baseline with no reordering, fed NV12 pixel buffers from its own pool, each picture completed
-//! before the call returns, its length-prefixed units turned into Annex B.
+//! VideoToolbox's hardware H.264 and H.265 encoders on macOS: a real-time compression session
+//! (H.264's constrained baseline, H.265's Main) with no reordering, fed NV12 pixel buffers from its
+//! own pool, each picture completed before the call returns, its length-prefixed units turned
+//! into Annex B with the parameter sets before each key picture.
 
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-use super::Encoder;
+use super::{Codec, Encoder};
 
 type Ref = *const c_void;
 
@@ -33,6 +34,10 @@ unsafe extern "C" {
     static kVTCompressionPropertyKey_RealTime: Ref;
     static kVTCompressionPropertyKey_ProfileLevel: Ref;
     static kVTProfileLevel_H264_Baseline_AutoLevel: Ref;
+    static kVTProfileLevel_HEVC_Main_AutoLevel: Ref;
+    fn VTCopyVideoEncoderList(options: Ref, list: *mut Ref) -> i32;
+    static kVTVideoEncoderList_CodecType: Ref;
+    static kVTVideoEncoderList_IsHardwareAccelerated: Ref;
     static kVTCompressionPropertyKey_AverageBitRate: Ref;
     static kVTCompressionPropertyKey_AllowFrameReordering: Ref;
     static kVTCompressionPropertyKey_MaxKeyFrameInterval: Ref;
@@ -49,6 +54,7 @@ unsafe extern "C" {
     fn CMBlockBufferGetDataLength(block: Ref) -> usize;
     fn CMBlockBufferCopyDataBytes(block: Ref, offset: usize, len: usize, to: *mut c_void) -> i32;
     fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(desc: Ref, index: usize, set: *mut *const u8, size: *mut usize, count: *mut usize, header: *mut i32) -> i32;
+    fn CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(desc: Ref, index: usize, set: *mut *const u8, size: *mut usize, count: *mut usize, header: *mut i32) -> i32;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -67,17 +73,58 @@ unsafe extern "C" {
     fn CFDictionaryCreateMutable(alloc: Ref, capacity: isize, keys: Ref, values: Ref) -> Ref;
     fn CFDictionarySetValue(dict: Ref, key: Ref, value: Ref);
     fn CFBooleanGetValue(b: Ref) -> bool;
+    fn CFArrayGetCount(a: Ref) -> isize;
+    fn CFArrayGetValueAtIndex(a: Ref, i: isize) -> Ref;
+    fn CFDictionaryGetValue(d: Ref, key: Ref) -> Ref;
+    fn CFNumberGetValue(n: Ref, kind: isize, out: *mut c_void) -> bool;
     static kCFBooleanTrue: Ref;
     static kCFBooleanFalse: Ref;
     static kCFTypeDictionaryKeyCallBacks: c_void;
     static kCFTypeDictionaryValueCallBacks: c_void;
 }
 
-const H264: u32 = u32::from_be_bytes(*b"avc1");
+fn codec_type(codec: Codec) -> u32 {
+    u32::from_be_bytes(*match codec {
+        Codec::H264 => b"avc1",
+        Codec::H265 => b"hvc1",
+    })
+}
+
+type ParameterSet = unsafe extern "C" fn(Ref, usize, *mut *const u8, *mut usize, *mut usize, *mut i32) -> i32;
+
+fn parameter_sets(codec: Codec) -> ParameterSet {
+    match codec {
+        Codec::H264 => CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+        Codec::H265 => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+    }
+}
+
+/// Whether the system lists a hardware encoder of `codec`.
+pub fn has(codec: Codec) -> bool {
+    let want = codec_type(codec) as i32;
+    // SAFETY: the list is read while it lives, then released.
+    unsafe {
+        let mut list: Ref = std::ptr::null();
+        if VTCopyVideoEncoderList(std::ptr::null(), &mut list) != 0 || list.is_null() {
+            return false;
+        }
+        let found = (0..CFArrayGetCount(list)).any(|i| {
+            let d = CFArrayGetValueAtIndex(list, i);
+            let (kind, hw) = (CFDictionaryGetValue(d, kVTVideoEncoderList_CodecType), CFDictionaryGetValue(d, kVTVideoEncoderList_IsHardwareAccelerated));
+            let mut k = 0i32;
+            !kind.is_null() && CFNumberGetValue(kind, INT32, (&raw mut k).cast()) && k == want && !hw.is_null() && CFBooleanGetValue(hw)
+        });
+        CFRelease(list);
+        found
+    }
+}
 const INT32: isize = 3;
 
-/// What the session hands back for one picture: its units, or why there are none.
-type Made = Mutex<Vec<Result<Vec<u8>, i32>>>;
+/// What the session hands back for one picture: its units, or why there are none; and the codec.
+struct Made {
+    codec: Codec,
+    out: Mutex<Vec<Result<Vec<u8>, i32>>>,
+}
 
 pub struct Vt {
     session: Ref,
@@ -93,16 +140,17 @@ unsafe impl Send for Vt {}
 
 /// The picture's units, length-prefixed in `data`, as Annex B; the parameter sets of `desc`
 /// before them.
-unsafe fn annex_b(desc: Ref, data: &[u8]) -> Vec<u8> {
+unsafe fn annex_b(codec: Codec, desc: Ref, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 64);
     if !desc.is_null() {
         let (mut count, mut header) = (0usize, 0i32);
         let (mut p, mut n) = (std::ptr::null(), 0usize);
         // SAFETY: the description's own sets, read while it lives.
         unsafe {
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(desc, 0, &mut p, &mut n, &mut count, &mut header) == 0 {
+            let get = parameter_sets(codec);
+            if get(desc, 0, &mut p, &mut n, &mut count, &mut header) == 0 {
                 for i in 0..count {
-                    if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(desc, i, &mut p, &mut n, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
+                    if get(desc, i, &mut p, &mut n, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
                         out.extend_from_slice(&[0, 0, 0, 1]);
                         out.extend_from_slice(std::slice::from_raw_parts(p, n));
                     }
@@ -137,15 +185,15 @@ unsafe extern "C" fn done(refcon: *mut c_void, _: *mut c_void, status: i32, _: u
                 CMBlockBufferCopyDataBytes(block, 0, n, data.as_mut_ptr().cast());
             }
             // Parameter sets before every key picture; a picture with none needs none.
-            let key = super::is_key(&annex_b(std::ptr::null(), &data));
-            Ok(annex_b(if key { CMSampleBufferGetFormatDescription(sample) } else { std::ptr::null() }, &data))
+            let key = super::is_key(made.codec, &annex_b(made.codec, std::ptr::null(), &data));
+            Ok(annex_b(made.codec, if key { CMSampleBufferGetFormatDescription(sample) } else { std::ptr::null() }, &data))
         }
     };
-    made.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+    made.out.lock().unwrap_or_else(|e| e.into_inner()).push(r);
 }
 
-pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
-    let made: Box<Made> = Box::new(Mutex::new(Vec::new()));
+pub fn open(codec: Codec, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
+    let made: Box<Made> = Box::new(Made { codec, out: Mutex::new(Vec::new()) });
     let fps = fps.max(1) as i32;
     // SAFETY: VideoToolbox's and Core Foundation's calls with the arguments they take; what is
     // made here is released here, the session at drop.
@@ -157,15 +205,15 @@ pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder
         CFDictionarySetValue(spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, if cfg!(test) { kCFBooleanFalse } else { kCFBooleanTrue });
         let mut session: Ref = std::ptr::null();
         let refcon = (&*made as *const Made).cast_mut().cast();
-        let r = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, H264, spec, std::ptr::null(), std::ptr::null(), Some(done), refcon, &mut session);
+        let r = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, codec_type(codec), spec, std::ptr::null(), std::ptr::null(), Some(done), refcon, &mut session);
         CFRelease(spec);
         if r != 0 || session.is_null() {
-            return Err(format!("VideoToolbox: no H.264 encoder for {w}x{h} ({r})"));
+            return Err(format!("VideoToolbox: no {codec:?} encoder for {w}x{h} ({r})"));
         }
         let number = |v: i32| CFNumberCreate(std::ptr::null(), INT32, (&raw const v).cast());
         let set = |k: Ref, v: Ref| VTSessionSetProperty(session, k, v);
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-        set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel);
+        set(kVTCompressionPropertyKey_ProfileLevel, if codec == Codec::H264 { kVTProfileLevel_H264_Baseline_AutoLevel } else { kVTProfileLevel_HEVC_Main_AutoLevel });
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
         for (k, v) in [(kVTCompressionPropertyKey_AverageBitRate, bitrate.min(i32::MAX as u32) as i32), (kVTCompressionPropertyKey_ExpectedFrameRate, fps), (kVTCompressionPropertyKey_MaxKeyFrameInterval, fps * 600)] {
             let n = number(v);
@@ -220,7 +268,7 @@ impl Encoder for Vt {
             VTCompressionSessionCompleteFrames(self.session, CMTime { value: 0, timescale: 0, flags: 0, epoch: 0 });
         }
         let mut out = Vec::new();
-        for r in self.made.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        for r in self.made.out.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
             out.extend(r.map_err(|s| format!("VideoToolbox: the picture failed ({s})"))?);
         }
         Ok(out)

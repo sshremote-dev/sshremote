@@ -1,7 +1,8 @@
-//! Media Foundation's hardware H.264 encoders (Intel Quick Sync, NVIDIA NVENC, AMD AMF): an
+//! Media Foundation's hardware H.264 and H.265 encoders (Intel Quick Sync, NVIDIA NVENC, AMD AMF): an
 //! asynchronous transform given a Direct3D 11 device of its own graphics card and NV12 pictures
 //! in textures there (from memory, a picture took Quick Sync 25 ms at any size), asked for low
-//! latency, no B pictures and constrained baseline (what the viewer's decoder reads).
+//! latency, no B pictures, and H.264's constrained baseline (what every viewer's decoder reads)
+//! or H.265's Main.
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{Interface, PWSTR};
 
-use super::Encoder;
+use super::{Codec, Encoder};
 
 /// The encoder's graphics card: its device, and textures the pictures go up into in turn (the
 /// transform may still read the one before).
@@ -75,6 +76,7 @@ fn gpu(luid: Option<u64>) -> Result<Gpu, String> {
 
 pub struct Mf {
     mft: IMFTransform,
+    codec: Codec,
     gpu: Option<Gpu>,
     /// The transform's events (hardware transforms run asynchronously); None for one that does not.
     events: Option<IMFMediaEventGenerator>,
@@ -121,38 +123,54 @@ fn yes() -> VARIANT {
     v
 }
 
-pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
+fn subtype(codec: Codec) -> windows::core::GUID {
+    match codec {
+        Codec::H264 => MFVideoFormat_H264,
+        Codec::H265 => MFVideoFormat_HEVC,
+    }
+}
+
+/// The hardware encoders of `codec` the system lists, best first.
+fn listed(codec: Codec) -> Result<Vec<IMFActivate>, String> {
     // SAFETY: plain calls; already set up on this thread (in another way) is as good.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e("start"))?;
     }
     let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
-    let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(codec) };
     let (mut list, mut count) = (std::ptr::null_mut(), 0u32);
     // SAFETY: the list and its count are written by the call, freed below.
     unsafe { MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, Some(&input), Some(&output), &mut list, &mut count) }
         .map_err(e("list"))?;
-    let acts: Vec<IMFActivate> = if list.is_null() {
+    Ok(if list.is_null() {
         Vec::new()
     } else {
         // SAFETY: `count` entries, each taken over once, then the list itself freed.
         let acts = (0..count as usize).filter_map(|i| unsafe { std::ptr::read(list.add(i)) }).collect();
         unsafe { CoTaskMemFree(Some(list as _)) };
         acts
-    };
+    })
+}
+
+pub fn has(codec: Codec) -> bool {
+    listed(codec).is_ok_and(|l| !l.is_empty())
+}
+
+pub fn open(codec: Codec, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
+    let acts = listed(codec)?;
     let mut why = Vec::new();
     for act in &acts {
-        match Mf::new(act, w, h, fps, bitrate) {
+        match Mf::new(act, codec, w, h, fps, bitrate) {
             Ok(m) => return Ok(Box::new(m)),
             Err(x) => why.push(x),
         }
     }
-    Err(if why.is_empty() { "no video hardware here encodes H.264".into() } else { why.join("; ") })
+    Err(if why.is_empty() { format!("no video hardware here encodes {codec:?}") } else { why.join("; ") })
 }
 
 impl Mf {
-    fn new(act: &IMFActivate, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Mf, String> {
+    fn new(act: &IMFActivate, codec: Codec, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Mf, String> {
         let name = {
             let (mut p, mut n) = (PWSTR::null(), 0u32);
             // SAFETY: the string is allocated by the call and freed after it is read.
@@ -192,13 +210,17 @@ impl Mf {
             let rate = ((fps as u64) << 32) | 1;
             let out = MFCreateMediaType().map_err(e("type"))?;
             out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(e("type"))?;
-            out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(e("type"))?;
+            out.SetGUID(&MF_MT_SUBTYPE, &subtype(codec)).map_err(e("type"))?;
             out.SetUINT32(&MF_MT_AVG_BITRATE, bitrate).map_err(e("type"))?;
             out.SetUINT64(&MF_MT_FRAME_SIZE, size).map_err(e("type"))?;
             out.SetUINT64(&MF_MT_FRAME_RATE, rate).map_err(e("type"))?;
             out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1).map_err(e("type"))?;
             out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(e("type"))?;
-            out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32).map_err(e("type"))?;
+            let profile = match codec {
+                Codec::H264 => eAVEncH264VProfile_Base.0 as u32,
+                Codec::H265 => eAVEncH265VProfile_Main_420_8.0 as u32,
+            };
+            out.SetUINT32(&MF_MT_MPEG2_PROFILE, profile).map_err(e("type"))?;
             mft.SetOutputType(0, &out, 0).map_err(e("its output"))?;
             let inp = MFCreateMediaType().map_err(e("type"))?;
             inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(e("type"))?;
@@ -224,6 +246,7 @@ impl Mf {
             windows_sys::Win32::Media::timeBeginPeriod(1);
             Ok(Mf {
                 mft,
+                codec,
                 gpu,
                 events,
                 name,
@@ -401,7 +424,7 @@ impl Encoder for Mf {
             }
         }
         // A first picture may take the hardware a while to set up.
-        let until = Instant::now() + if self.first { Duration::from_secs(2) } else { Duration::from_millis(250) };
+        let until = Instant::now() + if self.first { Duration::from_secs(5) } else { Duration::from_millis(250) };
         let mut data = if self.events.is_none() {
             self.feed()?;
             self.output()?.unwrap_or_default()
@@ -434,7 +457,7 @@ impl Encoder for Mf {
         if !self.late.is_empty() {
             data.splice(0..0, std::mem::take(&mut self.late));
         }
-        if self.first && !super::has_sps(&data) && !self.header.is_empty() {
+        if self.first && !super::has_sps(self.codec, &data) && !self.header.is_empty() {
             data.splice(0..0, self.header.iter().copied());
         }
         self.first = false;

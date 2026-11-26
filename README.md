@@ -370,7 +370,11 @@ paints a moment apart go as one. A film the processor falls behind on (more than
 picture's time) goes to the video hardware in H.264, through Media Foundation on Windows (Intel
 Quick Sync, NVIDIA NVENC, AMD AMF), VideoToolbox on macOS and GStreamer's VA-API, NVENC and Quick
 Sync encoders on Linux, and back to the processor if the hardware is no quicker
-(`SSHREMOTE_HW_ENCODE=0` never, `1` always).
+(`SSHREMOTE_HW_ENCODE=0` never, `1` always). The viewer can choose what films come in (the
+screen's display menu, or `--codec`): Auto, AV1, H.264, or H.265, encoded on the host's video
+hardware and decoded by the viewer's own system (Media Foundation with the HEVC Video Extensions
+on Windows, VideoToolbox on macOS, GStreamer's decoders on Linux); a choice either side cannot
+make is offered greyed, with the reason.
 
 ## Building
 

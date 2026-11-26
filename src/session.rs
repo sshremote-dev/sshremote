@@ -624,7 +624,11 @@ pub struct Control {
 
 impl Control {
     pub fn new(opt: &Options, max_mode: Mode) -> Control {
-        Control::with(opt.preset, opt.budget, (opt.mode, opt.scale, opt.fps), max_mode)
+        let mut c = Control::with(opt.preset, opt.budget, (opt.mode, opt.scale, opt.fps), max_mode);
+        // This viewer's system decodes H.265: films may come so, when chosen.
+        let h265 = if crate::hwdec::can_h265() { crate::proto::FORMAT_H265 } else { 0 };
+        c.s.formats = crate::proto::with_codec(c.s.formats | h265, opt.codec);
+        c
     }
 
     /// Auto, or preset `preset`, with nothing else asked (a browser's start).

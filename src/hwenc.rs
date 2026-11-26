@@ -11,6 +11,14 @@ mod vt;
 #[cfg(target_os = "linux")]
 mod gst;
 
+/// What a hardware encoder makes: H.264 (constrained baseline, which every viewer reads) or
+/// H.265 (Main, for a viewer whose system decodes it).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Codec {
+    H264,
+    H265,
+}
+
 /// A hardware encoder for one film's size.
 pub trait Encoder: Send {
     /// One picture as I420 planes with their strides: its access unit in Annex B form, the
@@ -41,27 +49,51 @@ pub fn wanted() -> Want {
 /// An encoder for `w`x`h` pictures at `fps` and about `bitrate` bits a second, or why there is
 /// none here.
 #[allow(unused_variables)]
-pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
+pub fn open(codec: Codec, w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder>, String> {
     #[cfg(windows)]
-    return mf::open(w, h, fps, bitrate);
+    return mf::open(codec, w, h, fps, bitrate);
     #[cfg(target_os = "macos")]
-    return vt::open(w, h, fps, bitrate);
+    return vt::open(codec, w, h, fps, bitrate);
     #[cfg(target_os = "linux")]
-    return gst::open(w, h, fps, bitrate);
+    return gst::open(codec, w, h, fps, bitrate);
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     Err("no video hardware encoder is used on this system".into())
 }
 
-/// Whether an access unit carries a sequence parameter set (NAL type 7).
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn has_sps(au: &[u8]) -> bool {
-    au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7)
+/// Whether this computer's video hardware encodes H.265 (looked at once, by what the system
+/// lists rather than by opening one).
+pub fn has_h265() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        #[cfg(windows)]
+        return mf::has(Codec::H265);
+        #[cfg(target_os = "macos")]
+        return vt::has(Codec::H265);
+        #[cfg(target_os = "linux")]
+        return gst::has(Codec::H265);
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        false
+    })
 }
 
-/// Whether an access unit carries a key picture (an IDR slice, NAL type 5).
+/// The type of each unit of an Annex B access unit.
+pub fn units(codec: Codec, au: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    au.windows(4).filter(|w| w[..3] == [0, 0, 1]).map(move |w| match codec {
+        Codec::H264 => w[3] & 0x1f,
+        Codec::H265 => (w[3] >> 1) & 0x3f,
+    })
+}
+
+/// Whether an access unit carries its sequence parameter set (H.264 type 7, H.265 type 33).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn has_sps(codec: Codec, au: &[u8]) -> bool {
+    units(codec, au).any(|t| t == if codec == Codec::H264 { 7 } else { 33 })
+}
+
+/// Whether an access unit carries a key picture (H.264 IDR, H.265 IRAP).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn is_key(au: &[u8]) -> bool {
-    au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 5)
+pub fn is_key(codec: Codec, au: &[u8]) -> bool {
+    units(codec, au).any(|t| if codec == Codec::H264 { t == 5 } else { (16..=21).contains(&t) })
 }
 
 #[cfg(test)]
@@ -70,9 +102,12 @@ mod tests {
 
     #[test]
     fn a_sequence_parameter_set_is_found() {
-        assert!(has_sps(&[0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68]));
-        assert!(!has_sps(&[0, 0, 0, 1, 0x65, 0x88]));
-        assert!(is_key(&[0, 0, 0, 1, 0x65, 0x88]) && !is_key(&[0, 0, 0, 1, 0x41, 0x9a]));
+        assert!(has_sps(Codec::H264, &[0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68]));
+        assert!(!has_sps(Codec::H264, &[0, 0, 0, 1, 0x65, 0x88]));
+        assert!(is_key(Codec::H264, &[0, 0, 0, 1, 0x65, 0x88]) && !is_key(Codec::H264, &[0, 0, 0, 1, 0x41, 0x9a]));
+        // H.265: VPS 32, SPS 33, PPS 34, IDR_W_RADL 19, TRAIL_R 1.
+        assert!(has_sps(Codec::H265, &[0, 0, 0, 1, 0x40, 1, 0, 0, 1, 0x42, 1, 0, 0, 1, 0x44, 1]));
+        assert!(is_key(Codec::H265, &[0, 0, 0, 1, 0x26, 1]) && !is_key(Codec::H265, &[0, 0, 0, 1, 0x02, 1]));
     }
 
     /// A moving picture through the hardware encoder here and back through the viewer's H.264
@@ -85,7 +120,7 @@ mod tests {
         for (w, h) in [(896usize, 576usize), (1920, 1080), (3840, 2160)] {
             let fps = 30u8;
             let bitrate = ((w * h) as f64 * fps as f64 * 0.08) as u32;
-            let mut enc = match open(w, h, fps, bitrate) {
+            let mut enc = match open(Codec::H264, w, h, fps, bitrate) {
                 Ok(e) => e,
                 Err(e) => panic!("{w}x{h}: {e}"),
             };
@@ -107,7 +142,7 @@ mod tests {
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
                 bytes += au.len();
                 if f == 0 {
-                    assert!(has_sps(&au), "the first picture carries its parameter sets");
+                    assert!(has_sps(Codec::H264, &au), "the first picture carries its parameter sets");
                 }
                 if let Ok(Some(pic)) = dec.decode(&au) {
                     shown += 1;

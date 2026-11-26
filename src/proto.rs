@@ -34,8 +34,28 @@ pub const FORMAT_SIDEWAYS: u8 = 4;
 pub const FORMAT_WIDE: u8 = 8;
 /// Video regions in AV1 (`av1`), told from H.264 by their first byte.
 pub const FORMAT_AV1: u8 = 16;
-/// Every form this program reads.
+/// The codec the viewer would have films in, in two bits of `formats` (`codec_of`): older agents
+/// pass them over and choose for themselves, as `CODEC_AUTO` does.
+pub const CODEC_SHIFT: u8 = 5;
+pub const CODEC_AUTO: u8 = 0;
+pub const CODEC_AV1: u8 = 1;
+pub const CODEC_H264: u8 = 2;
+pub const CODEC_H265: u8 = 3;
+/// Video regions in H.265 too, decoded by the viewer's system (`hwdec`), told from the others by
+/// their first byte (`hwdec::H265`).
+pub const FORMAT_H265: u8 = 128;
+/// Every form this program reads in every case.
 pub const FORMATS: u8 = FORMAT_PALETTE | FORMAT_SIDEWAYS | FORMAT_WIDE | FORMAT_AV1;
+
+/// The codec chosen in `formats`.
+pub fn codec_of(formats: u8) -> u8 {
+    (formats >> CODEC_SHIFT) & 3
+}
+
+/// `formats` with `codec` chosen.
+pub fn with_codec(formats: u8, codec: u8) -> u8 {
+    formats & !(3 << CODEC_SHIFT) | (codec & 3) << CODEC_SHIFT
+}
 
 /// `ToAgent::TrustMe`'s kind, which remote access looks for in the viewer's stream.
 pub const KIND_TRUST_ME: u8 = 54;
@@ -51,6 +71,8 @@ pub const CAN_SCREENS_WITH_HELPER: u32 = 4;
 /// Its computer has SSH Remote's printer: what is printed to it goes to a viewer that prints
 /// (`ToAgent::Prints`), as `ToClient::PrintJob`.
 pub const CAN_PRINT: u32 = 8;
+/// It encodes films in H.265 on its video hardware, for a viewer that chooses it.
+pub const CAN_H265: u32 = 16;
 
 pub struct Preset {
     pub name: &'static str,
@@ -1674,6 +1696,15 @@ impl ToClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_codec_choice_sits_beside_the_forms() {
+        for c in [CODEC_AUTO, CODEC_AV1, CODEC_H264, CODEC_H265] {
+            let f = with_codec(FORMATS | FORMAT_H265, c);
+            assert_eq!((codec_of(f), f & !(3 << CODEC_SHIFT)), (c, FORMATS | FORMAT_H265));
+        }
+        assert_eq!(codec_of(FORMATS), CODEC_AUTO);
+    }
     use crate::xk;
 
     /// A newer version's message can be passed over; a damaged one cannot.

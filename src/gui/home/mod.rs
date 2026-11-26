@@ -184,6 +184,8 @@ impl App {
             mode: None,
             scale: None,
             fps: None,
+            // The codec chosen in Settings (or from a screen's menu) for new connections.
+            codec: crate::hosts::setting("codec").and_then(|v| v.parse().ok()).filter(|c| *c <= crate::proto::CODEC_H265).unwrap_or(crate::proto::CODEC_AUTO),
             cell: None,
             probe: None,
             probe_type: String::new(),
