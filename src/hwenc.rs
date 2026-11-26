@@ -8,6 +8,8 @@
 mod mf;
 #[cfg(target_os = "macos")]
 mod vt;
+#[cfg(target_os = "linux")]
+mod gst;
 
 /// A hardware encoder for one film's size.
 pub trait Encoder: Send {
@@ -43,7 +45,9 @@ pub fn open(w: usize, h: usize, fps: u8, bitrate: u32) -> Result<Box<dyn Encoder
     return mf::open(w, h, fps, bitrate);
     #[cfg(target_os = "macos")]
     return vt::open(w, h, fps, bitrate);
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    return gst::open(w, h, fps, bitrate);
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     Err("no video hardware encoder is used on this system".into())
 }
 
