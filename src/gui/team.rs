@@ -194,6 +194,34 @@ fn decode_logo(url: &str) -> Option<egui::ColorImage> {
     Some(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
 }
 
+/// The team's name and logo (a data URL) as the app's own, when this computer is in a team that
+/// asks for it (`brand` in its settings).
+pub(super) fn team_brand(ctx: &egui::Context) -> Option<(String, String)> {
+    let arc = shared(ctx);
+    let s = lock(&arc);
+    let j = s.state.joined.as_ref().filter(|j| j.team["brand"].as_bool() == Some(true))?;
+    Some((team_name(&j.team, &j.url), j.team["logo"].as_str().unwrap_or("").to_string()))
+}
+
+/// The window's title and icon as the team's brand says (or the app's own again), sent when they
+/// change.
+pub(super) fn apply_brand(ctx: &egui::Context) {
+    let now = team_brand(ctx);
+    let id = egui::Id::unique("team-brand-applied");
+    if ctx.data(|d| d.get_temp::<Option<(String, String)>>(id)) == Some(now.clone()) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, now.clone()));
+    let (title, icon) = match &now {
+        Some((name, logo)) => (name.clone(), decode_logo(logo).map(|img| egui::IconData { rgba: img.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied()).collect(), width: img.size[0] as u32, height: img.size[1] as u32 }).or_else(super::app_icon)),
+        None => ("SSH Remote".to_string(), super::app_icon()),
+    };
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    if let Some(icon) = icon {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
+    }
+}
+
 /// A team's name as shown: its own, else its server's.
 fn team_name(team: &Value, url: &str) -> String {
     match team["name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
@@ -221,6 +249,9 @@ fn policy_words(p: &crate::team::Policy) -> String {
     }
     if let Some(m) = p.idle.filter(|m| *m > 0) {
         out.push(t!("Idle sessions end after {} min", m));
+    }
+    if p.incoming_only {
+        out.push(t!("Incoming only").into());
     }
     out.join("  \u{00b7}  ")
 }

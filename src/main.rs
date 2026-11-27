@@ -10,6 +10,8 @@ mod console;
 mod loginscreen;
 #[cfg(feature = "remote")]
 mod team;
+#[cfg(all(feature = "gui", not(target_os = "macos")))]
+mod desktop_entry;
 #[cfg(feature = "remote")]
 mod access;
 mod admin;

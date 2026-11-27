@@ -20,8 +20,17 @@ impl App {
     pub(super) fn home(&mut self, ui: &mut egui::Ui) {
         let dark = ui.visuals().dark_mode;
         let mut open_settings = false;
+        // A team that makes the app its own: its name in the title bar, and the window's title
+        // and icon too.
+        #[cfg(feature = "remote")]
+        let title = {
+            super::team::apply_brand(ui.ctx());
+            super::team::team_brand(ui.ctx()).map_or_else(|| "SSH Remote".to_string(), |b| b.0)
+        };
+        #[cfg(not(feature = "remote"))]
+        let title = "SSH Remote".to_string();
         let bar = super::chrome::title_bar(ui, |ui| {
-            ui.label(RichText::new("SSH Remote").size(14.0).strong());
+            ui.label(RichText::new(title).size(14.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 open_settings = icon(ui, ic::GEAR, t!("Settings"), false).clicked();
                 let (glyph, tip) = if dark { (ic::SUN, t!("Light theme")) } else { (ic::MOON, t!("Dark theme")) };
@@ -43,8 +52,22 @@ impl App {
         let mut go: Option<Choice> = None;
         let page = kit::PAGE;
         let frame = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: page, right: page, top: 20, bottom: 16 });
+        // A computer whose team made it incoming only: this computer alone, in the middle.
+        #[cfg(feature = "remote")]
+        let incoming_only = crate::team::client::policy().is_some_and(|p| p.incoming_only);
+        #[cfg(not(feature = "remote"))]
+        let incoming_only = false;
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
+            if incoming_only {
+                let w = (LEFT_W + 80.0).min(full.width());
+                let middle = Rect::from_min_size(egui::pos2(full.center().x - w / 2.0, full.min.y), Vec2::new(w, full.height()));
+                let mut m = ui.new_child(egui::UiBuilder::new().max_rect(middle).layout(egui::Layout::top_down(egui::Align::Min)));
+                self.update_banner(&mut m);
+                self.error_banner(&mut m);
+                egui::ScrollArea::vertical().id_salt("this-computer").auto_shrink([false, false]).show(&mut m, |ui| self.this_computer(ui));
+                return;
+            }
             let left = Rect::from_min_size(full.min, Vec2::new(LEFT_W.min(full.width() * 0.42), full.height()));
             let right = full.with_min_x(left.right() + 24.0);
             let mut l = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -69,6 +92,8 @@ impl App {
         let u = &mut self.update;
         let Some(r) = u.found.clone().filter(|_| !u.dismissed) else { return };
         let ours = env!("CARGO_PKG_VERSION");
+        // A copy a package manager keeps is updated by it: its command, not a button.
+        let managed = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e)).and_then(|e| crate::update::managed_by(&e));
         let (mut update, mut later, mut restart) = (false, false, false);
         egui::Frame::new()
             .fill(ACCENT.gamma_multiply(0.12))
@@ -83,12 +108,18 @@ impl App {
                         (Some(_), _, _) => t!("Updated to {}: start it again to use it.", r.version),
                         (_, Some(e), _) => t!("The update to {} did not go in: {}", r.version, crate::lang::tr_msg(e)),
                         (_, _, true) => t!("Getting {}\u{2026}", r.version),
+                        _ if managed.is_some() => t!("SSH Remote {} is out (this is {}): update it with {}", r.version, ours, managed.unwrap_or_default()),
                         _ => t!("SSH Remote {} is out (this is {}).", r.version, ours),
                     };
                     ui.add(egui::Label::new(RichText::new(text).color(ui.visuals().strong_text_color())).wrap());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if u.done.is_some() {
                             restart = ui.add(kit::secondary(t!("Start again"))).on_hover_text(t!("Ends this window's connections and opens the new version")).clicked();
+                        } else if let Some(how) = managed {
+                            later = ui.add(kit::ghost(t!("Later"))).clicked();
+                            if ui.add(kit::secondary(t!("Copy"))).on_hover_text(how).clicked() {
+                                ui.ctx().copy_text(how.to_string());
+                            }
                         } else if u.installing.is_none() {
                             later = ui.add(kit::ghost(t!("Later"))).clicked();
                             update = ui.add(kit::secondary(t!("Update"))).on_hover_text(t!("Puts the new version in place of this program, checked against sshremote.dev's signed list")).clicked();

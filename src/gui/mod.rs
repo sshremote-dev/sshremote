@@ -32,6 +32,8 @@ mod remote;
 mod shortcuts;
 #[cfg(feature = "remote")]
 mod team;
+#[cfg(all(target_os = "macos", feature = "remote"))]
+mod mac_links;
 #[cfg(not(feature = "remote"))]
 #[path = "remote_off.rs"]
 mod remote;
@@ -450,11 +452,19 @@ pub fn run(opt: &Options) -> Result<(), String> {
     let budget = opt.budget;
     let open = opt.open.clone();
     let size = if auto_start { WORK_SIZE } else { OPEN_SIZE };
+    // sshremote:// links, the one that started the app among them.
+    #[cfg(all(target_os = "macos", feature = "remote"))]
+    mac_links::listen();
     let mut native = native_options("SSH Remote", size);
     native.centered = true;
     let r = boot(native, move |cc| {
         let mut app = App::boot(cc, form, budget, &open);
+        #[cfg(all(target_os = "macos", feature = "remote"))]
+        mac_links::wake(&cc.egui_ctx);
         std::thread::spawn(crate::backup::auto);
+        // In the desktop's list of applications, and for sshremote:// links.
+        #[cfg(not(target_os = "macos"))]
+        std::thread::spawn(crate::desktop_entry::ensure);
         std::thread::spawn(crate::ext::retire_built_in);
         // Remote access by ID while this window is open, when it is on and no service runs it.
         #[cfg(feature = "remote")]
@@ -966,6 +976,12 @@ impl eframe::App for App {
         (self.unseen, self.drawn) = (0, std::time::Instant::now());
         lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
+        // sshremote:// links clicked elsewhere, each in a tab of its own.
+        #[cfg(all(target_os = "macos", feature = "remote"))]
+        for url in mac_links::take() {
+            self.form.host = url;
+            self.connect(false);
+        }
         // Files dropped under Wayland, which winit does not take.
         #[cfg(target_os = "linux")]
         {
@@ -1086,7 +1102,11 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         } else if back {
             self.screen = Screen::Connect;
-            ctx.send_viewport_cmd(ViewportCommand::Title("SSH Remote".into()));
+            #[cfg(feature = "remote")]
+            let title = team::team_brand(&ctx).map_or_else(|| "SSH Remote".to_string(), |b| b.0);
+            #[cfg(not(feature = "remote"))]
+            let title = "SSH Remote".to_string();
+            ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
         // Back from the workspace, the window is the open window's size again; either way it
         // resizes down to where it still reads.
@@ -1855,7 +1875,7 @@ mod tests {
             "home", "home_off", "home_loading", "typed_ssh", "typed_id", "typed_words", "row_hover", "add_ssh", "add_id", "edit_config",
             "access_settings", "settings_appearance", "settings_connections", "settings_shortcuts", "settings_keys", "settings_passwords", "settings_backup",
             "settings_extensions", "settings_parts", "settings_about", "quick", "narrow", "tags", "tag_picked", "settings_team", "settings_team_in",
-            "home_team",
+            "home_team", "access_locked", "home_incoming_only", "home_branded",
         ];
         for dark in [true, false] {
             for name in states {
@@ -1890,8 +1910,21 @@ mod tests {
                 // The team as made up for the pictures, or none (never the settings folder's).
                 #[cfg(feature = "remote")]
                 {
-                    let (state, devices) = if name.contains("team_in") || name == "home_team" { team::sample() } else { Default::default() };
+                    let (mut state, devices) = if name.contains("team_in") || matches!(name, "home_team" | "access_locked" | "home_incoming_only" | "home_branded") { team::sample() } else { Default::default() };
+                    if name == "home_branded"
+                        && let Some(j) = state.joined.as_mut()
+                    {
+                        j.team["brand"] = serde_json::json!(true);
+                    }
                     team::hold(&ctx, state, devices);
+                    // A computer whose team fixes some settings, or makes it incoming only.
+                    let mut joined = team::sample().0;
+                    if let Some(j) = joined.joined.as_mut() {
+                        j.policy.incoming_only = name == "home_incoming_only";
+                        j.policy.record = Some(true);
+                        j.policy.direct = Some(false);
+                    }
+                    crate::team::client::set_test_state(matches!(name, "access_locked" | "home_incoming_only").then_some(joined));
                 }
                 match name {
                     "settings_team_in" => app.settings = Some(settings::Settings::at("team")),
@@ -1901,7 +1934,7 @@ mod tests {
                     "add_ssh" => app.sheet = Some(home::Sheet::new(&home::connect::typed("dev@192.168.1.20"))),
                     "add_id" => app.sheet = Some(home::Sheet::new(&home::connect::typed("123456789"))),
                     "edit_config" => app.sheet = crate::computers::get("web1").map(|c| home::Sheet::open(&c)),
-                    "access_settings" => app.access_sheet_open = true,
+                    "access_settings" | "access_locked" => app.access_sheet_open = true,
                     "tags" | "tag_picked" => {
                         use crate::computers::Computer;
                         let tagged = |a: &str, name: &str, tags: &[&str], last: u64| Computer {
@@ -1927,7 +1960,7 @@ mod tests {
                     n if n.starts_with("settings_") => app.settings = Some(settings::Settings::at(&n["settings_".len()..])),
                     _ => {}
                 }
-                let size = if name == "narrow" { Vec2::new(760.0, 520.0) } else { Vec2::new(1100.0, 700.0) };
+                let size = match name { "narrow" => Vec2::new(760.0, 520.0), "access_locked" => Vec2::new(1100.0, 1900.0), _ => Vec2::new(1100.0, 700.0) };
                 let mut snap = snapshot::Snap::default();
                 for k in 0..12 {
                     let mut events = Vec::new();

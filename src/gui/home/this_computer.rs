@@ -144,7 +144,13 @@ impl App {
                 ui.add_space(6.0);
                 // The passwords viewers may give: the lasting one, the one-time one, or both, each
                 // shown on asking, copied, or made anew.
-                let rows: Vec<(bool, &str)> = [(cfg.passwords.lasting(), n!("Password")), (cfg.passwords.one_time(), n!("One-time"))].into_iter().filter(|r| r.0).collect();
+                // A team that lets in its own people alone: no password opens this computer.
+                let teams_only = crate::team::client::policy().is_some_and(|p| !p.password);
+                if teams_only {
+                    ui.add(egui::Label::new(RichText::new(t!("Your team's people come in with their own sign-in to the team: no password is needed or taken here.")).size(12.5)).wrap());
+                }
+                let rows: Vec<(bool, &str)> =
+                    [(cfg.passwords.lasting(), n!("Password")), (cfg.passwords.one_time(), n!("One-time"))].into_iter().filter(|r| r.0 && !teams_only).collect();
                 for (_, name) in rows {
                     let once = name == "One-time";
                     let value = if once { cfg.one_time.clone() } else { cfg.password.clone() };
@@ -258,6 +264,10 @@ impl App {
                 self.access_sheet_open = false;
                 return;
             };
+            // What the computer's team fixes: shown as the team set it, not to be changed here.
+            let policy = crate::team::client::policy();
+            let fixed_by = |v: Option<bool>| policy.as_ref().and(v);
+            let teams_only = policy.as_ref().is_some_and(|p| !p.password);
             let mut changed = false;
             let mut service: Option<bool> = None;
             let mut restart = false;
@@ -378,7 +388,16 @@ impl App {
                     ui.add_space(kit::GAP);
                     kit::heading(ui, t!("Who comes in, and what they may do"));
                     kit::card(ui, |ui| {
-                        if ui.checkbox(&mut cfg.ask, t!("Ask the person at this computer before letting anyone in")).changed() {
+                        if policy.is_some() {
+                            let words = if teams_only {
+                                t!("This computer's team sets some of these. It lets in the team's people alone: passwords, one-time passwords and asking to come in do not work here.")
+                            } else {
+                                t!("This computer's team sets some of these: they show as it set them.")
+                            };
+                            kit::notice(ui, kit::Tone::Info, t!("Set by your team"), words);
+                            ui.add_space(6.0);
+                        }
+                        if locked_checkbox(ui, &mut cfg.ask, fixed_by(policy.as_ref().and_then(|p| p.ask)), t!("Ask the person at this computer before letting anyone in")) {
                             changed = true;
                         }
                         ui.add(
@@ -386,7 +405,7 @@ impl App {
                                 .wrap(),
                         );
                         ui.add_space(8.0);
-                        if ui.checkbox(&mut cfg.requests, t!("Let people without the password ask to come in")).changed() {
+                        if locked_checkbox(ui, &mut cfg.requests, teams_only.then_some(false), t!("Let people without the password ask to come in")) {
                             changed = true;
                         }
                         ui.add(
@@ -401,7 +420,8 @@ impl App {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             for (bit, label, _) in crate::grant::RIGHTS {
                                 let mut on = cfg.allow & bit != 0;
-                                if ui.checkbox(&mut on, crate::lang::tr(label)).changed() {
+                                let capped = policy.as_ref().is_some_and(|p| p.rights & bit == 0).then_some(false);
+                                if locked_checkbox(ui, &mut on, capped, crate::lang::tr(label)) {
                                     cfg.allow = if on { cfg.allow | bit } else { cfg.allow & !bit };
                                     changed = true;
                                 }
@@ -414,27 +434,35 @@ impl App {
                         if ui.checkbox(&mut cfg.cameras, t!("Let viewers look at this computer's cameras")).changed() {
                             changed = true;
                         }
-                        let folder = crate::access::recordings_dir().map(|d| d.display().to_string()).unwrap_or_default();
-                        if ui
-                            .checkbox(&mut cfg.record, t!("Record each session by ID"))
-                            .on_hover_text(t!("As its viewer sees the screen, into {}; the viewer is told", folder))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        kit::row(ui, t!("End a session left idle"), |ui| {
-                            let name = |m: u32| if m == 0 { t!("Never").to_string() } else { t!("After {} min without input", m) };
-                            egui::ComboBox::from_id_salt("idle-end").selected_text(name(cfg.idle)).show_ui(ui, |ui| {
-                                for m in [0, 5, 15, 30, 60, 120] {
-                                    changed |= ui.selectable_value(&mut cfg.idle, m, name(m)).changed();
-                                }
-                            });
-                        });
                         ui.add(
                             egui::Label::new(RichText::new(t!("They are listed after the monitors; the person at the computer is told each time one is looked at.")).weak().size(12.0)).wrap(),
                         );
+                        ui.add_space(4.0);
+                        let folder = crate::access::recordings_dir().map(|d| d.display().to_string()).unwrap_or_default();
+                        if locked_checkbox(ui, &mut cfg.record, fixed_by(policy.as_ref().and_then(|p| p.record)), t!("Record each session by ID")) {
+                            changed = true;
+                        }
+                        ui.add(egui::Label::new(RichText::new(t!("As its viewer sees the screen, into {}; the viewer is told", folder)).weak().size(12.0)).wrap());
+                        ui.add_space(4.0);
+                        let idle_fixed = policy.as_ref().and_then(|p| p.idle);
+                        kit::row(ui, t!("End a session left idle"), |ui| {
+                            let name = |m: u32| if m == 0 { t!("Never").to_string() } else { t!("After {} min without input", m) };
+                            match idle_fixed {
+                                Some(m) => {
+                                    ui.add_enabled(false, egui::Button::new(name(m))).on_disabled_hover_text(t!("Set by your team"));
+                                }
+                                None => {
+                                    egui::ComboBox::from_id_salt("idle-end").selected_text(name(cfg.idle)).show_ui(ui, |ui| {
+                                        for m in [0, 5, 15, 30, 60, 120] {
+                                            changed |= ui.selectable_value(&mut cfg.idle, m, name(m)).changed();
+                                        }
+                                    });
+                                }
+                            }
+                        });
                         ui.add_space(8.0);
-                        if ui.checkbox(&mut cfg.lan, t!("Let computers on this network find this one")).changed() {
+                        let lan_fixed = fixed_by(policy.as_ref().and_then(|p| p.lan));
+                        if locked_checkbox(ui, &mut cfg.lan, lan_fixed, t!("Let computers on this network find this one")) {
                             changed = true;
                         }
                         ui.add(egui::Label::new(RichText::new(t!("They are told its ID, name and network card, never its password, and can add it without typing the ID.")).weak().size(12.0)).wrap());
@@ -517,7 +545,7 @@ impl App {
                             }
                         }
                         ui.add_space(8.0);
-                        if ui.checkbox(&mut cfg.direct, t!("Let viewers on this network come straight in")).changed() {
+                        if locked_checkbox(ui, &mut cfg.direct, lan_fixed.filter(|l| !l), t!("Let viewers on this network come straight in")) {
                             changed = true;
                         }
                         ui.add(
@@ -525,7 +553,7 @@ impl App {
                                 .wrap(),
                         );
                         ui.add_space(8.0);
-                        if ui.checkbox(&mut cfg.punch, t!("Let viewers by ID go straight through the routers")).changed() {
+                        if locked_checkbox(ui, &mut cfg.punch, fixed_by(policy.as_ref().and_then(|p| p.direct)), t!("Let viewers by ID go straight through the routers")) {
                             changed = true;
                         }
                         ui.add(
@@ -687,4 +715,18 @@ fn login_screen_on() -> bool {
     return crate::loginscreen::installed();
     #[allow(unreachable_code)]
     false
+}
+
+/// A setting's checkbox; one the computer's team fixes (`fixed`) shows its value there and cannot
+/// be changed. True when it was changed.
+#[cfg(feature = "remote")]
+fn locked_checkbox(ui: &mut egui::Ui, value: &mut bool, fixed: Option<bool>, label: impl Into<egui::WidgetText>) -> bool {
+    match fixed {
+        Some(v) => {
+            let mut shown = v;
+            ui.add_enabled(false, egui::Checkbox::new(&mut shown, label)).on_disabled_hover_text(t!("Set by your team"));
+            false
+        }
+        None => ui.checkbox(value, label).changed(),
+    }
 }

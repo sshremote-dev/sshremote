@@ -3,7 +3,6 @@
 //! file for this system (by its system and processor in the list), checked against the list, put
 //! in place of this program when asked.
 
-#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -87,10 +86,31 @@ fn for_here(file: &serde_json::Value) -> bool {
     }
 }
 
+/// The package manager that put this program where it is, if one did: it updates it, and a
+/// copy changed behind its back would confuse it. The command that updates it is returned.
+pub fn managed_by(exe: &Path) -> Option<&'static str> {
+    let p = exe.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    if p.contains("/cellar/") || p.contains("/caskroom/") || p.contains("/homebrew/") || p.contains("/linuxbrew/") {
+        Some("brew upgrade sshremote")
+    } else if p.contains("/scoop/apps/") {
+        Some("scoop update sshremote")
+    } else if p.contains("/winget/packages/") || p.contains("/microsoft/winget/") {
+        Some("winget upgrade SSHRemote.SSHRemote")
+    } else if p.starts_with("/usr/bin/") {
+        // The .deb or .rpm, which the system's package manager keeps.
+        Some("the newer .deb or .rpm from https://sshremote.dev")
+    } else {
+        None
+    }
+}
+
 /// Downloads the release, checks it against the list, and puts it in place of this program,
 /// which is returned to be started again.
 pub fn install(r: &Release) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(how) = managed_by(&exe.canonicalize().unwrap_or_else(|_| exe.clone())) {
+        return Err(crate::lang::fill(n!("a package manager installed this copy: update it with {}"), &[&how]));
+    }
     let data = crate::ext::fetch(&r.url)?;
     use sha2::Digest;
     let sum: String = sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
@@ -258,6 +278,17 @@ mod tests {
         assert!(newer("1.0", "0.99.99"));
         assert!(!newer("0.25.9", "0.25.10"));
         assert!(!newer("0.25.12", "0.25.12"));
+    }
+
+    #[test]
+    fn copies_package_managers_keep_are_left_to_them() {
+        let m = |p: &str| managed_by(Path::new(p));
+        assert_eq!(m("/opt/homebrew/Caskroom/sshremote/0.27.0/SSH Remote.app/Contents/MacOS/sshremote"), Some("brew upgrade sshremote"));
+        assert_eq!(m("/home/linuxbrew/.linuxbrew/Cellar/sshremote/0.27.0/bin/sshremote"), Some("brew upgrade sshremote"));
+        assert_eq!(m("C:\\Users\\ana\\scoop\\apps\\sshremote\\current\\sshremote.exe"), Some("scoop update sshremote"));
+        assert_eq!(m("/home/ana/.local/bin/sshremote"), None);
+        assert_eq!(m("/usr/bin/sshremote"), Some("the newer .deb or .rpm from https://sshremote.dev"));
+        assert_eq!(m("C:\\Users\\ana\\AppData\\Local\\Programs\\SSH Remote\\sshremote.exe"), None);
     }
 
     #[test]
