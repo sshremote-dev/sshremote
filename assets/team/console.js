@@ -1,7 +1,7 @@
 "use strict";
 // The team server's console (docs/team.md): signing in, for the console or for the app that opened
 // the page, and for administrators the team's devices, users, groups, device groups and their
-// policies, access rules, enrollment tokens, audit log and settings.
+// policies, access rules, enrollment tokens, API tokens, audit log and settings.
 
 const $ = id => document.getElementById(id);
 const base = location.pathname.replace(/[^/]*$/, "");
@@ -36,6 +36,8 @@ const ICONS = {
   download: "M12 4v11|M7 10l5 5 5-5|M4 15v5h16v-5",
   image: "M4 5h16v14H4z|M4 16l5-5 4 4 3-3 4 4|M15.5 8.5h.01",
   mail: "M3 6h18v12H3z|M3.5 6.5 12 13l8.5-6.5",
+  code: "M8 7l-5 5 5 5|M16 7l5 5-5 5|M13.5 5l-3 14",
+  refresh: "M20 11a8 8 0 1 0-2.3 5.7|M20 4v7h-7",
 };
 const SVG = "http://www.w3.org/2000/svg";
 function icon(name) {
@@ -457,8 +459,8 @@ const listOf = (v, ...keys) => Array.isArray(v) ? v : (keys.map(k => v?.[k]).fin
 
 const S = {
   user: null, team: null, options: { oidc: false, ldap: false, mail: false },
-  devices: [], users: [], groups: [], dgroups: [], rules: [], rulesSaved: "[]", tokens: [], events: [], settings: null, mine: [],
-  view: "", loaded: new Set(), sort: { devices: ["name", 1], users: ["name", 1], mine: ["name", 1], groups: ["name", 1], dgroups: ["name", 1], tokens: ["expires", 1] },
+  devices: [], users: [], groups: [], dgroups: [], rules: [], rulesSaved: "[]", tokens: [], apitokens: [], events: [], settings: null, mine: [], mybackup: null,
+  view: "", loaded: new Set(), sort: { devices: ["name", 1], users: ["name", 1], mine: ["name", 1], groups: ["name", 1], dgroups: ["name", 1], tokens: ["expires", 1], apitokens: ["name", 1] },
   logo: "", focusAfter: "",
 };
 const teamUrl = () => String(S.team?.url || location.origin + base).replace(/\/+$/, "");
@@ -477,14 +479,16 @@ const load = {
     S.rulesSaved = JSON.stringify(S.rules);
   },
   tokens: async () => { S.tokens = listOf(await api("GET", "api/admin/tokens"), "tokens"); },
+  apitokens: async () => { S.apitokens = listOf(await api("GET", "api/admin/api-tokens"), "tokens"); },
+  mybackup: async () => { S.mybackup = await api("GET", "api/me/backup-codes"); },
   settings: async () => { S.settings = await api("GET", "api/admin/settings"); },
   mine: async () => { S.mine = listOf(await api("GET", "api/devices"), "devices"); },
   me: async () => { const me = await api("GET", "api/me"); S.user = me.user; if (me.team) S.team = me.team; },
 };
 // What each view shows, fetched each time it opens.
 const NEEDS = {
-  mine: ["mine"], devices: ["devices", "dgroups"], users: ["users", "groups", "options"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
-  rules: ["rules", "users", "groups", "dgroups", "devices"], enroll: ["tokens", "dgroups"], audit: ["devices", "users"], settings: ["settings"], account: ["me"],
+  mine: ["mine"], devices: ["devices", "dgroups", "users"], users: ["users", "groups", "options"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
+  rules: ["rules", "users", "groups", "dgroups", "devices"], enroll: ["tokens", "dgroups"], apitokens: ["apitokens"], audit: ["devices", "users"], settings: ["settings"], account: ["me", "mybackup"],
 };
 
 // Whether the team sends email (the invitation button), as the sign-in page learns it.
@@ -614,18 +618,28 @@ RENDER.mine = () => {
   ], rows, S.mine.length ? h("p", { text: T("Nothing matches.") }) : h("p", { text: T("No computer of the team is open to you yet. An administrator gives access with an access rule.") })));
 };
 
+// A user by name, as the console shows them: their display name, else the name.
+const userName = n => { const u = S.users.find(x => x.name === n); return u?.display || n; };
 RENDER.devices = () => {
   const f = $("dfilter"), was = f.options.length ? f.value : "*";
   f.replaceChildren(...[["*", T("Every device group")], ["", T("No group")], ...S.dgroups.map(g => [g.name, g.name])].map(([v, t]) => h("option", { value: v, text: t })));
   f.value = [...f.options].some(o => o.value === was) ? was : "*";
+  const o = $("downer"), wasOwner = o.options.length ? o.value : "*";
+  const owners = [...new Set([...S.users.map(u => u.name), ...S.devices.map(d => d.owner).filter(Boolean)])].sort((a, b) => cmp(userName(a), userName(b)));
+  o.replaceChildren(...[["*", T("Any owner")], ["", T("No owner")], ...owners.map(n => [n, userName(n)])].map(([v, t]) => h("option", { value: v, text: t })));
+  o.value = [...o.options].some(x => x.value === wasOwner) ? wasOwner : "*";
   if (!S.loaded.has("devices")) { $("devices").replaceChildren(loading()); return; }
-  const q = norm($("dsearch").value), g = f.value;
-  const rows = S.devices.filter(d => (g === "*" || (d.group || "") === g) && (!q || [d.name, d.id, d.group, d.os, d.version].some(x => norm(x).includes(q))));
+  const q = norm($("dsearch").value), g = f.value, own = o.value;
+  const rows = S.devices.filter(d => (g === "*" || (d.group || "") === g) && (own === "*" || (d.owner || "") === own)
+    && (!q || [d.name, d.id, d.group, d.os, d.version, d.owner, d.owner && userName(d.owner), d.note].some(x => norm(x).includes(q))));
   count("dcount", rows.length, S.devices.length);
   $("devices").replaceChildren(table("devices", [
-    { key: "name", label: T("Name"), cls: "main", sort: d => d.name || d.id, cell: d => h("span", { class: "namecell" }, dot(online(d)), h("b", { text: d.name || spaced(d.id) })) },
+    { key: "name", label: T("Name"), cls: "main", sort: d => d.name || d.id, cell: d => h("div", { class: "who" },
+      h("span", { class: "namecell" }, dot(online(d) && !d.disabled), h("b", { text: d.name || spaced(d.id) }), d.disabled ? h("span", { class: "badge bad", text: T("Disabled") }) : null),
+      d.note ? h("small", { class: "note1", text: d.note.split("\n")[0], title: d.note, dir: "auto" }) : null) },
     { key: "id", label: T("ID"), sort: d => d.id, cell: d => h("span", { class: "mono", text: spaced(d.id) }) },
     { key: "group", label: T("Device group"), sort: d => d.group || "", cell: d => d.group || dash() },
+    { key: "owner", label: T("Owner"), sort: d => d.owner ? userName(d.owner) : "", cell: d => d.owner ? userName(d.owner) : dash() },
     { key: "os", label: T("System"), sort: d => d.os || "", cell: d => d.os || dash() },
     { key: "version", label: T("Version"), sort: d => d.version || "", cell: d => d.version ? h("span", { class: "mono", text: d.version }) : dash() },
     { key: "seen", label: T("Last seen"), cls: "nowrap", sort: d => seen(d), cell: d => h("span", { title: when(seen(d)), text: online(d) ? T("Online") : ago(seen(d)) }) },
@@ -648,11 +662,19 @@ function editDevice(d) {
   const name = h("input", { type: "text", maxlength: 64, autocomplete: "off", required: true });
   name.value = d.name || "";
   const group = groupSelect(d.group);
+  const people = S.users.map(u => [u.name, u.display && u.display !== u.name ? u.display + " (" + u.name + ")" : u.name]);
+  if (d.owner && !people.some(p => p[0] === d.owner)) people.push([d.owner, d.owner]);
+  const owner = select([["", T("No owner")], ...people], d.owner || "");
+  const note = h("textarea", { maxlength: 500, rows: 3, dir: "auto" });
+  note.value = d.note || "";
+  const off = checkbox(T("Disabled"), d.disabled,
+    T("It stays in the list, but nobody gets a ticket to it and the team server refuses its own requests. Sessions open now go on: end them first."));
   dialog({
-    title: T("Edit {}", d.name || spaced(d.id)), text: T("ID {}", spaced(d.id)),
-    fields: [field(T("Name"), name), field(T("Device group"), group, T("Its group's policy applies to it, and access rules can name the group."))],
+    title: T("Edit {}", d.name || spaced(d.id)), text: T("ID {}", spaced(d.id)), wide: true,
+    fields: [h("div", { class: "grid2" }, field(T("Name"), name), field(T("Device group"), group, T("Its group's policy applies to it, and access rules can name the group.")),
+      field(T("Owner"), owner, T("The person it is for."), "full")), field(T("Note"), note, T("At most 500 characters.")), off.node],
     submit: async () => {
-      await api("PUT", "api/admin/devices/" + enc(d.id), { name: name.value.trim(), group: group.value });
+      await api("PUT", "api/admin/devices/" + enc(d.id), { name: name.value.trim(), group: group.value, owner: owner.value, note: note.value.trim(), disabled: off.input.checked });
       await load.devices();
       render();
       toast(T("Saved."));
@@ -688,9 +710,11 @@ RENDER.users = () => {
       u.admin ? h("span", { class: "badge blue", text: T("Administrator") }) : null,
       u.disabled ? h("span", { class: "badge bad", text: T("Disabled") }) : null,
       u.totp ? h("span", { class: "badge good", text: T("Two-step sign-in") }) : null,
+      u.totp && typeof u.backup_codes === "number" ? h("span", { class: "badge" + (u.backup_codes <= 2 ? " warn" : ""), text: T("{} backup codes left", u.backup_codes) }) : null,
       !u.admin && !u.disabled && !u.totp && u.name !== S.user.name ? dash() : null) },
     { label: T("Actions"), cls: "acts", cell: u => [
       iconButton("rename", T("Edit {}", u.display || u.name), { "data-k": "edit-" + u.name, onclick: () => editUser(u) }),
+      u.totp ? iconButton("refresh", T("Make new backup codes for {}", u.display || u.name), { "data-k": "codes-" + u.name, onclick: () => newCodesFor(u) }) : null,
       S.options.mail && u.email ? iconButton("mail", T("Invite {} by email", u.display || u.name), { "data-k": "invite-" + u.name, onclick: () => invite(u) }) : null,
       iconButton("trash", T("Remove {}", u.display || u.name), { class: "danger", "data-k": "rm-" + u.name, disabled: u.name === S.user.name, onclick: () => removeUser(u) }),
     ] },
@@ -751,17 +775,46 @@ function editUser(u) {
       toast(adding ? T("{} is added.", body.name) : T("Saved."));
       return got;
     },
-  }).then(got => { if (got?.totp_secret) showTotp(got.user?.display || got.user?.name || name.value, got.totp_secret, got.totp_uri, got.totp_qr); });
+  }).then(got => { if (got?.totp_secret) showTotp(got.user?.display || got.user?.name || name.value, got.totp_secret, got.totp_uri, got.totp_qr, got.backup_codes); });
 }
-// An authenticator's key, shown once, for its person to set up in their app.
-function showTotp(who, secret, uri, qr) {
+// An authenticator's key, shown once, for its person to set up in their app, with the backup codes
+// that stand in for it.
+function showTotp(who, secret, uri, qr, codes) {
   const line = (label, text) => h("div", { class: "fld" }, h("span", { class: "lab", text: label }), copyLine(text, label));
   // Only a picture the server drew (an SVG data: URL) is shown.
   const code = typeof qr === "string" && qr.startsWith("data:image/svg+xml;base64,") ? h("img", { class: "qr", src: qr, alt: T("QR code of the setup address"), width: 192, height: 192 }) : null;
   dialog({
     title: T("Two-step sign-in for {}", who), wide: true, ok: T("Done"), cancel: null,
     text: code ? T("It is shown only now. In their authenticator app, they scan this code, or add an account with the key.") : T("It is shown only now. In their authenticator app, they add an account with this key, or open the setup address on their phone."),
-    fields: [code, h("div", { class: "cmds" }, line(T("Key"), secret.replace(/(.{4})(?=.)/g, "$1 ")), uri ? line(T("Setup address"), uri) : null)],
+    fields: [code, h("div", { class: "cmds" }, line(T("Key"), secret.replace(/(.{4})(?=.)/g, "$1 ")), uri ? line(T("Setup address"), uri) : null),
+      Array.isArray(codes) && codes.length ? codeList(codes, T("Backup codes: each works once in place of a code from the app, for a lost phone. Keep them somewhere safe, away from the phone.")) : null],
+  });
+}
+// Backup codes as shown once: in two columns, all copied at a click.
+function codeList(codes, hint) {
+  const btn = textButton("copy", T("Copy them all"), { class: "solid" });
+  btn.onclick = () => copy(codes.join("\n"), btn);
+  return h("div", { class: "fld" }, h("span", { class: "lab", text: T("Backup codes") }),
+    h("ol", { class: "codes", "aria-label": T("Backup codes") }, codes.map(c => h("li", null, h("span", { class: "mono", text: c })))),
+    hint ? h("p", { class: "hint", text: hint }) : null, h("div", { class: "row" }, btn));
+}
+function showCodes(who, codes) {
+  dialog({
+    title: T("Backup codes for {}", who), ok: T("Done"), cancel: null,
+    text: T("They are shown only now, and the ones made before no longer work. Each works once in place of a code from the authenticator app: keep them somewhere safe, away from the phone."),
+    fields: [codeList(codes)],
+  });
+}
+// A new set for someone who used or lost theirs.
+function newCodesFor(u) {
+  dialog({
+    title: T("Make new backup codes for {}?", u.display || u.name), ok: T("Make new codes"),
+    text: T("The backup codes they have stop working. The new ones are shown once, for you to give them."),
+    submit: () => api("POST", "api/admin/users/" + enc(u.name) + "/backup-codes"),
+  }).then(got => {
+    if (!Array.isArray(got?.backup_codes)) return;
+    load.users().then(render, oops);
+    showCodes(u.display || u.name, got.backup_codes);
   });
 }
 function invite(u) {
@@ -989,16 +1042,70 @@ function revokeToken(t) {
 }
 $("addtoken").onclick = newToken;
 
+// API tokens, for scripts: made, listed and revoked here, by an administrator signed in.
+const SCOPES = { read: () => T("Read only"), devices: () => T("Devices"), admin: () => T("Administration") };
+RENDER.apitokens = () => {
+  if (!S.loaded.has("apitokens")) { $("apitokens").replaceChildren(loading()); return; }
+  count("atcount", S.apitokens.length, S.apitokens.length);
+  const expired = t => t.expires && t.expires < nowSecs();
+  $("apitokens").replaceChildren(table("apitokens", [
+    { key: "name", label: T("Name"), cls: "main", sort: t => t.name, cell: t => h("b", { text: t.name }) },
+    { key: "scope", label: T("Scope"), sort: t => t.scope, cell: t => h("span", { class: "badge" + (t.scope === "admin" ? " warn" : ""), text: SCOPES[t.scope]?.() || t.scope }) },
+    { key: "made", label: T("Made"), cls: "nowrap", sort: t => t.created || 0, cell: t => h("div", { class: "who" }, h("span", { text: t.created ? when(t.created) : "" }), t.by ? h("small", { text: T("by {}", userName(t.by)) }) : null) },
+    { key: "used", label: T("Last used"), cls: "nowrap", sort: t => t.used || 0, cell: t => t.used ? h("span", { title: when(t.used), text: ago(t.used) }) : h("span", { class: "faint", text: T("Never") }) },
+    { key: "expires", label: T("Expires"), cls: "nowrap", sort: t => t.expires || Infinity, cell: t => h("span", { class: "row" }, h("span", { text: t.expires ? when(t.expires) : T("Never") }), expired(t) ? h("span", { class: "badge bad", text: T("Expired") }) : null) },
+    { label: T("Actions"), cls: "acts", cell: t => iconButton("trash", T("Revoke {}", t.name), { class: "danger", "data-k": "rm-" + t.id, onclick: () => revokeApiToken(t) }) },
+  ], S.apitokens, h("p", { text: T("No API tokens. Make one for a script that manages the team.") })));
+};
+function newApiToken() {
+  const name = h("input", { type: "text", maxlength: 64, autocomplete: "off", required: true, placeholder: T("What it is for") });
+  const scope = select([["read", T("Read only: every list and the audit log")], ["devices", T("Devices: list, change and remove them")],
+    ["admin", T("Administration: what an administrator may, but for passwords, two-step sign-in and API tokens")]], "read");
+  const expires = select([[2592000, T("In 30 days")], [7776000, T("In 90 days")], [31536000, T("In a year")], [0, T("Never")]], "7776000");
+  dialog({
+    title: T("Make an API token"), ok: T("Make the token"), wide: true,
+    fields: [field(T("Name"), name), field(T("Scope"), scope, T("What a script with it may do, as the administrator who makes it, while they are one.")), field(T("Expires"), expires)],
+    submit: () => {
+      const secs = +expires.value;
+      return api("POST", "api/admin/api-tokens", { name: name.value.trim(), scope: scope.value, expires: secs ? nowSecs() + secs : 0 });
+    },
+  }).then(got => {
+    if (!got || got === true) return;
+    load.apitokens().then(render, oops);
+    showApiToken(got);
+  });
+}
+// A new API token, shown once, with a line that uses it.
+function showApiToken(t) {
+  const line = (label, text) => h("div", { class: "fld" }, h("span", { class: "lab", text: label }), copyLine(text, label));
+  dialog({
+    title: T("The new API token"), wide: true, ok: T("Done"), cancel: null,
+    text: T("It is shown only now: keep it where the script keeps its secrets."),
+    fields: [h("div", { class: "cmds" }, line(T("The token"), t.token),
+      line(T("For example, the list of devices"), "curl -H 'Authorization: Bearer " + t.token + "' " + teamUrl() + "/api/admin/devices"))],
+  });
+}
+function revokeApiToken(t) {
+  dialog({
+    title: T("Revoke {}?", t.name), danger: true, ok: T("Revoke"),
+    text: T("A script that uses it is turned away from now on."),
+    submit: async () => { await api("DELETE", "api/admin/api-tokens/" + enc(t.id)); await load.apitokens(); render(); toast(T("Revoked.")); },
+  });
+}
+$("addapitoken").onclick = newApiToken;
+
 // The audit log.
 const KINDS = {
   in: () => T("Came in"), out: () => T("Left"), refused: () => T("Refused"), file: () => T("Files"), login: () => T("Signed in"),
   ticket: () => T("Ticket"), join: () => T("Joined the team"), leave: () => T("Left the team"), removed: () => T("Removed from the team"),
   invite: () => T("Invited by email"), reset: () => T("Asked for a new password"), password: () => T("Set a password"),
+  "login-failed": () => T("Sign-in failed"), locked: () => T("Locked out"), admin: () => T("Console change"), token: () => T("API token"),
 };
 const HOWS = {
   team: () => T("team ticket"), password: () => T("password"), "one-time": () => T("one-time password"), request: () => T("asked at the screen"),
-  oidc: () => T("single sign-on"), ldap: () => T("directory"),
+  oidc: () => T("single sign-on"), ldap: () => T("directory"), token: () => T("API token"),
 };
+const BAD_KINDS = ["refused", "login-failed", "locked"];
 function auditQuery(limit) {
   const q = new URLSearchParams();
   const range = $("arange").value;
@@ -1034,8 +1141,8 @@ RENDER.audit = () => {
   $("audit").replaceChildren(table("audit", [
     { key: "time", label: T("Time"), cls: "nowrap", cell: e => h("span", { title: ago(e.time), text: when(e.time) }) },
     { key: "kind", label: T("Event"), cls: "main", cell: e => h("span", { class: "row" },
-      h("span", { class: "badge" + (e.kind === "refused" ? " bad" : e.kind === "in" ? " good" : e.kind === "file" || e.kind === "ticket" ? " blue" : ""), text: KINDS[e.kind]?.() || e.kind || "" }),
-      e.how ? h("span", { class: "dim", text: HOWS[e.how]?.() || e.how }) : null) },
+      h("span", { class: "badge" + (BAD_KINDS.includes(e.kind) ? " bad" : e.kind === "in" ? " good" : ["file", "ticket", "admin", "token"].includes(e.kind) ? " blue" : ""), text: KINDS[e.kind]?.() || e.kind || "" }),
+      e.how ? h("span", { class: "dim", text: e.how === "token" && e.token ? T("API token {}", e.token) : HOWS[e.how]?.() || e.how }) : null) },
     { key: "device", label: T("Device"), cell: e => e.device ? h("div", { class: "who" }, name(e) ? h("b", { text: name(e) }) : null, h("small", { class: "mono", text: spaced(e.device) })) : dash() },
     { key: "user", label: T("User"), cell: e => e.user || dash() },
     { key: "from", label: T("Came from"), cell: e => e.from ? h("span", { class: "mono", text: /^\d{9}$/.test(e.from) ? spaced(e.from) : e.from }) : dash() },
@@ -1110,6 +1217,7 @@ function fillSettings() {
   S.mailPwSet = !!m?.password_set;
   $("smailfrom").value = m?.from || "";
   $("smailstatus").textContent = "";
+  $("sauditdays").value = String(Number.isInteger(s.audit_days) ? s.audit_days : 365);
   settingsLabels();
 }
 function settingsLabels() {
@@ -1185,7 +1293,9 @@ $("settingsform").onsubmit = async e => {
     // The password is never sent back: left empty, the one set stays.
     if ($("smailpw").value) smtp.password = $("smailpw").value;
   }
-  const body = { name: $("sname").value.trim(), logo: S.logo, brand: $("sbrand").checked, relay: $("srelay").value.trim(), oidc, ldap, smtp };
+  const days = Number($("sauditdays").value);
+  if (!Number.isInteger(days) || days < 0 || days > 36500) { err.textContent = T("The audit log keeps 0 (for ever) to 36500 days."); $("sauditdays").focus(); return; }
+  const body = { name: $("sname").value.trim(), logo: S.logo, brand: $("sbrand").checked, relay: $("srelay").value.trim(), oidc, ldap, smtp, audit_days: days };
   $("ssave").disabled = true;
   try {
     await api("PUT", "api/admin/settings", body);
@@ -1208,12 +1318,30 @@ RENDER.account = () => {
       fact(T("Email"), u.email),
       fact(T("Role"), u.admin ? T("Administrator") : T("Member")),
       fact(T("Groups"), (u.groups || []).length ? h("div", { class: "chips" }, u.groups.map(g => h("span", { class: "badge", text: g }))) : null),
-      fact(T("Two-step sign-in"), u.totp ? T("On") : T("Off")))),
+      fact(T("Two-step sign-in"), u.totp ? T("On") : T("Off")),
+      u.totp ? fact(T("Backup codes"), h("div", { class: "row" },
+        h("span", { text: typeof S.mybackup?.left === "number" ? T("{} left", S.mybackup.left) : "" }),
+        textButton("refresh", T("Make new backup codes"), { class: "solid", "data-k": "mycodes", onclick: myNewCodes }))) : null)),
     h("section", { class: "card" }, h("dl", { class: "facts" },
       fact(T("Team"), S.team?.name),
       fact(T("Address"), h("span", { class: "mono", text: teamUrl() })))),
     h("p", { class: "hint", text: T("To reach the team's computers, sign in to the team in the SSH Remote app: Settings, Team.") }));
 };
+
+// One's own new backup codes: the password again first.
+function myNewCodes() {
+  const pw = h("input", { type: "password", autocomplete: "current-password", required: true });
+  dialog({
+    title: T("Make new backup codes"), ok: T("Make new codes"),
+    text: T("The backup codes you have stop working; the new ones are shown once."),
+    fields: [field(T("Your password"), pw, T("To be sure it is you."))],
+    submit: () => api("POST", "api/me/backup-codes", { password: pw.value }),
+  }).then(got => {
+    if (!Array.isArray(got?.backup_codes)) return;
+    load.mybackup().then(render, oops);
+    showCodes(S.user.display || S.user.name, got.backup_codes);
+  });
+}
 
 // ----- The frame: who is signed in, the navigation, which view is open --------------------------------------
 
@@ -1237,7 +1365,7 @@ function renderMe() {
   for (const e of document.querySelectorAll(".adminonly")) e.hidden = !u.admin;
   for (const e of document.querySelectorAll(".useronly")) e.hidden = !!u.admin;
 }
-const NAV_ICONS = { mine: "monitor", devices: "monitor", users: "user", groups: "users", dgroups: "layers", rules: "shield", enroll: "key", audit: "list", settings: "sliders" };
+const NAV_ICONS = { mine: "monitor", devices: "monitor", users: "user", groups: "users", dgroups: "layers", rules: "shield", enroll: "key", apitokens: "code", audit: "list", settings: "sliders" };
 for (const a of document.querySelectorAll("#nav a")) a.prepend(icon(NAV_ICONS[a.dataset.view]));
 $("signout").prepend(icon("logout"));
 $("adduser").prepend(icon("plus"));
@@ -1245,6 +1373,7 @@ $("addgroup").prepend(icon("plus"));
 $("adddgroup").prepend(icon("plus"));
 $("addrule").prepend(icon("plus"));
 $("addtoken").prepend(icon("plus"));
+$("addapitoken").prepend(icon("plus"));
 $("acsv").prepend(icon("download"));
 $("sredirectcopy").prepend(icon("copy"));
 $("donemark").append(icon("check"));
@@ -1253,7 +1382,7 @@ for (const s of document.querySelectorAll(".search")) s.prepend(icon("search"));
 $("adduser").onclick = () => editUser(null);
 $("addgroup").onclick = () => addGroup("groups");
 $("adddgroup").onclick = () => addGroup("dgroups");
-$("dsearch").oninput = $("dfilter").onchange = () => RENDER.devices();
+$("dsearch").oninput = $("dfilter").onchange = $("downer").onchange = () => RENDER.devices();
 $("usearch").oninput = () => RENDER.users();
 $("msearch").oninput = () => RENDER.mine();
 $("menubtn").onclick = () => {
@@ -1278,7 +1407,7 @@ function render() {
     if (e && !e.disabled && e !== document.activeElement) e.focus();
   }
 }
-const VIEWS = { admin: ["devices", "users", "groups", "dgroups", "rules", "enroll", "audit", "settings", "account"], user: ["mine", "account"] };
+const VIEWS = { admin: ["devices", "users", "groups", "dgroups", "rules", "enroll", "apitokens", "audit", "settings", "account"], user: ["mine", "account"] };
 let viewAsked = 0;
 async function show(view, byHand) {
   const asked = ++viewAsked;
@@ -1333,7 +1462,24 @@ const appNonce = /\/login$/.test(location.pathname) ? appQuery.get("app") : null
 const appPort = Number(appQuery.get("port"));
 const appNonceOk = !appNonce || (/^[0-9a-f]{64}$/i.test(appNonce) && Number.isInteger(appPort) && appPort >= 1024 && appPort <= 65535);
 
+// The second step's field: the authenticator's code, or one of the backup codes in its place.
+let backupCode = false;
+function codeLabels() {
+  $("lcodelab").textContent = backupCode ? T("Backup code") : T("Two-step code");
+  $("lcodehint").textContent = backupCode ? T("One of the backup codes kept when two-step sign-in was set up; each works once.") : T("The code your authenticator app shows now");
+  $("lbackup").textContent = backupCode ? T("Use the authenticator app instead") : T("Use a backup code instead");
+  $("lcode").inputMode = backupCode ? "text" : "numeric";
+  $("lcode").autocomplete = backupCode ? "off" : "one-time-code";
+}
+$("lbackup").onclick = () => {
+  backupCode = !backupCode;
+  codeLabels();
+  $("lcode").value = "";
+  $("lerror").textContent = "";
+  $("lcode").focus();
+};
 function signinLabels() {
+  codeLabels();
   $("signtitle").textContent = appNonce ? T("Sign in to the team for SSH Remote") : T("Sign in to the team console");
   $("signsub").textContent = appNonce ? T("The SSH Remote app that opened this page is signed in with you.") : (S.team?.name || "");
   $("ldaphint").hidden = !S.options.ldap;
@@ -1355,6 +1501,7 @@ function showSignin(note) {
   $("signnote").textContent = note || "";
   $("lerror").textContent = "";
   $("coderow").hidden = true;
+  backupCode = false;
   signinLabels();
   loadOptions().then(() => { if (!S.user) { brand(); signinLabels(); } });
   if (!appNonceOk) {
@@ -1447,7 +1594,7 @@ $("loginform").onsubmit = async e => {
   $("lerror").textContent = "";
   $("signnote").textContent = "";
   const body = { name: $("lname").value.trim(), password: $("lpw").value };
-  const code = $("lcode").value.replace(/\s/g, "");
+  const code = $("lcode").value.replace(/[\s-]/g, "");
   if (!$("coderow").hidden && code) body.code = code;
   if (appNonce) { body.app = appNonce; body.port = appPort; }
   $("lgo").disabled = true;
@@ -1481,9 +1628,9 @@ $("loginform").onsubmit = async e => {
   } finally { $("lgo").disabled = false; }
 };
 $("lcode").addEventListener("input", () => {
-  // Six digits typed: no need to press the button.
+  // Six digits typed: no need to press the button (a backup code is sent with it).
   const c = $("lcode").value.replace(/\s/g, "");
-  if (/^\d{6}$/.test(c) && !$("lgo").disabled) $("loginform").requestSubmit();
+  if (!backupCode && /^\d{6}$/.test(c) && !$("lgo").disabled) $("loginform").requestSubmit();
 });
 $("signout").onclick = async () => {
   try { await api("POST", "api/logout"); } catch { /* the session ends here anyway */ }

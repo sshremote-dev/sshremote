@@ -2,8 +2,8 @@
 //! computers and people, and the console it is run from. Everything is in one JSON file,
 //! `DATA/team.json`, written whole (and read again when `sshremote team admin` changes it); the
 //! audit log is appended to `DATA/audit.jsonl`, and each person's sealed address book is a file in
-//! `DATA/books`. Sessions and enrollment tokens are kept as hashes only; the computers' team keys
-//! are kept as they are, since every ticket is tagged with one.
+//! `DATA/books`. Sessions, enrollment tokens, API tokens and backup codes are kept as hashes only;
+//! the computers' team keys are kept as they are, since every ticket is tagged with one.
 //!
 //! The administration lists come in an object named for what they hold: `{"users": [..]}`,
 //! `{"groups": [..]}` (user groups and device groups both), `{"devices": [..]}`, `{"rules": [..]}`,
@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -59,6 +59,19 @@ const MOST_FROM_ONE: usize = 16;
 const REQUEST_SECS: u64 = 30;
 /// A request or header line longer than this is no client's.
 const MOST_LINE: u64 = 8192;
+/// API tokens a team keeps at most: enough for its scripts, not a record to fill.
+const MOST_API_TOKENS: usize = 100;
+/// What an API token starts with, so it is told from a session (and found by secret scanners).
+const API_PREFIX: &str = "sshrt_";
+/// The backup codes made with an authenticator, each of 10 letters and digits that do not look alike.
+const BACKUP_CODES: usize = 8;
+const BACKUP_ABC: &[u8; 31] = b"abcdefghjkmnpqrstuvwxyz23456789";
+/// A device's note, in characters.
+const MOST_NOTE: usize = 500;
+/// How many days the audit log keeps when the settings never said.
+const AUDIT_DAYS: u64 = 365;
+/// A wrong sign-in (or a lockout) goes in the audit log once a minute for one address and name.
+const FAILED_SECS: u64 = 60;
 
 static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -145,12 +158,14 @@ struct User {
     oidc: String,
     /// For the address book's key, made once.
     salt: String,
+    /// The hashes of the backup codes not used yet, each good once in place of the authenticator's code.
+    backup: Vec<String>,
 }
 
 impl User {
     fn stored(&self) -> Value {
         json!({"name": self.name, "display": self.display, "email": self.email, "admin": self.admin, "groups": self.groups,
-            "password": self.password, "totp": self.totp, "disabled": self.disabled, "oidc": self.oidc, "salt": self.salt})
+            "password": self.password, "totp": self.totp, "disabled": self.disabled, "oidc": self.oidc, "salt": self.salt, "backup": self.backup})
     }
 
     fn read(v: &Value) -> Option<User> {
@@ -165,6 +180,7 @@ impl User {
             disabled: v["disabled"].as_bool().unwrap_or(false),
             oidc: st(v, "oidc"),
             salt: st(v, "salt"),
+            backup: strings(&v["backup"]),
         })
     }
 
@@ -173,12 +189,14 @@ impl User {
         json!({"name": self.name, "display": self.display, "email": self.email, "admin": self.admin, "groups": self.groups, "totp": !self.totp.is_empty()})
     }
 
-    /// As the console lists it: also whether it is disabled, has a password, is linked to single sign-on.
+    /// As the console lists it: also whether it is disabled, has a password, is linked to single
+    /// sign-on, and how many backup codes are left.
     fn listed(&self) -> Value {
         let mut v = self.public();
         v["disabled"] = json!(self.disabled);
         v["password"] = json!(!self.password.is_empty());
         v["oidc"] = json!(!self.oidc.is_empty());
+        v["backup_codes"] = json!(self.backup.len());
         v
     }
 
@@ -200,12 +218,18 @@ struct Device {
     seen: u64,
     /// The console asked for its sessions to end: said at its next look.
     end: bool,
+    /// What the administrators write of it (at most 500 characters).
+    note: String,
+    /// The user it is for, or empty.
+    owner: String,
+    /// Kept in the list, but given no tickets, and its own requests refused.
+    disabled: bool,
 }
 
 impl Device {
     fn stored(&self) -> Value {
         json!({"id": self.id, "name": self.name, "os": self.os, "version": self.version, "group": self.group, "key": crate::sys::hex(&self.key),
-            "joined": self.joined, "seen": self.seen, "end": self.end})
+            "joined": self.joined, "seen": self.seen, "end": self.end, "note": self.note, "owner": self.owner, "disabled": self.disabled})
     }
 
     fn read(v: &Value) -> Option<Device> {
@@ -219,6 +243,9 @@ impl Device {
             joined: v["joined"].as_u64().unwrap_or(0),
             seen: v["seen"].as_u64().unwrap_or(0),
             end: v["end"].as_bool().unwrap_or(false),
+            note: st(v, "note"),
+            owner: st(v, "owner"),
+            disabled: v["disabled"].as_bool().unwrap_or(false),
         })
     }
 
@@ -228,7 +255,7 @@ impl Device {
 
     fn listed(&self) -> Value {
         json!({"id": self.id, "name": self.name, "os": self.os, "version": self.version, "group": self.group, "online": self.online(),
-            "seen": self.seen, "joined": self.joined, "end": self.end})
+            "seen": self.seen, "joined": self.joined, "end": self.end, "note": self.note, "owner": self.owner, "disabled": self.disabled})
     }
 }
 
@@ -283,6 +310,101 @@ impl Token {
     fn listed(&self) -> Value {
         json!({"id": self.id, "group": self.group, "expires": self.expires, "uses": self.uses, "used": self.used, "created": self.created})
     }
+}
+
+/// A token for a script (docs/team.md, API tokens): it acts for the administrator who made it,
+/// while they are one, within its scope.
+#[derive(Clone, Debug, PartialEq)]
+struct ApiToken {
+    id: String,
+    name: String,
+    hash: String,
+    /// `read` (the lists), `devices` (the devices alone) or `admin` (what an administrator may).
+    scope: String,
+    /// The administrator who made it.
+    by: String,
+    created: u64,
+    /// 0: never.
+    expires: u64,
+    /// When it was last used (to the minute), 0: never.
+    used: u64,
+}
+
+const SCOPES: [&str; 3] = ["read", "devices", "admin"];
+
+impl ApiToken {
+    fn stored(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "hash": self.hash, "scope": self.scope, "by": self.by, "created": self.created, "expires": self.expires, "used": self.used})
+    }
+
+    fn read(v: &Value) -> Option<ApiToken> {
+        Some(ApiToken {
+            id: v["id"].as_str()?.to_string(),
+            name: st(v, "name"),
+            hash: v["hash"].as_str()?.to_string(),
+            scope: v["scope"].as_str().filter(|s| SCOPES.contains(s))?.to_string(),
+            by: st(v, "by"),
+            created: v["created"].as_u64().unwrap_or(0),
+            expires: v["expires"].as_u64().unwrap_or(0),
+            used: v["used"].as_u64().unwrap_or(0),
+        })
+    }
+
+    fn listed(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "scope": self.scope, "by": self.by, "created": self.created, "expires": self.expires, "used": self.used})
+    }
+}
+
+/// What an API token of `scope` may ask of the administration: `read` its lists, `devices` the
+/// devices alone, `admin` what an administrator may, but for what signs others in (invitations,
+/// backup codes; `put_user` turns away their passwords) and the API tokens themselves, which only
+/// an administrator signed in manages.
+fn token_may(scope: &str, method: &str, what: &str, sub: Option<&str>) -> bool {
+    let never = what == "api-tokens" || what == "invite" || sub.is_some();
+    !never
+        && match scope {
+            "read" => method == "GET",
+            "devices" => what == "devices",
+            _ => scope == "admin",
+        }
+}
+
+/// Who asks the administration: a person signed in, or a script with an API token.
+struct Caller {
+    /// The administrator: the person, or who made the token.
+    user: User,
+    /// The session's hash (one's own stays when one's password changes), empty for a token.
+    session: String,
+    /// The token's name and scope, for one.
+    token: Option<(String, String)>,
+}
+
+/// A new set of backup codes: as shown once ("abcde-fghij"), and as kept (their hashes).
+fn backup_codes() -> (Vec<String>, Vec<String>) {
+    let mut shown = Vec::new();
+    while shown.len() < BACKUP_CODES {
+        // Only bytes below 248 (8 times 31): each letter as likely as the others.
+        let letters: String = crate::sys::random(32).into_iter().filter(|b| *b < 248).take(10).map(|b| BACKUP_ABC[usize::from(b % 31)] as char).collect();
+        if letters.len() == 10 {
+            shown.push(format!("{}-{}", &letters[..5], &letters[5..]));
+        }
+    }
+    let hashes = shown.iter().map(|c| backup_hash(&backup_form(c).unwrap_or_default())).collect();
+    (shown, hashes)
+}
+
+/// A backup code as it is checked: its 10 letters and digits, in any case, the dash and spaces
+/// left out; None for what is no backup code (an authenticator's six digits).
+fn backup_form(code: &str) -> Option<String> {
+    let c: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect::<String>().to_ascii_lowercase();
+    (c.len() == 10 && c.bytes().all(|b| BACKUP_ABC.contains(&b))).then_some(c)
+}
+
+/// A backup code kept as PBKDF2 (as a password is, with fewer rounds: eight are tried at a sign-in).
+fn backup_hash(code: &str) -> String {
+    let salt = crate::sys::random(16);
+    let rounds = if cfg!(test) { 100 } else { 20_000 };
+    format!("pbkdf2${rounds}${}${}", crate::sys::hex(&salt), crate::sys::hex(&super::pbkdf2(code.as_bytes(), &salt, rounds)))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -383,8 +505,12 @@ struct Store {
     devices: BTreeMap<String, Device>,
     rules: Vec<Rule>,
     tokens: BTreeMap<String, Token>,
+    /// The scripts' tokens, by their ID.
+    api_tokens: BTreeMap<String, ApiToken>,
     /// By the hash of their token.
     sessions: HashMap<String, Session>,
+    /// How many days the audit log keeps; 0: for ever.
+    audit_days: u64,
 }
 
 impl Store {
@@ -406,7 +532,9 @@ impl Store {
             "devices": self.devices.values().map(Device::stored).collect::<Vec<_>>(),
             "rules": self.rules.iter().map(Rule::json).collect::<Vec<_>>(),
             "tokens": self.tokens.values().map(Token::stored).collect::<Vec<_>>(),
+            "api_tokens": self.api_tokens.values().map(ApiToken::stored).collect::<Vec<_>>(),
             "sessions": self.sessions.iter().filter(|(_, s)| s.expires > now).map(|(h, s)| json!({"hash": h, "user": s.user, "expires": s.expires, "app": s.app})).collect::<Vec<_>>(),
+            "audit_days": self.audit_days,
         })
     }
 
@@ -442,10 +570,12 @@ impl Store {
                 .map(|r| Rule { who: st(r, "who"), devices: st(r, "devices"), rights: (r["rights"].as_u64().unwrap_or(0) & 0x7f) as u8, ask: r["ask"].as_bool().unwrap_or(false) })
                 .collect(),
             tokens: list("tokens").iter().filter_map(Token::read).map(|t| (t.id.clone(), t)).collect(),
+            api_tokens: list("api_tokens").iter().filter_map(ApiToken::read).map(|t| (t.id.clone(), t)).collect(),
             sessions: list("sessions")
                 .iter()
                 .filter_map(|s| Some((s["hash"].as_str()?.to_string(), Session { user: st(s, "user"), expires: s["expires"].as_u64()?, app: s["app"].as_bool().unwrap_or(false) })))
                 .collect(),
+            audit_days: v["audit_days"].as_u64().unwrap_or(AUDIT_DAYS),
         }
     }
 
@@ -626,6 +756,10 @@ struct Team {
     discovery: Mutex<Option<(String, Value, u64)>>,
     /// The authenticator codes each person signed in with lately, so a code works once.
     codes: Mutex<HashMap<(String, String), u64>>,
+    /// The wrong sign-ins and lockouts written in the audit log lately, by kind, address and name.
+    failed: Mutex<HashMap<String, u64>>,
+    /// When the audit log last lost its old lines.
+    pruned: AtomicU64,
     audit_file: Mutex<()>,
 }
 
@@ -646,6 +780,8 @@ impl Team {
             flows: Mutex::default(),
             discovery: Mutex::default(),
             codes: Mutex::default(),
+            failed: Mutex::default(),
+            pruned: AtomicU64::new(0),
             audit_file: Mutex::default(),
         })
     }
@@ -882,6 +1018,67 @@ impl Team {
             .collect()
     }
 
+    /// Drops the audit log's lines older than the settings keep; the file is written whole
+    /// beside it and put in its place, so a stop halfway leaves the old one. The lines dropped.
+    fn prune_audit(&self) -> Result<usize, String> {
+        self.pruned.store(now(), Ordering::Relaxed);
+        let days = self.store().audit_days;
+        if days == 0 {
+            return Ok(0);
+        }
+        let oldest = now().saturating_sub(days.saturating_mul(86_400));
+        let file = self.dir.join("audit.jsonl");
+        let _one = lock(&self.audit_file);
+        let Ok(f) = std::fs::File::open(&file) else { return Ok(0) };
+        let (mut kept, mut dropped) = (Vec::new(), 0);
+        for line in BufReader::new(f).split(b'\n') {
+            let line = line.map_err(|e| format!("{}: {e}", file.display()))?;
+            // A line whose time does not read stays: nothing is lost for not being understood.
+            if serde_json::from_slice::<Value>(&line).ok().and_then(|e| e["time"].as_u64()).is_some_and(|t| t < oldest) {
+                dropped += 1;
+            } else if !line.is_empty() {
+                kept.extend_from_slice(&line);
+                kept.push(b'\n');
+            }
+        }
+        if dropped > 0 {
+            crate::sys::write_whole(&file, &kept, true, true).map_err(|e| format!("{}: {e}", file.display()))?;
+        }
+        Ok(dropped)
+    }
+
+    /// A wrong sign-in or a lockout, in the audit log at most once a minute for one address and
+    /// name: a flood of tries does not fill it.
+    fn failed(&self, req: &Req, kind: &str, name: &str, words: &str) {
+        let now = now();
+        let name = clean(name, 64);
+        let key = format!("{kind}\n{}\n{}", address_key(req.who), name.to_lowercase());
+        {
+            let mut f = lock(&self.failed);
+            f.retain(|_, at| now.saturating_sub(*at) < FAILED_SECS);
+            if f.contains_key(&key) || f.len() >= 100_000 {
+                return;
+            }
+            f.insert(key, now);
+        }
+        self.audit(&[json!({"time": now, "kind": kind, "user": name, "from": req.who.to_string(), "words": words})]);
+    }
+
+    /// A change made in the console (or by a script), in the audit log: who, from where, what (in
+    /// English, as the console translates it; never a secret).
+    fn changed(&self, c: &Caller, req: &Req, kind: &str, what: String, device: Option<&Device>) {
+        let mut e = json!({"time": now(), "kind": kind, "user": c.user.name, "from": req.who.to_string(), "words": what});
+        if let Some((t, _)) = &c.token {
+            e["how"] = json!("token");
+            e["token"] = json!(t);
+        }
+        if let Some(d) = device {
+            e["device"] = json!(d.id);
+            e["device_name"] = json!(d.name);
+        }
+        self.audit(&[e]);
+    }
+
     /// Counts a try from `who` before it is checked, under one lock, so tries made at once all
     /// count and none slips past the limit; false when the address must wait.
     fn try_from(&self, who: IpAddr) -> bool {
@@ -925,11 +1122,10 @@ impl Team {
         }
     }
 
-    /// The signed-in person a request's bearer token stands for, and the token's hash.
+    /// The signed-in person a request's bearer token stands for, and the token's hash. Sessions
+    /// only: an API token reaches the administration alone (`caller`), never a ticket or a book.
     fn person(&self, req: &Req) -> Result<(String, User), Answer> {
-        let auth = req.header("authorization");
-        let token = auth.split_once(' ').filter(|(k, _)| k.eq_ignore_ascii_case("bearer")).map(|(_, t)| t.trim()).filter(|t| !t.is_empty());
-        let Some(token) = token else { return Err(fail(401, "sign in first")) };
+        let Some(token) = bearer(req) else { return Err(fail(401, "sign in first")) };
         let hash = secret_hash(token);
         let s = self.store();
         let user = s.sessions.get(&hash).filter(|x| x.expires > now()).and_then(|x| s.users.get(&x.user)).filter(|u| !u.disabled);
@@ -939,12 +1135,39 @@ impl Team {
         }
     }
 
-    /// The computer that signed this request (docs/team.md, Protocol).
+    /// Who asks the administration: a person signed in, or a script by its API token, which acts
+    /// for the administrator who made it while they are one.
+    fn caller(&self, req: &Req) -> Result<Caller, Answer> {
+        let Some(token) = bearer(req).filter(|t| t.starts_with(API_PREFIX)) else {
+            let (session, user) = self.person(req)?;
+            return Ok(Caller { user, session, token: None });
+        };
+        let hash = secret_hash(token);
+        let now = now();
+        let mut s = self.store();
+        let found = s.api_tokens.values_mut().find(|t| super::same(t.hash.as_bytes(), hash.as_bytes())).filter(|t| t.expires == 0 || t.expires > now);
+        let Some(t) = found else { return Err(fail(401, "this API token is not known here, has run out or was revoked")) };
+        // When it was last used, to the minute: kept with the next save, not at every request.
+        if now.saturating_sub(t.used) >= 60 {
+            t.used = now;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        let (name, scope, by) = (t.name.clone(), t.scope.clone(), t.by.clone());
+        match s.users.get(&by).filter(|u| u.admin && !u.disabled) {
+            Some(u) => Ok(Caller { user: u.clone(), session: String::new(), token: Some((name, scope)) }),
+            None => Err(fail(403, "the administrator who made this API token is no longer one")),
+        }
+    }
+
+    /// The computer that signed this request (docs/team.md, Protocol), unless the console disabled it.
     fn device(&self, req: &Req) -> Result<Device, Answer> {
         let id = req.header("x-team-device");
         let stamp = req.header("x-team-time");
         let d = self.store().devices.get(id).cloned().ok_or_else(|| fail(401, "this computer is not in the team"))?;
         check_sign(&d.key, &req.method, &req.target, &req.body, (stamp, req.header("x-team-sign")), now(), &mut lock(&self.signs)).map_err(|e| fail(401, e))?;
+        if d.disabled {
+            return Err(fail(403, "this computer is disabled in the team"));
+        }
         Ok(d)
     }
 
@@ -957,6 +1180,11 @@ impl Team {
         a.insert(code.clone(), (app.challenge.clone(), json!({"token": token, "user": u.public(), "expires": expires}), now));
         app.back(&code)
     }
+}
+
+/// The token of a request's `Authorization: Bearer TOKEN`.
+fn bearer(req: &Req) -> Option<&str> {
+    req.header("authorization").split_once(' ').filter(|(k, _)| k.eq_ignore_ascii_case("bearer")).map(|(_, t)| t.trim()).filter(|t| !t.is_empty())
 }
 
 /// A device's signature checked: made with its key over this request, at a time near ours, and
@@ -1006,6 +1234,14 @@ fn listen(server: TcpListener, team: Arc<Team>) {
                     let s = team.store();
                     if let Err(e) = team.save(&s) {
                         eprintln!("team: {e}");
+                    }
+                }
+                // The audit log's old lines go once a day (and soon after its days were changed).
+                if now().saturating_sub(team.pruned.load(Ordering::Relaxed)) >= 86_400 {
+                    match team.prune_audit() {
+                        Ok(0) => {}
+                        Ok(n) => eprintln!("team: {n} audit lines older than the settings keep were dropped"),
+                        Err(e) => eprintln!("team: {e}"),
                     }
                 }
             }
@@ -1337,6 +1573,7 @@ fn route(team: &Team, req: &Req) -> Answer {
             ok(json!({}))
         }),
         ("GET", "/api/me") => team.person(req).map(|(_, u)| ok(json!({"user": u.public(), "team": team.team_json(&team.store())}))),
+        ("GET" | "POST", "/api/me/backup-codes") => team.my_backup_codes(req, method),
         ("GET", "/api/devices") => team.devices(req),
         ("POST", "/api/ticket") => team.ticket(req),
         ("GET" | "PUT", "/api/book") => team.book(req, method),
@@ -1361,8 +1598,9 @@ fn route(team: &Team, req: &Req) -> Answer {
 
 /// Why a sign-in did not take.
 enum Wrong {
-    /// A wrong name, password or code: counted against the address.
-    Guess,
+    /// A wrong name, password or code: counted against the address. Which, for the audit log
+    /// (the answer says only "wrong name, password or code").
+    Guess(&'static str),
     /// The password may be right; the authenticator's code is needed too.
     Code,
     Disabled,
@@ -1387,28 +1625,42 @@ impl Team {
         let code = v["code"].as_str().unwrap_or("").trim();
         let port = v["port"].as_u64().map_or_else(|| v["port"].as_str().unwrap_or("").to_string(), |p| p.to_string());
         let app = AppAsk::from(v["app"].as_str().unwrap_or(""), &port).map_err(|w| fail(400, w))?;
+        // In the audit log by the account's own name when there is one, else as typed.
+        let tried = || self.store().user(&name).map_or_else(|| name.clone(), |u| u.name.clone());
         if !self.try_from(req.who) {
+            self.failed(req, "locked", &tried(), n!("too many wrong tries from this address"));
             return Err(fail(429, "too many wrong tries from this address: try again in 15 minutes"));
         }
-        let account = format!("name:{}", name.to_lowercase());
+        // No account's name is longer: a name of a megabyte does not make a key of one.
+        let account = format!("name:{}", name.chars().take(128).collect::<String>().to_lowercase());
         if !self.try_as(&account, MOST_NAME_TRIES) {
             self.untry(req.who);
+            self.failed(req, "locked", &tried(), n!("too many wrong tries at this account"));
             return Err(fail(429, "too many wrong tries at this account: try again in 15 minutes"));
         }
-        let (user, how) = match self.check(&name, password, code) {
+        let (user, how, backup) = match self.check(&name, password, code) {
             Ok(got) => {
                 self.untry(req.who);
                 self.untry_as(&account);
                 got
             }
-            Err(Wrong::Guess) => return Err(fail(401, "wrong name, password or code")),
+            Err(Wrong::Guess(why)) => {
+                self.failed(req, "login-failed", &tried(), why);
+                return Err(fail(401, "wrong name, password or code"));
+            }
             Err(w) => {
                 self.untry(req.who);
                 self.untry_as(&account);
                 return Err(match w {
                     Wrong::Code => Answer { status: 401, kind: "application/json", body: br#"{"error":"code needed","code":true}"#.to_vec(), headers: Vec::new() },
-                    Wrong::Disabled => fail(403, "this account is disabled"),
-                    Wrong::Outsider => fail(403, "this account is not in the team: ask its administrator to add it"),
+                    Wrong::Disabled => {
+                        self.failed(req, "login-failed", &tried(), "this account is disabled");
+                        fail(403, "this account is disabled")
+                    }
+                    Wrong::Outsider => {
+                        self.failed(req, "login-failed", &tried(), "this account is not in the team: ask its administrator to add it");
+                        fail(403, "this account is not in the team: ask its administrator to add it")
+                    }
                     _ => fail(503, "the directory could not be reached: try again later"),
                 });
             }
@@ -1424,12 +1676,17 @@ impl Team {
             (Some(a), Some((t, e))) => Some(self.hand_to_app(a, &user, &t, e)),
             _ => None,
         };
-        self.audit(&[json!({"time": now(), "kind": "login", "how": how, "user": user.name, "from": req.who.to_string()})]);
+        let mut event = json!({"time": now(), "kind": "login", "how": how, "user": user.name, "from": req.who.to_string()});
+        if let Some(left) = backup {
+            event["words"] = json!(crate::lang::fill(n!("with a backup code ({} left)"), &[&left]));
+        }
+        self.audit(&[event]);
         Ok(ok(json!({"token": (!token.is_empty()).then_some(token), "user": user.public(), "expires": expires, "app": app.is_some(), "to": to})))
     }
 
-    /// A name and password (and code) checked: a local password first, else the directory.
-    fn check(&self, name: &str, password: &str, code: &str) -> Result<(User, &'static str), Wrong> {
+    /// A name and password (and code) checked: a local password first, else the directory. With
+    /// the person, how they signed in, and the backup codes left when one was used.
+    fn check(&self, name: &str, password: &str, code: &str) -> Result<(User, &'static str, Option<usize>), Wrong> {
         let (found, ldap) = {
             let s = self.store();
             (s.user(name).cloned(), s.ldap.clone())
@@ -1437,19 +1694,19 @@ impl Team {
         let (user, how) = match found {
             Some(u) if !u.password.is_empty() => {
                 if !super::password_ok(password, &u.password) {
-                    return Err(Wrong::Guess);
+                    return Err(Wrong::Guess(n!("wrong password")));
                 }
                 (u, "password")
             }
             found => {
                 let Some(l) = ldap.filter(|_| name_ok(name)) else {
                     let _ = super::password_ok(password, dummy_hash());
-                    return Err(Wrong::Guess);
+                    return Err(Wrong::Guess(if found.is_some() { n!("this account has no password: it signs in with single sign-on") } else { n!("no such user") }));
                 };
                 let as_name = found.as_ref().map_or(name, |u| u.name.as_str()).to_string();
                 let (display, email) = match ldap_check(&l, &as_name, password) {
                     Ok(Some(said)) => said,
-                    Ok(None) => return Err(Wrong::Guess),
+                    Ok(None) => return Err(Wrong::Guess(n!("the directory refused the name or password"))),
                     Err(e) => {
                         eprintln!("team: LDAP: {e}");
                         return Err(Wrong::Unreachable);
@@ -1479,18 +1736,91 @@ impl Team {
         };
         // The code is asked for once the password is right: the answer says nothing of who
         // has an account, or an authenticator, to someone who does not know their password.
+        let mut backup = None;
         if !user.totp.is_empty() {
             if code.is_empty() {
                 return Err(Wrong::Code);
             }
-            if !self.code_ok(&user, code) {
-                return Err(Wrong::Guess);
+            // A backup code in its place (ten letters and digits), or the authenticator's.
+            let right = match backup_form(code) {
+                Some(c) => {
+                    backup = self.use_backup_code(&user.name, &c);
+                    backup.is_some()
+                }
+                None => self.code_ok(&user, code),
+            };
+            if !right {
+                return Err(Wrong::Guess(n!("wrong two-step code")));
             }
         }
         if user.disabled {
             return Err(Wrong::Disabled);
         }
-        Ok((user, how))
+        Ok((user, how, backup))
+    }
+
+    /// A backup code of `name`'s used up, if it is one of theirs: how many are left then. Checked
+    /// outside the lock (each check takes a while) and taken out under it, so two sign-ins at
+    /// once with the same code do not both get in.
+    fn use_backup_code(&self, name: &str, code: &str) -> Option<usize> {
+        let hashes = self.store().users.get(name)?.backup.clone();
+        let mut hit = None;
+        // Every one checked, the right one or not: the time taken tells nothing of which.
+        for h in &hashes {
+            if super::password_ok(code, h) && hit.is_none() {
+                hit = Some(h.clone());
+            }
+        }
+        let hit = hit?;
+        let mut s = self.store();
+        let u = s.users.get_mut(name)?;
+        let at = u.backup.iter().position(|h| *h == hit)?;
+        u.backup.remove(at);
+        let left = u.backup.len();
+        self.save(&s).ok()?;
+        Some(left)
+    }
+
+    /// `GET /api/me/backup-codes` -> how many are left; `POST {"password"}` -> a new set, shown
+    /// once (the old ones no longer work). The password again, so a session left open on someone
+    /// else's computer does not hand them a way past the authenticator.
+    fn my_backup_codes(&self, req: &Req, method: &str) -> Reply {
+        let (_, me) = self.person(req)?;
+        if method == "GET" {
+            return Ok(ok(json!({"left": me.backup.len(), "totp": !me.totp.is_empty()})));
+        }
+        if me.totp.is_empty() {
+            return Err(fail(400, "two-step sign-in is not set up for this account"));
+        }
+        let v = req.json()?;
+        let password = v["password"].as_str().unwrap_or("");
+        if !self.try_from(req.who) {
+            return Err(fail(429, "too many wrong tries from this address: try again in 15 minutes"));
+        }
+        let ldap = self.store().ldap.clone();
+        let right = if !me.password.is_empty() {
+            super::password_ok(password, &me.password)
+        } else if let Some(l) = ldap {
+            matches!(ldap_check(&l, &me.name, password), Ok(Some(_)))
+        } else {
+            self.untry(req.who);
+            return Err(fail(400, "this account has no password here: ask an administrator for new backup codes"));
+        };
+        // Not 401, which would sign the console out.
+        if !right {
+            return Err(fail(403, "the password is wrong"));
+        }
+        self.untry(req.who);
+        let (shown, hashes) = backup_codes();
+        {
+            let mut s = self.store();
+            let Some(u) = s.users.get_mut(&me.name) else { return Err(fail(401, "the session has ended: sign in again")) };
+            u.backup = hashes;
+            self.saved(&s)?;
+        }
+        let c = Caller { user: me.clone(), session: String::new(), token: None };
+        self.changed(&c, req, "admin", crate::lang::fill(n!("new backup codes for user {}"), &[&me.name]), None);
+        Ok(ok(json!({"backup_codes": shown})))
     }
 
     fn code_ok(&self, u: &User, code: &str) -> bool {
@@ -1538,6 +1868,8 @@ impl Team {
         let mut list: Vec<(String, Value)> = s
             .devices
             .values()
+            // A disabled one is given no ticket: not offered either.
+            .filter(|d| !d.disabled)
             .filter_map(|d| {
                 let (rights, ask) = s.reach(&me, d)?;
                 Some((d.name.to_lowercase(), json!({"id": d.id, "name": d.name, "os": d.os, "group": d.group, "online": d.online(), "rights": rights, "ask": ask})))
@@ -1561,6 +1893,10 @@ impl Team {
         let got = s.reach(&me, &d);
         drop(s);
         let from = if viewer.is_empty() { req.who.to_string() } else { viewer.clone() };
+        if d.disabled {
+            self.audit(&[json!({"time": now(), "kind": "refused", "how": "team", "user": me.name, "from": from, "device": d.id, "device_name": d.name, "words": "this computer is disabled in the team"})]);
+            return Err(fail(403, "this computer is disabled in the team"));
+        }
         let Some((rights, ask)) = got else {
             self.audit(&[json!({"time": now(), "kind": "refused", "how": "team", "user": me.name, "from": from, "device": d.id, "device_name": d.name, "words": "no access rule"})]);
             return Err(fail(403, "no rule lets you reach this computer"));
@@ -1955,6 +2291,10 @@ impl Team {
         if t.uses != 0 && t.used >= t.uses {
             return Err(fail(403, "this enrollment token has been used up"));
         }
+        // Disabled, it stays so: joining again does not turn it back on.
+        if s.devices.get(&id).is_some_and(|d| d.disabled) {
+            return Err(fail(403, "this computer is disabled in the team"));
+        }
         if s.devices.contains_key(&id) && !by_itself {
             return Err(fail(409, "a computer with this ID is in the team already: remove it in the console first"));
         }
@@ -1967,7 +2307,9 @@ impl Team {
         let name = clean(v["name"].as_str().unwrap_or(""), 64);
         let name = if name.is_empty() { format!("Computer {}", crate::computers::spaced(&id)) } else { name };
         let key = crate::sys::random(32);
-        let d = Device { id: id.clone(), name, os: clean(v["os"].as_str().unwrap_or(""), 32), version: clean(v["version"].as_str().unwrap_or(""), 32), group, key: key.clone(), joined: now, seen: now, end: false };
+        // What the console wrote of it stays when it joins again by itself.
+        let (note, owner) = old.map(|d| (d.note.clone(), d.owner.clone())).unwrap_or_default();
+        let d = Device { id: id.clone(), name, os: clean(v["os"].as_str().unwrap_or(""), 32), version: clean(v["version"].as_str().unwrap_or(""), 32), group, key: key.clone(), joined: now, seen: now, end: false, note, owner, disabled: false };
         s.devices.insert(id.clone(), d.clone());
         self.saved(&s)?;
         let team = self.team_json(&s);
@@ -2184,7 +2526,7 @@ fn utc(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
-const CSV_COLUMNS: [&str; 10] = ["time", "device", "device_name", "kind", "how", "user", "from", "rights", "secs", "words"];
+const CSV_COLUMNS: [&str; 11] = ["time", "device", "device_name", "kind", "how", "user", "from", "rights", "secs", "words", "token"];
 
 /// The audit log as a spreadsheet takes it (RFC 4180), with no cell it would run as a formula.
 fn audit_csv(events: &[Value]) -> String {
@@ -2224,22 +2566,52 @@ fn relay_ok(r: &str) -> bool {
     r.is_empty() || (r.len() <= 255 && r.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:[]".contains(c)))
 }
 
+/// When a token runs out, as the console sends it: a time, or 0, null or "" for never.
+fn expiry(v: &Value) -> Result<u64, Answer> {
+    let bad = || fail(400, "\"expires\" is a time");
+    let t = match v {
+        Value::Null => 0,
+        Value::Number(n) if n.as_u64() == Some(0) => 0,
+        Value::Number(n) => n.as_u64().and_then(|n| when(&n.to_string(), true)).ok_or_else(bad)?,
+        Value::String(t) if t.trim().is_empty() => 0,
+        Value::String(t) => when(t, true).ok_or_else(bad)?,
+        _ => return Err(bad()),
+    };
+    if t != 0 && t <= now() {
+        return Err(fail(400, "the token would have run out already"));
+    }
+    Ok(t)
+}
+
 impl Team {
     fn admin(&self, req: &Req, method: &str) -> Reply {
-        let (own, me) = self.person(req)?;
-        if !me.admin {
+        let c = self.caller(req)?;
+        if !c.user.admin {
             return Err(fail(403, "only the team's administrators may do this"));
         }
         let rest = &req.path["/api/admin/".len()..];
-        let (what, arg) = match rest.split_once('/') {
-            Some((w, a)) => (w, Some(decode(a, false))),
-            None => (rest, None),
-        };
+        // Split before decoding: a name with a slash in it comes as %2F.
+        let mut parts = rest.splitn(3, '/');
+        let what = parts.next().unwrap_or("");
+        let arg = parts.next().map(|a| decode(a, false));
+        let sub = parts.next();
+        if let Some((_, scope)) = &c.token
+            && !token_may(scope, method, what, sub)
+        {
+            return Err(fail(403, "this API token's scope does not let it do this"));
+        }
         let arg = arg.as_deref();
+        let fill = crate::lang::fill;
+        if let Some(sub) = sub {
+            return match (method, what, arg, sub) {
+                ("POST", "users", Some(name), "backup-codes") => self.user_backup_codes(req, name, &c),
+                _ => Err(fail(404, "no such request")),
+            };
+        }
         match (method, what, arg) {
             ("GET", "users", None) => Ok(ok(json!({"users": self.store().users.values().map(User::listed).collect::<Vec<_>>()}))),
-            ("POST", "users", None) => self.put_user(req, None, &own),
-            ("PUT", "users", Some(name)) => self.put_user(req, Some(name), &own),
+            ("POST", "users", None) => self.put_user(req, None, &c),
+            ("PUT", "users", Some(name)) => self.put_user(req, Some(name), &c),
             ("DELETE", "users", Some(name)) => {
                 let mut s = self.store();
                 if !s.users.contains_key(name) {
@@ -2252,9 +2624,15 @@ impl Team {
                 s.sessions.retain(|_, x| x.user != name);
                 let who = format!("user:{name}");
                 s.rules.retain(|r| r.who != who);
+                // Their computers are nobody's now; the API tokens they made go with them.
+                for d in s.devices.values_mut().filter(|d| d.owner == name) {
+                    d.owner.clear();
+                }
+                s.api_tokens.retain(|_, t| t.by != name);
                 self.saved(&s)?;
                 drop(s);
                 let _ = std::fs::remove_file(self.book_file(name));
+                self.changed(&c, req, "admin", fill(n!("user {} removed"), &[&name]), None);
                 Ok(ok(json!({})))
             }
             ("GET", "groups", None) => Ok(ok(json!({"groups": groups_list(&self.store())}))),
@@ -2269,6 +2647,8 @@ impl Team {
                     return Err(fail(409, "there is a group of that name already"));
                 }
                 self.saved(&s)?;
+                drop(s);
+                self.changed(&c, req, "admin", fill(n!("group {} added"), &[&name]), None);
                 Ok(ok(json!({"group": {"name": name, "users": []}})))
             }
             ("DELETE", "groups", Some(g)) => {
@@ -2282,11 +2662,13 @@ impl Team {
                 let who = format!("group:{g}");
                 s.rules.retain(|r| r.who != who);
                 self.saved(&s)?;
+                drop(s);
+                self.changed(&c, req, "admin", fill(n!("group {} removed"), &[&g]), None);
                 Ok(ok(json!({})))
             }
             ("GET", "device-groups", None) => Ok(ok(json!({"groups": device_groups_list(&self.store())}))),
-            ("POST", "device-groups", None) => self.put_device_group(req, None),
-            ("PUT", "device-groups", Some(g)) => self.put_device_group(req, Some(g)),
+            ("POST", "device-groups", None) => self.put_device_group(req, None, &c),
+            ("PUT", "device-groups", Some(g)) => self.put_device_group(req, Some(g), &c),
             ("DELETE", "device-groups", Some(g)) => {
                 let mut s = self.store();
                 if s.device_groups.remove(g).is_none() {
@@ -2301,6 +2683,8 @@ impl Team {
                 let devices = format!("group:{g}");
                 s.rules.retain(|r| r.devices != devices);
                 self.saved(&s)?;
+                drop(s);
+                self.changed(&c, req, "admin", fill(n!("device group {} removed"), &[&g]), None);
                 Ok(ok(json!({})))
             }
             ("GET", "devices", None) => Ok(ok(json!({"devices": self.store().devices.values().map(Device::listed).collect::<Vec<_>>()}))),
@@ -2315,26 +2699,60 @@ impl Team {
                 if name.as_deref().is_some_and(|n| !name_ok(n)) {
                     return Err(fail(400, "a computer's name is 1 to 64 characters"));
                 }
+                // A note keeps its lines, and nothing else that is no text.
+                let note = v["note"].as_str().map(|n| n.replace("\r\n", "\n").chars().filter(|c| *c == '\n' || !c.is_control()).collect::<String>().trim().to_string());
+                if note.as_deref().is_some_and(|n| n.chars().count() > MOST_NOTE) {
+                    return Err(fail(400, "a note is at most 500 characters"));
+                }
+                let owner = v["owner"].as_str().map(str::trim);
+                if owner.is_some_and(|o| !o.is_empty() && !s.users.contains_key(o)) {
+                    return Err(fail(400, "there is no such user"));
+                }
                 let d = s.devices.get_mut(id).ok_or_else(|| fail(404, "that computer is not in the team"))?;
+                let before = d.clone();
                 if let Some(n) = name {
                     d.name = n;
                 }
                 if let Some(g) = group {
                     d.group = g.to_string();
                 }
-                if v["end"].as_bool() == Some(true) {
+                if let Some(n) = note {
+                    d.note = n;
+                }
+                if let Some(o) = owner {
+                    d.owner = o.to_string();
+                }
+                if let Some(off) = v["disabled"].as_bool() {
+                    d.disabled = off;
+                }
+                let end = v["end"].as_bool() == Some(true);
+                if end {
                     d.end = true;
                 }
-                let out = d.listed();
+                let after = d.clone();
                 self.saved(&s)?;
-                Ok(ok(json!({"device": out})))
+                drop(s);
+                let mut said = Vec::new();
+                if (&before.name, &before.group, &before.note, &before.owner) != (&after.name, &after.group, &after.note, &after.owner) {
+                    said.push(fill(n!("device {} changed"), &[&after.name]));
+                }
+                if before.disabled != after.disabled {
+                    said.push(fill(if after.disabled { n!("device {} disabled") } else { n!("device {} enabled") }, &[&after.name]));
+                }
+                if end {
+                    said.push(fill(n!("sessions on device {} ended"), &[&after.name]));
+                }
+                for w in said {
+                    self.changed(&c, req, "admin", w, Some(&after));
+                }
+                Ok(ok(json!({"device": after.listed()})))
             }
             ("DELETE", "devices", Some(id)) => {
                 let mut s = self.store();
                 let d = s.devices.remove(id).ok_or_else(|| fail(404, "that computer is not in the team"))?;
                 self.saved(&s)?;
                 drop(s);
-                self.audit(&[json!({"time": now(), "kind": "removed", "user": me.name, "device": d.id, "device_name": d.name})]);
+                self.changed(&c, req, "removed", fill(n!("device {} removed"), &[&d.name]), Some(&d));
                 Ok(ok(json!({})))
             }
             ("GET", "rules", None) => Ok(ok(json!({"rules": self.store().rules.iter().map(Rule::json).collect::<Vec<_>>()}))),
@@ -2347,26 +2765,22 @@ impl Team {
                 }
                 let mut s = self.store();
                 let rules = list.iter().map(|r| rule_from(r, &s)).collect::<Result<Vec<_>, _>>().map_err(|e| fail(400, &e))?;
+                let same = rules == s.rules;
                 s.rules = rules;
                 self.saved(&s)?;
-                Ok(ok(json!({"rules": s.rules.iter().map(Rule::json).collect::<Vec<_>>()})))
+                let out = json!({"rules": s.rules.iter().map(Rule::json).collect::<Vec<_>>()});
+                drop(s);
+                if !same {
+                    self.changed(&c, req, "admin", n!("rule list changed").to_string(), None);
+                }
+                Ok(ok(out))
             }
             ("GET", "tokens", None) => Ok(ok(json!({"tokens": self.store().tokens.values().map(Token::listed).collect::<Vec<_>>()}))),
             ("POST", "tokens", None) => {
                 let v = req.json()?;
                 let now = now();
                 let group = v["group"].as_str().unwrap_or("").trim().to_string();
-                let expires = match &v["expires"] {
-                    Value::Null => 0,
-                    Value::Number(n) if n.as_u64() == Some(0) => 0,
-                    Value::Number(n) => n.as_u64().and_then(|n| when(&n.to_string(), true)).ok_or_else(|| fail(400, "\"expires\" is a time"))?,
-                    Value::String(t) if t.trim().is_empty() => 0,
-                    Value::String(t) => when(t, true).ok_or_else(|| fail(400, "\"expires\" is a time"))?,
-                    _ => return Err(fail(400, "\"expires\" is a time")),
-                };
-                if expires != 0 && expires <= now {
-                    return Err(fail(400, "the token would have run out already"));
-                }
+                let expires = expiry(&v["expires"])?;
                 let uses = v["uses"].as_u64().unwrap_or(0);
                 let mut s = self.store();
                 if !group.is_empty() && !s.device_groups.contains_key(&group) {
@@ -2376,6 +2790,9 @@ impl Team {
                 let t = Token { id: crate::sys::hex(&crate::sys::random(8)), hash: secret_hash(&token), group, expires, uses, used: 0, created: now };
                 s.tokens.insert(t.id.clone(), t.clone());
                 self.saved(&s)?;
+                drop(s);
+                let what = if t.group.is_empty() { n!("enrollment token made").to_string() } else { fill(n!("enrollment token for device group {} made"), &[&t.group]) };
+                self.changed(&c, req, "admin", what, None);
                 let mut out = t.listed();
                 out["token"] = json!(token);
                 out["install"] = json!({
@@ -2391,6 +2808,52 @@ impl Team {
                     return Err(fail(404, "there is no such token"));
                 }
                 self.saved(&s)?;
+                drop(s);
+                self.changed(&c, req, "admin", n!("enrollment token revoked").to_string(), None);
+                Ok(ok(json!({})))
+            }
+            // Scripts' tokens: made, listed and revoked by an administrator signed in, never by one.
+            ("GET", "api-tokens", None) => Ok(ok(json!({"tokens": self.store().api_tokens.values().map(ApiToken::listed).collect::<Vec<_>>()}))),
+            ("POST", "api-tokens", None) => {
+                let v = req.json()?;
+                let name = v["name"].as_str().unwrap_or("").trim().to_string();
+                if !name_ok(&name) {
+                    return Err(fail(400, "an API token's name is 1 to 64 characters"));
+                }
+                let scope = v["scope"].as_str().unwrap_or("").trim();
+                if !SCOPES.contains(&scope) {
+                    return Err(fail(400, "an API token's scope is read, devices or admin"));
+                }
+                let expires = expiry(&v["expires"])?;
+                let mut s = self.store();
+                if s.api_tokens.len() >= MOST_API_TOKENS {
+                    return Err(fail(400, "a team has at most 100 API tokens: revoke some first"));
+                }
+                if s.api_tokens.values().any(|t| t.name.eq_ignore_ascii_case(&name)) {
+                    return Err(fail(409, "there is an API token of that name already"));
+                }
+                let token = format!("{API_PREFIX}{}", super::new_secret());
+                let t = ApiToken { id: crate::sys::hex(&crate::sys::random(8)), name, hash: secret_hash(&token), scope: scope.to_string(), by: c.user.name.clone(), created: now(), expires, used: 0 };
+                s.api_tokens.insert(t.id.clone(), t.clone());
+                self.saved(&s)?;
+                drop(s);
+                // One sentence a scope, so each is translated whole.
+                let what = match scope {
+                    "read" => n!("API token {} made (read only)"),
+                    "devices" => n!("API token {} made (devices)"),
+                    _ => n!("API token {} made (administration)"),
+                };
+                self.changed(&c, req, "token", fill(what, &[&t.name]), None);
+                let mut out = t.listed();
+                out["token"] = json!(token);
+                Ok(ok(out))
+            }
+            ("DELETE", "api-tokens", Some(id)) => {
+                let mut s = self.store();
+                let t = s.api_tokens.remove(id).ok_or_else(|| fail(404, "there is no such API token"))?;
+                self.saved(&s)?;
+                drop(s);
+                self.changed(&c, req, "token", fill(n!("API token {} revoked"), &[&t.name]), None);
                 Ok(ok(json!({})))
             }
             ("GET", "audit", None) => Ok(ok(json!({"events": self.audit_events(&req.query, 1000)}))),
@@ -2400,16 +2863,17 @@ impl Team {
                 Ok(a)
             }
             ("GET", "settings", None) => Ok(ok(self.settings(&self.store()))),
-            ("PUT", "settings", None) => self.put_settings(req),
+            ("PUT", "settings", None) => self.put_settings(req, &c),
             // An invitation to set a password, by email.
             ("POST", "invite", None) => {
                 let v = req.json()?;
+                let me = &c.user;
                 self.mail_link(v["name"].as_str().unwrap_or(""), false, Some(if me.display.is_empty() { &me.name } else { &me.display }))?;
                 Ok(ok(json!({"sent": true})))
             }
             ("POST", "mail-test", None) => {
                 let v = req.json()?;
-                let to = v["to"].as_str().filter(|t| !t.is_empty()).unwrap_or(&me.email).trim().to_string();
+                let to = v["to"].as_str().filter(|t| !t.is_empty()).unwrap_or(&c.user.email).trim().to_string();
                 let s = self.store();
                 let (Some(m), team) = (s.smtp.clone(), s.name.clone()) else { return Err(fail(400, "the team has no mail server set up (Settings, Email)")) };
                 drop(s);
@@ -2424,17 +2888,39 @@ impl Team {
         }
     }
 
+    /// `POST /api/admin/users/NAME/backup-codes`: a new set for someone who used or lost theirs,
+    /// shown once; the old ones no longer work.
+    fn user_backup_codes(&self, req: &Req, name: &str, c: &Caller) -> Reply {
+        if !self.store().users.contains_key(name) {
+            return Err(fail(404, "there is no such user"));
+        }
+        let (shown, hashes) = backup_codes();
+        let mut s = self.store();
+        let Some(u) = s.users.get_mut(name) else { return Err(fail(404, "there is no such user")) };
+        if u.totp.is_empty() {
+            return Err(fail(400, "this person has no two-step sign-in: set it up first"));
+        }
+        u.backup = hashes;
+        let out = u.listed();
+        self.saved(&s)?;
+        drop(s);
+        self.changed(c, req, "admin", crate::lang::fill(n!("new backup codes for user {}"), &[&name]), None);
+        Ok(ok(json!({"backup_codes": shown, "user": out})))
+    }
+
     /// A user made (`old` None) or changed, as the console sends it. `"totp": true` gives them an
-    /// authenticator, whose secret comes back with the answer to be set up once; `"totp_reset": true`
-    /// (or `"totp": false`) takes it away.
-    fn put_user(&self, req: &Req, old: Option<&str>, own: &str) -> Reply {
+    /// authenticator, whose secret comes back with the answer to be set up once, with its backup
+    /// codes; `"totp_reset": true` (or `"totp": false`) takes both away. A script's API token
+    /// changes no one's password or two-step sign-in.
+    fn put_user(&self, req: &Req, old: Option<&str>, c: &Caller) -> Reply {
         let v = req.json()?;
-        // The password's hash takes a while: not under the lock.
+        // The password's hash takes a while, and the backup codes': not under the lock.
         let password = match v["password"].as_str().filter(|p| !p.is_empty()) {
             Some(p) if p.chars().count() < 8 => return Err(fail(400, "a password has at least 8 characters")),
             Some(p) => Some(super::password_hash(p)),
             None => None,
         };
+        let mut codes = (v["totp"].as_bool() == Some(true)).then(backup_codes);
         let mut s = self.store();
         let before = match old {
             Some(n) => Some(s.users.get(n).cloned().ok_or_else(|| fail(404, "there is no such user"))?),
@@ -2460,6 +2946,10 @@ impl Team {
             let e = e.trim();
             if e.len() > 254 || e.chars().any(|c| c.is_control() || c.is_whitespace()) || (!e.is_empty() && !e.contains('@')) {
                 return Err(fail(400, "that is not an email address"));
+            }
+            // A link to set a new password goes to it: a script that changed it could take the account.
+            if c.token.is_some() && before.as_ref().is_some_and(|b| !b.password.is_empty() && !b.email.eq_ignore_ascii_case(e)) {
+                return Err(fail(403, "an API token cannot change the email address of an account with a password"));
             }
             u.email = e.to_string();
         }
@@ -2487,14 +2977,24 @@ impl Team {
         if let Some(h) = password {
             u.password = h;
         }
-        let mut secret = None;
+        let (mut secret, mut shown) = (None, None);
+        let mut taken = false;
         if v["totp_reset"].as_bool() == Some(true) || v["totp"].as_bool() == Some(false) {
             // A lost or new phone: the password alone signs in again, until another is set up.
+            taken = !u.totp.is_empty();
             u.totp.clear();
+            u.backup.clear();
         } else if v["totp"].as_bool() == Some(true) && u.totp.is_empty() {
             let t = crate::totp::new_secret();
             u.totp = t.clone();
             secret = Some(t);
+            let (list, hashes) = codes.take().unwrap_or_else(backup_codes);
+            u.backup = hashes;
+            shown = Some(list);
+        }
+        // What signs a person in is for administrators signed in to change, never for a script.
+        if c.token.is_some() && (new_password || secret.is_some() || taken) {
+            return Err(fail(403, "an API token cannot change anyone's password or two-step sign-in"));
         }
         let mut users = s.users.clone();
         if let Some(o) = old {
@@ -2513,19 +3013,58 @@ impl Team {
             for x in s.sessions.values_mut().filter(|x| x.user == o) {
                 x.user = name.clone();
             }
+            for d in s.devices.values_mut().filter(|d| d.owner == o) {
+                d.owner = name.clone();
+            }
+            for t in s.api_tokens.values_mut().filter(|t| t.by == o) {
+                t.by = name.clone();
+            }
             let _ = std::fs::rename(self.book_file(o), self.book_file(&name));
         }
         // A new password or a disabled account ends its sessions (but not the one making the change).
         if before.is_some() && (new_password || u.disabled) {
-            s.sessions.retain(|h, x| x.user != name || h == own);
+            s.sessions.retain(|h, x| x.user != name || *h == c.session);
         }
         self.saved(&s)?;
-        let uri = secret.as_ref().map(|t| crate::totp::uri(t, &esc(&format!("{}:{name}", s.name))));
+        let team = s.name.clone();
+        drop(s);
+        let fill = crate::lang::fill;
+        let mut said = Vec::new();
+        match &before {
+            None => said.push(fill(n!("user {} added"), &[&name])),
+            Some(b) => {
+                if b.name != name {
+                    said.push(fill(n!("user {} renamed to {}"), &[&b.name, &name]));
+                }
+                if (&b.display, &b.email, &b.groups) != (&u.display, &u.email, &u.groups) {
+                    said.push(fill(n!("user {} changed"), &[&name]));
+                }
+                if b.disabled != u.disabled {
+                    said.push(fill(if u.disabled { n!("user {} disabled") } else { n!("user {} enabled") }, &[&name]));
+                }
+                if new_password {
+                    said.push(fill(if cleared { n!("password of user {} taken away") } else { n!("new password for user {}") }, &[&name]));
+                }
+                if taken {
+                    said.push(fill(n!("two-step sign-in of user {} reset"), &[&name]));
+                }
+            }
+        }
+        if before.as_ref().map_or(u.admin, |b| b.admin != u.admin) {
+            said.push(fill(if u.admin { n!("user {} made an administrator") } else { n!("user {} is no longer an administrator") }, &[&name]));
+        }
+        if secret.is_some() {
+            said.push(fill(n!("two-step sign-in set up for user {}"), &[&name]));
+        }
+        for w in said {
+            self.changed(c, req, "admin", w, None);
+        }
+        let uri = secret.as_ref().map(|t| crate::totp::uri(t, &esc(&format!("{team}:{name}"))));
         let qr = uri.as_deref().and_then(qr_svg);
-        Ok(ok(json!({"user": u.listed(), "totp_secret": secret, "totp_uri": uri, "totp_qr": qr})))
+        Ok(ok(json!({"user": u.listed(), "totp_secret": secret, "totp_uri": uri, "totp_qr": qr, "backup_codes": shown})))
     }
 
-    fn put_device_group(&self, req: &Req, old: Option<&str>) -> Reply {
+    fn put_device_group(&self, req: &Req, old: Option<&str>, c: &Caller) -> Reply {
         let v = req.json()?;
         let name = old.map(str::to_string).unwrap_or_else(|| v["name"].as_str().unwrap_or("").trim().to_string());
         if !name_ok(&name) {
@@ -2535,10 +3074,17 @@ impl Team {
         if old.is_some() && !s.device_groups.contains_key(&name) {
             return Err(fail(404, "there is no such device group"));
         }
-        let policy = if v["policy"].is_object() { Policy::from_json(&v["policy"]) } else { s.device_groups.get(&name).cloned().unwrap_or_default() };
+        let was = s.device_groups.get(&name).cloned();
+        let policy = if v["policy"].is_object() { Policy::from_json(&v["policy"]) } else { was.clone().unwrap_or_default() };
         s.device_groups.insert(name.clone(), policy.clone());
         self.saved(&s)?;
         let devices = s.devices.values().filter(|d| d.group == name).count();
+        drop(s);
+        match was {
+            None => self.changed(c, req, "admin", crate::lang::fill(n!("device group {} added"), &[&name]), None),
+            Some(p) if p != policy => self.changed(c, req, "admin", crate::lang::fill(n!("device group {} policy changed"), &[&name]), None),
+            Some(_) => {}
+        }
         Ok(ok(json!({"group": {"name": name, "policy": policy.json(), "devices": devices}})))
     }
 
@@ -2553,10 +3099,11 @@ impl Team {
             "oidc": s.oidc.as_ref().map(|o| json!({"issuer": o.issuer, "client_id": o.client_id, "client_secret_set": !o.client_secret.is_empty(), "domains": o.domains, "make_users": o.make_users, "trust_email": o.trust_email})),
             "ldap": s.ldap.as_ref().map(|l| json!({"url": l.url, "user_dn": l.user_dn, "make_users": l.make_users, "ca_file": l.ca_file})),
             "smtp": s.smtp.as_ref().map(|m| json!({"url": m.url, "user": m.user, "password_set": !m.password.is_empty(), "from": m.from})),
+            "audit_days": s.audit_days,
         })
     }
 
-    fn put_settings(&self, req: &Req) -> Reply {
+    fn put_settings(&self, req: &Req, c: &Caller) -> Reply {
         let v = req.json()?;
         let mut kept = self.store();
         // Changed on a copy: a setting refused leaves the others as they were too.
@@ -2583,6 +3130,9 @@ impl Team {
         }
         if let Some(b) = v["brand"].as_bool() {
             s.brand = b;
+        }
+        if let Some(d) = v.get("audit_days").filter(|d| !d.is_null()) {
+            s.audit_days = d.as_u64().filter(|d| *d <= 36_500).ok_or_else(|| fail(400, "the audit log is kept for 0 (for ever) to 36500 days"))?;
         }
         match v.get("oidc") {
             None => {}
@@ -2654,8 +3204,19 @@ impl Team {
         if s.oidc != kept.oidc {
             *lock(&self.discovery) = None;
         }
+        // Fewer days: the old lines go at the next round, not a day later.
+        if s.audit_days != kept.audit_days {
+            self.pruned.store(0, Ordering::Relaxed);
+        }
+        let what = |x: &Store| (x.name.clone(), x.logo.clone(), x.relay.clone(), x.brand, x.oidc.clone(), x.ldap.clone(), x.smtp.clone(), x.audit_days);
+        let differs = what(&s) != what(&kept);
         *kept = s;
-        Ok(ok(self.settings(&kept)))
+        let out = self.settings(&kept);
+        drop(kept);
+        if differs {
+            self.changed(c, req, "admin", n!("settings changed").to_string(), None);
+        }
+        Ok(ok(out))
     }
 }
 
@@ -2706,8 +3267,10 @@ pub fn admin_cli(args: &[String]) -> Result<(), String> {
     u.admin = true;
     u.disabled = false;
     let totp = args.iter().any(|a| a == "--totp").then(crate::totp::new_secret);
-    if let Some(t) = &totp {
+    let codes = totp.as_ref().map(|_| backup_codes());
+    if let (Some(t), Some((_, hashes))) = (&totp, &codes) {
         u.totp = t.clone();
+        u.backup = hashes.clone();
     }
     let shown = u.name.clone();
     let team = s.name.clone();
@@ -2716,6 +3279,12 @@ pub fn admin_cli(args: &[String]) -> Result<(), String> {
     println!("{shown} is an administrator of the team in {} (a running server takes it at its next request)", dir.display());
     if let Some(t) = totp {
         println!("Authenticator app: add the key {} (or open {})", crate::totp::grouped(&t), crate::totp::uri(&t, &esc(&format!("{team}:{shown}"))));
+    }
+    if let Some((list, _)) = codes {
+        println!("Backup codes, each good once in place of the authenticator's code (shown only now: keep them somewhere safe):");
+        for c in list {
+            println!("  {c}");
+        }
     }
     Ok(())
 }
@@ -3240,9 +3809,9 @@ mod tests {
         ];
         let csv = audit_csv(&events);
         let lines: Vec<&str> = csv.split("\r\n").collect();
-        assert_eq!(lines[0], "time,device,device_name,kind,how,user,from,rights,secs,words");
-        assert_eq!(lines[1], "\"2023-11-14 22:13:20\",\"123456789\",\"Desk, front\",\"in\",\"team\",\"'=cmd()\",\"555666777\",\"5\",\"60\",\"said \"\"hi\"\"\nthen left\"");
-        assert_eq!(lines[2], "\"1970-01-01 00:00:00\",\"\",\"\",\"join\",\"\",\"\",\"\",\"\",\"\",\"\"");
+        assert_eq!(lines[0], "time,device,device_name,kind,how,user,from,rights,secs,words,token");
+        assert_eq!(lines[1], "\"2023-11-14 22:13:20\",\"123456789\",\"Desk, front\",\"in\",\"team\",\"'=cmd()\",\"555666777\",\"5\",\"60\",\"said \"\"hi\"\"\nthen left\",\"\"");
+        assert_eq!(lines[2], "\"1970-01-01 00:00:00\",\"\",\"\",\"join\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"");
         assert_eq!(lines[3], "");
         assert_eq!(when("2023-11-14", false), Some(1_699_920_000));
         assert_eq!(when("2023-11-14", true), Some(1_699_920_000 + 86_399));
@@ -3269,5 +3838,307 @@ mod tests {
         assert_eq!(ldap_self_url("ldaps://dir.example.com:636/dc=example,dc=com", "uid=o'neil,ou=people,dc=example,dc=com"), "ldaps://dir.example.com:636/uid=o%27neil,ou=people,dc=example,dc=com?cn,displayName,mail?base");
         assert_eq!(ldap_self_url("ldap://dir", "uid=a\\2cb"), "ldap://dir/uid=a%5C2cb?cn,displayName,mail?base");
         assert_eq!(ldap_escape("#x "), "\\#x\\ ");
+    }
+
+    /// The audit log's lines, oldest first.
+    fn audit_lines(team: &Team) -> Vec<Value> {
+        std::fs::read_to_string(team.dir.join("audit.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// What the audit log says of `kind`: its words.
+    fn audit_words(team: &Team, kind: &str) -> Vec<String> {
+        audit_lines(team).iter().filter(|e| e["kind"] == json!(kind)).map(|e| e["words"].as_str().unwrap_or("").to_string()).collect()
+    }
+
+    #[test]
+    fn api_tokens_reach_only_what_their_scope_lets() {
+        let (url, team, _gone) = start("apitokens");
+        let api = |p: &str| format!("{url}{p}");
+        let admin = login(&url, "ana", "ana's password");
+        let make = |name: &str, scope: &str, expires: Value| call("POST", &api("/api/admin/api-tokens"), Some(&admin), Some(json!({"name": name, "scope": scope, "expires": expires})));
+        assert_eq!(make("x", "everything", json!(0)).0, 400);
+        assert_eq!(make("", "read", json!(0)).0, 400);
+        assert_eq!(make("x", "read", json!(1_000_000_000)).0, 400, "run out already");
+        let (code, v) = make("reader", "read", json!(now() + 3600));
+        assert_eq!(code, 200, "{v}");
+        let read = v["token"].as_str().unwrap().to_string();
+        assert!(read.starts_with(API_PREFIX) && read.len() == API_PREFIX.len() + 64, "{read}");
+        assert_eq!(make("Reader", "admin", json!(0)).0, 409);
+        let devices = make("inventory", "devices", json!(0)).1["token"].as_str().unwrap().to_string();
+        let (_, v) = make("deploy", "admin", json!(0));
+        let (full, full_id) = (v["token"].as_str().unwrap().to_string(), v["id"].as_str().unwrap().to_string());
+        assert_eq!((v["scope"].as_str(), v["by"].as_str(), v["expires"].as_u64()), (Some("admin"), Some("ana"), Some(0)));
+        // Kept as a hash only, and listed without it.
+        let record = std::fs::read_to_string(team.dir.join("team.json")).unwrap();
+        assert!(!record.contains(&read[API_PREFIX.len()..]) && record.contains(&secret_hash(&read)));
+        let (_, v) = call("GET", &api("/api/admin/api-tokens"), Some(&admin), None);
+        let list = v["tokens"].as_array().unwrap();
+        assert!(list.len() == 3 && list.iter().all(|t| t.get("hash").is_none() && t.get("token").is_none() && t["created"].as_u64().is_some()), "{v}");
+
+        // read: the lists, nothing else (not even the tokens).
+        assert_eq!(call("GET", &api("/api/admin/users"), Some(&read), None).0, 200);
+        assert_eq!(call("GET", &api("/api/admin/audit"), Some(&read), None).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/rules"), Some(&read), Some(json!([]))).0, 403);
+        assert_eq!(call("GET", &api("/api/admin/api-tokens"), Some(&read), None).0, 403);
+        // devices: the devices alone.
+        assert_eq!(call("GET", &api("/api/admin/devices"), Some(&devices), None).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/devices/123456789"), Some(&devices), Some(json!({"note": "x"}))).0, 404);
+        assert_eq!(call("GET", &api("/api/admin/users"), Some(&devices), None).0, 403);
+        // admin: what an administrator may, but for anyone's sign-in and the tokens.
+        assert_eq!(call("PUT", &api("/api/admin/rules"), Some(&full), Some(json!([{"who": "all", "devices": "all", "rights": 1}]))).0, 200);
+        let (code, v) = call("POST", &api("/api/admin/users"), Some(&full), Some(json!({"name": "bo", "email": "bo@example.com"})));
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&full), Some(json!({"password": "a new password"}))).0, 403);
+        assert_eq!(call("POST", &api("/api/admin/users"), Some(&full), Some(json!({"name": "cy", "password": "cy's password"}))).0, 403);
+        assert_eq!(call("PUT", &api("/api/admin/users/ana"), Some(&full), Some(json!({"password_clear": true}))).0, 403);
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&full), Some(json!({"totp": true}))).0, 403);
+        assert_eq!(call("PUT", &api("/api/admin/users/ana"), Some(&full), Some(json!({"email": "mine@example.com"}))).0, 403, "a reset link would go there");
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&full), Some(json!({"email": "bo2@example.com", "display": "Bo"}))).0, 200, "bo has no password");
+        assert_eq!(call("POST", &api("/api/admin/api-tokens"), Some(&full), Some(json!({"name": "more", "scope": "admin"}))).0, 403);
+        assert_eq!(call("DELETE", &api(&format!("/api/admin/api-tokens/{full_id}")), Some(&full), None).0, 403);
+        assert_eq!(call("POST", &api("/api/admin/invite"), Some(&full), Some(json!({"name": "bo"}))).0, 403);
+        let users = team.store().users.clone();
+        assert!(!users.contains_key("cy") && users["ana"].email.is_empty());
+        // Only the administration: no person's own requests, no ticket, no signing out.
+        assert_eq!(call("GET", &api("/api/me"), Some(&full), None).0, 401);
+        assert_eq!(call("POST", &api("/api/ticket"), Some(&full), Some(json!({"device": "123456789", "key": crate::sys::hex(&[9u8; 32])}))).0, 401);
+        assert_eq!(call("GET", &api("/api/me/backup-codes"), Some(&full), None).0, 401);
+        assert_eq!(call("GET", &api("/api/admin/users"), Some(&format!("{API_PREFIX}{}", "0".repeat(64))), None).0, 401);
+        // When it was last used.
+        assert!(team.store().api_tokens[&full_id].used + 5 >= now());
+        // What it changed is in the audit log, whose token it was, and never a token itself.
+        let changes: Vec<Value> = audit_lines(&team).into_iter().filter(|e| e["kind"] == json!("admin")).collect();
+        assert!(changes.iter().any(|e| e["words"] == json!("rule list changed") && e["how"] == json!("token") && e["token"] == json!("deploy") && e["user"] == json!("ana")), "{changes:?}");
+        assert!(changes.iter().any(|e| e["words"] == json!("user bo added")));
+        assert_eq!(audit_words(&team, "token"), ["API token reader made (read only)", "API token inventory made (devices)", "API token deploy made (administration)"]);
+        // One run out is no more, nor one revoked.
+        team.store().api_tokens.values_mut().find(|t| t.name == "reader").unwrap().expires = now() - 1;
+        assert_eq!(call("GET", &api("/api/admin/users"), Some(&read), None).0, 401);
+        assert_eq!(call("DELETE", &api(&format!("/api/admin/api-tokens/{full_id}")), Some(&admin), None).0, 200);
+        assert_eq!(call("GET", &api("/api/admin/users"), Some(&full), None).0, 401);
+        assert_eq!(audit_words(&team, "token").last().map(String::as_str), Some("API token deploy revoked"));
+        // A token stops with its maker's rights, and goes with its maker.
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"admin": true, "password": "bo's password"}))).0, 200);
+        let bo = login(&url, "bo", "bo's password");
+        let (_, v) = call("POST", &api("/api/admin/api-tokens"), Some(&bo), Some(json!({"name": "bo's", "scope": "read"})));
+        let bos = v["token"].as_str().unwrap().to_string();
+        assert_eq!(call("GET", &api("/api/admin/devices"), Some(&bos), None).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"admin": false}))).0, 200);
+        assert_eq!(call("GET", &api("/api/admin/devices"), Some(&bos), None).0, 403);
+        assert_eq!(call("DELETE", &api("/api/admin/users/bo"), Some(&admin), None).0, 200);
+        assert!(team.store().api_tokens.values().all(|t| t.by != "bo"));
+        let log = std::fs::read_to_string(team.dir.join("audit.jsonl")).unwrap();
+        assert!(![&read, &devices, &full, &bos].iter().any(|t| log.contains(&t[API_PREFIX.len()..])) && !log.contains("bo's password"));
+        assert!(token_may("read", "GET", "audit.csv", None) && !token_may("read", "GET", "api-tokens", None) && !token_may("admin", "POST", "users", Some("backup-codes")));
+    }
+
+    #[test]
+    fn wrong_sign_ins_and_lockouts_are_audited_once_a_minute() {
+        let (url, team, _gone) = start("failed");
+        let api = format!("{url}/api/login");
+        let from = |ip: &str, name: &str, password: &str| {
+            let body = json!({"name": name, "password": password}).to_string();
+            http("POST", &api, &[("X-Forwarded-For".to_string(), ip.to_string())], Some(body.as_bytes())).unwrap().0
+        };
+        assert_eq!(from("192.0.2.1", "Ana", "wrong"), 401);
+        assert_eq!(from("192.0.2.1", "ana", "wrong again"), 401);
+        assert_eq!(from("192.0.2.1", "nobody", "x"), 401);
+        assert_eq!(from("192.0.2.2", "ana", "x"), 401);
+        assert_eq!((from("192.0.2.1", "ana", "x"), from("192.0.2.1", "ana", "x")), (401, 401));
+        assert_eq!((from("192.0.2.1", "ana", "x"), from("192.0.2.1", "nobody", "x")), (429, 429));
+        let seen = |kind: &str| audit_lines(&team).iter().filter(|e| e["kind"] == json!(kind)).map(|e| format!("{} {} {}", e["from"].as_str().unwrap_or(""), e["user"].as_str().unwrap_or(""), e["words"].as_str().unwrap_or(""))).collect::<Vec<_>>();
+        // By the account's own name; one line a minute for each address and name, however many tries.
+        assert_eq!(seen("login-failed"), ["192.0.2.1 ana wrong password", "192.0.2.1 nobody no such user", "192.0.2.2 ana wrong password"]);
+        assert_eq!(seen("locked"), ["192.0.2.1 ana too many wrong tries from this address", "192.0.2.1 nobody too many wrong tries from this address"]);
+        // A minute on, the next one is written again.
+        for at in lock(&team.failed).values_mut() {
+            *at -= FAILED_SECS;
+        }
+        assert_eq!(from("192.0.2.2", "ana", "x"), 401);
+        assert_eq!(seen("login-failed").len(), 4);
+        // A right sign-in is no failure; no password is ever written.
+        login(&url, "ana", "ana's password");
+        assert_eq!(seen("login-failed").len(), 4);
+        let log = std::fs::read_to_string(team.dir.join("audit.jsonl")).unwrap();
+        assert!(!log.contains("wrong again") && !log.contains("ana's password"));
+        // A name of any length is written, and kept, at 64 characters.
+        assert_eq!(from("192.0.2.3", &"x".repeat(5000), "x"), 401);
+        assert_eq!(seen("login-failed").last().map(String::len), Some(format!("192.0.2.3 {} no such user", "x".repeat(64)).len()));
+        assert!(lock(&team.failed).keys().chain(lock(&team.tries).keys()).all(|k| k.len() < 200));
+    }
+
+    #[test]
+    fn console_changes_are_audited_and_old_lines_go() {
+        let (url, team, _gone) = start("changes");
+        let api = |p: &str| format!("{url}{p}");
+        let admin = login(&url, "ana", "ana's password");
+        let settings = json!({"name": "Acme", "smtp": {"url": "smtps://mail.example.com", "from": "team@example.com", "user": "team", "password": "mail-s3cret"}});
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(settings.clone())).0, 200);
+        // The same again is no change.
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(settings)).0, 200);
+        assert_eq!(call("POST", &api("/api/admin/groups"), Some(&admin), Some(json!({"name": "staff"}))).0, 200);
+        assert_eq!(call("POST", &api("/api/admin/device-groups"), Some(&admin), Some(json!({"name": "office"}))).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/device-groups/office"), Some(&admin), Some(json!({"policy": {"password": false}}))).0, 200);
+        assert_eq!(call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": "bo", "password": "bo's password", "groups": ["staff"]}))).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"name": "bob", "password": "bob's password", "disabled": true}))).0, 200);
+        assert_eq!(call("POST", &api("/api/admin/tokens"), Some(&admin), Some(json!({"group": "office"}))).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/rules"), Some(&admin), Some(json!([{"who": "group:staff", "devices": "group:office", "rights": 1}]))).0, 200);
+        assert_eq!(call("DELETE", &api("/api/admin/groups/staff"), Some(&admin), None).0, 200);
+        assert_eq!(
+            audit_words(&team, "admin"),
+            [
+                "settings changed",
+                "group staff added",
+                "device group office added",
+                "device group office policy changed",
+                "user bo added",
+                "user bo renamed to bob",
+                "user bob disabled",
+                "new password for user bob",
+                "enrollment token for device group office made",
+                "rule list changed",
+                "group staff removed",
+            ]
+        );
+        assert!(audit_lines(&team).iter().filter(|e| e["kind"] == json!("admin")).all(|e| e["user"] == json!("ana") && e["from"] == json!("127.0.0.1") && e.get("how").is_none()));
+        let log = std::fs::read_to_string(team.dir.join("audit.jsonl")).unwrap();
+        assert!(!log.contains("mail-s3cret") && !log.contains("bob's password"));
+
+        // How long the log keeps: 365 days unless set, 0 for ever, at most a hundred years.
+        assert_eq!(call("GET", &api("/api/admin/settings"), Some(&admin), None).1["audit_days"], json!(365));
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"audit_days": 40_000}))).0, 400);
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"audit_days": "x"}))).0, 400);
+        team.pruned.store(now(), Ordering::Relaxed);
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"audit_days": 30}))).1["audit_days"], json!(30));
+        assert_eq!(team.pruned.load(Ordering::Relaxed), 0, "pruned at the next round");
+        let day = 86_400;
+        team.audit(&[json!({"time": now() - 31 * day, "kind": "in", "words": "old"}), json!({"time": now() - 29 * day, "kind": "in", "words": "kept"})]);
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(team.dir.join("audit.jsonl")).unwrap();
+            f.write_all(b"not JSON\n").unwrap();
+        }
+        let before = audit_lines(&team).len();
+        assert_eq!(team.prune_audit(), Ok(1));
+        assert_eq!(audit_lines(&team).len(), before - 1);
+        let text = std::fs::read_to_string(team.dir.join("audit.jsonl")).unwrap();
+        assert!(!text.contains("\"old\"") && text.contains("\"kept\"") && text.contains("not JSON\n") && text.contains("settings changed"));
+        assert_eq!(team.prune_audit(), Ok(0), "nothing more to drop");
+        assert!(team.pruned.load(Ordering::Relaxed) + 5 >= now());
+        // For ever: nothing goes.
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"audit_days": 0}))).0, 200);
+        team.audit(&[json!({"time": 1, "kind": "in"})]);
+        assert_eq!(team.prune_audit(), Ok(0));
+        assert_eq!(audit_words(&team, "admin").iter().filter(|w| *w == "settings changed").count(), 3);
+    }
+
+    #[test]
+    fn a_device_keeps_a_note_and_an_owner_and_a_disabled_one_gets_nothing() {
+        let (url, team, _gone) = start("disabled");
+        let api = |p: &str| format!("{url}{p}");
+        let admin = login(&url, "ana", "ana's password");
+        assert_eq!(call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": "bo", "password": "bo's password"}))).0, 200);
+        assert_eq!(call("PUT", &api("/api/admin/rules"), Some(&admin), Some(json!([{"who": "all", "devices": "all", "rights": 1}]))).0, 200);
+        let token = call("POST", &api("/api/admin/tokens"), Some(&admin), Some(json!({}))).1["token"].as_str().unwrap().to_string();
+        let join = json!({"token": token, "id": "123456789", "name": "Desk", "os": "linux", "version": "1.0"}).to_string();
+        let (code, v) = http("POST", &api("/api/device/enroll"), &[], Some(join.as_bytes())).unwrap();
+        assert_eq!(code, 200, "{v}");
+        let key = crate::sys::unhex(v["key"].as_str().unwrap()).unwrap();
+        let put = |body: Value| call("PUT", &api("/api/admin/devices/123456789"), Some(&admin), Some(body));
+        assert_eq!(put(json!({"note": "x".repeat(501)})).0, 400);
+        assert_eq!(put(json!({"owner": "nobody"})).0, 400);
+        let (code, v) = put(json!({"note": " Front desk\r\nby the door\u{7} ", "owner": "bo"}));
+        assert_eq!(code, 200, "{v}");
+        assert_eq!((v["device"]["note"].as_str(), v["device"]["owner"].as_str(), v["device"]["disabled"].as_bool()), (Some("Front desk\nby the door"), Some("bo"), Some(false)));
+        let bo = login(&url, "bo", "bo's password");
+        let viewer_key = crate::sys::hex(&[9u8; 32]);
+        assert_eq!(call("POST", &api("/api/ticket"), Some(&bo), Some(json!({"device": "123456789", "key": viewer_key}))).0, 200);
+
+        // Disabled: still listed, but no tickets, and its own requests refused.
+        assert_eq!(put(json!({"disabled": true})).0, 200);
+        let (_, v) = call("GET", &api("/api/admin/devices"), Some(&admin), None);
+        assert_eq!((v["devices"][0]["disabled"].as_bool(), v["devices"][0]["note"].as_str()), (Some(true), Some("Front desk\nby the door")));
+        let (code, v) = call("POST", &api("/api/ticket"), Some(&bo), Some(json!({"device": "123456789", "key": viewer_key})));
+        assert_eq!((code, v["error"].as_str()), (403, Some("this computer is disabled in the team")));
+        assert_eq!(call("GET", &api("/api/devices"), Some(&bo), None).1["devices"], json!([]));
+        let (code, v) = http("GET", &api("/api/device/policy"), &signed("123456789", &key, "GET", "/api/device/policy", "", now()), None).unwrap();
+        assert_eq!((code, v["error"].as_str()), (403, Some("this computer is disabled in the team")));
+        let events = json!({"events": [{"kind": "in", "how": "password"}]}).to_string();
+        assert_eq!(http("POST", &api("/api/device/events"), &signed("123456789", &key, "POST", "/api/device/events", &events, now()), Some(events.as_bytes())).unwrap().0, 403);
+        assert_eq!(http("POST", &api("/api/device/leave"), &signed("123456789", &key, "POST", "/api/device/leave", "{}", now()), Some(b"{}")).unwrap().0, 403);
+        assert_eq!(http("POST", &api("/api/device/enroll"), &signed("123456789", &key, "POST", "/api/device/enroll", &join, now()), Some(join.as_bytes())).unwrap().0, 403, "joining again turns nothing back on");
+        assert!(team.store().devices["123456789"].disabled);
+        assert_eq!(audit_lines(&team).iter().filter(|e| e["kind"] == json!("refused") && e["words"] == json!("this computer is disabled in the team")).count(), 1);
+        // Back on: its look works again, and a join by itself keeps what the console wrote.
+        assert_eq!(put(json!({"disabled": false, "end": true})).0, 200);
+        assert_eq!(http("GET", &api("/api/device/policy"), &signed("123456789", &key, "GET", "/api/device/policy", "", now() + 1), None).unwrap().0, 200);
+        let (code, v) = http("POST", &api("/api/device/enroll"), &signed("123456789", &key, "POST", "/api/device/enroll", &join, now() + 2), Some(join.as_bytes())).unwrap();
+        assert_eq!(code, 200, "{v}");
+        let d = team.store().devices["123456789"].clone();
+        assert_eq!((d.note.as_str(), d.owner.as_str()), ("Front desk\nby the door", "bo"));
+        let words = audit_words(&team, "admin");
+        assert_eq!(words.iter().filter(|w| w.starts_with("device Desk")).collect::<Vec<_>>(), ["device Desk changed", "device Desk disabled", "device Desk enabled"]);
+        assert!(words.contains(&"sessions on device Desk ended".to_string()));
+        assert!(audit_lines(&team).iter().any(|e| e["kind"] == json!("admin") && e["device"] == json!("123456789") && e["device_name"] == json!("Desk")));
+        // Its owner renamed goes with the name, and removed leaves it nobody's.
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"name": "bob"}))).0, 200);
+        assert_eq!(team.store().devices["123456789"].owner, "bob");
+        assert_eq!(call("DELETE", &api("/api/admin/users/bob"), Some(&admin), None).0, 200);
+        assert_eq!(team.store().devices["123456789"].owner, "");
+    }
+
+    #[test]
+    fn backup_codes_stand_in_for_the_authenticator_once() {
+        let (url, team, _gone) = start("backup");
+        let api = |p: &str| format!("{url}{p}");
+        let admin = login(&url, "ana", "ana's password");
+        let (code, v) = call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": "bo", "password": "bo's password", "totp": true})));
+        assert_eq!(code, 200, "{v}");
+        let codes: Vec<String> = v["backup_codes"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!((codes.len(), codes.iter().collect::<BTreeSet<_>>().len(), v["user"]["backup_codes"].as_u64()), (8, 8, Some(8)));
+        assert!(codes.iter().all(|c| c.len() == 11 && c.as_bytes()[5] == b'-' && backup_form(c).is_some()), "{codes:?}");
+        let record = std::fs::read_to_string(team.dir.join("team.json")).unwrap();
+        assert!(codes.iter().all(|c| !record.contains(&c.replace('-', "")) && !record.contains(c.as_str())));
+        let sign_in = |code: &str| call("POST", &api("/api/login"), None, Some(json!({"name": "bo", "password": "bo's password", "code": code})));
+        // In any case, with or without its dash; once.
+        let typed = codes[0].replace('-', " ").to_uppercase();
+        let (code, v) = sign_in(&typed);
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(sign_in(&codes[0]).0, 401);
+        assert_eq!(audit_lines(&team).iter().rev().find(|e| e["kind"] == json!("login")).unwrap()["words"], json!("with a backup code (7 left)"));
+        assert_eq!(audit_lines(&team).iter().rev().find(|e| e["kind"] == json!("login-failed")).unwrap()["words"], json!("wrong two-step code"));
+        let (_, v) = call("GET", &api("/api/admin/users"), Some(&admin), None);
+        assert_eq!(v["users"].as_array().unwrap().iter().find(|u| u["name"] == json!("bo")).unwrap()["backup_codes"], json!(7));
+        // The authenticator's code still works beside them.
+        let secret = team.store().users["bo"].totp.clone();
+        let bo = login_with(&url, "bo", "bo's password", &crate::totp::now(&secret));
+        // One's own new set: the password again first.
+        assert_eq!(call("GET", &api("/api/me/backup-codes"), Some(&bo), None).1, json!({"left": 7, "totp": true}));
+        assert_eq!(call("POST", &api("/api/me/backup-codes"), Some(&bo), Some(json!({"password": "wrong"}))).0, 403);
+        let (code, v) = call("POST", &api("/api/me/backup-codes"), Some(&bo), Some(json!({"password": "bo's password"})));
+        assert_eq!(code, 200, "{v}");
+        let mine: Vec<String> = v["backup_codes"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(mine.len(), 8);
+        assert_eq!(sign_in(&codes[1]).0, 401, "the old set is gone");
+        assert_eq!(sign_in(&mine[3]).0, 200);
+        assert_eq!(call("GET", &api("/api/me/backup-codes"), Some(&admin), None).1, json!({"left": 0, "totp": false}));
+        assert_eq!(call("POST", &api("/api/me/backup-codes"), Some(&admin), Some(json!({"password": "ana's password"}))).0, 400);
+        // An administrator makes a new set for someone; a script cannot.
+        let (code, v) = call("POST", &api("/api/admin/users/bo/backup-codes"), Some(&admin), None);
+        assert_eq!((code, v["backup_codes"].as_array().map(Vec::len), v["user"]["backup_codes"].as_u64()), (200, Some(8), Some(8)));
+        assert_eq!(call("POST", &api("/api/admin/users/ana/backup-codes"), Some(&admin), None).0, 400);
+        assert_eq!(call("POST", &api("/api/admin/users/nobody/backup-codes"), Some(&admin), None).0, 404);
+        let script = call("POST", &api("/api/admin/api-tokens"), Some(&admin), Some(json!({"name": "s", "scope": "admin"}))).1["token"].as_str().unwrap().to_string();
+        assert_eq!(call("POST", &api("/api/admin/users/bo/backup-codes"), Some(&script), None).0, 403);
+        assert_eq!(audit_words(&team, "admin").iter().filter(|w| *w == "new backup codes for user bo").count(), 2);
+        // The authenticator reset takes them away too.
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"totp_reset": true}))).1["user"]["backup_codes"], json!(0));
+        assert!(team.store().users["bo"].backup.is_empty());
+        assert_eq!((backup_form("ABCDE-FGHJK"), backup_form("123456"), backup_form("abcde-fghi1")), (Some("abcdefghjk".to_string()), None, None));
+    }
+
+    fn login_with(url: &str, name: &str, password: &str, code: &str) -> String {
+        let (status, v) = call("POST", &format!("{url}/api/login"), None, Some(json!({"name": name, "password": password, "code": code})));
+        assert_eq!(status, 200, "{v}");
+        v["token"].as_str().unwrap().to_string()
     }
 }

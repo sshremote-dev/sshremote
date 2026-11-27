@@ -82,7 +82,9 @@ input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-o
 /* Fields: a label over its input, a hint under it. */
 .fld { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; min-width: 0; }
 .fld > label, .fld > .lab { font-size: 12.5px; font-weight: 600; color: var(--dim); }
-.fld > input, .fld > select { width: 100%; }
+.fld > input, .fld > select, .fld > textarea { width: 100%; }
+.fld > textarea { resize: vertical; min-height: 64px; line-height: 1.4; }
+.fld > input.days { width: 9em; }
 .hint { margin: 0; color: var(--faint); font-size: 12.5px; }
 .hint:empty { display: none; }
 label.check { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; margin-top: 14px; user-select: none; }
@@ -188,6 +190,8 @@ fieldset label.check { margin-top: 10px; }
 .who small { display: block; color: var(--faint); font-size: 12px; }
 .namecell { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .namecell b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+/* A device's note: its first line under its name, the whole of it on hover. */
+.who small.note1 { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; padding-inline-start: 18px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); display: inline-block; flex: none; opacity: .55; }
 .dot.up { background: var(--good); opacity: 1; box-shadow: 0 0 0 3px #3fb95026; }
 .empty { padding: 30px 18px; color: var(--faint); text-align: center; background: var(--panel); border: 1px dashed var(--line); border-radius: 12px; }
@@ -302,6 +306,12 @@ dialog.dlg .acts { display: flex; justify-content: flex-end; flex-wrap: wrap; ga
 }
 .mt { margin-top: 16px; }
 .row.nowrap { flex-wrap: nowrap; }
+
+/* Backup codes, shown once: two columns of them, easy to copy out by hand. */
+ol.codes { columns: 2; column-gap: 28px; margin: 0; padding: 10px 14px 10px 36px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); }
+ol.codes li { padding: 2px 0; color: var(--faint); }
+ol.codes li .mono { color: var(--fg); font-size: 13.5px; letter-spacing: .04em; }
+@media (max-width: 420px) { ol.codes { columns: 1; } }
 
 /* The authenticator's QR code: white around it in either theme, for the phone's camera. */
 img.qr { display: block; width: 192px; height: 192px; margin: 0 auto 12px; background: #fff; border-radius: 8px; image-rendering: pixelated; }

@@ -26,9 +26,10 @@
         <div class="fld"><label for="lpw" data-t="Password">Password</label><input id="lpw" type="password" autocomplete="current-password" required></div>
         <p class="hint" id="ldaphint" hidden data-t="Your name and password in the organization's directory work too.">Your name and password in the organization's directory work too.</p>
         <div class="fld" id="coderow" hidden>
-          <label for="lcode" data-t="Two-step code">Two-step code</label>
-          <input id="lcode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" spellcheck="false" aria-describedby="lcodehint">
-          <p class="hint" id="lcodehint" data-t="The code your authenticator app shows now">The code your authenticator app shows now</p>
+          <label for="lcode" id="lcodelab">Two-step code</label>
+          <input id="lcode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" spellcheck="false" autocapitalize="off" aria-describedby="lcodehint">
+          <p class="hint" id="lcodehint">The code your authenticator app shows now</p>
+          <p class="hint"><button class="linkish" id="lbackup" type="button" aria-controls="lcode">Use a backup code instead</button></p>
         </div>
         <div id="lerror" class="error" role="alert"></div>
         <button class="btn primary wide" id="lgo" type="submit" data-t="Sign in">Sign in</button>
@@ -91,6 +92,7 @@
       <a href="#dgroups" data-view="dgroups" class="adminonly"><span data-t="Device groups">Device groups</span></a>
       <a href="#rules" data-view="rules" class="adminonly"><span data-t="Access rules">Access rules</span></a>
       <a href="#enroll" data-view="enroll" class="adminonly"><span data-t="Enrollment">Enrollment</span></a>
+      <a href="#apitokens" data-view="apitokens" class="adminonly"><span data-t="API tokens">API tokens</span></a>
       <a href="#audit" data-view="audit" class="adminonly"><span data-t="Audit log">Audit log</span></a>
       <a href="#settings" data-view="settings" class="adminonly"><span data-t="Settings">Settings</span></a>
     </nav>
@@ -114,10 +116,11 @@
     <section class="view" id="v-devices" hidden aria-labelledby="h-devices">
       <header class="vhead">
         <div class="vtitle"><h1 id="h-devices" tabindex="-1"><span data-t="Devices">Devices</span> <span class="count" id="dcount"></span></h1>
-          <p class="sub" data-t="The computers that joined the team. Online: seen in the last 3 minutes.">The computers that joined the team. Online: seen in the last 3 minutes.</p></div>
+          <p class="sub" data-t="The computers that joined the team, who each is for, and notes on them. Online: seen in the last 3 minutes.">The computers that joined the team, who each is for, and notes on them. Online: seen in the last 3 minutes.</p></div>
         <div class="tools">
           <div class="search"><input type="search" id="dsearch" placeholder="Name, ID, group or system" data-t-placeholder="Name, ID, group or system" aria-label="Search the devices" data-t-aria-label="Search the devices" autocomplete="off"></div>
           <select id="dfilter" aria-label="Device group" data-t-aria-label="Device group"></select>
+          <select id="downer" aria-label="Owner" data-t-aria-label="Owner"></select>
           <a class="btn solid" href="#enroll" data-t="Add computers">Add computers</a>
         </div>
       </header>
@@ -178,10 +181,19 @@
       <div id="tokens"></div>
     </section>
 
+    <section class="view" id="v-apitokens" hidden aria-labelledby="h-apitokens">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-apitokens" tabindex="-1"><span data-t="API tokens">API tokens</span> <span class="count" id="atcount"></span></h1>
+          <p class="sub" data-t="Tokens for scripts that manage the team through its API, sent in the header Authorization: Bearer TOKEN. Each acts for the administrator who made it, within its scope, until it expires or is revoked.">Tokens for scripts that manage the team through its API, sent in the header Authorization: Bearer TOKEN. Each acts for the administrator who made it, within its scope, until it expires or is revoked.</p></div>
+        <div class="tools"><button class="btn primary" id="addapitoken" type="button"><span data-t="Make an API token">Make an API token</span></button></div>
+      </header>
+      <div id="apitokens"></div>
+    </section>
+
     <section class="view" id="v-audit" hidden aria-labelledby="h-audit">
       <header class="vhead">
         <div class="vtitle"><h1 id="h-audit" tabindex="-1"><span data-t="Audit log">Audit log</span> <span class="count" id="acount"></span></h1>
-          <p class="sub" data-t="Who came in where, when they left, who was refused, and the files sent, as the computers report them.">Who came in where, when they left, who was refused, and the files sent, as the computers report them.</p></div>
+          <p class="sub" data-t="Who came in where, when they left, who was refused, and the files sent, as the computers report them; who signed in here or tried to, and every change made in this console.">Who came in where, when they left, who was refused, and the files sent, as the computers report them; who signed in here or tried to, and every change made in this console.</p></div>
       </header>
       <form id="auditform" class="card filters">
         <div class="grid2">
@@ -204,6 +216,11 @@
               <option value="out" data-t="Left">Left</option>
               <option value="refused" data-t="Refused">Refused</option>
               <option value="file" data-t="Files">Files</option>
+              <option value="login" data-t="Signed in">Signed in</option>
+              <option value="login-failed" data-t="Sign-in failed">Sign-in failed</option>
+              <option value="locked" data-t="Locked out">Locked out</option>
+              <option value="admin" data-t="Console changes">Console changes</option>
+              <option value="token" data-t="API tokens">API tokens</option>
             </select></div>
         </div>
         <div class="row mt">
@@ -275,6 +292,10 @@
               <div id="smailstatus" class="note" role="status"></div>
             </div>
           </div>
+        </section>
+        <section class="card">
+          <h2 data-t="Audit log">Audit log</h2>
+          <div class="fld"><label for="sauditdays" data-t="Keep the audit log for this many days">Keep the audit log for this many days</label><input id="sauditdays" class="days" type="number" min="0" max="36500" step="1" required aria-describedby="sauditdayshint"><p class="hint" id="sauditdayshint" data-t="0 keeps it for ever. Older lines are dropped once a day.">0 keeps it for ever. Older lines are dropped once a day.</p></div>
         </section>
         <div class="savebar">
           <div class="error" id="serror" role="alert"></div>

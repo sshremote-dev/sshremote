@@ -5,8 +5,8 @@ open which computers and with what rights, the settings every computer keeps, on
 for everyone, and a record of every session. It is part of the program (`sshremote team serve`)
 and runs on the organization's own server, behind its own HTTPS; nothing goes to sshremote.dev.
 People sign in to it with a password and an authenticator code, or through the organization's
-identity provider (OpenID Connect) or directory (LDAP). Anyone not in a team uses the program as
-before, with no account.
+identity provider (OpenID Connect) or directory (LDAP). Scripts manage it with API tokens. Anyone
+not in a team uses the program as before, with no account.
 
 ## How access works
 
@@ -31,6 +31,7 @@ same handshake). No password of the computer is given or kept.
 ```sh
 sshremote team serve --listen 127.0.0.1:8023 --data /var/lib/sshremote-team --url https://team.example.com
 sshremote team admin NAME            # makes an administrator (asks for a password), on the server
+sshremote team admin NAME --totp     # the same, with a new authenticator and its backup codes
 ```
 
 Put it behind HTTPS (nginx, Caddy) at the `--url` address. The first administrator is made on
@@ -38,16 +39,34 @@ the server with `team admin`; the rest is done in the console at that address.
 
 ## The console
 
-Devices (joined computers: name, ID, group, last seen, version; rename, move to a group, remove),
-users (add, disable, reset a password, require an authenticator, administrator or not, groups),
+Devices (joined computers: name, ID, group, owner, note, last seen, version; rename, move to a
+group, give an owner and a note, disable, remove; filter by group or owner), users (add, disable,
+reset a password, require an authenticator, make new backup codes, administrator or not, groups),
 user groups, device groups, access rules (which users or user groups may reach which device
 groups, with what rights, and whether the person at the screen is asked first), policies (the
 settings a device group keeps: whether a password lets anyone in at all besides team members,
 asking, rights, recording, idle end, straight connections, LAN), enrollment tokens (with a group,
 an expiry and a number of uses, and the installer lines for Windows, macOS and Linux that join with
-them), the audit log (connections, ends, refusals, file transfers; filter and download as CSV),
-and settings (team name and logo shown in the app, the relay its computers use, OpenID Connect,
-LDAP).
+them), API tokens (for scripts: a name, a scope and an expiry; shown once, revoked at a click), the
+audit log (connections, ends, refusals, file transfers, sign-ins and wrong ones, lockouts, and
+every change made in the console, with who made it; filter and download as CSV), and settings
+(team name and logo shown in the app, the relay its computers use, OpenID Connect, LDAP, email,
+and how many days the audit log keeps).
+
+A disabled device stays in the list with its note and owner, but nobody gets a ticket to it, the
+people's lists leave it out, and its own requests (its look for the policy, its events, leaving,
+joining again) get `403 {"error": "this computer is disabled in the team"}` until it is turned
+back on. Sessions open when it is disabled go on: end them first.
+
+Two-step sign-in: setting up an authenticator for someone (or `team admin NAME --totp`) also makes
+8 backup codes of 10 letters and digits ("abcde-fghij"), shown once with the QR code and kept only
+as hashes. Each works once in place of the authenticator's code (in any case, with or without its
+dash), for a lost phone; the users list says how many are left. An administrator makes a new set
+for someone, and anyone makes their own on their account page with their password; a new set
+ends the old one, and resetting the authenticator takes them away.
+
+The audit log keeps 365 days unless the settings say otherwise (0: for ever); once a day the
+server drops the older lines, writing `audit.jsonl` whole beside it and putting it in its place.
 
 ## In the app
 
@@ -74,8 +93,8 @@ Errors: HTTP 4xx/5xx with `{"error": "words"}`.
 - `POST /api/login` `{"name", "password", "code"?}` -> `{"token", "user": USER, "expires"}`.
   A user with an authenticator gets `401 {"error": "code needed", "code": true}` when the password
   is right and no code came (so the answer tells nothing of who has an account to someone without
-  its password); a code works once. Tried against LDAP when it is set up and the user is not
-  local. Five wrong tries from one address (an IPv6 one by its /64), or twenty at one account,
+  its password); a code works once, and so does a backup code in its place. Tried against LDAP
+  when it is set up and the user is not local. Five wrong tries from one address (an IPv6 one by its /64), or twenty at one account,
   lock them out for 15 minutes. Behind a proxy on the same computer the client's address is the
   last of `X-Forwarded-For` (nginx's `$proxy_add_x_forwarded_for`, Caddy's default).
 - `GET /api/login-options` -> `{"oidc": bool, "ldap": bool, "team": TEAM}` (no sign-in needed).
@@ -102,6 +121,10 @@ Errors: HTTP 4xx/5xx with `{"error": "words"}`.
   `POST /api/link` `{"token", "password"}` sets the password, uses the link up and ends the
   person's sessions. The console opens links sent as `URL/#link=TOKEN`.
 - `GET /api/me` -> `{"user": USER, "team": TEAM}`.
+- `GET /api/me/backup-codes` -> `{"left": N, "totp": bool}`; `POST /api/me/backup-codes`
+  `{"password"}` -> `{"backup_codes": [8 codes]}`, a new set shown once (the old ones end). The
+  password is the account's own, or its directory's; a wrong one is `403` and counts as a wrong
+  try from the address.
 - `GET /api/devices` -> `{"devices": [{"id", "name", "os", "group", "online": bool, "rights", "ask"}]}`:
   the devices the person may reach (online: seen in the last 3 minutes).
 - `POST /api/ticket` `{"device": ID, "key": HEX32, "viewer": ID?}` -> `{"ticket": B64URL, "tag": HEX, "expires"}`
@@ -136,25 +159,45 @@ EVENT = `{"time", "kind": "in"|"out"|"refused"|"file", "how": "team"|"password"|
 "user"?, "from"?, "rights"?, "secs"?, "words"?}`; a file event's words say what was done in English
 ("Uploaded PATH (SIZE)", "Downloaded PATH", "Made the folder PATH", "Renamed PATH to NAME",
 "Deleted PATH"), which the console and the app translate. The server adds its own kinds:
-`login`, `ticket`, `join`, `leave`, `removed`.
+`login`, `ticket`, `join`, `leave`, `removed`, `invite`, `reset`, `password`, and:
 
-### Administration (an administrator's token)
+- `login-failed`: a wrong sign-in, with `user` (the account's name, or the name as typed when
+  there is none), `from` and `words` saying why ("wrong password", "wrong two-step code", "no such
+  user", "the directory refused the name or password", "this account is disabled", ...); `locked`:
+  a sign-in turned away for too many wrong tries (`429`). Each at most once a minute for one
+  address and name, so a flood of tries does not fill the log.
+- `admin`: a change made in the console or by an API token: `user` is who made it (for a token,
+  the administrator who made the token, with `"how": "token"` and the token's `token` name),
+  `from`, and `words` saying what in English ("user bo changed", "user bo renamed to bob", "new
+  password for user bo", "device group office policy changed", "rule list changed", "settings
+  changed", "enrollment token made", "device Desk disabled", ...), which the console translates;
+  never a secret. A change of a device names it in `device` and `device_name`.
+- `token`: an API token made ("API token deploy made (administration)") or revoked.
+
+### Administration (an administrator's session, or an API token)
 
 - `GET|POST /api/admin/users`, `PUT|DELETE /api/admin/users/NAME`
   (`{"name", "display", "email", "admin", "groups", "password"?, "password_clear"?, "disabled", "totp"?, "totp_reset"?}`;
-  `"totp": true` makes an authenticator and answers with `totp_secret`, `totp_uri` and `totp_qr`
-  once). Single sign-on finds a person by the issuer and subject it linked, else by an email the
-  provider says it verified, in an allowed domain, and links it only to an account with no
-  password, authenticator or administrator's rights.
+  `"totp": true` makes an authenticator and answers with `totp_secret`, `totp_uri`, `totp_qr` and
+  `backup_codes` once; `totp_reset` takes the backup codes away too). The list has
+  `"backup_codes": N`, how many are left. `POST /api/admin/users/NAME/backup-codes` ->
+  `{"backup_codes": [..], "user"}`: a new set for someone with an authenticator. Single sign-on
+  finds a person by the issuer and subject it linked, else by an email the provider says it
+  verified, in an allowed domain, and links it only to an account with no password,
+  authenticator or administrator's rights.
 - `GET|POST /api/admin/groups`, `DELETE /api/admin/groups/NAME`; the same for `/api/admin/device-groups`
   (a device group has a `policy`).
-- `GET /api/admin/devices`, `PUT|DELETE /api/admin/devices/ID` (`{"name", "group"}`; `{"end": true}`
-  ends its sessions at its next look).
+- `GET /api/admin/devices`, `PUT|DELETE /api/admin/devices/ID` (`{"name", "group", "owner", "note",
+  "disabled"}`, each left as it is when not sent: `owner` a user's name or "", `note` at most 500
+  characters; `{"end": true}` ends its sessions at its next look). A device is listed with these
+  too.
 - `GET|PUT /api/admin/rules` (`[{"who": "user:NAME"|"group:NAME"|"all", "devices": "group:NAME"|"device:ID"|"all", "rights": u8, "ask": bool}]`).
 - `GET|POST /api/admin/tokens`, `DELETE /api/admin/tokens/ID` (`{"group", "expires", "uses"}` -> with `"token"`).
 - `GET /api/admin/audit?from&to&device&user&kind&limit` -> `{"events": [EVENT + "device"]}`;
-  `GET /api/admin/audit.csv` the same as CSV.
-- `GET|PUT /api/admin/settings` (`{"name", "logo", "relay", "oidc": {"issuer", "client_id",
+  `GET /api/admin/audit.csv` the same as CSV (columns time, device, device_name, kind, how, user,
+  from, rights, secs, words, token; every cell quoted, none a spreadsheet would run as a formula).
+- `GET|POST /api/admin/api-tokens`, `DELETE /api/admin/api-tokens/ID`: API tokens (below).
+- `GET|PUT /api/admin/settings` (`{"name", "logo", "relay", "audit_days": 0..36500, "oidc": {"issuer", "client_id",
   "client_secret", "domains": [..], "make_users": bool, "trust_email": bool} | null, "ldap": {"url",
   "user_dn": "uid={},ou=people,dc=example,dc=com", "make_users": bool, "ca_file": PATH} | null,
   "smtp": {"url": "smtps://HOST[:PORT]" | "smtp://HOST:587", "user", "password", "from"} | null}`;
@@ -165,6 +208,27 @@ EVENT = `{"time", "kind": "in"|"out"|"refused"|"file", "how": "team"|"password"|
 - `POST /api/admin/invite` `{"name"}`: an email to that person with a link to set their password
   (a week). `POST /api/admin/mail-test` `{"to"?}`: a test email (to the administrator's own address
   when none is given).
+
+### API tokens
+
+A script manages the team with a token an administrator made in the console (API tokens), sent as
+`Authorization: Bearer TOKEN` to `/api/admin/...` as a session is.
+
+- `POST /api/admin/api-tokens` `{"name", "scope": "read"|"devices"|"admin", "expires": TIME|0}` ->
+  the token as listed, with `"token": "sshrt_..."` shown this once (kept only as its hash);
+  `GET /api/admin/api-tokens` -> `{"tokens": [{"id", "name", "scope", "by", "created", "used",
+  "expires"}]}` (`used`: when it was last used, to the minute; 0: never; `expires` 0: never);
+  `DELETE /api/admin/api-tokens/ID` revokes it. At most 100, each name once.
+- `read` may `GET` the administration (the lists, the audit log and its CSV, the settings without
+  their secrets); `devices` only `/api/admin/devices` and `/api/admin/devices/ID`; `admin` what an
+  administrator may, but never what signs a person in: no password set or taken away, no
+  authenticator set up or reset, no new email address for an account with a password (a link to
+  set a new one would go there), no invitation, no backup codes, and no API tokens (only an
+  administrator signed in manages those). Otherwise `403`.
+- A token acts for the administrator who made it, while they are one: taken their rights (or
+  disabled), it gets `403`; removed, their tokens go with them. Expired or revoked, `401`.
+- A token is no session: `/api/login`, `/api/me`, `/api/devices`, `/api/ticket`, `/api/book` and
+  `/api/logout` do not take it.
 
 ### Installers
 
