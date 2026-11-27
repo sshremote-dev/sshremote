@@ -699,7 +699,7 @@ impl Team {
     /// on stdin, the message in a file of this server's own).
     fn send_mail(&self, m: &Smtp, team: &str, to: &str, subject: &str, body: &str) -> Result<(), String> {
         if !mail_ok(to) || !mail_ok(&m.from) {
-            return Err("an email address is not one".into());
+            return Err("an email address is not valid".into());
         }
         let host = m.url.split_once("://").map_or("", |(_, r)| r.split([':', '/']).next().unwrap_or(""));
         let local = host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
