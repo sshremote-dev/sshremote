@@ -12,10 +12,9 @@
   $ProgressPreference = 'SilentlyContinue'
   # Windows PowerShell 5.1 on an older Windows 10 offers only older TLS unless told.
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  if (-not [Environment]::Is64BitOperatingSystem) { throw 'SSH Remote is built for 64-bit Windows only.' }
   # The system's processor, not this PowerShell's (an x64 one runs emulated on Arm).
   $arch = try { [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture } catch { $env:PROCESSOR_ARCHITECTURE }
-  $arch = if ($arch -match 'Arm64') { 'aarch64' } else { 'x86_64' }
+  $arch = if ($arch -match 'Arm64') { 'aarch64' } elseif (-not [Environment]::Is64BitOperatingSystem) { 'x86' } else { 'x86_64' }
   $index = Invoke-RestMethod 'https://sshremote.dev/download/latest.json'
   $file = $index.files | Where-Object { $_.os -eq 'windows' -and $_.arch -eq $arch } | Select-Object -First 1
   # Windows on Arm runs the x86_64 one too, emulated.

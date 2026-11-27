@@ -4,6 +4,7 @@
 # C runtime and kernel32 it needs.
 [env]
 CXXSTDLIB_x86_64_pc_windows_gnu = ""
+CXXSTDLIB_i686_pc_windows_gnu = ""
 # The bundled libopus declares an old CMake minimum that current CMake refuses without this.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
@@ -14,6 +15,22 @@ rustflags = [
     "-C", "link-arg=-lgcc_eh",
     "-C", "link-arg=-lwinpthread",
     "-C", "link-arg=-Wl,-Bdynamic",
+    "-C", "link-arg=-lmingwex",
+    "-C", "link-arg=-lmsvcrt",
+    "-C", "link-arg=-lkernel32",
+]
+
+# The same for 32-bit Windows, whose static C++ runtime also takes its thread helpers from libgcc
+# and libmingw32.
+[target.i686-pc-windows-gnu]
+rustflags = [
+    "-C", "link-arg=-Wl,-Bstatic",
+    "-C", "link-arg=-lstdc++",
+    "-C", "link-arg=-lgcc_eh",
+    "-C", "link-arg=-lgcc",
+    "-C", "link-arg=-lwinpthread",
+    "-C", "link-arg=-Wl,-Bdynamic",
+    "-C", "link-arg=-lmingw32",
     "-C", "link-arg=-lmingwex",
     "-C", "link-arg=-lmsvcrt",
     "-C", "link-arg=-lkernel32",

@@ -52,7 +52,8 @@ fn main() {
         sdk_rc().iter().any(|rc_exe| run(std::process::Command::new(rc_exe).arg("/nologo").arg("/fo").arg(&compiled).arg(&rc)))
     } else {
         // WINDRES when set; else the native one, or MinGW's when building for Windows elsewhere.
-        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        // MinGW names 32-bit x86 i686.
+        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").map(|a| if a == "x86" { "i686".to_string() } else { a }).unwrap_or_default();
         let candidates = std::env::var("WINDRES").map_or_else(|_| vec!["windres".to_string(), format!("{arch}-w64-mingw32-windres")], |w| vec![w]);
         candidates.iter().any(|w| run(std::process::Command::new(w).arg("-O").arg("coff").arg("-i").arg(&rc).arg("-o").arg(&compiled)))
     };

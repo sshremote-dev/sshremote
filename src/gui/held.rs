@@ -223,7 +223,8 @@ mod imp {
     /// left on: a window that shows before it takes the change fades in rather than shows at once.
     fn hush(h: HWND) -> Option<isize> {
         unsafe {
-            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            // (A long on 32-bit Windows, a pointer-wide one on 64-bit.)
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE) as isize;
             // Seen already (caught as it shows): left so, as made see-through it would vanish a
             // moment before it shows again.
             if ex & WS_EX_LAYERED as isize != 0 || (IsWindowVisible(h) != 0 && IsIconic(h) == 0) {
@@ -231,17 +232,17 @@ mod imp {
             }
             // Its program is sent the change and takes it when it next looks at its messages: a
             // thread of its own waits for that, not this window's.
-            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_LAYERED as isize) as _);
             // Shown meanwhile where its program put it, before it took the change (a program
             // already running, as Chrome or Edge, opens a window and shows it at once): hidden now
             // and shown again on the pane it would blink, so it stays seen and just moves there.
             if IsWindowVisible(h) != 0 && IsIconic(h) == 0 {
                 SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
-                SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex as _);
                 return None;
             }
             if SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA) == 0 {
-                SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex as _);
                 return None;
             }
             Some(ex)
@@ -252,7 +253,7 @@ mod imp {
     fn unhush(h: HWND, ex: isize) {
         unsafe {
             SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
-            SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex as _);
         }
     }
 
@@ -456,7 +457,7 @@ mod imp {
                 let style = super::hush(h);
                 unsafe {
                     if owner != 0 {
-                        SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner);
+                        SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner as _);
                     }
                     if let Some(to) = to {
                         SetWindowPos(h, std::ptr::null_mut(), to.left, to.top, to.right - to.left, to.bottom - to.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
@@ -745,7 +746,7 @@ mod imp {
             unsafe {
                 // Again when let go meanwhile (`bring_back`).
                 if self.owner != owner || (self.owned && GetWindow(h, GW_OWNER) as isize != owner) {
-                    SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner);
+                    SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner as _);
                     self.owner = owner;
                     self.owned = GetWindow(h, GW_OWNER) as isize == owner;
                 }

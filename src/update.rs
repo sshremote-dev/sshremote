@@ -34,6 +34,8 @@ pub fn newer(theirs: &str, ours: &str) -> bool {
 fn file_name() -> Option<&'static str> {
     if cfg!(all(windows, target_arch = "x86_64")) {
         Some("sshremote-windows-x86_64.exe")
+    } else if cfg!(all(windows, target_arch = "x86")) {
+        Some("sshremote-windows-x86.exe")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("sshremote-linux-x86_64")
     } else if cfg!(target_os = "macos") {

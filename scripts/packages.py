@@ -32,8 +32,8 @@ BUCKET = f"{ORG}/scoop-bucket"
 WINGET_ID = "SSHRemote.SSHRemote"
 ABOUT = "One workspace for all your servers and projects: split terminals, Markdown, screens and files over the SSH you already have"
 HOMEBREW_ARCH = {"x86_64": "on_intel", "aarch64": "on_arm"}
-WINGET_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
-SCOOP_ARCH = {"x86_64": "64bit", "aarch64": "arm64"}
+WINGET_ARCH = {"x86_64": "x64", "aarch64": "arm64", "x86": "x86"}
+SCOOP_ARCH = {"x86_64": "64bit", "aarch64": "arm64", "x86": "32bit"}
 
 
 def call(url, method="GET", data=None):

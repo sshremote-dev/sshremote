@@ -59,9 +59,11 @@ jobs:
         if: matrix.build.setup == 'mingw'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake nasm gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
-          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          sudo apt-get install -y cmake nasm gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 gcc-mingw-w64-i686 g++-mingw-w64-i686
+          for a in x86_64 i686; do
+            sudo update-alternatives --set $a-w64-mingw32-gcc /usr/bin/$a-w64-mingw32-gcc-posix
+            sudo update-alternatives --set $a-w64-mingw32-g++ /usr/bin/$a-w64-mingw32-g++-posix
+          done
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.build.target }}

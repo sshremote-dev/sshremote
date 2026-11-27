@@ -767,23 +767,26 @@ mod win {
         };
         #[cfg(feature = "remote")]
         let tip = if status.connected.is_empty() { tip } else { format!("{tip}; {}", t!("{} connected now", status.connected.len())) };
-        copy(&mut nid.szTip, &tip);
+        nid.szTip = wide_n(&tip);
         let mut inner = inner;
         if what == NIM_MODIFY
             && let Some(text) = inner.as_mut().and_then(|i| i.said.take())
         {
             nid.uFlags |= NIF_INFO;
-            copy(&mut nid.szInfoTitle, "SSH Remote");
-            copy(&mut nid.szInfo, &text);
+            nid.szInfoTitle = wide_n("SSH Remote");
+            nid.szInfo = wide_n(&text);
         }
         drop(inner);
         unsafe { Shell_NotifyIconW(what, &nid) };
     }
 
-    fn copy(to: &mut [u16], text: &str) {
-        let w: Vec<u16> = text.encode_utf16().take(to.len() - 1).collect();
-        to[..w.len()].copy_from_slice(&w);
-        to[w.len()] = 0;
+    /// `text` as a fixed field of UTF-16, cut to fit with its NUL (by value: on 32-bit Windows
+    /// the structure is packed, and its fields cannot be borrowed).
+    fn wide_n<const N: usize>(text: &str) -> [u16; N] {
+        let mut a = [0u16; N];
+        let w: Vec<u16> = text.encode_utf16().take(N - 1).collect();
+        a[..w.len()].copy_from_slice(&w);
+        a
     }
 
     /// A balloon from the icon now.
