@@ -2,7 +2,7 @@
 //! draws it into a plain texture and reads that back. libEGL and libGLESv2 are loaded at run
 //! time, so the program starts on systems without them.
 
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
 
 type Ptr = *mut c_void;
 type EglInt = i32;
@@ -69,11 +69,11 @@ fns! {
     eglBindAPI: fn(u32) -> u32;
     eglCreateContext: fn(Ptr, Ptr, Ptr, *const EglInt) -> Ptr;
     eglMakeCurrent: fn(Ptr, Ptr, Ptr, Ptr) -> u32;
-    eglQueryString: fn(Ptr, EglInt) -> *const i8;
+    eglQueryString: fn(Ptr, EglInt) -> *const c_char;
     eglGetError: fn() -> EglInt;
     eglGetPlatformDisplayEXT: fn(u32, Ptr, *const EglInt) -> Ptr;
     eglQueryDevicesEXT: fn(EglInt, *mut Ptr, *mut EglInt) -> u32;
-    eglQueryDeviceStringEXT: fn(Ptr, EglInt) -> *const i8;
+    eglQueryDeviceStringEXT: fn(Ptr, EglInt) -> *const c_char;
     eglCreateImageKHR: fn(Ptr, Ptr, u32, Ptr, *const EglInt) -> Ptr;
     eglDestroyImageKHR: fn(Ptr, Ptr) -> u32;
     glEGLImageTargetTexture2DOES: fn(u32, Ptr);
@@ -91,16 +91,16 @@ fns! {
     glReadPixels: fn(i32, i32, i32, i32, u32, u32, *mut c_void);
     glPixelStorei: fn(u32, i32);
     glCreateShader: fn(u32) -> u32;
-    glShaderSource: fn(u32, i32, *const *const i8, *const i32);
+    glShaderSource: fn(u32, i32, *const *const c_char, *const i32);
     glCompileShader: fn(u32);
     glGetShaderiv: fn(u32, u32, *mut i32);
     glCreateProgram: fn() -> u32;
     glAttachShader: fn(u32, u32);
-    glBindAttribLocation: fn(u32, u32, *const i8);
+    glBindAttribLocation: fn(u32, u32, *const c_char);
     glLinkProgram: fn(u32);
     glGetProgramiv: fn(u32, u32, *mut i32);
     glUseProgram: fn(u32);
-    glGetUniformLocation: fn(u32, *const i8) -> i32;
+    glGetUniformLocation: fn(u32, *const c_char) -> i32;
     glUniform1i: fn(i32, i32);
     glVertexAttribPointer: fn(u32, i32, u32, u8, i32, *const c_void);
     glEnableVertexAttribArray: fn(u32);
@@ -146,12 +146,12 @@ impl Gl {
         let egl = dlopen(&["libEGL.so.1", "libEGL.so"]).ok_or("libEGL is not installed")?;
         let gles = dlopen(&["libGLESv2.so.2", "libGLESv2.so"]);
         // SAFETY: looking up symbols in libraries that stay loaded for the program's life.
-        let get_proc: unsafe extern "C" fn(*const i8) -> Ptr = unsafe {
+        let get_proc: unsafe extern "C" fn(*const c_char) -> Ptr = unsafe {
             let p = libc::dlsym(egl, c"eglGetProcAddress".as_ptr());
             if p.is_null() {
                 return Err("libEGL has no eglGetProcAddress".into());
             }
-            std::mem::transmute::<Ptr, unsafe extern "C" fn(*const i8) -> Ptr>(p)
+            std::mem::transmute::<Ptr, unsafe extern "C" fn(*const c_char) -> Ptr>(p)
         };
         let get = |name: &CStr| -> Ptr {
             // SAFETY: as above.
@@ -224,7 +224,7 @@ impl Gl {
         unsafe {
             let shader = |kind, src: &str| -> Result<u32, String> {
                 let s = (f.glCreateShader)(kind);
-                let p = src.as_ptr() as *const i8;
+                let p = src.as_ptr() as *const c_char;
                 (f.glShaderSource)(s, 1, &p, std::ptr::null());
                 (f.glCompileShader)(s);
                 let mut ok = 0;
