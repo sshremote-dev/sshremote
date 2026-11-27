@@ -1,5 +1,5 @@
 {
-  "about": "Every file a release ships. GitHub Actions builds the ones `by: ci` (.github/workflows/release.yml), runs each on `check` and attests it; scripts/release.sh builds the `by: mac` one on the project's Mac. The site's download list, the list the app updates from, the installers and the package managers all follow this. See docs/releasing.md.",
+  "about": "Every file a release ships. GitHub Actions builds the ones `by: ci` (.github/workflows/release.yml), runs each on `check` and attests it (a `package` is made from the program `from` names, with scripts/ci-package.sh); scripts/release.sh builds the `by: mac` one on the project's Mac. The site's download list, the list the app updates from, the installers and the package managers all follow this. See docs/releasing.md.",
   "platforms": [
     {
       "file": "sshremote-windows-x86_64.exe",
@@ -36,6 +36,46 @@
       "detail": "Arm64 · X11 and Wayland",
       "build": { "by": "ci", "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "setup": "linux" },
       "check": "ubuntu-24.04-arm"
+    },
+    {
+      "file": "sshremote-linux-x86_64.deb",
+      "os": "linux",
+      "arch": "x86_64",
+      "package": "deb",
+      "label": "Debian, Ubuntu",
+      "detail": "x86_64 · .deb, in the applications menu",
+      "build": { "by": "ci", "runner": "ubuntu-24.04", "from": "sshremote-linux-x86_64" },
+      "check": null
+    },
+    {
+      "file": "sshremote-linux-aarch64.deb",
+      "os": "linux",
+      "arch": "aarch64",
+      "package": "deb",
+      "label": "Debian, Ubuntu on Arm",
+      "detail": "Arm64 · .deb, in the applications menu",
+      "build": { "by": "ci", "runner": "ubuntu-24.04-arm", "from": "sshremote-linux-aarch64" },
+      "check": null
+    },
+    {
+      "file": "sshremote-linux-x86_64.rpm",
+      "os": "linux",
+      "arch": "x86_64",
+      "package": "rpm",
+      "label": "Fedora, RHEL, openSUSE",
+      "detail": "x86_64 · .rpm, in the applications menu",
+      "build": { "by": "ci", "runner": "ubuntu-24.04", "from": "sshremote-linux-x86_64" },
+      "check": null
+    },
+    {
+      "file": "sshremote-linux-aarch64.rpm",
+      "os": "linux",
+      "arch": "aarch64",
+      "package": "rpm",
+      "label": "Fedora, RHEL, openSUSE on Arm",
+      "detail": "Arm64 · .rpm, in the applications menu",
+      "build": { "by": "ci", "runner": "ubuntu-24.04-arm", "from": "sshremote-linux-aarch64" },
+      "check": null
     },
     {
       "file": "sshremote-macos.zip",

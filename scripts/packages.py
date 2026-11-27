@@ -5,9 +5,11 @@
 Homebrew: the tap sshremote-dev/homebrew-tap (made the first time) gets Casks/sshremote.rb, the
 Mac app, and Formula/sshremote.rb, the Linux program, committed and pushed:
     brew install --cask sshremote-dev/tap/sshremote     brew install sshremote-dev/tap/sshremote
+Scoop: the bucket sshremote-dev/scoop-bucket (made the first time) gets bucket/sshremote.json:
+    scoop bucket add sshremote https://github.com/sshremote-dev/scoop-bucket; scoop install sshremote
 winget: the manifests go to OUT/winget/VERSION; with WINGET_PR=1 they are proposed to
 microsoft/winget-pkgs from the token's account's fork (`winget install SSHRemote.SSHRemote` once
-merged). Both follow release/platforms.json: a new system or processor there comes into them.
+merged). All follow release/platforms.json: a new system or processor there comes into them.
 """
 
 import base64
@@ -26,10 +28,12 @@ ROOT = Path(__file__).resolve().parent.parent
 ORG = "sshremote-dev"
 RELEASES = f"https://github.com/{ORG}/sshremote/releases"
 TAP = f"{ORG}/homebrew-tap"
+BUCKET = f"{ORG}/scoop-bucket"
 WINGET_ID = "SSHRemote.SSHRemote"
 ABOUT = "One workspace for all your servers and projects: split terminals, Markdown, screens and files over the SSH you already have"
 HOMEBREW_ARCH = {"x86_64": "on_intel", "aarch64": "on_arm"}
 WINGET_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
+SCOOP_ARCH = {"x86_64": "64bit", "aarch64": "arm64"}
 
 
 def call(url, method="GET", data=None):
@@ -90,7 +94,7 @@ def formula(version, platforms):
       sha256 "{p['sha256']}"
     end'''
         for p in platforms
-        if p["os"] == "linux"
+        if p["os"] == "linux" and not p.get("package")
     )
     return f'''class Sshremote < Formula
   desc "{ABOUT.split(':')[0]}"
@@ -120,35 +124,75 @@ def git(*args, cwd=None):
     subprocess.run(["git", "-c", f"http.extraHeader=Authorization: Basic {auth}", *args], cwd=cwd, check=True)
 
 
-def homebrew(version, platforms, out):
+def repo_files(repo, description, files, version, label):
+    """Puts `files` ({path: text}) into the organization's repository `repo` (made the first
+    time), committed and pushed."""
     try:
-        call(f"/repos/{TAP}")
+        call(f"/repos/{repo}")
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
-        call(f"/orgs/{ORG}/repos", "POST", {"name": "homebrew-tap", "description": "Homebrew tap for SSH Remote", "homepage": "https://sshremote.dev", "has_wiki": False, "has_projects": False, "auto_init": True})
+        call(f"/orgs/{ORG}/repos", "POST", {"name": repo.split("/")[1], "description": description, "homepage": "https://sshremote.dev", "has_wiki": False, "has_projects": False, "auto_init": True})
         time.sleep(3)
     with tempfile.TemporaryDirectory() as tmp:
-        git("clone", "-q", f"https://github.com/{TAP}.git", tmp)
-        tap = Path(tmp)
-        (tap / "Casks").mkdir(exist_ok=True)
-        (tap / "Formula").mkdir(exist_ok=True)
-        (tap / "Casks" / "sshremote.rb").write_text(cask(version, platforms))
-        (tap / "Formula" / "sshremote.rb").write_text(formula(version, platforms))
-        (tap / "README.md").write_text(
-            "# Homebrew tap for SSH Remote\n\n"
-            f"{ABOUT}. See [sshremote.dev](https://sshremote.dev).\n\n"
-            "```sh\nbrew install --cask sshremote-dev/tap/sshremote   # macOS: the app, and sshremote on PATH\n"
-            "brew install sshremote-dev/tap/sshremote          # Linux\n```\n\n"
-            "Written by `scripts/packages.py` of [sshremote](https://github.com/sshremote-dev/sshremote) with each release.\n"
-        )
+        git("clone", "-q", f"https://github.com/{repo}.git", tmp)
+        for path, text in files.items():
+            f = Path(tmp) / path
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text)
         subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=tmp).returncode == 0:
-            print(f"homebrew: {TAP} already has {version}")
+            print(f"{label}: {repo} already has {version}")
             return
         subprocess.run(["git", "commit", "-q", "-m", f"chore: update SSH Remote to {version}"], cwd=tmp, check=True)
         git("push", "-q", "origin", "HEAD", cwd=tmp)
-        print(f"homebrew: {TAP} has {version}")
+        print(f"{label}: {repo} has {version}")
+
+
+def homebrew(version, platforms, out):
+    readme = (
+        "# Homebrew tap for SSH Remote\n\n"
+        f"{ABOUT}. See [sshremote.dev](https://sshremote.dev).\n\n"
+        "```sh\nbrew install --cask sshremote-dev/tap/sshremote   # macOS: the app, and sshremote on PATH\n"
+        "brew install sshremote-dev/tap/sshremote          # Linux\n```\n\n"
+        "Written by `scripts/packages.py` of [sshremote](https://github.com/sshremote-dev/sshremote) with each release.\n"
+    )
+    files = {"Casks/sshremote.rb": cask(version, platforms), "Formula/sshremote.rb": formula(version, platforms), "README.md": readme}
+    repo_files(TAP, "Homebrew tap for SSH Remote", files, version, "homebrew")
+
+
+def scoop_manifest(version, platforms):
+    arch, auto = {}, {}
+    for p in platforms:
+        if p["os"] != "windows" or p["arch"] not in SCOOP_ARCH:
+            continue
+        a = SCOOP_ARCH[p["arch"]]
+        # Saved as sshremote.exe, whichever processor's file it is.
+        arch[a] = {"url": p["url"] + "#/sshremote.exe", "hash": p["sha256"]}
+        auto[a] = {"url": f"{RELEASES}/download/v$version/{p['file']}#/sshremote.exe"}
+    manifest = {
+        "version": version,
+        "description": ABOUT,
+        "homepage": "https://sshremote.dev",
+        "license": "MIT",
+        "architecture": arch,
+        "bin": "sshremote.exe",
+        "shortcuts": [["sshremote.exe", "SSH Remote"]],
+        "checkver": {"github": f"https://github.com/{ORG}/sshremote"},
+        "autoupdate": {"architecture": auto},
+    }
+    return json.dumps(manifest, indent=4) + "\n"
+
+
+def scoop(version, platforms, out):
+    readme = (
+        "# Scoop bucket for SSH Remote\n\n"
+        f"{ABOUT}. See [sshremote.dev](https://sshremote.dev).\n\n"
+        "```powershell\nscoop bucket add sshremote https://github.com/sshremote-dev/scoop-bucket\nscoop install sshremote\n```\n\n"
+        "Written by `scripts/packages.py` of [sshremote](https://github.com/sshremote-dev/sshremote) with each release.\n"
+    )
+    files = {"bucket/sshremote.json": scoop_manifest(version, platforms), "README.md": readme}
+    repo_files(BUCKET, "Scoop bucket for SSH Remote", files, version, "scoop")
 
 
 def winget_manifests(version, platforms, folder):
@@ -224,7 +268,7 @@ def winget(version, platforms, out):
 
 # Each channel takes the release (its version, release/platforms.json's entries with their sha256
 # and url, and OUT) to where its package manager reads it: another is one more function here.
-CHANNELS = [homebrew, winget]
+CHANNELS = [homebrew, scoop, winget]
 
 
 def main():

@@ -75,6 +75,10 @@ def main():
     downloads.mkdir(exist_ok=True)
     latest, first = [], []
     for p in platforms():
+        # The program updates itself (and the installers install it) from the program's own
+        # files, never a .deb or .rpm, which only the download section offers.
+        if p.get("package"):
+            continue
         data = (have / p["file"]).read_bytes()
         entry = {"name": p["file"], "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         latest.append({**entry, "os": p["os"], "arch": p["arch"], "url": f"{REPO}/releases/download/v{ver}/{p['file']}"})

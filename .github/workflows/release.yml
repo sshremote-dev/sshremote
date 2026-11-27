@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       builds: ${{ steps.plan.outputs.builds }}
+      packages: ${{ steps.plan.outputs.packages }}
       checks: ${{ steps.plan.outputs.checks }}
     steps:
       - uses: actions/checkout@v7
@@ -25,8 +26,9 @@ jobs:
           persist-credentials: false
       - id: plan
         run: |
-          echo "builds=$(jq -c '[.platforms[] | select(.build.by == "ci")]' release/platforms.json)" >> "$GITHUB_OUTPUT"
-          echo "checks=$(jq -c '[.platforms[] | select(.build.by == "ci" and .check != null and .check != .build.runner)]' release/platforms.json)" >> "$GITHUB_OUTPUT"
+          echo "builds=$(jq -c '[.platforms[] | select(.build.by == "ci" and .package == null)]' release/platforms.json)" >> "$GITHUB_OUTPUT"
+          echo "packages=$(jq -c '[.platforms[] | select(.build.by == "ci" and .package != null)]' release/platforms.json)" >> "$GITHUB_OUTPUT"
+          echo "checks=$(jq -c '[.platforms[] | select(.build.by == "ci" and .package == null and .check != null and .check != .build.runner)]' release/platforms.json)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -79,6 +81,50 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # The Linux program as a .deb and an .rpm (scripts/ci-package.sh), each made on its own processor
+  # from the program built above, installed there where the runner's system takes it, attested.
+  package:
+    needs: [plan, build]
+    if: needs.plan.outputs.packages != '[]'
+    name: ${{ matrix.file }}
+    runs-on: ${{ matrix.build.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.packages) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.build.from }}
+      - name: rpmbuild
+        if: matrix.package == 'rpm'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Package
+        run: scripts/ci-package.sh "${{ matrix.package }}" "./${{ matrix.build.from }}" "${{ matrix.file }}" "${{ matrix.arch }}"
+      - name: Install here
+        if: matrix.package == 'deb'
+        run: sudo apt-get update && sudo apt-get install -y "./${{ matrix.file }}" && sshremote --version && test -f /usr/share/applications/sshremote.desktop
+      - uses: actions/attest@v4
+        with:
+          subject-path: ${{ matrix.file }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.file }}
+          path: ${{ matrix.file }}
+          if-no-files-found: error
+          retention-days: 30
+
   # A file built elsewhere (Windows on Linux) runs on its own system before it ships.
   check:
     needs: [plan, build]
@@ -102,7 +148,7 @@ jobs:
       - run: chmod +x "${{ matrix.file }}" && scripts/ci-check.sh "./${{ matrix.file }}"
 
   draft:
-    needs: [build, check]
+    needs: [build, check, package]
     if: ${{ !cancelled() && !failure() && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-24.04
     permissions:

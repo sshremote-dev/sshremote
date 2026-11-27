@@ -47,6 +47,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>sshremote</string>
 <key>CFBundleIconFile</key><string>sshremote</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>SSH Remote link</string><key>CFBundleURLSchemes</key><array><string>sshremote</string></array></dict></array>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$version</string>
 <key>LSMinimumSystemVersion</key><string>12.3</string>
