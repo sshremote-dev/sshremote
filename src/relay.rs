@@ -104,13 +104,19 @@ pub fn run(backend: &str) -> Result<(), String> {
     // (Whether it may see the cameras goes last: a service from before takes this as unknown
     // and the scheduled task below starts the helper.)
     let cameras = if crate::agent::cameras_arg().is_empty() { "" } else { " cameras" };
-    let request = if crate::agent::by_id() { format!("spawn {base} {backend} id {grant}{code}{cameras}") } else { format!("spawn {base} {backend}") };
+    let request = if crate::agent::by_id() { format!("spawn {base} {backend} id {grant}{code}{cameras}{}", crate::agent::helper_words()) } else { format!("spawn {base} {backend}") };
     match crate::service::ask(&request) {
         Some(Ok(())) => {}
         service => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             // A headless console host keeps a console window from appearing on the remote screen.
-            let by_id = if crate::agent::by_id() { format!(" --by-id --grant {grant}{}{}", crate::agent::code_arg(), crate::agent::cameras_arg()) } else { String::new() };
+            let by_id = if crate::agent::by_id() {
+                let words = crate::agent::helper_words();
+                let more = crate::agent::helper_args(&words.split_whitespace().collect::<Vec<_>>())?;
+                format!(" --by-id --grant {grant}{}{}{more}", crate::agent::code_arg(), crate::agent::cameras_arg())
+            } else {
+                String::new()
+            };
             let cmd = format!("conhost.exe --headless \"{}\" --agent --capture {backend} --pipe {base}{by_id}", exe.display());
             let task = format!("sshremote-agent-{}", std::process::id());
             schtasks(&["/create", "/tn", &task, "/tr", &cmd, "/sc", "once", "/st", "00:00", "/it", "/f"])?;

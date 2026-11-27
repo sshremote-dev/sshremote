@@ -474,6 +474,14 @@ impl App {
                             });
                         }
                         ui.add_space(4.0);
+                        if ui
+                            .checkbox(&mut cfg.plain_wallpaper, t!("Take the desktop picture away during sessions"))
+                            .on_hover_text(t!("A plain color is quicker to send; the picture comes back when the session ends (Windows, GNOME, Cinnamon, MATE)"))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.add_space(4.0);
                         if ui.checkbox(&mut cfg.cameras, t!("Let viewers look at this computer's cameras")).changed() {
                             changed = true;
                         }

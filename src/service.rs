@@ -363,19 +363,23 @@ fn serve() {
         let _ = BufReader::new(&*pipe).read_line(&mut line);
         let answer = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["sas"] => send_sas(),
-            ["spawn", base, capture] => spawn_helper(base, capture, None, None, false),
+            ["spawn", base, capture] => spawn_helper(base, capture, None, None, false, ""),
             // By ID: what the viewer may do, the code to show with the question when it asked
             // without a password, and whether it may see the cameras, each when given.
-            ["spawn", base, capture, "id", rest @ ..] => {
+            // Then the session's other settings, as words of `agent::helper_words`.
+            ["spawn", base, capture, "id", all @ ..] => {
+                let at = all.iter().position(|w| w.starts_with("way=")).unwrap_or(all.len());
+                let (rest, words) = all.split_at(at);
                 let cameras = rest.last() == Some(&"cameras");
-                match &rest[..rest.len() - cameras as usize] {
-                    [] => spawn_helper(base, capture, Some(crate::grant::ALL), None, cameras),
-                    [grant] => match grant.parse() {
-                        Ok(g) => spawn_helper(base, capture, Some(g), None, cameras),
+                match (&rest[..rest.len() - cameras as usize], crate::agent::helper_args(words)) {
+                    (_, Err(e)) => Err(e),
+                    ([], Ok(more)) => spawn_helper(base, capture, Some(crate::grant::ALL), None, cameras, &more),
+                    ([grant], Ok(more)) => match grant.parse() {
+                        Ok(g) => spawn_helper(base, capture, Some(g), None, cameras, &more),
                         Err(_) => Err("bad request".into()),
                     },
-                    [grant, code] => match grant.parse() {
-                        Ok(g) if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) => spawn_helper(base, capture, Some(g), Some(code), cameras),
+                    ([grant, code], Ok(more)) => match grant.parse() {
+                        Ok(g) if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) => spawn_helper(base, capture, Some(g), Some(code), cameras, &more),
                         _ => Err("bad request".into()),
                     },
                     _ => Err("bad request".into()),
@@ -404,7 +408,7 @@ fn send_sas() -> Result<(), String> {
 }
 
 /// Starts `sshremote --agent --pipe BASE` as SYSTEM in the active console session.
-fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>, code: Option<&str>, cameras: bool) -> Result<(), String> {
+fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>, code: Option<&str>, cameras: bool, more: &str) -> Result<(), String> {
     let name = base.strip_prefix(r"\\.\pipe\sshremote-").unwrap_or("");
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || !capture.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("bad request".into());
@@ -412,7 +416,7 @@ fn spawn_helper(base: &str, capture: &str, by_id: Option<u8>, code: Option<&str>
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let code = code.map(|c| format!(" --code {c}")).unwrap_or_default();
     let cameras = if cameras { " --cameras" } else { "" };
-    let by_id = by_id.map(|g| format!(" --by-id --grant {g}{code}{cameras}")).unwrap_or_default();
+    let by_id = by_id.map(|g| format!(" --by-id --grant {g}{code}{cameras}{more}")).unwrap_or_default();
     let mut cmd = wide(&format!("\"{}\" --agent --capture {capture} --pipe {base}{by_id}", exe.display()));
     let mut desktop = wide(r"winsta0\default");
     unsafe {

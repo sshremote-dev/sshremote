@@ -168,6 +168,55 @@ fn files_way() -> u8 {
     FILES_WAY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The desktop's picture is taken away during a session by ID, as the computer is set to (less
+/// to send), and put back after.
+static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_plain(on: bool) {
+    PLAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What a helper started by Windows' service is told besides (each word as `service` reads it):
+/// ` way=CF`, ` who=HOW.FROM` in hex, ` plain`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn helper_words() -> String {
+    let mut s = format!(" way={}{}", clip_way(), files_way());
+    if let Some((h, f)) = WHO.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        s += &format!(" who={}.{}", crate::sys::hex(h.as_bytes()), crate::sys::hex(f.as_bytes()));
+    }
+    if PLAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        s += " plain";
+    }
+    s
+}
+
+/// The same as the helper's command line takes it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn helper_args(words: &[&str]) -> Result<String, String> {
+    let mut s = String::new();
+    for w in words {
+        match w.split_once('=') {
+            Some(("way", cf)) if cf.len() == 2 && cf.bytes().all(|b| (b'0'..=b'2').contains(&b)) => {
+                s += &format!(" --clip-way {} --files-way {}", &cf[..1], &cf[1..]);
+            }
+            Some(("who", hf)) if hf.len() <= 1024 && hf.split('.').count() == 2 && hf.split('.').all(|x| crate::sys::unhex(x).is_some()) => s += &format!(" --who-hex {hf}"),
+            None if *w == "plain" => s += " --plain-wallpaper",
+            _ => return Err("bad request".into()),
+        }
+    }
+    Ok(s)
+}
+
+/// `--who-hex HOW.FROM` back to the words.
+pub fn set_who_hex(hf: &str) {
+    let text = |x: &str| crate::sys::unhex(x).and_then(|b| String::from_utf8(b).ok());
+    if let Some((h, f)) = hf.split_once('.')
+        && let (Some(h), Some(f)) = (text(h), text(f))
+    {
+        set_who(&h, &f);
+    }
+}
+
 /// Why `m` goes the way this computer does not let things go, if it does.
 fn against_way(m: &ToAgent, clip: u8, files: u8) -> Option<&'static str> {
     match m {
@@ -526,6 +575,7 @@ fn serve_with(
     }
     // Awake, the screen on, for as long as someone looks at it.
     let _awake = crate::sys::keep_awake();
+    let _plain = (by_id() && PLAIN.load(std::sync::atomic::Ordering::Relaxed)).then(crate::sys::plain_desktop);
     // Remote access run in the app without administrator rights (Windows): the viewer may ask the
     // person here for them.
     #[cfg(windows)]
@@ -1838,6 +1888,17 @@ mod tests {
         // A web page takes the size it is shown at, whatever its shape was.
         assert_eq!(target((1280, 800), &view(1178, 696, 100), true), (1178, 696));
         assert_eq!(target((1280, 800), &view(1178, 696, 50), true), (589, 348));
+    }
+
+    /// What the Windows service is told for its helper comes back as the same arguments, and
+    /// nothing else gets through.
+    #[test]
+    fn helper_words_come_back_as_arguments() {
+        let hf = format!("{}.{}", crate::sys::hex("with a password".as_bytes()), crate::sys::hex(b"203.0.113.7"));
+        assert_eq!(helper_args(&["way=12", &format!("who={hf}"), "plain"]).unwrap(), format!(" --clip-way 1 --files-way 2 --who-hex {hf} --plain-wallpaper"));
+        for bad in ["way=3", "way=1", "who=zz.00", "who=\"x\"", "plain=1", "--grant"] {
+            assert!(helper_args(&[bad]).is_err(), "{bad}");
+        }
     }
 
     /// One way only: what would go the other way is refused, the rest goes as before.

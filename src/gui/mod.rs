@@ -1846,7 +1846,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: String::new(), id_keys: Vec::new(), auto_update: true, clip_way: 0, files_way: 0, team: serde_json::Value::Null };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: String::new(), id_keys: Vec::new(), auto_update: true, clip_way: 0, files_way: 0, plain_wallpaper: false, team: serde_json::Value::Null };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1902,7 +1902,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off" && name != "settings_team";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: "718543859, 98765*".into(), id_keys: vec![("718543859".into(), "3ebfa6097815".into(), 0)], auto_update: true, clip_way: 0, files_way: 0, team: serde_json::Value::Null };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: "718543859, 98765*".into(), id_keys: vec![("718543859".into(), "3ebfa6097815".into(), 0)], auto_update: true, clip_way: 0, files_way: 0, plain_wallpaper: false, team: serde_json::Value::Null };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

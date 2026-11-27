@@ -611,6 +611,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 let way = |k: &str| get(k).and_then(|w| w.parse::<u8>().ok()).filter(|w| *w <= agent::WAY_IN).unwrap_or(agent::WAY_BOTH);
                 agent::set_ways(way("--clip-way"), way("--files-way"));
+                if let Some(hf) = get("--who-hex") {
+                    agent::set_who_hex(hf);
+                }
+                agent::set_plain(args.iter().any(|a| a == "--plain-wallpaper"));
             }
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
             // A relay helper has no visible stderr; keep its failure where it can be found: beside

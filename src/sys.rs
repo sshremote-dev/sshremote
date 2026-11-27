@@ -460,6 +460,95 @@ pub fn keep_awake() -> KeepAwake {
     }
 }
 
+/// The desktop's picture taken away for as long as it lives (a plain color to send instead), and
+/// put back after. Windows: in memory only, so signing out brings it back too; GNOME, Cinnamon
+/// and MATE: what it was is written down first, put back by the next session if this one could
+/// not.
+pub struct PlainDesktop {
+    #[cfg(windows)]
+    was: Option<Vec<u16>>,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    was: Option<(&'static str, String)>,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn plain_note() -> Option<std::path::PathBuf> {
+    crate::hosts::config_dir().map(|d| d.join("desktop-picture-was"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn gsettings(args: &[&str]) -> Option<String> {
+    let out = Command::new("gsettings").args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub fn plain_desktop() -> PlainDesktop {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SystemParametersInfoW};
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: a buffer of the size given; the empty name is NUL-terminated.
+        let ok = unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, buf.as_mut_ptr().cast(), 0) };
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        if ok == 0 || len == 0 {
+            return PlainDesktop { was: None };
+        }
+        buf.truncate(len + 1);
+        let mut none = [0u16; 1];
+        unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, none.as_mut_ptr().cast(), SPIF_SENDCHANGE) };
+        PlainDesktop { was: Some(buf) }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let desk = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let schema = match () {
+            _ if desk.contains("cinnamon") => "org.cinnamon.desktop.background",
+            _ if desk.contains("mate") => "org.mate.background",
+            _ if ["gnome", "unity", "budgie", "pop"].iter().any(|d| desk.contains(d)) => "org.gnome.desktop.background",
+            _ => return PlainDesktop { was: None },
+        };
+        // One a session before did not put back (it ended at once) is what it was.
+        let note = plain_note();
+        let left = note.as_ref().and_then(|n| std::fs::read_to_string(n).ok()).and_then(|t| t.split_once(' ').map(|(s, v)| (s.to_string(), v.trim().to_string())));
+        let was = match left {
+            Some((s, v)) if s == schema => v,
+            _ => match gsettings(&["get", schema, "picture-options"]) {
+                Some(v) => v,
+                None => return PlainDesktop { was: None },
+            },
+        };
+        if was.trim_matches('\'') == "none" || !was.trim_matches('\'').chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return PlainDesktop { was: None };
+        }
+        if let Some(n) = &note {
+            let _ = n.parent().map(std::fs::create_dir_all);
+            let _ = write_private(n, format!("{schema} {was}\n").as_bytes());
+        }
+        let _ = gsettings(&["set", schema, "picture-options", "none"]);
+        PlainDesktop { was: Some((schema, was)) }
+    }
+    #[cfg(target_os = "macos")]
+    PlainDesktop {}
+}
+
+impl Drop for PlainDesktop {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(mut was) = self.was.take() {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SystemParametersInfoW};
+            // SAFETY: the NUL-terminated name taken before.
+            unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, was.as_mut_ptr().cast(), SPIF_SENDCHANGE) };
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some((schema, was)) = self.was.take()
+            && gsettings(&["set", schema, "picture-options", was.trim_matches('\'')]).is_some()
+            && let Some(n) = plain_note()
+        {
+            let _ = std::fs::remove_file(n);
+        }
+    }
+}
+
 /// The portal's Inhibit of suspending and going idle (4 | 8), for as long as the connection
 /// asking lives.
 #[cfg(all(unix, not(target_os = "macos"), feature = "remote"))]
@@ -627,6 +716,48 @@ pub fn end_tree(child: &mut std::process::Child) {
 
 #[cfg(test)]
 mod tests {
+    /// Run in a signed-in session of a test machine (it takes the desktop's picture away).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn the_desktop_picture_comes_back_on_windows() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETDESKWALLPAPER, SystemParametersInfoW};
+        let now = || {
+            let mut buf = vec![0u16; 1024];
+            unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, buf.as_mut_ptr().cast(), 0) };
+            String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
+        };
+        let before = now();
+        assert!(!before.is_empty(), "a picture to take away");
+        let plain = super::plain_desktop();
+        assert_eq!(now(), "");
+        drop(plain);
+        assert_eq!(now(), before);
+    }
+
+    /// Run alone with gsettings' file backend in a home of its own (`GSETTINGS_BACKEND=keyfile
+    /// XDG_CONFIG_HOME=... XDG_CURRENT_DESKTOP=GNOME`), never with the person's own settings.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    #[ignore]
+    fn the_desktop_picture_comes_back_after_a_session_even_one_that_died() {
+        assert_eq!(std::env::var("GSETTINGS_BACKEND").as_deref(), Ok("keyfile"), "a settings file of its own only");
+        let get = || super::gsettings(&["get", "org.gnome.desktop.background", "picture-options"]).unwrap();
+        super::gsettings(&["set", "org.gnome.desktop.background", "picture-options", "zoom"]).unwrap();
+        let plain = super::plain_desktop();
+        assert_eq!(get(), "'none'");
+        drop(plain);
+        assert_eq!(get(), "'zoom'");
+        assert!(!super::plain_note().unwrap().exists());
+        // A session that ended before it could put it back: the next one knows what it was.
+        let plain = super::plain_desktop();
+        std::mem::forget(plain);
+        assert_eq!(get(), "'none'");
+        let plain = super::plain_desktop();
+        drop(plain);
+        assert_eq!(get(), "'zoom'");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_of_its_own_opens_and_a_link_does_not() {

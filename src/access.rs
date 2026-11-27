@@ -83,6 +83,8 @@ pub struct Config {
     /// this computer only, or to it only.
     pub clip_way: u8,
     pub files_way: u8,
+    /// The desktop's picture taken away during sessions by ID (less to send).
+    pub plain_wallpaper: bool,
     /// The team this computer is in (`team::client::Joined` as JSON), or null: kept with the rest,
     /// so that only who may change remote access can join a team, and the service reads it.
     pub team: serde_json::Value,
@@ -264,7 +266,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -316,6 +318,7 @@ impl Config {
             auto_update: v.get("auto_update").and_then(|x| x.as_bool()).unwrap_or(true),
             clip_way: v.get("clip_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
             files_way: v.get("files_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
+            plain_wallpaper: v.get("plain_wallpaper").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
 }
@@ -493,6 +496,7 @@ pub fn fresh() -> Config {
         auto_update: true,
         clip_way: 0,
         files_way: 0,
+        plain_wallpaper: false,
         team: serde_json::Value::Null,
     }
 }
@@ -2269,6 +2273,9 @@ fn serve_viewer(
     }
     cmd.args(["--who-how", asking.how, "--who-from", asking.from]);
     cmd.args(["--clip-way", &cfg.clip_way.to_string(), "--files-way", &cfg.files_way.to_string()]);
+    if cfg.plain_wallpaper {
+        cmd.arg("--plain-wallpaper");
+    }
     if cameras {
         cmd.arg("--cameras");
     }
@@ -2708,7 +2715,7 @@ pub fn uninstall_service() -> Result<(), String> {
     Err(n!("not on this system").into())
 }
 
-/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | password [NEW] | relay HOST | install | uninstall]`
+/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | password [NEW] | relay HOST | install | uninstall]`
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
@@ -2756,6 +2763,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             println!("record:   sessions by ID are recorded in {}", recordings_dir().map(|d| d.display().to_string()).unwrap_or_default());
         }
         let way = |w: u8| ["both ways", "from this computer only", "to this computer only"][w.min(2) as usize];
+        if c.plain_wallpaper {
+            println!("desktop:  its picture is taken away during sessions by ID");
+        }
         if c.clip_way != 0 || c.files_way != 0 {
             println!("one way:  clipboard {}, files {}", way(c.clip_way), way(c.files_way));
         }
@@ -2897,7 +2907,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Switches, each `on` or `off`.
-        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record")) => {
+        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record" | "wallpaper")) => {
             let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
@@ -2909,6 +2919,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 "requests" => c.requests = on,
                 "cameras" => c.cameras = on,
                 "record" => c.record = on,
+                "wallpaper" => c.plain_wallpaper = !on,
                 _ => c.direct = on,
             }
             save(&c)?;
