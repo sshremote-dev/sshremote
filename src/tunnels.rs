@@ -248,6 +248,72 @@ fn start_by_id(_: &mut Vec<Run>, _: &str, _: &Tunnel) -> Result<(), String> {
 }
 
 /// Closes `t` of the computer at `address`, and forgets why it failed if it did.
+/// Where Remote Desktop listens on a Windows computer.
+const RDP_DEST: &str = "localhost:3389";
+
+/// Windows' Remote Desktop on the computer at `address`: a tunnel from a free port here to its
+/// port 3389 (the one opened for it before, while it is up), and this computer's RDP client
+/// opened on it once it is. Waits for the tunnel: call it from a thread of its own.
+pub fn open_rdp(address: &str, port: Option<u16>) -> Result<(), String> {
+    let up = RUNS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|r| r.address == address && r.tunnel.kind == Kind::Local && r.tunnel.dest == RDP_DEST).map(|r| r.tunnel.clone());
+    let t = match up.filter(|t| matches!(state(address, t), State::On | State::Starting)) {
+        Some(t) => t,
+        None => {
+            let free = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
+            Tunnel { kind: Kind::Local, port: free, dest: RDP_DEST.into(), start_with_app: false }
+        }
+    };
+    start(address, port, &t)?;
+    let since = std::time::Instant::now();
+    loop {
+        match state(address, &t) {
+            State::On => break,
+            State::Failed(e) => return Err(e),
+            State::Off => return Err(n!("the tunnel closed").into()),
+            State::Starting if since.elapsed() > std::time::Duration::from_secs(20) => return Err(n!("the tunnel did not open in time").into()),
+            State::Starting => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+    rdp_client(t.port)
+}
+
+/// This computer's RDP client, on `127.0.0.1:port`.
+fn rdp_client(port: u16) -> Result<(), String> {
+    let at = format!("127.0.0.1:{port}");
+    #[cfg(not(target_os = "macos"))]
+    let spawn = |program: &str, args: &[String]| {
+        let mut c = std::process::Command::new(program);
+        c.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        c.spawn().map(|_| ())
+    };
+    #[cfg(windows)]
+    return spawn("mstsc", &[format!("/v:{at}")]).map_err(|e| format!("mstsc: {e}"));
+    // Microsoft's Windows App (Remote Desktop) takes rdp:// links.
+    #[cfg(target_os = "macos")]
+    return std::process::Command::new("open")
+        .arg(format!("rdp://full%20address=s:{at}"))
+        .status()
+        .map_err(|e| e.to_string())
+        .and_then(|s| if s.success() { Ok(()) } else { Err(n!("no RDP client found here: install Windows App from the App Store").into()) });
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let free = [format!("/v:{at}"), "/dynamic-resolution".into(), "+clipboard".into(), "/cert:tofu".into()];
+        for (program, args) in [
+            ("xfreerdp3", &free[..]),
+            ("wlfreerdp3", &free[..]),
+            ("xfreerdp", &free[..]),
+            ("wlfreerdp", &free[..]),
+            ("remmina", &["-c".to_string(), format!("rdp://{at}")][..]),
+        ] {
+            match spawn(program, args) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                r => return r.map_err(|e| format!("{program}: {e}")),
+            }
+        }
+        Err(n!("no RDP client found here: install FreeRDP or Remmina").into())
+    }
+}
+
 pub fn stop(address: &str, t: &Tunnel) {
     RUNS.lock().unwrap_or_else(|e| e.into_inner()).retain_mut(|r| {
         let it = r.address == address && same(&r.tunnel, t);
@@ -333,6 +399,36 @@ pub fn start_with_app() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Run alone with `SSHR_RDP_TO` an ssh address (an alias) that reaches a Windows computer with
+    /// Remote Desktop on, by key, and a stand-in `xfreerdp3` first on PATH that writes its
+    /// arguments to `$SSHR_RDP_SAID`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn remote_desktop_opens_through_a_tunnel_in_the_rdp_client() {
+        let to = std::env::var("SSHR_RDP_TO").expect("SSHR_RDP_TO");
+        let said = std::path::PathBuf::from(std::env::var("SSHR_RDP_SAID").expect("SSHR_RDP_SAID"));
+        let _ = std::fs::remove_file(&said);
+        open_rdp(&to, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let args = std::fs::read_to_string(&said).unwrap();
+        let port: u16 = args.split_whitespace().find_map(|a| a.strip_prefix("/v:127.0.0.1:")).unwrap().parse().unwrap();
+        // The tunnel leads to the computer's Remote Desktop: its first answer is a TPKT header.
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        // An X.224 connection request asking for TLS.
+        s.write_all(&[3, 0, 0, 19, 14, 0xe0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 1, 0, 0, 0]).unwrap();
+        let mut b = [0u8; 4];
+        s.read_exact(&mut b).unwrap();
+        assert_eq!(b[0], 3, "a TPKT answer: {b:?}");
+        // Asked again: the same tunnel.
+        let up = RUNS.lock().unwrap().iter().filter(|r| r.address == to && r.tunnel.dest == RDP_DEST).count();
+        open_rdp(&to, None).unwrap();
+        assert_eq!(RUNS.lock().unwrap().iter().filter(|r| r.address == to && r.tunnel.dest == RDP_DEST).count(), up);
+        stop_all();
+    }
     use super::*;
 
     #[test]

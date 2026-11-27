@@ -319,3 +319,22 @@ img.qr { display: block; width: 192px; height: 192px; margin: 0 auto 12px; backg
 .linkish { background: none; border: 0; padding: 2px 4px; color: var(--accent); cursor: pointer; font-size: 13px; border-radius: 4px; }
 .linkish:hover { text-decoration: underline; }
 .linkish:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Shared address books: the way back to the list over one book's name, a book's name as a link,
+   and the rows of whom it is shared with. */
+.crumb { margin: 0 0 6px; font-size: 13px; }
+.crumb a { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+:root[dir=rtl] .crumb svg { transform: scaleX(-1); }
+.who small.note1.flush { padding-inline-start: 0; }
+a.blink { color: var(--fg); text-decoration: none; }
+a.blink:hover { color: var(--accent); text-decoration: underline; }
+.members { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.members:empty { display: none; }
+.member { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+@media (max-width: 520px) {
+  .member { grid-template-columns: minmax(0, 1fr) auto; }
+  .member select:first-child { grid-area: 1 / 1; }
+  .member .btn { grid-area: 1 / 2; }
+  .member select:nth-child(2) { grid-area: 2 / 1; }
+}

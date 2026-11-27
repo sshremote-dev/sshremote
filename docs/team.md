@@ -1,8 +1,9 @@
 # Teams
 
 A team server lets an organization manage its computers and the people who reach them: who may
-open which computers and with what rights, the settings every computer keeps, one address book
-for everyone, and a record of every session. It is part of the program (`sshremote team serve`)
+open which computers and with what rights, the settings every computer keeps, address books shared
+with groups and people, each person's own address book on all their devices, and a record of every
+session. It is part of the program (`sshremote team serve`)
 and runs on the organization's own server, behind its own HTTPS; nothing goes to sshremote.dev.
 People sign in to it with a password and an authenticator code, or through the organization's
 identity provider (OpenID Connect) or directory (LDAP). Scripts manage it with API tokens. Anyone
@@ -47,9 +48,10 @@ groups, with what rights, and whether the person at the screen is asked first), 
 settings a device group keeps: whether a password lets anyone in at all besides team members,
 asking, rights, recording, idle end, straight connections, LAN), enrollment tokens (with a group,
 an expiry and a number of uses, and the installer lines for Windows, macOS and Linux that join with
-them), API tokens (for scripts: a name, a scope and an expiry; shown once, revoked at a click), the
-audit log (connections, ends, refusals, file transfers, sign-ins and wrong ones, lockouts, and
-every change made in the console, with who made it; filter and download as CSV), and settings
+them), shared address books (below), API tokens (for scripts: a name, a scope and an expiry; shown
+once, revoked at a click), the audit log (connections, ends, refusals, file transfers, sign-ins and
+wrong ones, lockouts, and every change made in the console, with who made it; filter and download
+as CSV), and settings
 (team name and logo shown in the app, the relay its computers use, OpenID Connect, LDAP, email,
 and how many days the audit log keeps).
 
@@ -65,6 +67,23 @@ dash), for a lost phone; the users list says how many are left. An administrator
 for someone, and anyone makes their own on their account page with their password; a new set
 ends the old one, and resetting the authenticator takes them away.
 
+Shared address books (Address books): lists of computers an administrator makes, names (up to 64
+characters, each name once), describes, and shares with user groups and people, each either to
+**view** (they see its computers in the app and open them) or to **edit** (they also add, change
+and remove its computers). An administrator makes, renames, shares and removes books there, and
+opens one (`#books/ID`) to add, change, remove and find its computers. A computer of a book has a
+name (up to 64 characters), an address, up to 10 tags (each up to 32 characters, separated by
+commas) and a note (up to 500 characters). The address is a computer's ID (`123 456 789`; with
+`@RELAY[:PORT]` after it, `123456789@relay.example.com:21116`, it goes through that relay) or an SSH
+address (`user@host`, `user@host:2222`, `host`, `[v6]:22`); a user of 6 to 12 digits before the
+`@` is read as an ID. No password is kept in a book, and none can be put in an address. Members
+who are no administrators see Address books too: the books shared with them, and in the books
+they may edit, the same ways to add, change and remove their computers. A team keeps at most 100
+books of at most 2000 computers each. Whom a book is shared with, and what it lets them do, is
+looked at again at every request with the person's groups as they are then: someone taken out of
+a group, or removed, no longer reaches its books; a user renamed keeps theirs. Each book is kept
+in a file of its own in the data folder (`shared-books/ID.json`), written whole at each change.
+
 The audit log keeps 365 days unless the settings say otherwise (0: for ever); once a day the
 server drops the older lines, writing `audit.jsonl` whole beside it and putting it in its place.
 
@@ -73,7 +92,12 @@ server drops the older lines, writing `audit.jsonl` whole beside it and putting 
 Settings > Team: join this computer to a team (address and token), or leave it; sign in as a
 person (the sign-in opens in the browser, so the organization's single sign-on works), or sign
 out. Signed in, the home window lists the team's computers the person may reach; opening one gets
-a ticket and connects. With an address book passphrase set, the person's own list of computers is
+a ticket and connects. Under them, each address book the team shares with the person, under its
+name: its computers in the same rows, found by the home window's search too (by name, address and
+tags), and opened as their address typed in the field would be (an ID through the relay as usual,
+or the one the entry names, asking for its password; an SSH address over SSH). They are asked for
+with the team's computers, every minute and with the list's refresh button; changing them is done
+in the console. With an address book passphrase set, the person's own list of computers is
 kept on the team server too, encrypted on the device with a key from that passphrase (the server
 stores what it cannot read), and shows on every device they sign in on.
 
@@ -133,7 +157,18 @@ Errors: HTTP 4xx/5xx with `{"error": "words"}`.
 - `GET /api/book` -> `{"book": B64 or null, "salt": HEX}`; `PUT /api/book` `{"book": B64}`: the
   person's own address book, sealed on the device (ChaCha20-Poly1305 with a key from PBKDF2 of
   their passphrase and `salt`); at most 1 MB.
+- `GET /api/books` -> `{"books": [{"id", "name", "description", "role": "view"|"edit", "entries": [ENTRY]}]}`:
+  the shared address books the person is in (by name, or through a user group), by name, with
+  what they may do in each (shared with them in two ways, the one that lets more; an administrator
+  may edit any) and their computers; whom else a book is shared with is not said.
+- `POST /api/books/ID/entries` `{"name", "address", "tags", "note"}` -> `{"entry": ENTRY}`;
+  `PUT /api/books/ID/entries/EID` (each field left as it is when not sent) -> `{"entry": ENTRY}`;
+  `DELETE /api/books/ID/entries/EID` -> `{}`: for those the book lets edit, and administrators.
+  A book not shared with the person is `404` as one that is not there; one they may only view,
+  `403`. `tags` is a list or words with commas between them.
 
+ENTRY = `{"id", "name", "address", "tags": [words], "note"}` (no password: addresses are an ID, as
+`123 456 789` or `123456789@relay.example.com:21116`, or an SSH address, as `user@host:2222`).
 USER = `{"name", "display", "email", "admin": bool, "groups": [names], "totp": bool}`.
 TEAM = `{"name", "logo": DATA_URL or "", "relay": "HOST[:PORT]" or "", "url"}`.
 
@@ -197,6 +232,17 @@ EVENT = `{"time", "kind": "in"|"out"|"refused"|"file", "how": "team"|"password"|
   `GET /api/admin/audit.csv` the same as CSV (columns time, device, device_name, kind, how, user,
   from, rights, secs, words, token; every cell quoted, none a spreadsheet would run as a formula).
 - `GET|POST /api/admin/api-tokens`, `DELETE /api/admin/api-tokens/ID`: API tokens (below).
+- `GET|POST /api/admin/books`, `GET|PUT|DELETE /api/admin/books/ID`: shared address books.
+  BOOK = `{"id", "name", "description", "members": [{"who": "user:NAME"|"group:NAME", "role": "view"|"edit"}], "count", "created"}`
+  (`count`: how many computers it has); the list is `{"books": [BOOK]}`, one book
+  `{"book": BOOK + "entries": [ENTRY]}`, and so is the answer to a change. `POST` and `PUT` take
+  `{"name", "description", "members", "entries"?}`, each left as it is when not sent; `entries`, when
+  sent, takes the place of all of a book's computers (a script keeping a book as another list has
+  it; one that gives the `id` of one there keeps it). Names of a user or group there is, each once;
+  at most 100 books, 2000 entries a book, 1000 members, 500 characters of description; a request
+  here is at most 2 MB. Each change is an `admin` event ("address book Servers added", "sharing of
+  address book Servers changed", "entry Build added to address book Servers", "entries of address
+  book Servers replaced", ...), an editor's under their own name.
 - `GET|PUT /api/admin/settings` (`{"name", "logo", "relay", "audit_days": 0..36500, "oidc": {"issuer", "client_id",
   "client_secret", "domains": [..], "make_users": bool, "trust_email": bool} | null, "ldap": {"url",
   "user_dn": "uid={},ou=people,dc=example,dc=com", "make_users": bool, "ca_file": PATH} | null,
@@ -227,8 +273,10 @@ A script manages the team with a token an administrator made in the console (API
   administrator signed in manages those). Otherwise `403`.
 - A token acts for the administrator who made it, while they are one: taken their rights (or
   disabled), it gets `403`; removed, their tokens go with them. Expired or revoked, `401`.
-- A token is no session: `/api/login`, `/api/me`, `/api/devices`, `/api/ticket`, `/api/book` and
-  `/api/logout` do not take it.
+- A token is no session: `/api/login`, `/api/me`, `/api/devices`, `/api/ticket`, `/api/book`,
+  `/api/books` (and a book's entries there) and `/api/logout` do not take it. A script changes a
+  shared book's computers with `PUT /api/admin/books/ID` and its `entries`: `read` may only get the
+  books, `admin` change them, `devices` neither.
 
 ### Installers
 

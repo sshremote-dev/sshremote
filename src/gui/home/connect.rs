@@ -129,6 +129,9 @@ enum Entry {
     /// A computer of the person's team.
     #[cfg(feature = "remote")]
     Team(crate::team::client::Device),
+    /// A computer of an address book the team shares with the person: the book's ID, the computer.
+    #[cfg(feature = "remote")]
+    Book(String, crate::team::client::BookEntry),
 }
 
 /// What a row of the list asks for.
@@ -140,6 +143,7 @@ enum RowAct {
     Remove,
     ForgetPassword,
     Wake,
+    Rdp,
 }
 
 /// Looking for computers on this network: the answer coming, what answered, and what to say.
@@ -167,7 +171,7 @@ impl App {
         #[cfg(feature = "remote")]
         let team = crate::gui::team::listed(ui.ctx());
         #[cfg(feature = "remote")]
-        let entries = self.entries(&what, team.as_ref().map_or(&[][..], |t| &t.devices));
+        let entries = self.entries(&what, team.as_ref());
         #[cfg(not(feature = "remote"))]
         let entries = self.entries(&what);
         let r = ui.add(
@@ -254,8 +258,9 @@ impl App {
     }
 
     /// The lines of the list for what is typed: this computer, then the computers found, then
-    /// the team's (not under a tag: those are the person's own).
-    fn entries(&self, what: &Typed, #[cfg(feature = "remote")] team: &[crate::team::client::Device]) -> Vec<Entry> {
+    /// the team's and those of the address books it shares, book by book (not under a tag:
+    /// those are the person's own).
+    fn entries(&self, what: &Typed, #[cfg(feature = "remote")] team: Option<&crate::gui::team::Listed>) -> Vec<Entry> {
         // An address finds itself without the port typed after it.
         let q = match what {
             Typed::Empty => String::new(),
@@ -273,8 +278,13 @@ impl App {
         let tagged = |c: &&Computer| tag.is_none_or(|t| c.tags.iter().any(|k| k.eq_ignore_ascii_case(t)));
         out.extend(self.computers.iter().filter(tagged).filter(|c| q.is_empty() || finds(c, &q)).cloned().map(Entry::Computer));
         #[cfg(feature = "remote")]
-        if tag.is_none() {
-            out.extend(team.iter().filter(|d| q.is_empty() || crate::gui::team::finds(d, &q)).cloned().map(Entry::Team));
+        if tag.is_none()
+            && let Some(team) = team
+        {
+            out.extend(team.devices.iter().filter(|d| q.is_empty() || crate::gui::team::finds(d, &q)).cloned().map(Entry::Team));
+            for b in &team.books {
+                out.extend(b.entries.iter().filter(|e| q.is_empty() || crate::gui::team::finds_entry(e, &q)).map(|e| Entry::Book(b.id.clone(), e.clone())));
+            }
         }
         out
     }
@@ -467,6 +477,11 @@ impl App {
             Entry::Computer(c) => (c.address.clone(), c.port.map(|p| p.to_string()).unwrap_or_default(), how(self.default_mode(c.id().is_some()))),
             #[cfg(feature = "remote")]
             Entry::Team(d) => (String::new(), String::new(), How::Team { id: d.id.clone(), name: d.name.clone(), mode: self.default_mode(true) }),
+            #[cfg(feature = "remote")]
+            Entry::Book(_, b) => {
+                let (address, port, by_id) = book_target(&b.address)?;
+                (address, port, how(self.default_mode(by_id)))
+            }
         })
     }
 
@@ -675,6 +690,15 @@ impl App {
         go: &mut Option<Choice>,
         #[cfg(feature = "remote")] team: Option<&crate::gui::team::Listed>,
     ) {
+        // What opening Remote Desktop came to.
+        match self.rdp_said.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            Some(Ok(label)) => self.lan.said = t!("Remote Desktop to {} is open in its own window.", label),
+            Some(Err((label, e))) => {
+                self.lan.said.clear();
+                self.error = Some(t!("Remote Desktop to {} did not open: {}", label, crate::lang::tr_msg(&e)));
+            }
+            None => {}
+        }
         let count = entries.iter().filter(|e| matches!(e, Entry::Computer(_))).count();
         let mut add = false;
         let mut look = false;
@@ -757,6 +781,15 @@ impl App {
                     self.error = Some(t!("The password was not forgotten: {}", crate::lang::tr_msg(&e)));
                 }
             }
+            RowAct::Rdp => {
+                let (said, ctx, address, label) = (self.rdp_said.clone(), ui.ctx().clone(), c.address.clone(), crate::lang::tr_msg(&c.label()).into_owned());
+                self.lan.said = t!("Remote Desktop to {} opens\u{2026}", label);
+                std::thread::spawn(move || {
+                    let r = crate::tunnels::open_rdp(&address, c.port).map(|()| label.clone()).map_err(|e| (label, e));
+                    *said.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    ctx.request_repaint();
+                });
+            }
             RowAct::Wake => match crate::lan::wake(&c.mac) {
                 Ok(()) => self.lan.said = t!("Wake-up sent to {}: it may take a minute to come up.", crate::lang::tr_msg(&c.label())),
                 Err(e) => self.error = Some(t!("{} was not woken: {}", crate::lang::tr_msg(&c.label()), crate::lang::tr_msg(&e))),
@@ -778,6 +811,8 @@ impl App {
                 Entry::Computer(c) => self.computer_row(ui, c, picked == Some(i)),
                 #[cfg(feature = "remote")]
                 Entry::Team(d) => self.team_row(ui, d, picked == Some(i)),
+                #[cfg(feature = "remote")]
+                Entry::Book(book, b) => self.book_row(ui, book, b, picked == Some(i)),
             };
             if let Some(a) = a {
                 if matches!(a, RowAct::Pick) {
@@ -789,34 +824,81 @@ impl App {
     }
 
     /// The team's computers the person may reach: a heading with a way to ask again, then a row
-    /// each, or why there is none.
+    /// each, or why there is none; then the address books the team shares with them.
     #[cfg(feature = "remote")]
     fn team_part(&mut self, ui: &mut egui::Ui, team: &crate::gui::team::Listed, entries: &[Entry], range: std::ops::Range<usize>, picked: Option<usize>, act: &mut Option<(Entry, RowAct)>) {
-        ui.add_space(kit::GAP);
-        let count = range.len();
-        ui.horizontal(|ui| {
-            kit::heading(ui, &t!("Team computers  {}", count));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon(ui, ic::ARROWS_CLOCKWISE, t!("Ask the team server again"), false).clicked() {
-                    crate::gui::team::refresh(ui.ctx());
+        // The team's computers come first, then the books' entries, book by book.
+        let books = range.start + entries[range.clone()].iter().take_while(|e| matches!(e, Entry::Team(_))).count();
+        let searching = typed(&self.form.host) != Typed::Empty;
+        if !searching || books > range.start {
+            ui.add_space(kit::GAP);
+            let count = books - range.start;
+            ui.horizontal(|ui| {
+                kit::heading(ui, &t!("Team computers  {}", count));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon(ui, ic::ARROWS_CLOCKWISE, t!("Ask the team server again"), false).clicked() {
+                        crate::gui::team::refresh(ui.ctx());
+                    }
+                });
+            });
+            kit::list(ui, |ui| {
+                self.rows(ui, entries, range.start..books, picked, act);
+                let note = match &team.problem {
+                    Some(e) => t!("The team's computers could not be listed: {}", crate::lang::tr_msg(e)),
+                    None if team.coming => t!("Asking the team server\u{2026}").to_string(),
+                    None if count == 0 && team.devices.is_empty() => t!("The team lets you reach no computer yet.").to_string(),
+                    None => String::new(),
+                };
+                if !note.is_empty() {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
+                        let colour = if team.problem.is_some() { bad() } else { ui.visuals().weak_text_color() };
+                        ui.add(egui::Label::new(RichText::new(note).color(colour).size(12.5)).wrap());
+                    });
                 }
             });
-        });
-        kit::list(ui, |ui| {
-            self.rows(ui, entries, range, picked, act);
-            let note = match &team.problem {
-                Some(e) => t!("The team's computers could not be listed: {}", crate::lang::tr_msg(e)),
-                None if team.coming => t!("Asking the team server\u{2026}").to_string(),
-                None if count == 0 && team.devices.is_empty() => t!("The team lets you reach no computer yet.").to_string(),
-                None => String::new(),
-            };
-            if !note.is_empty() {
-                egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
-                    let colour = if team.problem.is_some() { bad() } else { ui.visuals().weak_text_color() };
-                    ui.add(egui::Label::new(RichText::new(note).color(colour).size(12.5)).wrap());
-                });
+        }
+        self.book_parts(ui, team, entries, books..range.end, picked, act, searching);
+    }
+
+    /// The address books the team shares with the person, each under its name: its computers,
+    /// or that it has none. Searching, only the books with a computer found are shown.
+    #[cfg(feature = "remote")]
+    #[allow(clippy::too_many_arguments)]
+    fn book_parts(&mut self, ui: &mut egui::Ui, team: &crate::gui::team::Listed, entries: &[Entry], range: std::ops::Range<usize>, picked: Option<usize>, act: &mut Option<(Entry, RowAct)>, searching: bool) {
+        let mut at = range.start;
+        for b in &team.books {
+            let end = at + entries[at..range.end].iter().take_while(|e| matches!(e, Entry::Book(id, _) if *id == b.id)).count();
+            if searching && end == at {
+                continue;
             }
-        });
+            ui.add_space(kit::GAP);
+            kit::heading(ui, &format!("{}  {}", b.name, end - at));
+            if !b.description.is_empty() {
+                ui.add(egui::Label::new(RichText::new(b.description.lines().next().unwrap_or("")).size(12.0).weak()).truncate()).on_hover_text(&b.description);
+                ui.add_space(4.0);
+            }
+            kit::list(ui, |ui| {
+                self.rows(ui, entries, at..end, picked, act);
+                if end == at {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(t!("No computer is in this address book yet.")).weak().size(12.5)).wrap());
+                    });
+                }
+            });
+            at = end;
+        }
+        if let Some(e) = &team.books_problem {
+            ui.add_space(kit::GAP);
+            ui.add(egui::Label::new(RichText::new(t!("The team's shared address books could not be listed: {}", crate::lang::tr_msg(e))).color(bad()).size(12.5)).wrap());
+        }
+        // An entry opens as its address typed in the field would: handed on as a computer by it.
+        let open = match act.as_ref() {
+            Some((Entry::Book(_, b), RowAct::Open(_))) => book_target(&b.address).map(|(address, port, _)| Computer { address, port: port.parse().ok(), ..Default::default() }),
+            _ => None,
+        };
+        if let (Some(c), Some((e, _))) = (open, act.as_mut()) {
+            *e = Entry::Computer(c);
+        }
     }
 
     /// One of the team's computers: online or not, its name, its ID and its group; under the
@@ -889,6 +971,88 @@ impl App {
             }
         }
         r.on_hover_text(t!("Double-click to open; a ticket from the team server lets you in, no password needed"));
+        act
+    }
+
+    /// One computer of a shared address book, in the team's rows' look: its name, its ID or SSH
+    /// address, its tags and the start of its note; under the mouse, what opens on it and a menu.
+    #[cfg(feature = "remote")]
+    fn book_row(&mut self, ui: &mut egui::Ui, book: &str, b: &crate::team::client::BookEntry, picked: bool) -> Option<RowAct> {
+        let mut act = None;
+        let key = format!("book:{book}:{}", b.id);
+        let (r, mut row, lit) = self.row_frame(ui, picked, &key);
+        let weak = row.visuals().weak_text_color();
+        let target = book_target(&b.address);
+        let by_id = target.as_ref().is_some_and(|t| t.2);
+        kit::mark(&mut row, if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, weak);
+        let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        right.spacing_mut().item_spacing.x = 2.0;
+        if lit && target.is_some() {
+            let (_, menu) = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
+                crate::gui::menu_look(ui);
+                ui.set_min_width(220.0);
+                if PaneMode::Screen.on() && ui.button(format!("{}  {}", ic::MONITOR, t!("Screen sharing"))).clicked() {
+                    act = Some(RowAct::Open(How::Screen));
+                }
+                if PaneMode::Files.on() && ui.button(format!("{}  {}", ic::FOLDER, t!("Files"))).clicked() {
+                    act = Some(RowAct::Open(How::Files));
+                }
+                if !by_id && ui.button(format!("{}  {}", ic::TERMINAL, t!("Terminal"))).clicked() {
+                    act = Some(RowAct::Open(How::Terminal));
+                }
+                if ui.button(format!("{}  {}", ic::COPY, t!("Copy address"))).clicked() {
+                    ui.ctx().copy_text(b.address.clone());
+                }
+            });
+            self.menu_open(&key, menu.is_some());
+            if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, t!("Files"), false).clicked() {
+                act = Some(RowAct::Open(How::Files));
+            }
+            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, t!("Screen"), false).clicked() {
+                act = Some(RowAct::Open(How::Screen));
+            }
+            if !by_id && icon(&mut right, ic::TERMINAL, t!("Terminal"), false).clicked() {
+                act = Some(RowAct::Open(How::Terminal));
+            }
+        }
+        let room = (right.min_rect().left() - row.cursor().left() - 8.0).max(40.0);
+        row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add_space(ROW_TEXT_TOP);
+            ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
+            let shown = book_shown(&b.address, by_id);
+            ui.add(egui::Label::new(RichText::new(if b.name.is_empty() { shown.as_str() } else { b.name.as_str() }).strong()).truncate());
+            let mut sub: Vec<String> = Vec::new();
+            if !b.name.is_empty() {
+                sub.push(shown.clone());
+            }
+            if let Some(line) = b.note.lines().map(str::trim).find(|l| !l.is_empty()) {
+                sub.push(line.to_string());
+            }
+            if sub.is_empty() {
+                sub.push(if by_id { t!("by ID").into() } else { "SSH".into() });
+            }
+            // As tall as its text and tags, as the person's own computers' line.
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for t in &b.tags {
+                    tag_pill(ui, t);
+                }
+                if !b.tags.is_empty() {
+                    ui.add_space(2.0);
+                }
+                ui.add(egui::Label::new(RichText::new(sub.join("  \u{00b7}  ")).small().weak()).truncate());
+            });
+        });
+        if act.is_none() {
+            if r.double_clicked() && target.is_some() {
+                act = Some(RowAct::Open(how(self.default_mode(by_id))));
+            } else if r.clicked() {
+                act = Some(RowAct::Pick);
+            }
+        }
+        let tip = t!("Double-click to open; the buttons open a terminal, the screen or the files");
+        r.on_hover_text(if b.note.is_empty() { tip.to_string() } else { format!("{}\n\n{tip}", b.note) });
         act
     }
 
@@ -1096,6 +1260,14 @@ impl App {
                 if crate::vault::has(&c.address) && ui.button(format!("{}  {}", ic::LOCK_KEY, t!("Forget the saved password"))).clicked() {
                     act = Some(RowAct::ForgetPassword);
                 }
+                if !web
+                    && ui
+                        .button(format!("{}  {}", ic::MONITOR, t!("Remote Desktop (RDP)")))
+                        .on_hover_text(t!("Windows' own Remote Desktop there, through a tunnel from this computer, in this computer's RDP client"))
+                        .clicked()
+                {
+                    act = Some(RowAct::Rdp);
+                }
                 if !c.mac.is_empty() && ui.button(format!("{}  {}", ic::LIGHTNING, t!("Wake it up"))).on_hover_text(t!("Wake-on-LAN to {}, on this network", c.mac)).clicked() {
                     act = Some(RowAct::Wake);
                 }
@@ -1177,6 +1349,37 @@ impl App {
     }
 }
 
+/// What an entry of a shared address book opens, as its address typed in the field would: an ID
+/// through the relay it names (else as typed IDs go), or an SSH address with its port; and
+/// whether it is by ID.
+#[cfg(feature = "remote")]
+fn book_target(address: &str) -> Option<(String, String, bool)> {
+    let a = address.trim();
+    if let Some((id, relay)) = a.split_once('@') {
+        let digits: String = id.chars().filter(|c| !c.is_whitespace()).collect();
+        if crate::access::valid_id(&digits) && !relay.trim().is_empty() {
+            return Some((crate::computers::canonical(&format!("sshremote://{digits}@{}", relay.trim())), String::new(), true));
+        }
+    }
+    match typed(a) {
+        Typed::Id { address, .. } => Some((address, String::new(), true)),
+        Typed::Ssh { host, port } => Some((host, port, false)),
+        _ => None,
+    }
+}
+
+/// An entry's address as the list shows it: an ID by its digits in threes, with the relay it
+/// names; an SSH address as it is.
+#[cfg(feature = "remote")]
+fn book_shown(address: &str, by_id: bool) -> String {
+    if !by_id {
+        return address.trim().to_string();
+    }
+    let (id, relay) = address.split_once('@').map_or((address, ""), |(i, r)| (i, r.trim()));
+    let id = t!("ID {}", crate::computers::spaced(&id.chars().filter(|c| !c.is_whitespace()).collect::<String>()));
+    if relay.is_empty() { id } else { format!("{id}  \u{00b7}  {relay}") }
+}
+
 /// What asking to come in does, where it is offered beside a saved password.
 const ASK_TIP: &str = n!("No password is given, saved or not: the person at that computer is asked to let you in, and both screens show a code to compare. Reconnecting and opening more from it ask again.");
 
@@ -1241,5 +1444,16 @@ mod tests {
         assert!(matches!(typed("sshremote://123456789@relay.example"), Typed::Id { ref address, .. } if address == "sshremote://123456789@relay.example"));
         assert_eq!(typed("my office pc"), Typed::Words);
         assert_eq!(typed("-oProxyCommand=x"), Typed::Words);
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn a_shared_book_entry_opens_as_its_address_typed() {
+        let id = super::book_target("123 456 789").unwrap();
+        assert!(id.0.starts_with("sshremote://123456789@") && id.1.is_empty() && id.2, "{id:?}");
+        assert_eq!(super::book_target(" 123456789@relay.example.com:21116 "), Some(("sshremote://123456789@relay.example.com:21116".to_string(), String::new(), true)));
+        assert_eq!(super::book_target("ops@gpu1.lab:2222"), Some(("ops@gpu1.lab".to_string(), "2222".to_string(), false)));
+        assert_eq!(super::book_target("web1"), Some(("web1".to_string(), String::new(), false)));
+        assert_eq!(super::book_target("-oProxyCommand=x"), None);
     }
 }

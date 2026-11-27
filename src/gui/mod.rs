@@ -361,6 +361,8 @@ pub struct App {
     #[cfg(windows)]
     told_tray: bool,
     error: Option<String>,
+    /// What opening Remote Desktop to a computer came to (its name, and why not), from its thread.
+    rdp_said: std::sync::Arc<std::sync::Mutex<Option<Result<String, (String, String)>>>>,
     /// A newer version: looked for in the background, offered over the home screen.
     update: home::Update,
     budget: Option<f64>,
@@ -804,6 +806,7 @@ impl App {
             picked_moved: false,
             row_menu: None,
             lan: Default::default(),
+            rdp_said: Default::default(),
             ssh_password: false,
             here: Default::default(),
             here_at: None,

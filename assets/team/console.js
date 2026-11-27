@@ -1,7 +1,8 @@
 "use strict";
 // The team server's console (docs/team.md): signing in, for the console or for the app that opened
 // the page, and for administrators the team's devices, users, groups, device groups and their
-// policies, access rules, enrollment tokens, API tokens, audit log and settings.
+// policies, access rules, shared address books, enrollment tokens, API tokens, audit log and
+// settings; for members their computers and the address books shared with them.
 
 const $ = id => document.getElementById(id);
 const base = location.pathname.replace(/[^/]*$/, "");
@@ -38,6 +39,8 @@ const ICONS = {
   mail: "M3 6h18v12H3z|M3.5 6.5 12 13l8.5-6.5",
   code: "M8 7l-5 5 5 5|M16 7l5 5-5 5|M13.5 5l-3 14",
   refresh: "M20 11a8 8 0 1 0-2.3 5.7|M20 4v7h-7",
+  book: "M6 3.5h12.5v17H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2z|M4 18.5a2 2 0 0 1 2-2h12.5|M8.5 8h6",
+  back: "M19 12H5|M11 6l-6 6 6 6",
 };
 const SVG = "http://www.w3.org/2000/svg";
 function icon(name) {
@@ -460,7 +463,9 @@ const listOf = (v, ...keys) => Array.isArray(v) ? v : (keys.map(k => v?.[k]).fin
 const S = {
   user: null, team: null, options: { oidc: false, ldap: false, mail: false },
   devices: [], users: [], groups: [], dgroups: [], rules: [], rulesSaved: "[]", tokens: [], apitokens: [], events: [], settings: null, mine: [], mybackup: null,
-  view: "", loaded: new Set(), sort: { devices: ["name", 1], users: ["name", 1], mine: ["name", 1], groups: ["name", 1], dgroups: ["name", 1], tokens: ["expires", 1], apitokens: ["name", 1] },
+  // The shared address books; the one open (#books/ID), and which one it was fetched for.
+  books: [], book: "", bookOpen: null, bookFor: null,
+  view: "", loaded: new Set(), sort: { devices: ["name", 1], users: ["name", 1], mine: ["name", 1], groups: ["name", 1], dgroups: ["name", 1], tokens: ["expires", 1], apitokens: ["name", 1], books: ["name", 1], entries: ["name", 1] },
   logo: "", focusAfter: "",
 };
 const teamUrl = () => String(S.team?.url || location.origin + base).replace(/\/+$/, "");
@@ -483,11 +488,29 @@ const load = {
   mybackup: async () => { S.mybackup = await api("GET", "api/me/backup-codes"); },
   settings: async () => { S.settings = await api("GET", "api/admin/settings"); },
   mine: async () => { S.mine = listOf(await api("GET", "api/devices"), "devices"); },
+  // An administrator's are all the team's (the one open with its entries), with the users and
+  // groups to share them with; a member's are those shared with them, each with its entries.
+  books: async () => {
+    const want = S.book;
+    if (S.user.admin) {
+      const [list, open] = await Promise.all([
+        api("GET", "api/admin/books"),
+        want ? api("GET", "api/admin/books/" + enc(want)).catch(e => { if (e.status === 404) return null; throw e; }) : null,
+        load.users(), load.groups(),
+      ]);
+      S.books = listOf(list, "books");
+      S.bookOpen = open?.book ? { ...open.book, role: "edit" } : null;
+    } else {
+      S.books = listOf(await api("GET", "api/books"), "books");
+      S.bookOpen = S.books.find(b => b.id === want) || null;
+    }
+    S.bookFor = want;
+  },
   me: async () => { const me = await api("GET", "api/me"); S.user = me.user; if (me.team) S.team = me.team; },
 };
 // What each view shows, fetched each time it opens.
 const NEEDS = {
-  mine: ["mine"], devices: ["devices", "dgroups", "users"], users: ["users", "groups", "options"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
+  mine: ["mine"], books: ["books"], devices: ["devices", "dgroups", "users"], users: ["users", "groups", "options"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
   rules: ["rules", "users", "groups", "dgroups", "devices"], enroll: ["tokens", "dgroups"], apitokens: ["apitokens"], audit: ["devices", "users"], settings: ["settings"], account: ["me", "mybackup"],
 };
 
@@ -1094,6 +1117,173 @@ function revokeApiToken(t) {
 }
 $("addapitoken").onclick = newApiToken;
 
+// Shared address books: the list (#books), or one book's computers (#books/ID). An administrator
+// makes, shares and removes them; whoever a book lets edit changes its computers.
+const canEdit = b => !!b && (S.user?.admin || b.role === "edit");
+// A member as the console shows it: a user by their display name, a group as one.
+const memberName = who => who.startsWith("group:") ? T("Group {}", who.slice(6)) : userName(who.replace(/^user:/, ""));
+function memberChips(b) {
+  const ms = b.members || [];
+  if (!ms.length) return h("span", { class: "faint", text: T("Nobody yet") });
+  return h("div", { class: "chips" }, ms.map(m => h("span", { class: "badge" + (m.role === "edit" ? " blue" : ""),
+    title: m.role === "edit" ? T("Sees its computers and changes them") : T("Sees and opens its computers"),
+    text: m.role === "edit" ? T("{} (edits)", memberName(m.who)) : memberName(m.who) })));
+}
+const firstLine = s => String(s || "").split("\n")[0];
+RENDER.books = () => {
+  const admin = !!S.user?.admin, open = S.book;
+  $("bback").hidden = !open;
+  $("addbook").hidden = !admin || !!open;
+  $("editbook").hidden = !admin || !open;
+  const ready = S.loaded.has("books") && S.bookFor === open;
+  const b = open ? S.bookOpen : null;
+  $("addentry").hidden = !ready || !canEdit(b);
+  $("btitle").textContent = open ? (b?.name || T("Address book")) : T("Shared address books");
+  $("bsub").textContent = open ? (b?.description || "")
+    : admin ? T("Lists of computers you share with groups and people: they see them in the SSH Remote app, signed in to the team, and those who may edit a list change it here. No password is kept in them.")
+      : T("The lists of computers the team shares with you. They are in the SSH Remote app too, signed in to the team (Settings, Team).");
+  $("bsearch").placeholder = open ? T("Name, address, tag or note") : T("Name or description");
+  $("bsearch").setAttribute("aria-label", open ? T("Search the computers") : T("Search the address books"));
+  if (!ready) { $("bcount").textContent = ""; $("books").replaceChildren(loading()); return; }
+  const q = norm($("bsearch").value);
+  if (open) {
+    if (!b) { $("bcount").textContent = ""; $("books").replaceChildren(h("div", { class: "empty" }, h("p", { text: T("This address book is not there any more, or not shared with you.") }), h("a", { class: "btn primary", href: "#books", text: T("All address books") }))); return; }
+    const all = b.entries || [];
+    const rows = all.filter(e => !q || [e.name, e.address, e.note, ...(e.tags || [])].some(x => norm(x).includes(q)));
+    count("bcount", rows.length, all.length);
+    const edit = canEdit(b);
+    const cols = [
+      { key: "name", label: T("Name"), cls: "main", sort: e => e.name || e.address, cell: e => h("div", { class: "who" }, h("b", { text: e.name || e.address, dir: "auto" }),
+        e.note ? h("small", { class: "note1 flush", text: firstLine(e.note), title: e.note, dir: "auto" }) : null) },
+      { key: "address", label: T("Address"), sort: e => e.address, cell: e => h("span", { class: "mono", text: e.address }) },
+      { key: "tags", label: T("Tags"), cls: "wrap", cell: e => (e.tags || []).length ? h("div", { class: "chips" }, e.tags.map(t => h("span", { class: "badge", text: t, dir: "auto" }))) : dash() },
+    ];
+    if (edit) cols.push({ label: T("Actions"), cls: "acts", cell: e => [
+      iconButton("rename", T("Edit {}", e.name || e.address), { "data-k": "edit-" + e.id, onclick: () => editEntry(b, e) }),
+      iconButton("trash", T("Remove {}", e.name || e.address), { class: "danger", "data-k": "rm-" + e.id, onclick: () => removeEntry(b, e) }),
+    ] });
+    $("books").replaceChildren(table("entries", cols, rows, all.length ? h("p", { text: T("Nothing matches.") })
+      : [h("p", { text: T("No computer is in this address book yet.") }), edit ? textButton("plus", T("Add a computer"), { class: "primary", onclick: () => editEntry(b, null) }) : null]));
+    return;
+  }
+  const rows = S.books.filter(x => !q || [x.name, x.description].some(v => norm(v).includes(q)));
+  count("bcount", rows.length, S.books.length);
+  const size = x => typeof x.count === "number" ? x.count : (x.entries || []).length;
+  const cols = [
+    { key: "name", label: T("Name"), cls: "main", sort: x => x.name, cell: x => h("div", { class: "who" }, h("a", { class: "blink", href: "#books/" + enc(x.id), "data-k": "open-" + x.id }, h("b", { text: x.name, dir: "auto" })),
+      x.description ? h("small", { class: "note1 flush", text: firstLine(x.description), title: x.description, dir: "auto" }) : null) },
+    admin ? { key: "members", label: T("Shared with"), cls: "wrap", cell: memberChips }
+      : { key: "role", label: T("You may"), sort: x => x.role === "edit" ? 0 : 1, cell: x => x.role === "edit" ? h("span", { class: "badge blue", text: T("Change its computers") }) : T("See and open its computers") },
+    { key: "count", label: T("Computers"), sort: size, cell: x => String(size(x)) },
+    { label: T("Actions"), cls: "acts", cell: x => [
+      iconButton("list", T("Open {}", x.name), { "data-k": "show-" + x.id, onclick: () => { location.hash = "#books/" + enc(x.id); } }),
+      admin ? iconButton("rename", T("Edit {}", x.name), { "data-k": "edit-" + x.id, onclick: () => editBook(x) }) : null,
+      admin ? iconButton("trash", T("Remove {}", x.name), { class: "danger", "data-k": "rm-" + x.id, onclick: () => removeBook(x) }) : null,
+    ] },
+  ];
+  $("books").replaceChildren(table("books", cols, rows, S.books.length ? h("p", { text: T("Nothing matches.") })
+    : admin ? [h("p", { text: T("No shared address books yet. Make one, put computers in it and share it with groups or people.") }), textButton("plus", T("Make an address book"), { class: "primary", onclick: () => editBook(null) })]
+      : h("p", { text: T("No address book is shared with you yet.") })));
+};
+// After a change: the books fetched again, the view drawn, a word said.
+async function booksChanged(words) {
+  await load.books();
+  render();
+  toast(words);
+}
+// A book made or changed: its name, description, and whom it is shared with, each to view or to edit.
+function editBook(b) {
+  const adding = !b;
+  b = b || { name: "", description: "", members: [] };
+  const name = h("input", { type: "text", maxlength: 64, autocomplete: "off", required: true });
+  name.value = b.name;
+  const desc = h("textarea", { maxlength: 500, rows: 2, dir: "auto" });
+  desc.value = b.description || "";
+  const options = () => {
+    const opts = [{ group: T("Groups"), items: S.groups.map(g => ["group:" + g.name, g.name]) },
+      { group: T("Users"), items: S.users.map(u => ["user:" + u.name, u.display && u.display !== u.name ? u.display + " (" + u.name + ")" : u.name]) }];
+    return opts.filter(o => o.items.length);
+  };
+  const list = h("div", { class: "members" });
+  const addRow = m => {
+    const who = select(options(), m.who, { "aria-label": T("Who") });
+    if (m.who && who.value !== m.who) { who.append(h("option", { value: m.who, text: T("{} (not found)", m.who.replace(/^\w+:/, "")) })); who.value = m.who; }
+    const role = select([["view", T("Sees and opens its computers")], ["edit", T("Also changes its computers")]], m.role || "view", { "aria-label": T("What they may do") });
+    const row = h("div", { class: "member" }, who, role);
+    row.append(iconButton("x", T("Stop sharing with them"), { class: "danger", onclick: () => { row.remove(); more.focus(); } }));
+    list.append(row);
+    return who;
+  };
+  for (const m of b.members || []) addRow(m);
+  const more = textButton("plus", T("Share with someone"), { class: "solid" });
+  more.disabled = !S.groups.length && !S.users.length;
+  more.onclick = () => {
+    const taken = new Set([...list.querySelectorAll(".member select:first-child")].map(s => s.value));
+    const next = options().flatMap(o => o.items).find(i => !taken.has(i[0]));
+    addRow({ who: next ? next[0] : "", role: "view" }).focus();
+  };
+  const shared = h("fieldset", null, h("legend", { text: T("Shared with") }), list, h("div", { class: "row mt" }, more),
+    h("p", { class: "hint", text: T("They see its computers in the SSH Remote app, signed in to the team; those who may change them do it here, in the console. A person in two of its groups gets the more of the two.") }));
+  dialog({
+    title: adding ? T("Make an address book") : T("Edit {}", b.name), wide: true, ok: adding ? T("Make it") : T("Save"),
+    fields: [field(T("Name"), name), field(T("Description"), desc, T("At most 500 characters.")), shared],
+    submit: async () => {
+      const members = [...list.querySelectorAll(".member")].map(r => { const [w, ro] = r.querySelectorAll("select"); return { who: w.value, role: ro.value }; }).filter(m => m.who);
+      const body = { name: name.value.trim(), description: desc.value.trim(), members };
+      const got = adding ? await api("POST", "api/admin/books", body) : await api("PUT", "api/admin/books/" + enc(b.id), body);
+      await booksChanged(adding ? T("{} is made.", body.name) : T("Saved."));
+      return got;
+    },
+  });
+}
+function removeBook(b) {
+  dialog({
+    title: T("Remove the address book {}?", b.name), danger: true, ok: T("Remove"),
+    text: T("Everyone it is shared with loses its list of computers. The computers themselves are not touched."),
+    submit: async () => {
+      await api("DELETE", "api/admin/books/" + enc(b.id));
+      if (S.book === b.id) { location.hash = "#books"; toast(T("Removed.")); return; }
+      await booksChanged(T("Removed."));
+    },
+  });
+}
+// A computer of a book added or changed: its name, its address, its tags, a note. Never a password.
+function editEntry(b, e) {
+  const adding = !e;
+  e = e || { name: "", address: "", tags: [], note: "" };
+  const name = h("input", { type: "text", maxlength: 64, autocomplete: "off", dir: "auto" });
+  name.value = e.name || "";
+  const address = h("input", { type: "text", maxlength: 300, autocomplete: "off", autocapitalize: "off", spellcheck: "false", required: true, class: "ltr", placeholder: "123 456 789, user@host:22" });
+  address.value = e.address || "";
+  const tags = h("input", { type: "text", autocomplete: "off", dir: "auto" });
+  tags.value = (e.tags || []).join(", ");
+  const note = h("textarea", { maxlength: 500, rows: 3, dir: "auto" });
+  note.value = e.note || "";
+  dialog({
+    title: adding ? T("Add a computer to {}", b.name) : T("Edit {}", e.name || e.address), wide: true, ok: adding ? T("Add") : T("Save"),
+    fields: [h("div", { class: "grid2" }, field(T("Name"), name), field(T("Address"), address,
+      T("A computer's ID, such as 123 456 789 (with @ and a relay after it for another relay, such as 123456789@relay.example.com), or an SSH address, such as user@host or user@host:2222. No password: each person gives their own."), "full"),
+      field(T("Tags"), tags, T("At most 10, separated by commas."), "full")), field(T("Note"), note, T("At most 500 characters."))],
+    submit: async () => {
+      const body = { name: name.value.trim(), address: address.value.trim(), tags: tags.value.split(",").map(t => t.trim()).filter(Boolean), note: note.value.trim() };
+      if (adding) await api("POST", "api/books/" + enc(b.id) + "/entries", body);
+      else await api("PUT", "api/books/" + enc(b.id) + "/entries/" + enc(e.id), body);
+      await booksChanged(adding ? T("{} is added.", body.name || body.address) : T("Saved."));
+    },
+  });
+}
+function removeEntry(b, e) {
+  dialog({
+    title: T("Remove {} from the address book?", e.name || e.address), danger: true, ok: T("Remove"),
+    text: T("It goes for everyone the address book is shared with."),
+    submit: async () => { await api("DELETE", "api/books/" + enc(b.id) + "/entries/" + enc(e.id)); await booksChanged(T("Removed.")); },
+  });
+}
+$("addbook").onclick = () => editBook(null);
+$("editbook").onclick = () => { if (S.bookOpen) editBook(S.books.find(x => x.id === S.bookOpen.id) || S.bookOpen); };
+$("addentry").onclick = () => { if (S.bookOpen) editEntry(S.bookOpen, null); };
+$("bsearch").oninput = () => RENDER.books();
+
 // The audit log.
 const KINDS = {
   in: () => T("Came in"), out: () => T("Left"), refused: () => T("Refused"), file: () => T("Files"), login: () => T("Signed in"),
@@ -1365,7 +1555,7 @@ function renderMe() {
   for (const e of document.querySelectorAll(".adminonly")) e.hidden = !u.admin;
   for (const e of document.querySelectorAll(".useronly")) e.hidden = !!u.admin;
 }
-const NAV_ICONS = { mine: "monitor", devices: "monitor", users: "user", groups: "users", dgroups: "layers", rules: "shield", enroll: "key", apitokens: "code", audit: "list", settings: "sliders" };
+const NAV_ICONS = { mine: "monitor", devices: "monitor", users: "user", groups: "users", dgroups: "layers", rules: "shield", books: "book", enroll: "key", apitokens: "code", audit: "list", settings: "sliders" };
 for (const a of document.querySelectorAll("#nav a")) a.prepend(icon(NAV_ICONS[a.dataset.view]));
 $("signout").prepend(icon("logout"));
 $("adduser").prepend(icon("plus"));
@@ -1374,6 +1564,10 @@ $("adddgroup").prepend(icon("plus"));
 $("addrule").prepend(icon("plus"));
 $("addtoken").prepend(icon("plus"));
 $("addapitoken").prepend(icon("plus"));
+$("addbook").prepend(icon("plus"));
+$("addentry").prepend(icon("plus"));
+$("editbook").prepend(icon("rename"));
+$("bbacklink").prepend(icon("back"));
 $("acsv").prepend(icon("download"));
 $("sredirectcopy").prepend(icon("copy"));
 $("donemark").append(icon("check"));
@@ -1407,17 +1601,23 @@ function render() {
     if (e && !e.disabled && e !== document.activeElement) e.focus();
   }
 }
-const VIEWS = { admin: ["devices", "users", "groups", "dgroups", "rules", "enroll", "apitokens", "audit", "settings", "account"], user: ["mine", "account"] };
+const VIEWS = { admin: ["devices", "users", "groups", "dgroups", "rules", "books", "enroll", "apitokens", "audit", "settings", "account"], user: ["mine", "books", "account"] };
 let viewAsked = 0;
-async function show(view, byHand) {
+// `arg`: the address book open in the books' view (#books/ID).
+async function show(view, byHand, arg) {
   const asked = ++viewAsked;
+  const hash = view + (view === "books" && arg ? "/" + arg : "");
   if (S.view === "rules" && view !== "rules" && rulesChanged()) {
     history.replaceState(null, "", "#rules");
     const leave = await dialog({ title: T("Leave the rules unsaved?"), text: T("The changes to the access rules are not saved yet."), ok: T("Leave them"), danger: true });
     if (!leave || asked !== viewAsked) return;
     S.rules = JSON.parse(S.rulesSaved);
-    history.replaceState(null, "", "#" + view);
+    history.replaceState(null, "", "#" + hash);
   }
+  const book = view === "books" ? arg || "" : "";
+  // Another book, or the list again: its own search.
+  if (view === "books" && (S.view !== "books" || S.book !== book)) $("bsearch").value = "";
+  S.book = book;
   S.view = view;
   for (const s of document.querySelectorAll(".view")) s.hidden = s.id !== "v-" + view;
   for (const a of document.querySelectorAll("#nav a, .foot a.me")) {
@@ -1425,7 +1625,7 @@ async function show(view, byHand) {
   }
   $("side").classList.remove("open");
   $("menubtn").setAttribute("aria-expanded", "false");
-  if (location.hash.slice(1) !== view) history.replaceState(null, "", "#" + view);
+  if (location.hash.slice(1) !== hash) history.replaceState(null, "", "#" + hash);
   if (byHand) $("h-" + view)?.focus();
   render();
   try {
@@ -1440,8 +1640,9 @@ async function show(view, byHand) {
 function route(byHand) {
   if (!S.user) return;
   const views = S.user.admin ? VIEWS.admin : VIEWS.user;
-  const want = location.hash.slice(1);
-  show(views.includes(want) ? want : views[0], byHand);
+  const [want, arg] = location.hash.slice(1).split("/");
+  if (views.includes(want)) show(want, byHand, arg);
+  else show(views[0], byHand);
 }
 addEventListener("hashchange", () => route(true));
 // The lists that change by themselves (who is online), looked at again while they are open.

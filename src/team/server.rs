@@ -1,14 +1,16 @@
 //! The team server (docs/team.md): `sshremote team serve`, an organization's own record of its
 //! computers and people, and the console it is run from. Everything is in one JSON file,
 //! `DATA/team.json`, written whole (and read again when `sshremote team admin` changes it); the
-//! audit log is appended to `DATA/audit.jsonl`, and each person's sealed address book is a file in
-//! `DATA/books`. Sessions, enrollment tokens, API tokens and backup codes are kept as hashes only;
-//! the computers' team keys are kept as they are, since every ticket is tagged with one.
+//! audit log is appended to `DATA/audit.jsonl`, each person's sealed address book is a file in
+//! `DATA/books`, and each shared address book one in `DATA/shared-books`. Sessions, enrollment
+//! tokens, API tokens and backup codes are kept as hashes only; the computers' team keys are kept
+//! as they are, since every ticket is tagged with one.
 //!
 //! The administration lists come in an object named for what they hold: `{"users": [..]}`,
 //! `{"groups": [..]}` (user groups and device groups both), `{"devices": [..]}`, `{"rules": [..]}`,
-//! `{"tokens": [..]}`, `{"events": [..]}`; a change answers with what it made (`{"user": ..}`,
-//! `{"group": ..}`, `{"device": ..}`, a token, the rules, the settings), a removal with `{}`.
+//! `{"tokens": [..]}`, `{"books": [..]}`, `{"events": [..]}`; a change answers with what it made
+//! (`{"user": ..}`, `{"group": ..}`, `{"device": ..}`, `{"book": ..}`, a token, the rules, the
+//! settings), a removal with `{}`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -45,7 +47,8 @@ const MOST_TRIES: usize = 5;
 const MOST_NAME_TRIES: usize = 20;
 const TRIES_SECS: u64 = 900;
 const MOST_BODY: usize = 1 << 20;
-/// An address book's request: the book (at most 1 MB) in JSON.
+/// An address book's request: a person's own book (at most 1 MB) in JSON, or a shared book's
+/// entries sent whole.
 const MOST_BOOK_BODY: usize = 2 << 20;
 const MOST_BOOK: usize = 1 << 20;
 const MOST_LOGO: usize = 256 << 10;
@@ -377,6 +380,234 @@ struct Caller {
     session: String,
     /// The token's name and scope, for one.
     token: Option<(String, String)>,
+}
+
+/// An address book an administrator shares with groups and people (docs/team.md, Shared address
+/// books): the computers in it and how each is reached, never a password.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Book {
+    id: String,
+    name: String,
+    description: String,
+    /// Who it is shared with (`user:NAME` or `group:NAME`), and whether they may change its
+    /// entries (true: "edit") or only see and open them ("view").
+    members: BTreeMap<String, bool>,
+    entries: Vec<BookEntry>,
+    created: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct BookEntry {
+    id: String,
+    name: String,
+    /// An ID (`123 456 789`, `123456789@relay.example.com:21116`) or an SSH address (`user@host:22`).
+    address: String,
+    tags: Vec<String>,
+    note: String,
+}
+
+/// Shared address books a team keeps at most, the entries of each, who each is shared with.
+const MOST_BOOKS: usize = 100;
+const MOST_ENTRIES: usize = 2000;
+const MOST_MEMBERS: usize = 1000;
+/// An entry's tags, and the characters of each.
+const MOST_TAGS: usize = 10;
+const MOST_TAG: usize = 32;
+
+const fn role_word(edit: bool) -> &'static str {
+    if edit { "edit" } else { "view" }
+}
+
+impl BookEntry {
+    fn json(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "address": self.address, "tags": self.tags, "note": self.note})
+    }
+
+    fn read(v: &Value) -> Option<BookEntry> {
+        Some(BookEntry { id: v["id"].as_str()?.to_string(), name: st(v, "name"), address: v["address"].as_str()?.to_string(), tags: strings(&v["tags"]), note: st(v, "note") })
+    }
+
+    /// What the audit log calls it: its name, else its address.
+    fn shown(&self) -> &str {
+        if self.name.is_empty() { &self.address } else { &self.name }
+    }
+}
+
+impl Book {
+    fn members_json(&self) -> Vec<Value> {
+        self.members.iter().map(|(who, edit)| json!({"who": who, "role": role_word(*edit)})).collect()
+    }
+
+    fn stored(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "description": self.description, "members": self.members_json(), "created": self.created,
+            "entries": self.entries.iter().map(BookEntry::json).collect::<Vec<_>>()})
+    }
+
+    fn read(v: &Value) -> Option<Book> {
+        let members = v["members"].as_array().into_iter().flatten().filter_map(|m| Some((m["who"].as_str()?.to_string(), m["role"].as_str() == Some("edit")))).collect();
+        Some(Book {
+            id: v["id"].as_str().filter(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))?.to_string(),
+            name: v["name"].as_str()?.to_string(),
+            description: st(v, "description"),
+            members,
+            entries: v["entries"].as_array().into_iter().flatten().filter_map(BookEntry::read).collect(),
+            created: v["created"].as_u64().unwrap_or(0),
+        })
+    }
+
+    /// As the administration lists it: who it is shared with, and how many entries it has.
+    fn listed(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "description": self.description, "members": self.members_json(), "count": self.entries.len(), "created": self.created})
+    }
+
+    /// As the administration opens it: with its entries.
+    fn whole(&self) -> Value {
+        let mut v = self.listed();
+        v["entries"] = json!(self.entries.iter().map(BookEntry::json).collect::<Vec<_>>());
+        v
+    }
+
+    /// As a person it is shared with sees it: what they may do in it, not who else is in it.
+    fn for_person(&self, edit: bool) -> Value {
+        json!({"id": self.id, "name": self.name, "description": self.description, "role": role_word(edit), "entries": self.entries.iter().map(BookEntry::json).collect::<Vec<_>>()})
+    }
+
+    /// What it lets `u` do, as they are now: None when it is not shared with them, else whether
+    /// they may change it (shared with them in two ways, the one that lets more).
+    fn role(&self, u: &User) -> Option<bool> {
+        let mine = |who: &str| who.strip_prefix("user:") == Some(u.name.as_str()) || who.strip_prefix("group:").is_some_and(|g| u.groups.iter().any(|x| x == g));
+        self.members.iter().filter(|(who, _)| mine(who)).map(|(_, edit)| *edit).reduce(|a, b| a || b)
+    }
+}
+
+/// A note or a description as kept: its lines, and nothing else that is no text.
+fn note_text(s: &str) -> String {
+    s.replace("\r\n", "\n").chars().filter(|c| *c == '\n' || !c.is_control()).collect::<String>().trim().to_string()
+}
+
+/// An entry's address as docs/team.md has it: a computer's ID (6 to 12 digits, single spaces
+/// between them allowed) with `@RELAY[:PORT]` after it or not, or an SSH address
+/// `[USER@]HOST[:PORT]`. Nothing ssh could take for an option, and no password in it.
+fn address_ok(a: &str) -> bool {
+    let id = |s: &str| s.trim() == s && !s.contains("  ") && crate::access::valid_id(&s.replace(' ', ""));
+    let port = |p: &str| p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|p| p > 0);
+    let name = |h: &str| !h.is_empty() && h.len() <= 253 && !h.starts_with(['-', '.']) && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c));
+    let v6 = |h: &str| h.matches(':').count() >= 2 && h.chars().all(|c| c.is_ascii_hexdigit() || ":.".contains(c));
+    // A host and its port: name[:port], [v6][:port], or a bare v6 (which has no port).
+    let host = |h: &str| match h.strip_prefix('[') {
+        Some(r) => r.split_once(']').is_some_and(|(ip, rest)| v6(ip) && (rest.is_empty() || rest.strip_prefix(':').is_some_and(port))),
+        None if v6(h) => true,
+        None => match h.split_once(':') {
+            Some((n, p)) => name(n) && port(p),
+            None => name(h),
+        },
+    };
+    if a.is_empty() || a.chars().count() > 300 {
+        return false;
+    }
+    match a.rsplit_once('@') {
+        // A user of an ID's digits: the ID, through the relay after it.
+        Some((u, relay)) if id(u) => host(relay),
+        Some((u, h)) => !u.is_empty() && u.len() <= 64 && !u.starts_with('-') && u.chars().all(|c| c.is_ascii_alphanumeric() || "._-\\@".contains(c)) && host(h),
+        None => id(a) || host(a),
+    }
+}
+
+/// An entry as the console sends it, each field left as `was` has it when not sent.
+fn entry_from(v: &Value, was: Option<&BookEntry>) -> Result<BookEntry, String> {
+    let mut e = was.cloned().unwrap_or_default();
+    if let Some(n) = v["name"].as_str() {
+        e.name = n.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
+        if e.name.chars().count() > 64 {
+            return Err("an entry's name is at most 64 characters".into());
+        }
+    }
+    if let Some(a) = v["address"].as_str() {
+        e.address = a.trim().to_string();
+    }
+    if !address_ok(&e.address) {
+        return Err("an entry's address is a computer's ID (123 456 789, or 123456789@relay.example.com:21116) or an SSH address (user@host:22), with no password in it".into());
+    }
+    if v.get("tags").is_some_and(|t| !t.is_null()) {
+        // A list, or words with commas between them as a person types them (a comma parts tags,
+        // as in the app's own list).
+        let typed: Vec<String> = match &v["tags"] {
+            Value::String(s) => vec![s.clone()],
+            t => strings(t),
+        };
+        let mut tags: Vec<String> = Vec::new();
+        for t in typed.iter().flat_map(|t| t.split(',')) {
+            let t = t.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).collect::<String>();
+            if !t.is_empty() && !tags.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                tags.push(t);
+            }
+        }
+        if tags.len() > MOST_TAGS || tags.iter().any(|t| t.chars().count() > MOST_TAG) {
+            return Err("an entry has at most 10 tags, each of at most 32 characters".into());
+        }
+        e.tags = tags;
+    }
+    if let Some(n) = v["note"].as_str() {
+        e.note = note_text(n);
+        if e.note.chars().count() > MOST_NOTE {
+            return Err("a note is at most 500 characters".into());
+        }
+    }
+    Ok(e)
+}
+
+/// Who a book is shared with, as the console sends it (`[{"who", "role"}]`), checked against the
+/// users and groups there are.
+fn members_from(v: &Value, s: &Store) -> Result<BTreeMap<String, bool>, String> {
+    let list = v.as_array().ok_or("the members are a list")?;
+    if list.len() > MOST_MEMBERS {
+        return Err("an address book is shared with at most 1000 users and groups".into());
+    }
+    let mut out = BTreeMap::new();
+    for m in list {
+        let who = m["who"].as_str().unwrap_or("").trim();
+        if !member_known(who, s) {
+            return Err(format!("a member's \"who\" is user:NAME or group:NAME, of a user or group there is (not \"{}\")", who));
+        }
+        let edit = match m["role"].as_str().unwrap_or("view") {
+            "view" => false,
+            "edit" => true,
+            r => return Err(format!("a member's role is view or edit (not \"{}\")", r)),
+        };
+        // Named twice: the role that lets more is kept.
+        *out.entry(who.to_string()).or_insert(false) |= edit;
+    }
+    Ok(out)
+}
+
+fn member_known(who: &str, s: &Store) -> bool {
+    match who.split_once(':') {
+        Some(("user", n)) => s.users.contains_key(n),
+        Some(("group", g)) => s.groups.contains(g),
+        _ => false,
+    }
+}
+
+/// The shared address books in `dir`, each in its own file (written alone when it changes); a
+/// member who is no longer there (removed while the file could not be written) is left out.
+fn load_books(dir: &Path, s: &Store) -> BTreeMap<String, Book> {
+    let mut out = BTreeMap::new();
+    let Ok(files) = std::fs::read_dir(dir) else { return out };
+    for f in files.flatten() {
+        let path = f.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let read = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| Book::read(&v));
+        match read {
+            Some(mut b) if path.file_stem().and_then(|x| x.to_str()) == Some(b.id.as_str()) => {
+                b.members.retain(|who, _| member_known(who, s));
+                out.insert(b.id.clone(), b);
+            }
+            _ => eprintln!("team: {}: not a shared address book, left out", path.display()),
+        }
+    }
+    out
 }
 
 /// A new set of backup codes: as shown once ("abcde-fghij"), and as kept (their hashes).
@@ -761,6 +992,9 @@ struct Team {
     /// When the audit log last lost its old lines.
     pruned: AtomicU64,
     audit_file: Mutex<()>,
+    /// The shared address books, by their ID, each kept in a file of its own. Taken after the
+    /// record's lock when both are, never before it.
+    books: Mutex<BTreeMap<String, Book>>,
 }
 
 impl Team {
@@ -768,6 +1002,7 @@ impl Team {
         make_dir(dir)?;
         let file = dir.join("team.json");
         let store = load(&file)?;
+        let books = load_books(&dir.join("shared-books"), &store);
         Ok(Team {
             dir: dir.to_path_buf(),
             url: url.to_string(),
@@ -783,6 +1018,7 @@ impl Team {
             failed: Mutex::default(),
             pruned: AtomicU64::new(0),
             audit_file: Mutex::default(),
+            books: Mutex::new(books),
         })
     }
 
@@ -977,6 +1213,42 @@ impl Team {
         drop(s);
         self.audit(&[json!({"time": now, "kind": "password", "user": l.user, "from": req.who.to_string()})]);
         Ok(ok(json!({"user": l.user})))
+    }
+
+    fn shared_book_file(&self, id: &str) -> PathBuf {
+        self.dir.join("shared-books").join(format!("{id}.json"))
+    }
+
+    /// A shared address book written whole to its file.
+    fn save_book(&self, b: &Book) -> Result<(), String> {
+        make_dir(&self.dir.join("shared-books"))?;
+        let file = self.shared_book_file(&b.id);
+        let text = serde_json::to_vec(&b.stored()).map_err(|e| e.to_string())?;
+        crate::sys::write_whole(&file, &text, true, true).map_err(|e| format!("{}: {e}", file.display()))
+    }
+
+    fn saved_book(&self, b: &Book) -> Result<(), Answer> {
+        self.save_book(b).map_err(|e| {
+            eprintln!("team: {e}");
+            fail(500, "the team server could not save the address book")
+        })
+    }
+
+    /// The shared books as a user or group changes: `was` (`user:NAME` or `group:NAME`) renamed to
+    /// `now`, or gone with None, so no book is left to whoever takes the old name later. Called
+    /// with the record's lock held.
+    fn members_moved(&self, was: &str, now: Option<&str>) {
+        let mut books = lock(&self.books);
+        for b in books.values_mut().filter(|b| b.members.contains_key(was)) {
+            if let Some(edit) = b.members.remove(was)
+                && let Some(n) = now
+            {
+                *b.members.entry(n.to_string()).or_insert(false) |= edit;
+            }
+            if let Err(e) = self.save_book(b) {
+                eprintln!("team: {e}");
+            }
+        }
     }
 
     fn book_file(&self, name: &str) -> PathBuf {
@@ -1402,7 +1674,7 @@ fn read_request(conn: &TcpStream, peer: IpAddr) -> Result<Req, (u16, &'static st
         Some(v) => v.parse().map_err(|_| (400, "the Content-Length does not read"))?,
         None => 0,
     };
-    if len > if path == "/api/book" { MOST_BOOK_BODY } else { MOST_BODY } {
+    if len > if path == "/api/book" || path.starts_with("/api/admin/books") { MOST_BOOK_BODY } else { MOST_BODY } {
         return Err((413, "the request is too large"));
     }
     // curl waits for this before a body of more than a kilobyte.
@@ -1577,6 +1849,8 @@ fn route(team: &Team, req: &Req) -> Answer {
         ("GET", "/api/devices") => team.devices(req),
         ("POST", "/api/ticket") => team.ticket(req),
         ("GET" | "PUT", "/api/book") => team.book(req, method),
+        ("GET", "/api/books") => team.shared_books(req),
+        _ if p.starts_with("/api/books/") => team.book_entry(req, method),
         ("GET", "/api/oidc/start") => {
             let app = AppAsk::from(req.q("app"), req.q("port")).ok().flatten();
             Ok(team.oidc_start(req).unwrap_or_else(|w| team.to_page(app.as_ref(), &format!("error={}", esc(&w)))))
@@ -1960,6 +2234,179 @@ impl Team {
         let book = std::fs::read_to_string(&file).ok();
         Ok(ok(json!({"book": book, "salt": salt})))
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shared address books. Whom a book is shared with, and what it lets them do, is looked at again
+// at every request, with the person's groups as they are then.
+
+impl Team {
+    /// `GET /api/books`: the shared address books the person is in, each with what they may do
+    /// in it and its entries (whom else it is shared with is for the administrators).
+    fn shared_books(&self, req: &Req) -> Reply {
+        let (_, me) = self.person(req)?;
+        let books = lock(&self.books);
+        let mut list: Vec<(String, Value)> = books.values().filter_map(|b| Some((b.name.to_lowercase(), b.for_person(b.role(&me)? || me.admin)))).collect();
+        drop(books);
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ok(json!({"books": list.into_iter().map(|(_, v)| v).collect::<Vec<_>>()})))
+    }
+
+    /// `POST /api/books/ID/entries`, `PUT|DELETE /api/books/ID/entries/EID`: an entry added,
+    /// changed or removed, by someone the book lets change it or by an administrator.
+    fn book_entry(&self, req: &Req, method: &str) -> Reply {
+        let (_, me) = self.person(req)?;
+        let mut parts = req.path["/api/books/".len()..].splitn(3, '/');
+        let (id, what, eid) = (parts.next().unwrap_or(""), parts.next(), parts.next());
+        if what != Some("entries") || !matches!((method, eid), ("POST", None) | ("PUT" | "DELETE", Some(_))) {
+            return Err(fail(404, "no such request"));
+        }
+        let v = req.json()?;
+        let mut books = lock(&self.books);
+        // Someone it is not shared with learns nothing of it, not even that it is there.
+        let may = books.get(id).and_then(|b| if me.admin { Some(true) } else { b.role(&me) });
+        match may {
+            None => return Err(fail(404, "there is no such address book")),
+            Some(false) => return Err(fail(403, "this address book lets you open its computers, not change them")),
+            Some(true) => {}
+        }
+        let mut b = books[id].clone();
+        let at = eid.map(|e| b.entries.iter().position(|x| x.id == e).ok_or_else(|| fail(404, "there is no such entry in this address book"))).transpose()?;
+        let fill = crate::lang::fill;
+        let (said, out) = match at {
+            None => {
+                if b.entries.len() >= MOST_ENTRIES {
+                    return Err(fail(400, "an address book has at most 2000 entries: remove some first"));
+                }
+                let mut e = entry_from(&v, None).map_err(|e| fail(400, &e))?;
+                e.id = crate::sys::hex(&crate::sys::random(8));
+                b.entries.push(e.clone());
+                (Some(fill(n!("entry {} added to address book {}"), &[&e.shown(), &b.name])), Some(e))
+            }
+            Some(i) if method == "PUT" => {
+                let e = entry_from(&v, Some(&b.entries[i])).map_err(|e| fail(400, &e))?;
+                let changed = e != b.entries[i];
+                b.entries[i] = e.clone();
+                (changed.then(|| fill(n!("entry {} in address book {} changed"), &[&e.shown(), &b.name])), Some(e))
+            }
+            Some(i) => {
+                let e = b.entries.remove(i);
+                (Some(fill(n!("entry {} removed from address book {}"), &[&e.shown(), &b.name])), None)
+            }
+        };
+        if said.is_some() {
+            self.saved_book(&b)?;
+            books.insert(b.id.clone(), b);
+        }
+        drop(books);
+        if let Some(w) = said {
+            self.changed(&Caller { user: me, session: String::new(), token: None }, req, "admin", w, None);
+        }
+        Ok(ok(out.map_or_else(|| json!({}), |e| json!({"entry": e.json()}))))
+    }
+
+    /// A shared address book made (`old` None) or changed by the administration: its name,
+    /// description and members, each left as it is when not sent. `"entries"`, when sent, takes
+    /// the place of all of them (a script keeping a book as another list has it); an entry that
+    /// gives the ID of one there is keeps it.
+    fn put_book(&self, req: &Req, old: Option<&str>, c: &Caller) -> Reply {
+        let v = req.json()?;
+        let s = self.store();
+        let mut books = lock(&self.books);
+        let before = match old {
+            Some(id) => Some(books.get(id).cloned().ok_or_else(|| fail(404, "there is no such address book"))?),
+            None if books.len() >= MOST_BOOKS => return Err(fail(400, "a team has at most 100 shared address books: remove some first")),
+            None => None,
+        };
+        let mut b = before.clone().unwrap_or_else(|| Book { id: crate::sys::hex(&crate::sys::random(8)), created: now(), ..Book::default() });
+        if let Some(n) = v["name"].as_str() {
+            b.name = n.trim().to_string();
+        }
+        if !name_ok(&b.name) {
+            return Err(fail(400, "an address book's name is 1 to 64 characters"));
+        }
+        if books.values().any(|x| x.id != b.id && x.name.eq_ignore_ascii_case(&b.name)) {
+            return Err(fail(409, "there is an address book of that name already"));
+        }
+        if let Some(d) = v["description"].as_str() {
+            b.description = note_text(d);
+            if b.description.chars().count() > MOST_NOTE {
+                return Err(fail(400, "a description is at most 500 characters"));
+            }
+        }
+        if v.get("members").is_some_and(|m| !m.is_null()) {
+            b.members = members_from(&v["members"], &s).map_err(|e| fail(400, &e))?;
+        }
+        // Who is checked against the record; once the book is in, a user or group removed
+        // after (under the record's lock, then this one) leaves it too.
+        drop(s);
+        let replaced = v.get("entries").is_some_and(|e| !e.is_null());
+        if replaced {
+            let list = v["entries"].as_array().ok_or_else(|| fail(400, "the entries are a list"))?;
+            if list.len() > MOST_ENTRIES {
+                return Err(fail(400, "an address book has at most 2000 entries"));
+            }
+            let mut entries: Vec<BookEntry> = Vec::with_capacity(list.len());
+            for (i, x) in list.iter().enumerate() {
+                let mut e = entry_from(x, None).map_err(|e| fail(400, &format!("entry {}: {}", i + 1, e)))?;
+                let keep = x["id"].as_str().filter(|id| b.entries.iter().any(|o| o.id == *id) && !entries.iter().any(|n| n.id == *id));
+                e.id = keep.map_or_else(|| crate::sys::hex(&crate::sys::random(8)), str::to_string);
+                entries.push(e);
+            }
+            b.entries = entries;
+        }
+        if before.as_ref() == Some(&b) {
+            return Ok(ok(json!({"book": b.whole()})));
+        }
+        self.saved_book(&b)?;
+        books.insert(b.id.clone(), b.clone());
+        drop(books);
+        let fill = crate::lang::fill;
+        let mut said = Vec::new();
+        match &before {
+            None => said.push(fill(n!("address book {} added"), &[&b.name])),
+            Some(x) => {
+                if x.name != b.name {
+                    said.push(fill(n!("address book {} renamed to {}"), &[&x.name, &b.name]));
+                }
+                if x.description != b.description {
+                    said.push(fill(n!("address book {} changed"), &[&b.name]));
+                }
+                if x.members != b.members {
+                    said.push(fill(n!("sharing of address book {} changed"), &[&b.name]));
+                }
+                if x.entries != b.entries {
+                    said.push(fill(n!("entries of address book {} replaced"), &[&b.name]));
+                }
+            }
+        }
+        for w in said {
+            self.changed(c, req, "admin", w, None);
+        }
+        Ok(ok(json!({"book": b.whole()})))
+    }
+
+    fn remove_book(&self, req: &Req, id: &str, c: &Caller) -> Reply {
+        let mut books = lock(&self.books);
+        let b = books.remove(id).ok_or_else(|| fail(404, "there is no such address book"))?;
+        if let Err(e) = std::fs::remove_file(self.shared_book_file(id))
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("team: {}: {e}", self.shared_book_file(id).display());
+            books.insert(b.id.clone(), b);
+            return Err(fail(500, "the team server could not remove the address book"));
+        }
+        drop(books);
+        self.changed(c, req, "admin", crate::lang::fill(n!("address book {} removed"), &[&b.name]), None);
+        Ok(ok(json!({})))
+    }
+}
+
+/// The administration's list of shared address books, by name.
+fn books_list(books: &BTreeMap<String, Book>) -> Vec<Value> {
+    let mut list: Vec<&Book> = books.values().collect();
+    list.sort_by_key(|b| b.name.to_lowercase());
+    list.into_iter().map(Book::listed).collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2630,6 +3077,7 @@ impl Team {
                 }
                 s.api_tokens.retain(|_, t| t.by != name);
                 self.saved(&s)?;
+                self.members_moved(&format!("user:{name}"), None);
                 drop(s);
                 let _ = std::fs::remove_file(self.book_file(name));
                 self.changed(&c, req, "admin", fill(n!("user {} removed"), &[&name]), None);
@@ -2662,6 +3110,7 @@ impl Team {
                 let who = format!("group:{g}");
                 s.rules.retain(|r| r.who != who);
                 self.saved(&s)?;
+                self.members_moved(&who, None);
                 drop(s);
                 self.changed(&c, req, "admin", fill(n!("group {} removed"), &[&g]), None);
                 Ok(ok(json!({})))
@@ -2856,6 +3305,11 @@ impl Team {
                 self.changed(&c, req, "token", fill(n!("API token {} revoked"), &[&t.name]), None);
                 Ok(ok(json!({})))
             }
+            ("GET", "books", None) => Ok(ok(json!({"books": books_list(&lock(&self.books))}))),
+            ("GET", "books", Some(id)) => lock(&self.books).get(id).map(|b| ok(json!({"book": b.whole()}))).ok_or_else(|| fail(404, "there is no such address book")),
+            ("POST", "books", None) => self.put_book(req, None, &c),
+            ("PUT", "books", Some(id)) => self.put_book(req, Some(id), &c),
+            ("DELETE", "books", Some(id)) => self.remove_book(req, id, &c),
             ("GET", "audit", None) => Ok(ok(json!({"events": self.audit_events(&req.query, 1000)}))),
             ("GET", "audit.csv", None) => {
                 let mut a = file("text/csv; charset=utf-8", &audit_csv(&self.audit_events(&req.query, 1_000_000)));
@@ -3026,6 +3480,9 @@ impl Team {
             s.sessions.retain(|h, x| x.user != name || *h == c.session);
         }
         self.saved(&s)?;
+        if let Some(o) = old.filter(|o| *o != name) {
+            self.members_moved(&format!("user:{o}"), Some(&format!("user:{name}")));
+        }
         let team = s.name.clone();
         drop(s);
         let fill = crate::lang::fill;
@@ -4140,5 +4597,180 @@ mod tests {
         let (status, v) = call("POST", &format!("{url}/api/login"), None, Some(json!({"name": name, "password": password, "code": code})));
         assert_eq!(status, 200, "{v}");
         v["token"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn an_entry_is_reached_by_an_id_or_an_ssh_address_and_nothing_else() {
+        for a in ["123456789", "123 456 789", "123456789@relay.example.com", "123 456 789@relay.example.com:21116", "123456789@[2001:db8::1]:21116", "dev@build.example", "dev@build.example:2222", "build", "10.0.0.5:22", "2001:db8::7", "dev@[fe80::1]:22", "CORP\\ana@ws1", "ana@corp@ws1"] {
+            assert!(address_ok(a), "{a}");
+        }
+        for a in ["", " 123456789", "123  456789", "-oProxyCommand=x", "dev@-oProxyCommand=x", "dev:secret@host", "a b", "dev@host:0", "dev@host:65536", "dev@host:22x", "dev@", "@host", "123456789@", "host;rm", "dev@host/x", "dev@.host", &"a".repeat(301)] {
+            assert!(!address_ok(a), "{a}");
+        }
+        let e = entry_from(&json!({"name": " Build\u{7} ", "address": " dev@build ", "tags": "linux, CI ,ci,,  two  words ", "note": "a\r\nb"}), None).unwrap();
+        assert_eq!((e.name.as_str(), e.address.as_str(), e.tags.clone(), e.note.as_str()), ("Build", "dev@build", vec!["linux".to_string(), "CI".into(), "two words".into()], "a\nb"));
+        // Fields not sent stay; a password has nowhere to go.
+        let kept = entry_from(&json!({"note": "", "password": "hunter2"}), Some(&e)).unwrap();
+        assert!(!kept.json().to_string().contains("hunter2"));
+        assert_eq!((kept.name, kept.tags.len(), kept.note), ("Build".to_string(), 3, String::new()));
+        let many: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
+        assert!(entry_from(&json!({"address": "web1", "tags": many}), None).is_err());
+        assert!(entry_from(&json!({"address": "web1", "tags": ["x".repeat(33)]}), None).is_err());
+        assert!(entry_from(&json!({"address": "web1", "name": "n".repeat(65)}), None).is_err());
+        assert!(entry_from(&json!({"address": "web1", "note": "n".repeat(501)}), None).is_err());
+        assert!(entry_from(&json!({"name": "no address"}), None).is_err());
+    }
+
+    #[test]
+    fn a_shared_book_reaches_only_its_members_as_they_are_now() {
+        let (url, team, _gone) = start("books");
+        let api = |p: &str| format!("{url}{p}");
+        let admin = login(&url, "ana", "ana's password");
+        assert_eq!(call("POST", &api("/api/admin/groups"), Some(&admin), Some(json!({"name": "staff"}))).0, 200);
+        for (name, groups) in [("bo", json!(["staff"])), ("cy", json!([])), ("dee", json!([]))] {
+            let (code, v) = call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": name, "password": format!("{name}'s password"), "groups": groups})));
+            assert_eq!(code, 200, "{v}");
+        }
+        let make = |body: Value| call("POST", &api("/api/admin/books"), Some(&admin), Some(body));
+        assert_eq!(make(json!({"name": ""})).0, 400);
+        assert_eq!(make(json!({"name": "x".repeat(65)})).0, 400);
+        assert_eq!(make(json!({"name": "Servers", "members": [{"who": "user:nobody", "role": "view"}]})).0, 400);
+        assert_eq!(make(json!({"name": "Servers", "members": [{"who": "group:staff", "role": "owner"}]})).0, 400);
+        assert_eq!(make(json!({"name": "Servers", "description": "d".repeat(501)})).0, 400);
+        let members = json!([{"who": "group:staff", "role": "view"}, {"who": "user:dee", "role": "edit"}, {"who": "user:dee", "role": "view"}]);
+        let (code, v) = make(json!({"name": "Servers", "description": "The build farm", "members": members}));
+        assert_eq!(code, 200, "{v}");
+        let id = v["book"]["id"].as_str().unwrap().to_string();
+        assert_eq!(v["book"]["members"], json!([{"who": "group:staff", "role": "view"}, {"who": "user:dee", "role": "edit"}]));
+        assert_eq!(make(json!({"name": "servers"})).0, 409);
+        let (bo, cy, dee) = (login(&url, "bo", "bo's password"), login(&url, "cy", "cy's password"), login(&url, "dee", "dee's password"));
+        let entries = |book: &str| format!("/api/books/{book}/entries");
+
+        // Shared: seen with its role, never whom else it is shared with; not shared: nothing.
+        let (code, v) = call("GET", &api("/api/books"), Some(&bo), None);
+        assert_eq!((code, v["books"][0]["name"].as_str(), v["books"][0]["role"].as_str()), (200, Some("Servers"), Some("view")));
+        assert!(v["books"][0].get("members").is_none() && !v.to_string().contains("dee"), "{v}");
+        assert_eq!(call("GET", &api("/api/books"), Some(&cy), None).1, json!({"books": []}));
+        assert_eq!(call("GET", &api("/api/admin/books"), Some(&bo), None).0, 403);
+        assert_eq!(call("GET", &api(&format!("/api/admin/books/{id}")), Some(&dee), None).0, 403);
+
+        // An editor adds, changes and removes; a viewer cannot; someone it is not shared with
+        // is told there is no such book.
+        let build = json!({"name": "Build", "address": "dev@build.example:2222", "tags": ["linux", "ci"], "note": "Rack 4"});
+        assert_eq!(call("POST", &api(&entries(&id)), Some(&bo), Some(build.clone())).0, 403);
+        assert_eq!(call("POST", &api(&entries(&id)), Some(&cy), Some(build.clone())).0, 404);
+        assert_eq!(call("POST", &api(&entries("0123456789abcdef")), Some(&dee), Some(build.clone())).0, 404);
+        assert_eq!(call("POST", &api(&entries(&id)), Some(&dee), Some(json!({"name": "x", "address": "-oProxyCommand=x"}))).0, 400);
+        let (code, v) = call("POST", &api(&entries(&id)), Some(&dee), Some(build));
+        assert_eq!(code, 200, "{v}");
+        let eid = v["entry"]["id"].as_str().unwrap().to_string();
+        assert_eq!(v["entry"]["tags"], json!(["linux", "ci"]));
+        let (code, v) = call("POST", &api(&entries(&id)), Some(&admin), Some(json!({"name": "Desk", "address": "123 456 789@relay.example.com:21116"})));
+        assert_eq!(code, 200, "{v}");
+        let one = format!("{}/{eid}", entries(&id));
+        assert_eq!(call("PUT", &api(&one), Some(&bo), Some(json!({"name": "Mine now"}))).0, 403);
+        assert_eq!(call("DELETE", &api(&one), Some(&cy), None).0, 404);
+        assert_eq!(call("PUT", &api(&format!("{}/0123456789abcdef", entries(&id))), Some(&dee), Some(json!({"name": "x"}))).0, 404);
+        let (code, v) = call("PUT", &api(&one), Some(&dee), Some(json!({"name": "Build box"})));
+        assert_eq!((code, v["entry"]["name"].as_str(), v["entry"]["address"].as_str()), (200, Some("Build box"), Some("dev@build.example:2222")));
+        let (_, v) = call("GET", &api("/api/books"), Some(&bo), None);
+        assert_eq!(v["books"][0]["entries"].as_array().map(Vec::len), Some(2));
+        assert_eq!(v["books"][0]["entries"][0]["name"], json!("Build box"));
+        // The administration sees whom it is shared with and how many entries it has.
+        let (_, v) = call("GET", &api("/api/admin/books"), Some(&admin), None);
+        assert_eq!((v["books"][0]["count"].as_u64(), v["books"][0]["description"].as_str()), (Some(2), Some("The build farm")));
+        assert!(v["books"][0].get("entries").is_none());
+        assert_eq!(call("GET", &api(&format!("/api/admin/books/{id}")), Some(&admin), None).1["book"]["entries"][1]["name"], json!("Desk"));
+        assert_eq!(call("DELETE", &api(&one), Some(&dee), None).0, 200);
+        assert_eq!(call("DELETE", &api(&one), Some(&dee), None).0, 404);
+
+        // Kept in a file of its own, and read back as it was.
+        let again = Team::open(&team.dir, &url).unwrap();
+        assert_eq!(lock(&again.books).get(&id), lock(&team.books).get(&id));
+
+        // Out of the group, out of the book: at once, with the same session.
+        assert_eq!(call("PUT", &api("/api/admin/users/bo"), Some(&admin), Some(json!({"groups": []}))).0, 200);
+        assert_eq!(call("GET", &api("/api/books"), Some(&bo), None).1, json!({"books": []}));
+        assert_eq!(call("POST", &api(&entries(&id)), Some(&bo), Some(json!({"address": "web1"}))).0, 404);
+        // Renamed, the person keeps the book; removed, the name no longer reaches it.
+        assert_eq!(call("PUT", &api("/api/admin/users/dee"), Some(&admin), Some(json!({"name": "dana"}))).0, 200);
+        assert_eq!(call("GET", &api("/api/books"), Some(&dee), None).1["books"][0]["role"], json!("edit"));
+        assert!(lock(&team.books)[&id].members.contains_key("user:dana"));
+        assert_eq!(call("DELETE", &api("/api/admin/users/dana"), Some(&admin), None).0, 200);
+        assert_eq!(call("DELETE", &api("/api/admin/groups/staff"), Some(&admin), None).0, 200);
+        assert!(lock(&team.books)[&id].members.is_empty());
+        assert_eq!(call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": "dana", "password": "another one"}))).0, 200);
+        let dana = login(&url, "dana", "another one");
+        assert_eq!(call("GET", &api("/api/books"), Some(&dana), None).1, json!({"books": []}));
+        let record = std::fs::read_to_string(team.shared_book_file(&id)).unwrap();
+        assert!(!record.contains("user:dana") && !record.contains("group:staff"), "{record}");
+
+        // Renamed and described anew; shared again; the same again changes nothing.
+        let put = |body: Value| call("PUT", &api(&format!("/api/admin/books/{id}")), Some(&admin), Some(body));
+        let (code, v) = put(json!({"name": "Build farm", "members": [{"who": "user:cy", "role": "view"}]}));
+        assert_eq!((code, v["book"]["description"].as_str()), (200, Some("The build farm")), "{v}");
+        assert_eq!(put(json!({"name": "Build farm"})).0, 200);
+        assert_eq!(call("GET", &api("/api/books"), Some(&cy), None).1["books"][0]["name"], json!("Build farm"));
+        assert_eq!(put(json!({"description": "Racks 1 to 4"})).0, 200);
+
+        // At most 2000 entries a book, sent whole or one at a time; an entry named by its ID keeps it.
+        let kept = lock(&team.books)[&id].entries[0].id.clone();
+        let mut list: Vec<Value> = (0..MOST_ENTRIES - 1).map(|i| json!({"name": format!("pc{i}"), "address": format!("pc{i}.example")})).collect();
+        list.insert(0, json!({"id": kept, "name": "Desk", "address": "123456789"}));
+        assert_eq!(put(json!({"entries": list.iter().cloned().chain([json!({"address": "one-more"})]).collect::<Vec<_>>()})).0, 400);
+        assert_eq!(put(json!({"entries": [{"address": "fine"}, {"address": "not fine at all"}]})).1["error"], json!("entry 2: an entry's address is a computer's ID (123 456 789, or 123456789@relay.example.com:21116) or an SSH address (user@host:22), with no password in it"));
+        let (code, v) = put(json!({"entries": list}));
+        assert_eq!((code, v["book"]["count"].as_u64(), v["book"]["entries"][0]["id"].as_str()), (200, Some(MOST_ENTRIES as u64), Some(kept.as_str())));
+        assert_eq!(call("POST", &api(&entries(&id)), Some(&admin), Some(json!({"address": "web1"}))).0, 400);
+        // At most 100 books.
+        {
+            let mut b = lock(&team.books);
+            for i in 1..MOST_BOOKS {
+                let id = format!("{i:016x}");
+                b.insert(id.clone(), Book { id, name: format!("filler {i}"), ..Book::default() });
+            }
+        }
+        assert_eq!(make(json!({"name": "One too many"})).0, 400);
+        lock(&team.books).retain(|k, _| *k == id);
+
+        // API tokens: read sees them, admin changes them, devices does neither; none is a person.
+        let token = |name: &str, scope: &str| call("POST", &api("/api/admin/api-tokens"), Some(&admin), Some(json!({"name": name, "scope": scope}))).1["token"].as_str().unwrap().to_string();
+        let (read, devices, full) = (token("reader", "read"), token("inventory", "devices"), token("sync", "admin"));
+        assert_eq!(call("GET", &api("/api/admin/books"), Some(&read), None).0, 200);
+        assert_eq!(call("GET", &api(&format!("/api/admin/books/{id}")), Some(&read), None).0, 200);
+        assert_eq!(call("POST", &api("/api/admin/books"), Some(&read), Some(json!({"name": "By a reader"}))).0, 403);
+        assert_eq!(call("GET", &api("/api/admin/books"), Some(&devices), None).0, 403);
+        assert_eq!(call("DELETE", &api(&format!("/api/admin/books/{id}")), Some(&devices), None).0, 403);
+        let (code, v) = call("POST", &api("/api/admin/books"), Some(&full), Some(json!({"name": "Synced", "entries": [{"name": "Web", "address": "web1"}]})));
+        assert_eq!((code, v["book"]["count"].as_u64()), (200, Some(1)), "{v}");
+        let synced = v["book"]["id"].as_str().unwrap().to_string();
+        assert_eq!(call("GET", &api("/api/books"), Some(&full), None).0, 401);
+        assert_eq!(call("POST", &api(&entries(&synced)), Some(&full), Some(json!({"address": "web2"}))).0, 401);
+        assert_eq!(call("DELETE", &api(&format!("/api/admin/books/{synced}")), Some(&full), None).0, 200);
+        assert_eq!(call("DELETE", &api(&format!("/api/admin/books/{synced}")), Some(&admin), None).0, 404);
+        assert!(!team.shared_book_file(&synced).exists());
+
+        // Each change in the audit log: who, from where, what; an editor's under their own name.
+        let changes: Vec<Value> = audit_lines(&team).into_iter().filter(|e| e["kind"] == json!("admin") && e["words"].as_str().is_some_and(|w| w.contains("address book"))).collect();
+        let words: Vec<&str> = changes.iter().filter_map(|e| e["words"].as_str()).collect();
+        assert_eq!(
+            words,
+            [
+                "address book Servers added",
+                "entry Build added to address book Servers",
+                "entry Desk added to address book Servers",
+                "entry Build box in address book Servers changed",
+                "entry Build box removed from address book Servers",
+                "address book Servers renamed to Build farm",
+                "sharing of address book Build farm changed",
+                "address book Build farm changed",
+                "entries of address book Build farm replaced",
+                "address book Synced added",
+                "address book Synced removed",
+            ]
+        );
+        assert!(changes.iter().all(|e| e["from"] == json!("127.0.0.1")));
+        assert_eq!(changes[1]["user"], json!("dee"));
+        assert!(changes[9]["how"] == json!("token") && changes[9]["token"] == json!("sync") && changes[9]["user"] == json!("ana"));
     }
 }

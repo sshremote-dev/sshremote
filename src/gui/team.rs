@@ -1,6 +1,6 @@
 //! The team screens (docs/team.md, In the app): Settings > Team, where this computer joins a team
-//! and the person signs in to one; the team's computers in the home window's list; the team's
-//! name over This computer. What the window keeps of the team is on the egui context, so the
+//! and the person signs in to one; the team's computers and the address books it shares in the
+//! home window's list; the team's name over This computer. What the window keeps of the team is on the egui context, so the
 //! page, the home window and their pictures share it; every call to the server runs off the
 //! window's thread.
 
@@ -13,12 +13,13 @@ use serde_json::{Value, json};
 use super::*;
 use crate::computers::Computer;
 use crate::gui::kit;
-use crate::team::client::{self, Device, State};
+use crate::team::client::{self, Book, BookEntry, Device, State};
 
 /// Phosphor's users-three: a team.
 pub(super) const ICON: &str = "\u{E68E}";
 
-/// How often the team's computers are asked for again while they are shown.
+/// How often the team's computers (and its shared address books) are asked for again while
+/// they are shown.
 const DEVICES_EVERY: Duration = Duration::from_secs(60);
 /// How long a sign-in in the browser is waited for (the server keeps its nonce as long).
 const SIGN_IN_FOR: Duration = Duration::from_secs(600);
@@ -90,6 +91,10 @@ pub(super) struct Shared {
     devices_at: Option<Instant>,
     devices_coming: Option<(String, Slot<Result<Vec<Device>, String>>)>,
     devices_problem: Option<String>,
+    /// The address books the team shares with the person, asked for with the computers.
+    books: Vec<Book>,
+    books_coming: Option<(String, Slot<Result<Vec<Book>, String>>)>,
+    books_problem: Option<String>,
     passphrase: String,
     /// The team's logo: its data URL and what it made (None: it does not read).
     logo: Option<(String, Option<egui::TextureHandle>)>,
@@ -132,15 +137,18 @@ impl Shared {
         }
     }
 
-    /// The team's computers the person may reach: asked for again every minute, and on demand.
+    /// The team's computers the person may reach, and the address books it shares with them:
+    /// asked for again every minute, and on demand.
     fn devices(&mut self, ctx: &egui::Context) {
         let Some(p) = self.state.person.as_ref() else {
             (self.devices, self.devices_of, self.devices_problem, self.devices_coming) = (Vec::new(), String::new(), None, None);
+            (self.books, self.books_problem, self.books_coming) = (Vec::new(), None, None);
             return;
         };
         let whose = format!("{} {}", p.url, p.user["name"].as_str().unwrap_or(""));
         if whose != self.devices_of {
             (self.devices, self.devices_at, self.devices_problem) = (Vec::new(), None, None);
+            (self.books, self.books_problem) = (Vec::new(), None);
             self.devices_of = whose.clone();
         }
         if let Some((of, r)) = self.devices_coming.as_ref().and_then(|(of, s)| lock(s).take().map(|r| (of.clone(), r))) {
@@ -154,9 +162,20 @@ impl Shared {
             // A session the server ended signs the person out: read so at once.
             self.read = None;
         }
-        if !self.held && self.devices_coming.is_none() && self.devices_at.is_none_or(|t| t.elapsed() >= DEVICES_EVERY) {
+        if let Some((of, r)) = self.books_coming.as_ref().and_then(|(of, s)| lock(s).take().map(|r| (of.clone(), r))) {
+            self.books_coming = None;
+            if of == whose {
+                match r {
+                    Ok(b) => (self.books, self.books_problem) = (b, None),
+                    Err(e) => self.books_problem = Some(e),
+                }
+            }
+            self.read = None;
+        }
+        if !self.held && self.devices_coming.is_none() && self.books_coming.is_none() && self.devices_at.is_none_or(|t| t.elapsed() >= DEVICES_EVERY) {
             self.devices_at = Some(Instant::now());
-            self.devices_coming = Some((whose, spawn(ctx, client::devices)));
+            self.devices_coming = Some((whose.clone(), spawn(ctx, client::devices)));
+            self.books_coming = Some((whose, spawn(ctx, client::books)));
         }
         ctx.request_repaint_after(DEVICES_EVERY);
     }
@@ -670,12 +689,15 @@ fn download(passphrase: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------------------------
 // The home window.
 
-/// The team's computers as the home list shows them, while the person is signed in.
+/// The team's computers as the home list shows them, while the person is signed in, and the
+/// address books it shares with them.
 pub(super) struct Listed {
     pub(super) devices: Vec<Device>,
     /// Asked for and not answered yet, with nothing to show meanwhile.
     pub(super) coming: bool,
     pub(super) problem: Option<String>,
+    pub(super) books: Vec<Book>,
+    pub(super) books_problem: Option<String>,
 }
 
 pub(super) fn listed(ctx: &egui::Context) -> Option<Listed> {
@@ -684,10 +706,16 @@ pub(super) fn listed(ctx: &egui::Context) -> Option<Listed> {
     s.poll(ctx);
     s.devices(ctx);
     s.state.person.as_ref()?;
-    Some(Listed { devices: s.devices.clone(), coming: s.devices_coming.is_some() && s.devices.is_empty(), problem: s.devices_problem.clone() })
+    Some(Listed {
+        devices: s.devices.clone(),
+        coming: s.devices_coming.is_some() && s.devices.is_empty(),
+        problem: s.devices_problem.clone(),
+        books: s.books.clone(),
+        books_problem: s.books_problem.clone(),
+    })
 }
 
-/// The team's computers asked for again now.
+/// The team's computers (and its shared address books) asked for again now.
 pub(super) fn refresh(ctx: &egui::Context) {
     lock(&shared(ctx)).devices_at = None;
 }
@@ -696,6 +724,17 @@ pub(super) fn refresh(ctx: &egui::Context) {
 pub(super) fn finds(d: &Device, q: &str) -> bool {
     let digits: String = q.chars().filter(|c| !c.is_whitespace()).collect();
     d.name.to_lowercase().contains(q) || d.group.to_lowercase().contains(q) || (!digits.is_empty() && d.id.contains(&digits))
+}
+
+/// Whether an entry of a shared address book is found by the words `q` (lower case): its name,
+/// its address, its tags, an ID's digits.
+pub(super) fn finds_entry(e: &BookEntry, q: &str) -> bool {
+    let digits: String = q.chars().filter(|c| !c.is_whitespace()).collect();
+    let id: String = e.address.split('@').next().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
+    e.name.to_lowercase().contains(q)
+        || e.address.to_lowercase().contains(q)
+        || e.tags.iter().any(|t| t.to_lowercase().contains(q))
+        || (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && id.contains(&digits))
 }
 
 /// Over This computer: the team that manages it, or the person's.
@@ -735,7 +774,25 @@ pub(super) fn hold(ctx: &egui::Context, state: State, devices: Vec<Device>) {
     let mut s = lock(&arc);
     s.devices_of = state.person.as_ref().map(|p| format!("{} {}", p.url, p.user["name"].as_str().unwrap_or(""))).unwrap_or_default();
     (s.state, s.held, s.read) = (state, true, Some(Instant::now()));
+    // The made-up team shares its made-up books too.
+    s.books = if devices.is_empty() { Vec::new() } else { sample_books() };
     (s.devices, s.devices_at) = (devices, Some(Instant::now()));
+}
+
+/// Two shared address books for pictures: one by ID, one over SSH.
+#[cfg(test)]
+pub(super) fn sample_books() -> Vec<Book> {
+    let entry = |id: &str, name: &str, address: &str, tags: &[&str], note: &str| BookEntry { id: id.into(), name: name.into(), address: address.into(), tags: tags.iter().map(|t| t.to_string()).collect(), note: note.into() };
+    vec![
+        Book {
+            id: "00000000000000b1".into(),
+            name: "Customers".into(),
+            description: "The computers we look after".into(),
+            edit: false,
+            entries: vec![entry("e1", "Bakery till", "418 220 931", &["shop"], "Ask for Maria"), entry("e2", "Dental office", "702 118 554@relay.northwind.example", &[], "")],
+        },
+        Book { id: "00000000000000b2".into(), name: "Lab servers".into(), description: String::new(), edit: true, entries: vec![entry("e3", "GPU box", "ops@gpu1.lab.example:2222", &["linux", "gpu"], "")] },
+    ]
 }
 
 /// A made-up team for pictures: this computer in it, a person signed in, three of its computers.
@@ -787,6 +844,15 @@ mod tests {
         let mut with_more = list.clone();
         with_more[0].mac = "aa:bb:cc:dd:ee:ff".into();
         assert!(!book_with(None, &with_more).to_string().contains("aa:bb"));
+    }
+
+    #[test]
+    fn a_book_entry_is_found_by_its_name_address_tags_and_id() {
+        let books = sample_books();
+        let (till, gpu) = (&books[0].entries[0], &books[1].entries[0]);
+        assert!(finds_entry(till, "bakery") && finds_entry(till, "418220931") && finds_entry(till, "220 9") && finds_entry(till, "shop"));
+        assert!(finds_entry(gpu, "ops@gpu1") && finds_entry(gpu, "gpu") && !finds_entry(gpu, "418"));
+        assert!(!finds_entry(till, "maria"), "not by its note");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The app's side of a team: this computer joined to one (its team key, the policy it keeps, the
 //! record it sends), and a person signed in to one (their session, the computers they may reach,
-//! tickets, their own address book sealed with their passphrase). The computer's team is kept
+//! tickets, the address books the team shares with them, their own address book sealed with
+//! their passphrase). The computer's team is kept
 //! with its remote access settings (`access::set_team`: where only who may change remote access
 //! writes, and the service reads); the person's session in `team.json` of their own settings
 //! folder, readable by them alone.
@@ -221,7 +222,9 @@ fn as_person(p: &SignedIn) -> Vec<(String, String)> {
     vec![("Authorization".into(), format!("Bearer {}", p.token))]
 }
 
-fn person_call(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+/// A request with the person's session: the status and the answer. A session the server ended
+/// signs the person out here too.
+fn person_ask(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
     let p = state().person.ok_or(n!("not signed in to a team"))?;
     let body = body.map(|b| b.to_string().into_bytes());
     let (code, v) = http(method, &format!("{}{path}", p.url), &as_person(&p), body.as_deref())?;
@@ -229,6 +232,11 @@ fn person_call(method: &str, path: &str, body: Option<&Value>) -> Result<Value, 
         let _ = change(|s| s.person = None);
         return Err(n!("signed out of the team: sign in again").into());
     }
+    Ok((code, v))
+}
+
+fn person_call(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+    let (code, v) = person_ask(method, path, body)?;
     if !(200..300).contains(&code) {
         return Err(refused(code, &v));
     }
@@ -562,6 +570,67 @@ pub fn ticket_password(device: &str) -> Result<String, String> {
     Ok(format!("{mark}{ticket}{mark}{tag}"))
 }
 
+/// An address book the team shares with the person: whether they may change its entries (in
+/// the console), and the computers in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Book {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub edit: bool,
+    pub entries: Vec<BookEntry>,
+}
+
+/// A computer of a shared address book, and how it is reached: an ID (with the relay after it,
+/// `123456789@relay.example.com`, or not) or an SSH address. No password is kept in a book.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BookEntry {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub tags: Vec<String>,
+    pub note: String,
+}
+
+/// The shared address books the person is in; none from a team server that has none to give
+/// (one from before shared books).
+pub fn books() -> Result<Vec<Book>, String> {
+    match person_ask("GET", "/api/books", None)? {
+        (404, _) => Ok(Vec::new()),
+        (code, v) if !(200..300).contains(&code) => Err(refused(code, &v)),
+        (_, v) => Ok(books_of(&v)),
+    }
+}
+
+/// The books of `GET /api/books`, as many as a team keeps at most.
+fn books_of(v: &Value) -> Vec<Book> {
+    let text = |v: &Value, k: &str, most: usize| v[k].as_str().unwrap_or("").chars().take(most).collect::<String>();
+    let entry = |e: &Value| {
+        Some(BookEntry {
+            id: e["id"].as_str()?.to_string(),
+            name: text(e, "name", 64),
+            address: e["address"].as_str().filter(|a| !a.trim().is_empty() && a.len() <= 300)?.trim().to_string(),
+            tags: e["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).take(10).map(|t| t.chars().take(32).collect()).collect(),
+            note: text(e, "note", 500),
+        })
+    };
+    v["books"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(100)
+        .filter_map(|b| {
+            Some(Book {
+                id: b["id"].as_str()?.to_string(),
+                name: text(b, "name", 64),
+                description: text(b, "description", 500),
+                edit: b["role"].as_str() == Some("edit"),
+                entries: b["entries"].as_array().into_iter().flatten().take(2000).filter_map(entry).collect(),
+            })
+        })
+        .collect()
+}
+
 // The person's own address book, sealed on the device with a key from their passphrase.
 
 fn book_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
@@ -617,6 +686,24 @@ mod tests {
         assert_eq!(open_book(&sealed, "river stone", b"salt").unwrap(), book);
         assert!(open_book(&sealed, "river stones", b"salt").is_err());
         assert!(open_book(&sealed, "river stone", b"pepper").is_err());
+    }
+
+    #[test]
+    fn shared_books_read_as_the_server_sends_them() {
+        let v = json!({"books": [
+            {"id": "00000000000000a1", "name": "Servers", "description": "Racks", "role": "edit", "entries": [
+                {"id": "e1", "name": "Build", "address": "dev@build:2222", "tags": ["linux", "ci"], "note": "Rack 4"},
+                {"id": "e2", "address": ""},
+                {"name": "no ID", "address": "web1"},
+            ]},
+            {"id": "00000000000000a2", "name": "Front desk", "role": "view", "entries": [{"id": "e3", "name": "Desk", "address": " 123 456 789 "}]},
+            {"name": "no ID"},
+        ]});
+        let got = books_of(&v);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].edit, got[0].entries.len(), got[0].entries[0].tags.clone()), (true, 1, vec!["linux".to_string(), "ci".into()]));
+        assert_eq!((got[1].edit, got[1].entries[0].address.as_str(), got[1].description.as_str()), (false, "123 456 789", ""));
+        assert!(books_of(&json!({"error": "not here"})).is_empty());
     }
 
     #[test]

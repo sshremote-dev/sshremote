@@ -91,6 +91,7 @@
       <a href="#groups" data-view="groups" class="adminonly"><span data-t="Groups">Groups</span></a>
       <a href="#dgroups" data-view="dgroups" class="adminonly"><span data-t="Device groups">Device groups</span></a>
       <a href="#rules" data-view="rules" class="adminonly"><span data-t="Access rules">Access rules</span></a>
+      <a href="#books" data-view="books"><span data-t="Address books">Address books</span></a>
       <a href="#enroll" data-view="enroll" class="adminonly"><span data-t="Enrollment">Enrollment</span></a>
       <a href="#apitokens" data-view="apitokens" class="adminonly"><span data-t="API tokens">API tokens</span></a>
       <a href="#audit" data-view="audit" class="adminonly"><span data-t="Audit log">Audit log</span></a>
@@ -170,6 +171,24 @@
         <button class="btn solid" id="rundo" type="button" data-t="Undo the changes">Undo the changes</button>
         <button class="btn primary" id="rsave" type="button" data-t="Save the rules">Save the rules</button>
       </div>
+    </section>
+
+    <!-- Shared address books: an administrator makes and shares them; a member sees theirs, and
+         changes the computers in those they may edit. One book is #books/ID. -->
+    <section class="view" id="v-books" hidden aria-labelledby="h-books">
+      <header class="vhead">
+        <div class="vtitle">
+          <p class="crumb" id="bback" hidden><a href="#books" id="bbacklink"><span data-t="All address books">All address books</span></a></p>
+          <h1 id="h-books" tabindex="-1"><span id="btitle"></span> <span class="count" id="bcount"></span></h1>
+          <p class="sub" id="bsub" dir="auto"></p></div>
+        <div class="tools">
+          <div class="search"><input type="search" id="bsearch" placeholder="Search" data-t-placeholder="Search" aria-label="Search" data-t-aria-label="Search" autocomplete="off"></div>
+          <button class="btn solid" id="editbook" type="button" hidden><span data-t="Edit the address book">Edit the address book</span></button>
+          <button class="btn primary" id="addbook" type="button" hidden><span data-t="Make an address book">Make an address book</span></button>
+          <button class="btn primary" id="addentry" type="button" hidden><span data-t="Add a computer">Add a computer</span></button>
+        </div>
+      </header>
+      <div id="books"></div>
     </section>
 
     <section class="view" id="v-enroll" hidden aria-labelledby="h-enroll">
