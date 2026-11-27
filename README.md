@@ -289,7 +289,9 @@ What is opened goes into the workspace:
   Ctrl and the command key trade places, so Ctrl+C here is Cmd+C on the Mac, and Cmd+C on a Mac is
   Ctrl+C on the other; a box in the keys menu turns it off), chat,
   a voice call (the person there answers in their window), screenshot, recording to MP4, pause,
-  view only, clipboard with files (copied in a file manager here, pasted there, and back), sound,
+  view only, clipboard with files (copied in a file manager here, pasted there, and back; what one
+  screen's computer copied pastes into another's, as each screen sends this clipboard to its own
+  computer when it is worked in), sound,
   and the computer itself: lock it, restart it, keep its own keyboard and mouse out (Windows and
   macOS), hide its screen from whoever sits there (Windows, and Macs with Metal graphics) and lock
   it on leaving. Printing: what is printed on the host to its printer "SSH Remote" (on Windows it
@@ -299,6 +301,11 @@ What is opened goes into the workspace:
   printed while no viewer is there waits for one. F11 and the other keys go to the host;
   Ctrl+Alt+Enter enters and leaves full screen, Ctrl+Alt+Home shows the toolbar there,
   Ctrl+Alt+PgUp/PgDn go to the tab before or after and Ctrl+Alt+Shift+PgUp/PgDn to the pane.
+  **Shortcuts** of one's own (Settings, Shortcuts; off until turned on, so every key reaches the
+  host as before): Ctrl+Alt+Del, full screen, the host's next or previous screen, screenshot,
+  recording, chat, call, view only, sound, pause, repaint, the mouse for games and locking the
+  computer, each on Ctrl+Alt+Shift and a letter to begin with or on keys of one's own, taken where
+  they are on the keyboard before the host sees them.
 - **Terminal**: tabs and split panes as in Windows Terminal (tabs can be dragged out into new
   windows), profiles for local shells and SSH hosts, find, schemes, mouse reporting for full-screen
   programs. Two reading views:
@@ -417,6 +424,14 @@ images pass through to the outer terminal.
 The agent starts a helper in the logged-on user's console session. `sshremote --install-service`
 (elevated, or from the tools menu) adds a service for the sign-in screen and Ctrl+Alt+Del.
 
+A monitor with **HDR** on comes as Windows composes it, in half floats (Desktop Duplication's
+`DuplicateOutput1`, Windows 10 1703 and later), and is turned on the graphics card into the
+picture an SDR screen shows: divided by the SDR brightness set in Windows (read again each second,
+so moving its slider shows), a colour brighter than SDR white scaled down whole so its hue stays,
+and the sRGB curve put back. Asked the old way, Windows clips such a desktop and everything
+brighter than about 40% turns white. Without a shader compiler or a graphics card that runs one,
+the CPU does the same.
+
 ## MCP
 
 `sshremote mcp HOST` (or `mcp --here` for this computer) lets an AI agent read the window in front
@@ -451,6 +466,7 @@ sshremote remote-access passwords lasting|one-time|both  # which passwords viewe
 sshremote remote-access one-time                 # a new one-time password now
 sshremote remote-access requests on|off          # people without the password may ask
 sshremote remote-access from 203.0.113.7 10.0.0.0/8   # viewers only from there (or: anywhere)
+sshremote remote-access ids 123456789, 98765*    # viewers only from these IDs (or: anyone)
 sshremote sshremote://ID --password ""           # ask to come in, without a password
 sshremote sshremote://ID --password P [--code C]
 sshremote find                     # computers nearby with remote access on
@@ -465,7 +481,16 @@ one takes its place and nobody comes back later with what they were told once.
 Where the person at the computer allows it, someone with only the ID may **ask to come in**:
 they leave the password empty, the person there is asked, and both screens show the same
 six-digit code (from the key exchange itself), which someone standing between the two could not
-match. One request at a time, and always a click to let them in.
+match. One request at a time, and always a click to let them in. A computer whose password is
+saved can be asked the same way (its menu in the list, or *Ask the person there instead* under
+the address): no password goes, and reconnecting or opening more screens from it asks again.
+
+**Only these IDs**: a computer can let in viewers from some IDs alone (a star stands for any
+digits, as `98765*`), even with the password. A viewer shows its own remote access ID (on or off)
+and proves, inside the sealed stream, that it holds its device's key; the first device an ID comes
+from is the only one it may come from after, so another computer cannot take that ID's place
+(the settings list each ID's device, to forget one that was replaced). Taking an ID off the list
+ends its sessions.
 
 Who comes in and what they may do is the person at the computer's choice: **ask first** (a viewer
 with the right password waits for a click there, turned away after a minute), and rights for the
