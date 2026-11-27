@@ -3053,6 +3053,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 return Err("the login window's screen is not up yet".into());
             }
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
+            // The person's own agent (not root's at the login window) keeps itself up to date.
+            // SAFETY: getuid cannot fail.
+            #[cfg(target_os = "macos")]
+            if service && unsafe { libc::getuid() } != 0 {
+                thread::spawn(|| crate::update::unattended(|| viewers_here() == 0));
+            }
             #[cfg(target_os = "linux")]
             {
                 // SAFETY: getuid cannot fail.
