@@ -753,3 +753,28 @@ fn the_mouse_for_games_moves_the_host_pointer_by_its_movement() {
     h.frame(Vec::new()).unwrap();
     assert!(!h.r.grab_set && !h.r.games_held);
 }
+
+/// With two monitors there, the picture goes to the one the pointer moves onto by itself, never
+/// on the pointer only being there, and not again at once after a change.
+#[test]
+#[ignore]
+fn the_picture_goes_to_the_monitor_the_pointer_moves_onto() {
+    use crate::proto::MonitorInfo;
+    let mut h = Harness::new(Vec2::new(800.0, 600.0));
+    h.frame(Vec::new()).unwrap();
+    let m = |name: &str, w, hh, at| MonitorInfo { name: name.into(), w, h: hh, primary: false, at: Some(at), added: false };
+    h.r.monitors = vec![m("left", 1920, 1080, (0, 0)), m("right", 1280, 1024, (1920, 0))];
+    h.r.monitor = 0;
+    h.r.follow_screens = true;
+    assert_eq!(h.r.screen_followed(Some((100, 100))), None, "first heard: where it is, not a move");
+    assert_eq!(h.r.screen_followed(Some((200, 100))), None, "moved on the one shown");
+    assert_eq!(h.r.screen_followed(Some((2000, 100))), Some(1), "moved onto the right one");
+    h.r.screen_changed = Some(std::time::Instant::now());
+    assert_eq!(h.r.screen_followed(Some((2010, 100))), None, "not again at once");
+    h.r.screen_changed = None;
+    h.r.monitor = 1;
+    assert_eq!(h.r.screen_followed(Some((-1900, 100))), None, "the same place said from the other monitor is no move");
+    assert_eq!(h.r.screen_followed(Some((-1800, 100))), Some(0), "moved on the left one, shown the right one");
+    h.r.follow_screens = false;
+    assert_eq!(h.r.screen_followed(Some((-1700, 100))), None, "not when turned off");
+}

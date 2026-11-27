@@ -88,6 +88,12 @@ pub(super) struct Remote {
     /// person there, or a program, moving it); `followed`: where it was when last looked at.
     follow: bool,
     followed: Option<(i16, i16)>,
+    /// The picture goes to the monitor there the pointer goes to, when the person there or a
+    /// program moves it; where on the host's desktop it was last (with the monitor shown then),
+    /// and when the monitor last changed (the agent says a moment late where the pointer is).
+    pub(in crate::gui) follow_screens: bool,
+    pointer_desk: Option<((i32, i32), usize)>,
+    screen_changed: Option<std::time::Instant>,
     /// Remote access there runs without administrator rights (`ToClient::Unelevated`); and
     /// whether they were asked for already.
     unelevated: bool,
@@ -395,6 +401,9 @@ impl Remote {
             fill_full: true,
             pan: Vec2::ZERO,
             follow: crate::hosts::setting("follow_pointer").is_none_or(|v| v != "no"),
+            follow_screens: crate::hosts::setting("follow_screens").is_some_and(|v| v == "yes"),
+            pointer_desk: None,
+            screen_changed: None,
             followed: None,
             unelevated: false,
             elevation_asked: false,
@@ -568,7 +577,27 @@ impl Remote {
     /// The host's screen `i` here from now on (kept for the next connection too).
     pub(in crate::gui) fn show_monitor(&mut self, i: usize) -> Result<(), String> {
         self.chosen_monitor = Some(i as u8);
+        self.screen_changed = Some(std::time::Instant::now());
         self.send(ToAgent::SelectMonitor(i as u8))
+    }
+
+    /// The monitor there that the pointer moved onto, when it moved there by itself (the viewer
+    /// moves it only on the one shown) onto another than the one shown.
+    fn screen_followed(&mut self, at: Option<(i16, i16)>) -> Option<usize> {
+        let (x, y) = at?;
+        let here = self.monitors.get(self.monitor)?;
+        let (ox, oy) = here.at?;
+        let desk = (ox + x as i32, oy + y as i32);
+        let was = self.pointer_desk.replace((desk, self.monitor));
+        let moved = was.is_some_and(|(p, m)| m == self.monitor && p != desk);
+        if !self.follow_screens || self.spread_asked || self.beside_asked || !moved || self.screen_changed.is_some_and(|t| t.elapsed().as_secs_f32() < 1.5) {
+            return None;
+        }
+        let inside = |m: &crate::proto::MonitorInfo| m.at.is_some_and(|(mx, my)| desk.0 >= mx && desk.1 >= my && desk.0 < mx + m.w as i32 && desk.1 < my + m.h as i32);
+        if inside(here) {
+            return None;
+        }
+        self.monitors.iter().position(|m| !m.camera() && inside(m))
     }
 
     pub(super) fn notify(&mut self, text: &str) {
@@ -850,6 +879,9 @@ impl Remote {
                 }
                 Ok(Ev::Net(ToClient::PointerAt(at))) => {
                     self.host_pointer = at;
+                    if let Some(i) = self.screen_followed(at) {
+                        self.show_monitor(i)?;
+                    }
                     ctx.request_repaint();
                 }
                 Ok(Ev::Net(ToClient::Voice(p))) => {

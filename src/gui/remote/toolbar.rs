@@ -339,6 +339,15 @@ impl Remote {
                 self.follow = follow;
                 crate::hosts::set_setting("follow_pointer", if follow { "yes" } else { "no" });
             }
+            let mut screens = self.follow_screens;
+            if ui
+                .checkbox(&mut screens, t!("Go to the monitor the pointer goes to"))
+                .on_hover_text(t!("With several monitors there, the picture changes to the one the person there or a program moves the pointer onto"))
+                .changed()
+            {
+                self.follow_screens = screens;
+                crate::hosts::set_setting("follow_screens", if screens { "yes" } else { "no" });
+            }
             ui.separator();
             // Where every new connection starts: Settings, as the quality there is named.
             let default = crate::hosts::setting("preset").and_then(|v| v.parse::<usize>().ok()).and_then(|i| PRESETS.get(i)).map_or(t!("Auto").to_string(), |p| crate::lang::tr_msg(&preset_text(p)).into_owned());
