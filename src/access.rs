@@ -76,6 +76,9 @@ pub struct Config {
     pub ids: String,
     /// The device each listed ID first came from: the ID, its key (hex), and when.
     pub id_keys: Vec<(String, String, u64)>,
+    /// The team this computer is in (`team::client::Joined` as JSON), or null: kept with the rest,
+    /// so that only who may change remote access can join a team, and the service reads it.
+    pub team: serde_json::Value,
 }
 
 /// Where sessions by ID are recorded: on Windows where the service runs them (as SYSTEM), a
@@ -254,7 +257,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>() })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -301,6 +304,7 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            team: v.get("team").filter(|t| t.is_object()).cloned().unwrap_or_default(),
         })
     }
 }
@@ -422,6 +426,12 @@ pub fn stored() -> Result<Option<Config>, String> {
 /// When [`recent`] last read the settings, from where, and what it found.
 static RECENT: Mutex<Option<(std::time::Instant, Option<PathBuf>, Option<Config>)>> = Mutex::new(None);
 
+/// [`recent`] with the team's policy over it: what remote access acts on (the window shows and
+/// keeps the computer's own settings).
+pub fn effective() -> Option<Config> {
+    recent().map(with_policy)
+}
+
 /// [`stored`] for the loops that wait on it: read again at most once a second, however often
 /// they ask (a burst of calls or of network questions included).
 pub fn recent() -> Option<Config> {
@@ -469,6 +479,7 @@ pub fn fresh() -> Config {
         record: false,
         ids: String::new(),
         id_keys: Vec::new(),
+        team: serde_json::Value::Null,
     }
 }
 
@@ -485,7 +496,7 @@ pub fn relay() -> String {
 /// macOS: what the login window's copy of remote access (run as root there, with the settings of
 /// the person who set it up) writes is handed to that person, who could not read or change it
 /// otherwise.
-fn hand_back(p: &std::path::Path) {
+pub(crate) fn hand_back(p: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -493,16 +504,34 @@ fn hand_back(p: &std::path::Path) {
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
+        // The file itself, opened as itself: a link put in its place is not followed.
         if let Some(owner) = crate::hosts::config_dir().and_then(|d| std::fs::metadata(d).ok())
             && owner.uid() != 0
+            && let Ok(f) = crate::sys::open_own(p, false)
         {
-            let _ = std::os::unix::fs::chown(p, Some(owner.uid()), Some(owner.gid()));
+            let _ = std::os::unix::fs::fchown(&f, Some(owner.uid()), Some(owner.gid()));
         }
     }
     let _ = p;
 }
 
 pub fn save(c: &Config) -> Result<(), String> {
+    // The team is changed by `set_team` alone: a window's older copy of the settings keeps it.
+    let mut c = c.clone();
+    if let Ok(Some(now)) = stored() {
+        c.team = now.team;
+    }
+    write_config(&c)
+}
+
+/// Joins this computer's settings to a team (`team::client`), or out of one with null.
+pub fn set_team(team: serde_json::Value) -> Result<(), String> {
+    let mut c = stored()?.unwrap_or_else(fresh);
+    c.team = team;
+    write_config(&c)
+}
+
+fn write_config(c: &Config) -> Result<(), String> {
     if c.password.trim().chars().count() < 8 {
         return Err(n!("The password needs at least 8 characters").into());
     }
@@ -617,6 +646,7 @@ pub fn public_state() -> serde_json::Value {
     serde_json::json!({
         "enabled": c.enabled, "id": c.id, "relay": c.relay, "ask": c.ask, "allow": c.allow, "punch": c.punch,
         "lan": c.lan, "direct": c.direct, "two_step": !c.totp.is_empty(), "passwords": c.passwords.word(), "requests": c.requests, "state": state, "viewers": viewers().iter().map(Viewer::json).collect::<Vec<_>>(),
+        "team": crate::team::client::public(&c.team),
     })
 }
 
@@ -731,13 +761,17 @@ fn note_visit(v: serde_json::Value) {
     if let Some(d) = f.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    if std::fs::metadata(&f).is_ok_and(|m| m.len() > VISITS_MOST)
-        && let Ok(t) = std::fs::read_to_string(&f)
+    // Opened as itself only (see `sys::open_own`): the login screen's copy runs as root.
+    if let Ok(mut t) = crate::sys::open_own(&f, false)
+        && t.metadata().is_ok_and(|m| m.len() > VISITS_MOST)
     {
-        let rest = &t[t.len() / 2..];
-        let _ = std::fs::write(&f, rest.find('\n').map_or("", |i| &rest[i + 1..]));
+        let mut text = String::new();
+        if t.read_to_string(&mut text).is_ok() {
+            let rest = &text[text.len() / 2..];
+            let _ = crate::sys::write_whole(&f, rest.find('\n').map_or("", |i| &rest[i + 1..]).as_bytes(), true, false);
+        }
     }
-    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&f) {
+    if let Ok(mut out) = crate::sys::open_own(&f, true) {
         let _ = writeln!(out, "{v}");
         hand_back(&f);
     }
@@ -1032,6 +1066,8 @@ enum Came {
     Lasting(String),
     OneTime(String),
     Request,
+    /// A person of the computer's team, by a ticket.
+    Team,
 }
 
 impl Welcome {
@@ -1040,6 +1076,7 @@ impl Welcome {
             crate::net::Came::Lasting => Came::Lasting(c.password.clone()),
             crate::net::Came::OneTime => Came::OneTime(c.one_time.clone()),
             crate::net::Came::Request(_) => Came::Request,
+            crate::net::Came::Team(_) => Came::Team,
         };
         Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from, token, who }
     }
@@ -1060,6 +1097,8 @@ impl Welcome {
                 Came::Lasting(p) => c.passwords.lasting() && *p == c.password,
                 Came::OneTime(p) => c.passwords.one_time() && *p == c.one_time,
                 Came::Request => c.requests,
+                // While the computer stays in its team.
+                Came::Team => crate::team::client::state().joined.is_some(),
             }
     }
 }
@@ -1379,7 +1418,7 @@ fn standby() -> bool {
             }
         };
         return match r {
-            Role::LoginScreen(owner) => console.is_none_or(|c| c.open_for(owner)) || recent().is_some_and(|c| c.ask),
+            Role::LoginScreen(owner) => console.is_none_or(|c| c.open_for(owner)) || effective().is_some_and(|c| c.ask),
             Role::Owner(uid) => console.is_some_and(|c| !c.open_for(uid)),
             Role::Plain => false,
         };
@@ -1388,12 +1427,54 @@ fn standby() -> bool {
     false
 }
 
+/// The settings with the team's policy over them, for a computer in a team (docs/team.md).
+pub fn with_policy(mut c: Config) -> Config {
+    if let Some(p) = crate::team::client::policy() {
+        c.allow &= p.rights;
+        if let Some(a) = p.ask {
+            c.ask = a;
+        }
+        if let Some(r) = p.record {
+            c.record = r;
+        }
+        if let Some(i) = p.idle {
+            c.idle = i;
+        }
+        if let Some(d) = p.direct {
+            c.punch = d;
+        }
+        if let Some(l) = p.lan {
+            c.lan = l;
+            c.direct &= l;
+        }
+        if !p.password {
+            c.requests = false;
+        }
+    }
+    c
+}
+
 /// Keeps this computer reachable by its ID until `keep` says to stop: a line to the relay, a new
 /// connection for each viewer, and the agent run as a process of its own for each.
 pub fn run(keep: impl Fn() -> Option<Config>) {
+    // In a team, its policy over the settings; looked up each minute, with the record sent.
+    let keep = || keep().map(with_policy);
+    thread::spawn(|| {
+        loop {
+            if crate::team::client::state().joined.is_some() {
+                match crate::team::client::refresh() {
+                    // The console ended this computer's sessions.
+                    Ok(true) => end_sessions_but(None),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("team: {e}"),
+                }
+            }
+            thread::sleep(Duration::from_secs(60));
+        }
+    });
     // Computers on this network that ask are told this one's ID, while remote access is on and
     // that is allowed (one process answers: another that runs it too finds the port taken).
-    thread::spawn(|| crate::lan::answer(|| recent().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay, c.direct))));
+    thread::spawn(|| crate::lan::answer(|| effective().filter(|c| c.enabled && c.lan).map(|c| (c.id, c.relay, c.direct))));
     let guard = Arc::new(Guard::default());
     {
         let guard = guard.clone();
@@ -1587,7 +1668,7 @@ fn listen_direct(guard: Arc<Guard>) {
     // Another process running remote access holds it already.
     let Ok(l) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, crate::net::DIRECT_PORT)) else { return };
     let _ = l.set_nonblocking(true);
-    while let Some(cfg) = recent().filter(|c| c.enabled && c.direct) {
+    while let Some(cfg) = effective().filter(|c| c.enabled && c.direct) {
         match l.accept() {
             Ok((mut s, _)) => {
                 let _ = s.set_nonblocking(false);
@@ -1662,6 +1743,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         } else {
             guard.failed(&at);
             note_visit(serde_json::json!({ "refused": what, "at": crate::sys::now_secs(), "from": from_text }));
+            crate::team::client::report(serde_json::json!({ "time": crate::sys::now_secs(), "kind": "refused", "words": what, "from": from.map(|a| a.to_string()) }));
         }
         Ok(right)
     };
@@ -1678,8 +1760,11 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let totp = (!cfg.totp.is_empty()).then_some(&two_step as crate::net::TwoStep);
     // Through a proxy everything goes its way: no straight path around it.
     let punch = (relayed && cfg.punch && crate::proxy::none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
-    let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str());
-    let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty());
+    // A team's policy may let in its people alone (their tickets), no password at all.
+    let policy = crate::team::client::policy();
+    let passwords = policy.as_ref().is_none_or(|p| p.password);
+    let lasting = cfg.passwords.lasting().then_some(cfg.password.as_str()).filter(|_| passwords);
+    let one_time = cfg.passwords.one_time().then_some(cfg.one_time.as_str()).filter(|p| !p.is_empty() && passwords);
     // A request without a password: one at a time, and a breath after the last, so nobody can
     // fill the screen with them.
     let took = std::cell::Cell::new(None);
@@ -1694,7 +1779,9 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         }
         ok
     };
-    let requests: Option<&dyn Fn() -> bool> = cfg.requests.then_some(&take_request as &dyn Fn() -> bool);
+    let requests: Option<&dyn Fn() -> bool> = (cfg.requests && passwords).then_some(&take_request as &dyn Fn() -> bool);
+    let team_check = |ticket: &str| crate::team::client::check_ticket(ticket, &cfg.id);
+    let team = policy.is_some().then_some(&team_check as crate::net::TeamCheck);
     // Only some IDs, each from the device it first came from.
     let who = std::cell::RefCell::new(None::<(String, String)>);
     let check_id = |id: &str, key: &[u8; 32]| {
@@ -1719,7 +1806,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         verdict
     };
     let ids = (!cfg.ids.trim().is_empty()).then_some(&check_id as crate::net::Ids);
-    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch, ids) else {
+    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch, ids, team) else {
         // Taken, then lost before the end of the exchange (or stopped short of showing its
         // part): the next request may come, after the same breath.
         request_done(took.get());
@@ -1738,7 +1825,15 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         }
     }
     let _request = Request(took.get());
-    let grant = if code.is_some() { cfg.grant() | crate::grant::ASK } else { cfg.grant() };
+    let grant = match &came {
+        // A team ticket says what this person may do here, within the team's policy.
+        crate::net::Came::Team(t) => {
+            let cap = policy.as_ref().map_or(crate::grant::ALL, |p| p.rights);
+            (t.rights & cap & crate::grant::ALL) | if t.ask || cfg.ask { crate::grant::ASK } else { 0 }
+        }
+        _ if code.is_some() => cfg.grant() | crate::grant::ASK,
+        _ => cfg.grant(),
+    };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let by_device = by_device.into_inner();
@@ -1759,10 +1854,19 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let who = who.into_inner();
     let how = came_how(&came, step, who.as_ref().map(|(id, _)| crate::computers::spaced(id)));
     note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { n!("through the relay") } else { n!("on this network") } }));
+    let (team_how, team_user) = match &came {
+        crate::net::Came::Team(t) => ("team", Some(t.user.clone())),
+        crate::net::Came::OneTime => ("one-time", None),
+        crate::net::Came::Request(_) => ("request", None),
+        crate::net::Came::Lasting => ("password", None),
+    };
+    crate::team::client::report(serde_json::json!({ "time": at, "kind": "in", "session": n, "how": team_how, "user": team_user, "from": from.map(|a| a.to_string()), "rights": grant & crate::grant::ALL }));
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from, by_device, who), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
-    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle, trust_offer);
+    // Files moved or changed in the session go to the team's audit log too, as who did it.
+    let team_base = serde_json::json!({ "kind": "file", "session": n, "how": team_how, "user": team_user, "from": from.map(|a| a.to_string()) });
+    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg, trust_offer, team_base);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     let path = match ender.straight() {
         Some(a) => crate::lang::fill(n!("straight from {}"), &[&a.ip()]),
@@ -1770,6 +1874,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         None => n!("on this network").into(),
     };
     note_visit(serde_json::json!({ "out": n, "at": at, "secs": crate::sys::now_secs().saturating_sub(at), "path": path }));
+    crate::team::client::report(serde_json::json!({ "time": crate::sys::now_secs(), "kind": "out", "session": n, "how": team_how, "user": team_user, "from": from.map(|a| a.to_string()), "secs": crate::sys::now_secs().saturating_sub(at) }));
     if once {
         one_time_used(&cfg.one_time);
     }
@@ -1800,6 +1905,7 @@ fn came_how(came: &crate::net::Came, step: u8, id: Option<String>) -> String {
         (Came::Request(_), 1, true) => n!("by asking, at the screen, from a trusted device, as ID {}"),
         (Came::Request(_), _, false) => n!("by asking, at the screen and the two-step code"),
         (Came::Request(_), _, true) => n!("by asking, at the screen and the two-step code, as ID {}"),
+        (Came::Team(t), ..) => return crate::lang::fill(n!("with a team ticket, as {}"), &[&if t.display.is_empty() { t.user.clone() } else { format!("{} ({})", t.display, t.user) }]),
     };
     crate::lang::fill(phrase, &[&id.unwrap_or_default()])
 }
@@ -2012,6 +2118,35 @@ struct Frames {
     left: usize,
     /// The viewer asked to be trusted (`ToAgent::TrustMe`).
     trust_me: bool,
+    /// The message being kept whole (`NOTED`), as far as it came.
+    body: Option<Vec<u8>>,
+    /// Uploads, downloads and changes to files the viewer asked for, for the record (None: one
+    /// that did not read).
+    files: Vec<Option<crate::proto::ToAgent>>,
+}
+
+/// What of a viewer's messages goes to a team's audit log: uploads (13, 24, and 52 going on
+/// with one), downloads (17, 26, and 53) and folders made, names changed and files deleted (25).
+const NOTED: [u8; 7] = [13, 17, 24, 25, 26, 52, 53];
+/// What of such a message is kept to read: names and paths come first, and are short.
+const NOTED_MOST: usize = 64 * 1024;
+
+/// A file event in English words, which the console and the app translate where they show it.
+fn file_words(m: &Option<crate::proto::ToAgent>) -> Option<String> {
+    use crate::proto::{FileOp, ToAgent};
+    let fill = crate::lang::fill;
+    let into = |dir: &str, name: &str| if dir.is_empty() { format!("Downloads/{name}") } else { format!("{}/{name}", dir.trim_end_matches(['/', '\\'])) };
+    let Some(m) = m else { return Some(n!("Did something with files that the record could not read").into()) };
+    Some(match m {
+        ToAgent::FileStart { size, dir, name, .. } => fill(n!("Uploaded {} ({})"), &[&into(dir, name), &crate::sys::human(*size)]),
+        // Going on after a broken connection: its own line too, whatever it says it has already.
+        ToAgent::FileResume { size, dir, name, .. } => fill(n!("Uploaded {} ({})"), &[&into(dir, name), &crate::sys::human(*size)]),
+        ToAgent::Fetch { path, .. } | ToAgent::FetchFrom { path, .. } => fill(n!("Downloaded {}"), &[path]),
+        ToAgent::FileOp { op: FileOp::Mkdir, path, .. } => fill(n!("Made the folder {}"), &[path]),
+        ToAgent::FileOp { op: FileOp::Rename, path, arg } => fill(n!("Renamed {} to {}"), &[path, arg]),
+        ToAgent::FileOp { op: FileOp::Delete, path, .. } => fill(n!("Deleted {}"), &[path]),
+        _ => return None,
+    })
 }
 
 /// What a viewer sends by itself: settings, acknowledgements, pings, pausing, refreshing,
@@ -2026,7 +2161,14 @@ impl Frames {
         while !b.is_empty() {
             if self.left > 0 {
                 let n = self.left.min(b.len());
+                if let Some(body) = self.body.as_mut() {
+                    let room = NOTED_MOST.saturating_sub(body.len()).min(n);
+                    body.extend_from_slice(&b[..room]);
+                }
                 (self.left, b) = (self.left - n, &b[n..]);
+                if self.left == 0 {
+                    self.noted();
+                }
                 continue;
             }
             let n = (5 - self.have).min(b.len());
@@ -2037,9 +2179,19 @@ impl Frames {
                 self.left = u32::from_le_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]) as usize;
                 person |= !AUTOMATIC.contains(&self.head[0]);
                 self.trust_me |= self.head[0] == crate::proto::KIND_TRUST_ME;
+                self.body = NOTED.contains(&self.head[0]).then(Vec::new);
+                if self.left == 0 {
+                    self.noted();
+                }
             }
         }
         person
+    }
+
+    fn noted(&mut self) {
+        if let Some(body) = self.body.take() {
+            self.files.push(crate::proto::ToAgent::decode(self.head[0], &body).ok());
+        }
     }
 
     fn between(&self) -> bool {
@@ -2047,16 +2199,18 @@ impl Frames {
     }
 }
 
-/// `trust`: a token for the agent to give the viewer if it asks to be trusted, and where it is.
+/// `trust`: a token for the agent to give the viewer if it asks to be trusted, and where it is;
+/// `audit`: the team's record of this session, for its file events.
 fn serve_viewer(
     mut r: crate::net::SealedReader,
     mut w: crate::net::SealedWriter,
     grant: u8,
     code: Option<&str>,
-    cameras: bool,
-    idle: u32,
+    cfg: &Config,
     mut trust: Option<(String, String)>,
+    audit: serde_json::Value,
 ) -> Result<(), String> {
+    let (cameras, idle) = (cfg.cameras, cfg.idle);
     // The session's own pings come every second; two minutes of nothing means it is gone.
     let ender = w.ender();
     ender.set_idle_limit(Duration::from_secs(120));
@@ -2129,6 +2283,14 @@ fn serve_viewer(
                 let mut i = input.lock().unwrap_or_else(|e| e.into_inner());
                 if i.1.feed(&buf[..n]) {
                     i.2 = std::time::Instant::now();
+                }
+                for m in std::mem::take(&mut i.1.files) {
+                    if let Some(words) = file_words(&m) {
+                        let mut e = audit.clone();
+                        e["time"] = crate::sys::now_secs().into();
+                        e["words"] = words.into();
+                        crate::team::client::report(e);
+                    }
                 }
                 // Trusted, pending until it comes back by the token the agent gives it.
                 if std::mem::take(&mut i.1.trust_me)
@@ -2904,6 +3066,26 @@ mod tests {
         assert!(!f.trust_me);
         f.feed(&msg(ToAgent::TrustMe));
         assert!(f.trust_me, "asking to be trusted is seen");
+        // Files moved or changed are kept for the record, a byte at a time too; their data not.
+        let up = msg(ToAgent::FileStart { id: 1, size: 2048, dir: "/srv/share/".into(), name: "a b.txt".into() });
+        let data = msg(ToAgent::FileData { id: 1, data: vec![7; 2048] });
+        let down = msg(ToAgent::Fetch { tag: 3, path: "C:\\Users\\ana\\report.pdf".into() });
+        let gone = msg(ToAgent::FileOp { op: crate::proto::FileOp::Delete, path: "/tmp/x".into(), arg: String::new() });
+        for b in [up, data, down, gone].concat() {
+            f.feed(&[b]);
+        }
+        assert!(f.between());
+        let words: Vec<String> = std::mem::take(&mut f.files).iter().filter_map(file_words).collect();
+        assert_eq!(words, ["Uploaded /srv/share/a b.txt (2.0 KB)", "Downloaded C:\\Users\\ana\\report.pdf", "Deleted /tmp/x"]);
+        // Going on with a transfer is recorded too; one padded past what is kept, all the same.
+        let on = msg(ToAgent::FetchFrom { tag: 1, path: "/etc/hosts".into(), name: "hosts".into(), from: 0, tail: [0; 32] });
+        let (k, mut p) = ToAgent::FileOp { op: crate::proto::FileOp::Mkdir, path: "/srv/new".into(), arg: String::new() }.encode();
+        p.extend(std::iter::repeat_n(0u8, 100_000));
+        let mut padded = Vec::new();
+        crate::proto::write_msg(&mut padded, k, &p).unwrap();
+        f.feed(&[on, padded].concat());
+        let words: Vec<String> = std::mem::take(&mut f.files).iter().filter_map(file_words).collect();
+        assert_eq!(words, ["Downloaded /etc/hosts", "Made the folder /srv/new"]);
     }
 
     #[test]

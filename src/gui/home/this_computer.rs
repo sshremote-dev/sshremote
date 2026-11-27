@@ -12,6 +12,9 @@ impl App {
         #[cfg(feature = "remote")]
         let access = if crate::modules::on("screen") { self.access_status(&ui.ctx().clone()) } else { None };
         kit::card(ui, |ui| {
+            // The team that manages it, or the person's, over it.
+            #[cfg(feature = "remote")]
+            super::super::team::branding(ui);
             ui.horizontal(|ui| {
                 kit::mark(ui, ic::HOUSE, super::super::brand());
                 ui.vertical(|ui| {

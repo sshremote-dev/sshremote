@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>SSH Remote Team</title>
+<link rel="icon" id="favicon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232b59c3'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' transform='translate(2.4 2.4) scale(.8)'%3E%3Cpath d='M5 8.5 8.5 12 5 15.5'/%3E%3Cpath d='M12 5h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-4'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div id="boot" class="boot" role="status"><div><div class="spin"></div></div></div>
+
+<!-- Signing in: to the console, or for the app that opened this page (/login?app=CHALLENGE&port=PORT). -->
+<div id="signin" class="signin" hidden>
+  <div class="corner"><button class="btn icon langbtn" type="button"></button><button class="btn icon themebtn" type="button"></button></div>
+  <main class="card signcard">
+    <div class="brand"><span class="logo"></span><span class="names"><span class="bname">SSH Remote</span><span class="bsub" data-t="Team console">Team console</span></span></div>
+    <div id="signform">
+      <h1 id="signtitle" data-t="Sign in">Sign in</h1>
+      <p class="sub" id="signsub"></p>
+      <div id="signnote" class="note" role="status"></div>
+      <form id="loginform">
+        <div class="fld"><label for="lname" data-t="Name">Name</label><input id="lname" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required></div>
+        <div class="fld"><label for="lpw" data-t="Password">Password</label><input id="lpw" type="password" autocomplete="current-password" required></div>
+        <p class="hint" id="ldaphint" hidden data-t="Your name and password in the organization's directory work too.">Your name and password in the organization's directory work too.</p>
+        <div class="fld" id="coderow" hidden>
+          <label for="lcode" data-t="Two-step code">Two-step code</label>
+          <input id="lcode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" spellcheck="false" aria-describedby="lcodehint">
+          <p class="hint" id="lcodehint" data-t="The code your authenticator app shows now">The code your authenticator app shows now</p>
+        </div>
+        <div id="lerror" class="error" role="alert"></div>
+        <button class="btn primary wide" id="lgo" type="submit" data-t="Sign in">Sign in</button>
+      </form>
+      <div id="ssobox" hidden>
+        <hr class="or">
+        <a class="btn solid wide" id="sso" href="api/oidc/start" data-t="Sign in with single sign-on">Sign in with single sign-on</a>
+      </div>
+    </div>
+    <div id="handoff" class="done" hidden>
+      <h1 id="handofftitle" tabindex="-1" data-t="Hand this sign-in to SSH Remote?">Hand this sign-in to SSH Remote?</h1>
+      <p data-t="Go on only if you began signing in to the team in the SSH Remote app on this computer just now.">Go on only if you began signing in to the team in the SSH Remote app on this computer just now.</p>
+      <button class="btn primary wide" id="handoffgo" type="button" data-t="Go on to SSH Remote">Go on to SSH Remote</button>
+    </div>
+    <div id="appdone" class="done" hidden>
+      <div class="big" id="donemark"></div>
+      <h1 id="donetitle" tabindex="-1" data-t="You are signed in.">You are signed in.</h1>
+      <p data-t="You can close this window and go back to SSH Remote.">You can close this window and go back to SSH Remote.</p>
+    </div>
+  </main>
+</div>
+
+<!-- The console. -->
+<div id="app" class="app" hidden>
+  <aside class="side" id="side">
+    <div class="sidetop">
+      <a class="brand" href="#"><span class="logo"></span><span class="names"><span class="bname">SSH Remote</span><span class="bsub" data-t="Team console">Team console</span></span></a>
+      <button class="btn icon" id="menubtn" type="button" aria-expanded="false" aria-controls="nav" aria-label="Menu" data-t-aria-label="Menu" title="Menu" data-t-title="Menu"></button>
+    </div>
+    <nav class="nav" id="nav" aria-label="Sections" data-t-aria-label="Sections">
+      <a href="#mine" data-view="mine" class="useronly"><span data-t="Your computers">Your computers</span></a>
+      <a href="#devices" data-view="devices" class="adminonly"><span data-t="Devices">Devices</span></a>
+      <a href="#users" data-view="users" class="adminonly"><span data-t="Users">Users</span></a>
+      <a href="#groups" data-view="groups" class="adminonly"><span data-t="Groups">Groups</span></a>
+      <a href="#dgroups" data-view="dgroups" class="adminonly"><span data-t="Device groups">Device groups</span></a>
+      <a href="#rules" data-view="rules" class="adminonly"><span data-t="Access rules">Access rules</span></a>
+      <a href="#enroll" data-view="enroll" class="adminonly"><span data-t="Enrollment">Enrollment</span></a>
+      <a href="#audit" data-view="audit" class="adminonly"><span data-t="Audit log">Audit log</span></a>
+      <a href="#settings" data-view="settings" class="adminonly"><span data-t="Settings">Settings</span></a>
+    </nav>
+    <div class="foot">
+      <a class="me" href="#account" data-view="account" title="Your account" data-t-title="Your account"><span class="avatar" id="meinitial"></span><div><b id="mename"></b><small id="merole"></small></div></a>
+      <div class="row"><button class="btn icon langbtn" type="button"></button><button class="btn icon themebtn" type="button"></button><span class="grow"></span><button class="btn" id="signout" type="button"><span data-t="Sign out">Sign out</span></button></div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <!-- A person's own computers (not an administrator). -->
+    <section class="view" id="v-mine" hidden aria-labelledby="h-mine">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-mine" tabindex="-1"><span data-t="Your computers">Your computers</span> <span class="count" id="minecount"></span></h1>
+          <p class="sub" data-t="The team's computers you may reach. Open them in the SSH Remote app, signed in to the team (Settings, Team).">The team's computers you may reach. Open them in the SSH Remote app, signed in to the team (Settings, Team).</p></div>
+        <div class="tools"><div class="search"><input type="search" id="msearch" placeholder="Search" data-t-placeholder="Search" aria-label="Search the computers" data-t-aria-label="Search the computers" autocomplete="off"></div></div>
+      </header>
+      <div id="mine"></div>
+    </section>
+
+    <section class="view" id="v-devices" hidden aria-labelledby="h-devices">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-devices" tabindex="-1"><span data-t="Devices">Devices</span> <span class="count" id="dcount"></span></h1>
+          <p class="sub" data-t="The computers that joined the team. Online: seen in the last 3 minutes.">The computers that joined the team. Online: seen in the last 3 minutes.</p></div>
+        <div class="tools">
+          <div class="search"><input type="search" id="dsearch" placeholder="Name, ID, group or system" data-t-placeholder="Name, ID, group or system" aria-label="Search the devices" data-t-aria-label="Search the devices" autocomplete="off"></div>
+          <select id="dfilter" aria-label="Device group" data-t-aria-label="Device group"></select>
+          <a class="btn solid" href="#enroll" data-t="Add computers">Add computers</a>
+        </div>
+      </header>
+      <div id="devices"></div>
+    </section>
+
+    <section class="view" id="v-users" hidden aria-labelledby="h-users">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-users" tabindex="-1"><span data-t="Users">Users</span> <span class="count" id="ucount"></span></h1>
+          <p class="sub" data-t="The people who sign in to the team: in this console, and in the app to reach its computers.">The people who sign in to the team: in this console, and in the app to reach its computers.</p></div>
+        <div class="tools">
+          <div class="search"><input type="search" id="usearch" placeholder="Name, email or group" data-t-placeholder="Name, email or group" aria-label="Search the users" data-t-aria-label="Search the users" autocomplete="off"></div>
+          <button class="btn primary" id="adduser" type="button"><span data-t="Add a user">Add a user</span></button>
+        </div>
+      </header>
+      <div id="users"></div>
+    </section>
+
+    <section class="view" id="v-groups" hidden aria-labelledby="h-groups">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-groups" tabindex="-1"><span data-t="Groups">Groups</span> <span class="count" id="gcount"></span></h1>
+          <p class="sub" data-t="Groups of users, for access rules that name many people at once. Add people to a group in their account.">Groups of users, for access rules that name many people at once. Add people to a group in their account.</p></div>
+        <div class="tools"><button class="btn primary" id="addgroup" type="button"><span data-t="Add a group">Add a group</span></button></div>
+      </header>
+      <div id="groups"></div>
+    </section>
+
+    <section class="view" id="v-dgroups" hidden aria-labelledby="h-dgroups">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-dgroups" tabindex="-1"><span data-t="Device groups">Device groups</span> <span class="count" id="dgcount"></span></h1>
+          <p class="sub" data-t="Groups of computers. Each keeps a policy: the settings its computers take from the team, over their own.">Groups of computers. Each keeps a policy: the settings its computers take from the team, over their own.</p></div>
+        <div class="tools"><button class="btn primary" id="adddgroup" type="button"><span data-t="Add a device group">Add a device group</span></button></div>
+      </header>
+      <div id="dgroups"></div>
+    </section>
+
+    <section class="view" id="v-rules" hidden aria-labelledby="h-rules">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-rules" tabindex="-1"><span data-t="Access rules">Access rules</span> <span class="count" id="rcount"></span></h1>
+          <p class="sub" data-t="Who may reach which computers, with what rights, and whether the person at the screen is asked first. A device group's policy can take rights away again.">Who may reach which computers, with what rights, and whether the person at the screen is asked first. A device group's policy can take rights away again.</p></div>
+        <div class="tools"><button class="btn solid" id="addrule" type="button"><span data-t="Add a rule">Add a rule</span></button></div>
+      </header>
+      <ol class="rules" id="rules"></ol>
+      <div class="savebar">
+        <div class="error" id="rerror" role="alert"></div>
+        <span class="state" id="rstate" role="status"></span>
+        <button class="btn solid" id="rundo" type="button" data-t="Undo the changes">Undo the changes</button>
+        <button class="btn primary" id="rsave" type="button" data-t="Save the rules">Save the rules</button>
+      </div>
+    </section>
+
+    <section class="view" id="v-enroll" hidden aria-labelledby="h-enroll">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-enroll" tabindex="-1"><span data-t="Enrollment">Enrollment</span> <span class="count" id="tcount"></span></h1>
+          <p class="sub" data-t="A computer joins the team with a token: run its installer line on the computer. A token puts the computers into a device group, works until it expires, and for as many computers as it allows.">A computer joins the team with a token: run its installer line on the computer. A token puts the computers into a device group, works until it expires, and for as many computers as it allows.</p></div>
+        <div class="tools"><button class="btn primary" id="addtoken" type="button"><span data-t="Make a token">Make a token</span></button></div>
+      </header>
+      <div id="tokens"></div>
+    </section>
+
+    <section class="view" id="v-audit" hidden aria-labelledby="h-audit">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-audit" tabindex="-1"><span data-t="Audit log">Audit log</span> <span class="count" id="acount"></span></h1>
+          <p class="sub" data-t="Who came in where, when they left, who was refused, and the files sent, as the computers report them.">Who came in where, when they left, who was refused, and the files sent, as the computers report them.</p></div>
+      </header>
+      <form id="auditform" class="card filters">
+        <div class="grid2">
+          <div class="fld"><label for="arange" data-t="Time">Time</label>
+            <select id="arange">
+              <option value="86400" data-t="The last 24 hours">The last 24 hours</option>
+              <option value="604800" data-t="The last 7 days" selected>The last 7 days</option>
+              <option value="2592000" data-t="The last 30 days">The last 30 days</option>
+              <option value="all" data-t="All of it">All of it</option>
+              <option value="custom" data-t="From and to&hellip;">From and to&hellip;</option>
+            </select></div>
+          <div class="fld" id="afromrow" hidden><label for="afrom" data-t="From date">From date</label><input type="datetime-local" id="afrom"></div>
+          <div class="fld" id="atorow" hidden><label for="ato" data-t="To date">To date</label><input type="datetime-local" id="ato"></div>
+          <div class="fld"><label for="adevice" data-t="Device">Device</label><select id="adevice"></select></div>
+          <div class="fld"><label for="auser" data-t="User">User</label><input type="text" id="auser" list="auserlist" autocomplete="off" spellcheck="false" placeholder="Anyone" data-t-placeholder="Anyone"><datalist id="auserlist"></datalist></div>
+          <div class="fld"><label for="akind" data-t="Event">Event</label>
+            <select id="akind">
+              <option value="" data-t="Every kind">Every kind</option>
+              <option value="in" data-t="Came in">Came in</option>
+              <option value="out" data-t="Left">Left</option>
+              <option value="refused" data-t="Refused">Refused</option>
+              <option value="file" data-t="Files">Files</option>
+            </select></div>
+        </div>
+        <div class="row mt">
+          <button class="btn primary" type="submit" data-t="Show">Show</button>
+          <button class="btn solid" type="button" id="acsv"><span data-t="Download CSV">Download CSV</span></button>
+        </div>
+      </form>
+      <div id="audit" class="mt"></div>
+      <p class="more" id="amore"></p>
+    </section>
+
+    <section class="view" id="v-settings" hidden aria-labelledby="h-settings">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-settings" tabindex="-1" data-t="Settings">Settings</h1>
+          <p class="sub" data-t="What the app shows of the team, the relay its computers use, and how people sign in.">What the app shows of the team, the relay its computers use, and how people sign in.</p></div>
+      </header>
+      <form id="settingsform" class="form">
+        <section class="card">
+          <h2 data-t="The team">The team</h2>
+          <div class="fld"><label for="sname" data-t="Team name">Team name</label><input id="sname" type="text" maxlength="80" autocomplete="organization" required aria-describedby="snamehint"><p class="hint" id="snamehint" data-t="Shown in the app and here.">Shown in the app and here.</p></div>
+          <div class="fld" role="group" aria-labelledby="slogolab"><span class="lab" id="slogolab" data-t="Logo">Logo</span>
+            <div class="logo-row"><div class="logo-prev" id="slogoprev"></div>
+              <div class="row"><button class="btn solid" type="button" id="slogopick" data-t="Choose a picture&hellip;">Choose a picture&hellip;</button><button class="btn danger" type="button" id="slogorm" data-t="Remove">Remove</button></div>
+              <input type="file" id="slogofile" accept="image/png,image/svg+xml,image/jpeg" hidden>
+            </div>
+            <p class="hint" data-t="PNG, SVG or JPEG, at most 256 KB. Square looks best.">PNG, SVG or JPEG, at most 256 KB. Square looks best.</p>
+          </div>
+          <div class="fld"><label for="srelay" data-t="Relay">Relay</label><input id="srelay" class="ltr" type="text" placeholder="relay.example.com:7071" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="srelayhint"><p class="hint" id="srelayhint" data-t="The relay the team's computers use, as HOST or HOST:PORT. Empty: each keeps its own.">The relay the team's computers use, as HOST or HOST:PORT. Empty: each keeps its own.</p></div>
+        </section>
+        <section class="card">
+          <h2 data-t="Single sign-on (OpenID Connect)">Single sign-on (OpenID Connect)</h2>
+          <p class="sub" data-t="People sign in through the organization's identity provider, in the console and in the app.">People sign in through the organization's identity provider, in the console and in the app.</p>
+          <label class="check"><input type="checkbox" id="soidc"> <span data-t="Use single sign-on">Use single sign-on</span></label>
+          <div id="soidcf" class="grid2">
+            <div class="fld full"><label for="sissuer" data-t="Issuer">Issuer</label><input id="sissuer" class="ltr" type="url" placeholder="https://login.example.com" spellcheck="false" autocomplete="off"></div>
+            <div class="fld"><label for="sclient" data-t="Client ID">Client ID</label><input id="sclient" class="ltr" type="text" spellcheck="false" autocomplete="off"></div>
+            <div class="fld"><label for="ssecret" data-t="Client secret">Client secret</label><input id="ssecret" class="ltr" type="password" spellcheck="false" autocomplete="new-password"></div>
+            <div class="fld full"><label for="sdomains" data-t="Allowed email domains">Allowed email domains</label><input id="sdomains" class="ltr" type="text" placeholder="example.com, example.org" spellcheck="false" autocomplete="off" aria-describedby="sdomainshint"><p class="hint" id="sdomainshint" data-t="Separated by commas.">Separated by commas.</p></div>
+            <label class="check full"><input type="checkbox" id="soidcmake"> <span data-t="Make an account at the first sign-in of someone whose email is in an allowed domain">Make an account at the first sign-in of someone whose email is in an allowed domain</span></label>
+            <label class="check full"><input type="checkbox" id="soidctrust"> <span data-t="Its email addresses are the organization's own (as with Microsoft Entra ID): take them as verified unless it says they are not">Its email addresses are the organization's own (as with Microsoft Entra ID): take them as verified unless it says they are not</span></label>
+            <div class="fld full"><label for="sredirect" data-t="Redirect address, for the identity provider">Redirect address, for the identity provider</label>
+              <div class="cmd"><code id="sredirect"></code><button class="btn" type="button" id="sredirectcopy"><span data-t="Copy">Copy</span></button></div></div>
+          </div>
+        </section>
+        <section class="card">
+          <h2 data-t="Directory (LDAP)">Directory (LDAP)</h2>
+          <p class="sub" data-t="Someone who is not a user here signs in with their name and password in the directory.">Someone who is not a user here signs in with their name and password in the directory.</p>
+          <label class="check"><input type="checkbox" id="sldap"> <span data-t="Use a directory">Use a directory</span></label>
+          <div id="sldapf" class="grid2">
+            <div class="fld full"><label for="sldapurl" data-t="Directory address">Directory address</label><input id="sldapurl" class="ltr" type="text" placeholder="ldaps://ldap.example.com" spellcheck="false" autocomplete="off"></div>
+            <div class="fld full"><label for="sldapdn" data-t="User DN">User DN</label><input id="sldapdn" class="ltr" type="text" placeholder="uid={},ou=people,dc=example,dc=com" spellcheck="false" autocomplete="off" aria-describedby="sldapdnhint"><p class="hint" id="sldapdnhint" data-t="{} is where the name typed at sign-in goes.">{} is where the name typed at sign-in goes.</p></div>
+            <label class="check full"><input type="checkbox" id="sldapmake"> <span data-t="Make an account at the first sign-in of someone in the directory">Make an account at the first sign-in of someone in the directory</span></label>
+          </div>
+        </section>
+        <div class="savebar">
+          <div class="error" id="serror" role="alert"></div>
+          <button class="btn primary" type="submit" id="ssave" data-t="Save the settings">Save the settings</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="view" id="v-account" hidden aria-labelledby="h-account">
+      <header class="vhead">
+        <div class="vtitle"><h1 id="h-account" tabindex="-1" data-t="Your account">Your account</h1></div>
+      </header>
+      <div class="account" id="account"></div>
+    </section>
+  </main>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<script src="console.js"></script>
+</body>
+</html>

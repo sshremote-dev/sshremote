@@ -126,6 +126,9 @@ const ROW_LINE_GAP: f32 = 3.0;
 enum Entry {
     Here,
     Computer(Computer),
+    /// A computer of the person's team.
+    #[cfg(feature = "remote")]
+    Team(crate::team::client::Device),
 }
 
 /// What a row of the list asks for.
@@ -161,6 +164,11 @@ impl App {
     pub(super) fn going_out(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         self.load_computers();
         let what = typed(&self.form.host);
+        #[cfg(feature = "remote")]
+        let team = crate::gui::team::listed(ui.ctx());
+        #[cfg(feature = "remote")]
+        let entries = self.entries(&what, team.as_ref().map_or(&[][..], |t| &t.devices));
+        #[cfg(not(feature = "remote"))]
         let entries = self.entries(&what);
         let r = ui.add(
             egui::TextEdit::singleline(&mut self.form.host)
@@ -233,12 +241,21 @@ impl App {
         if self.launcher_for.is_some() && crate::ext::programs_enabled() {
             self.programs_part(ui, go);
         } else {
-            self.computer_list(ui, &what, &entries, picked, go);
+            self.computer_list(
+                ui,
+                &what,
+                &entries,
+                picked,
+                go,
+                #[cfg(feature = "remote")]
+                team.as_ref(),
+            );
         }
     }
 
-    /// The lines of the list for what is typed: this computer, then the computers found.
-    fn entries(&self, what: &Typed) -> Vec<Entry> {
+    /// The lines of the list for what is typed: this computer, then the computers found, then
+    /// the team's (not under a tag: those are the person's own).
+    fn entries(&self, what: &Typed, #[cfg(feature = "remote")] team: &[crate::team::client::Device]) -> Vec<Entry> {
         // An address finds itself without the port typed after it.
         let q = match what {
             Typed::Empty => String::new(),
@@ -255,6 +272,10 @@ impl App {
         }
         let tagged = |c: &&Computer| tag.is_none_or(|t| c.tags.iter().any(|k| k.eq_ignore_ascii_case(t)));
         out.extend(self.computers.iter().filter(tagged).filter(|c| q.is_empty() || finds(c, &q)).cloned().map(Entry::Computer));
+        #[cfg(feature = "remote")]
+        if tag.is_none() {
+            out.extend(team.iter().filter(|d| q.is_empty() || crate::gui::team::finds(d, &q)).cloned().map(Entry::Team));
+        }
         out
     }
 
@@ -444,6 +465,8 @@ impl App {
             },
             Entry::Computer(c) if is_web(c) => (c.address.clone(), String::new(), How::Web(c.address.clone(), String::new())),
             Entry::Computer(c) => (c.address.clone(), c.port.map(|p| p.to_string()).unwrap_or_default(), how(self.default_mode(c.id().is_some()))),
+            #[cfg(feature = "remote")]
+            Entry::Team(d) => (String::new(), String::new(), How::Team { id: d.id.clone(), name: d.name.clone(), mode: self.default_mode(true) }),
         })
     }
 
@@ -643,7 +666,15 @@ impl App {
     }
 
     /// The computers: a heading with a way to add one, then a row each.
-    fn computer_list(&mut self, ui: &mut egui::Ui, what: &Typed, entries: &[Entry], picked: Option<usize>, go: &mut Option<Choice>) {
+    fn computer_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        what: &Typed,
+        entries: &[Entry],
+        picked: Option<usize>,
+        go: &mut Option<Choice>,
+        #[cfg(feature = "remote")] team: Option<&crate::gui::team::Listed>,
+    ) {
         let count = entries.iter().filter(|e| matches!(e, Entry::Computer(_))).count();
         let mut add = false;
         let mut look = false;
@@ -673,27 +704,14 @@ impl App {
         self.tag_chips(ui);
         let searching = !matches!(what, Typed::Empty) || self.tag.is_some();
         let mut act: Option<(Entry, RowAct)> = None;
+        // The person's own computers first, the team's in a list of their own under them.
+        let own = entries.iter().position(|e| !matches!(e, Entry::Here | Entry::Computer(_))).unwrap_or(entries.len());
         egui::ScrollArea::vertical().id_salt("computers").auto_shrink([false, false]).show(ui, |ui| {
           kit::list(ui, |ui| {
-            let line = ui.visuals().widgets.noninteractive.bg_stroke;
-            for (i, e) in entries.iter().enumerate() {
-                if i > 0 {
-                    ui.painter().hline(ui.max_rect().x_range().shrink(14.0), ui.cursor().top(), line);
-                }
-                let a = match e {
-                    Entry::Here => self.here_row(ui, picked == Some(i)),
-                    Entry::Computer(c) => self.computer_row(ui, c, picked == Some(i)),
-                };
-                if let Some(a) = a {
-                    act = Some((e.clone(), a));
-                    if matches!(act, Some((_, RowAct::Pick))) {
-                        self.picked = Some(i);
-                    }
-                }
-            }
+            self.rows(ui, entries, 0..own, picked, &mut act);
             let note = if self.computers.is_empty() && !searching {
                 t!("The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first.")
-            } else if searching && entries.iter().all(|e| matches!(e, Entry::Here)) {
+            } else if searching && own == entries.len() && entries.iter().all(|e| matches!(e, Entry::Here)) {
                 if self.tag.is_some() { t!("No computer with this tag matches.") } else { t!("No computer in the list matches.") }
             } else {
                 ""
@@ -704,6 +722,13 @@ impl App {
                 });
             }
           });
+          #[cfg(feature = "remote")]
+          if let Some(team) = team
+              && self.tag.is_none()
+              && (!searching || own < entries.len())
+          {
+              self.team_part(ui, team, entries, own..entries.len(), picked, &mut act);
+          }
         });
         let Some((e, a)) = act else { return };
         let Entry::Computer(c) = e else {
@@ -737,6 +762,134 @@ impl App {
                 Err(e) => self.error = Some(t!("{} was not woken: {}", crate::lang::tr_msg(&c.label()), crate::lang::tr_msg(&e))),
             },
         }
+    }
+
+    /// The rows of `entries` in `range`, a hairline between them; what one asks for goes to `act`.
+    fn rows(&mut self, ui: &mut egui::Ui, entries: &[Entry], range: std::ops::Range<usize>, picked: Option<usize>, act: &mut Option<(Entry, RowAct)>) {
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let first = range.start;
+        for i in range {
+            let e = &entries[i];
+            if i > first {
+                ui.painter().hline(ui.max_rect().x_range().shrink(14.0), ui.cursor().top(), line);
+            }
+            let a = match e {
+                Entry::Here => self.here_row(ui, picked == Some(i)),
+                Entry::Computer(c) => self.computer_row(ui, c, picked == Some(i)),
+                #[cfg(feature = "remote")]
+                Entry::Team(d) => self.team_row(ui, d, picked == Some(i)),
+            };
+            if let Some(a) = a {
+                if matches!(a, RowAct::Pick) {
+                    self.picked = Some(i);
+                }
+                *act = Some((e.clone(), a));
+            }
+        }
+    }
+
+    /// The team's computers the person may reach: a heading with a way to ask again, then a row
+    /// each, or why there is none.
+    #[cfg(feature = "remote")]
+    fn team_part(&mut self, ui: &mut egui::Ui, team: &crate::gui::team::Listed, entries: &[Entry], range: std::ops::Range<usize>, picked: Option<usize>, act: &mut Option<(Entry, RowAct)>) {
+        ui.add_space(kit::GAP);
+        let count = range.len();
+        ui.horizontal(|ui| {
+            kit::heading(ui, &t!("Team computers  {}", count));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon(ui, ic::ARROWS_CLOCKWISE, t!("Ask the team server again"), false).clicked() {
+                    crate::gui::team::refresh(ui.ctx());
+                }
+            });
+        });
+        kit::list(ui, |ui| {
+            self.rows(ui, entries, range, picked, act);
+            let note = match &team.problem {
+                Some(e) => t!("The team's computers could not be listed: {}", crate::lang::tr_msg(e)),
+                None if team.coming => t!("Asking the team server\u{2026}").to_string(),
+                None if count == 0 && team.devices.is_empty() => t!("The team lets you reach no computer yet.").to_string(),
+                None => String::new(),
+            };
+            if !note.is_empty() {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
+                    let colour = if team.problem.is_some() { bad() } else { ui.visuals().weak_text_color() };
+                    ui.add(egui::Label::new(RichText::new(note).color(colour).size(12.5)).wrap());
+                });
+            }
+        });
+    }
+
+    /// One of the team's computers: online or not, its name, its ID and its group; under the
+    /// mouse, its screen, its files, and a menu.
+    #[cfg(feature = "remote")]
+    fn team_row(&mut self, ui: &mut egui::Ui, d: &crate::team::client::Device, picked: bool) -> Option<RowAct> {
+        let mut act = None;
+        let key = format!("team:{}", d.id);
+        let (r, mut row, lit) = self.row_frame(ui, picked, &key);
+        let weak = row.visuals().weak_text_color();
+        kit::mark(&mut row, ic::DESKTOP, if d.online { super::super::brand() } else { weak });
+        // Online or not, on the mark's edge.
+        let m = row.min_rect();
+        let at = egui::pos2(m.right() - 5.0, m.center().y + 11.0);
+        row.painter().circle_filled(at, 5.5, if row.visuals().dark_mode { row.visuals().faint_bg_color } else { egui::Color32::WHITE });
+        row.painter().circle_filled(at, 4.0, if d.online { good() } else { weak });
+        let open = |m: PaneMode| RowAct::Open(How::Team { id: d.id.clone(), name: d.name.clone(), mode: m });
+        let files = d.rights & crate::grant::FILES != 0;
+        let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        right.spacing_mut().item_spacing.x = 2.0;
+        if lit {
+            let (_, menu) = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
+                crate::gui::menu_look(ui);
+                ui.set_min_width(220.0);
+                if PaneMode::Screen.on() && ui.button(format!("{}  {}", ic::MONITOR, t!("Screen sharing"))).clicked() {
+                    act = Some(open(PaneMode::Screen));
+                }
+                if PaneMode::Files.on() && files && ui.button(format!("{}  {}", ic::FOLDER, t!("Files"))).clicked() {
+                    act = Some(open(PaneMode::Files));
+                }
+                if d.rights & crate::grant::TERMINAL != 0 && ui.button(format!("{}  {}", ic::TERMINAL, t!("Terminal"))).clicked() {
+                    act = Some(open(PaneMode::Terminal));
+                }
+                if ui.button(format!("{}  {}", ic::COPY, t!("Copy ID"))).clicked() {
+                    ui.ctx().copy_text(d.id.clone());
+                }
+            });
+            self.menu_open(&key, menu.is_some());
+            if PaneMode::Files.on() && files && icon(&mut right, ic::FOLDER, t!("Files"), false).clicked() {
+                act = Some(open(PaneMode::Files));
+            }
+            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, t!("Screen"), false).clicked() {
+                act = Some(open(PaneMode::Screen));
+            }
+        }
+        let room = (right.min_rect().left() - row.cursor().left() - 8.0).max(40.0);
+        row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.add_space(ROW_TEXT_TOP);
+            ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
+            let id = t!("ID {}", crate::computers::spaced(&d.id));
+            ui.add(egui::Label::new(RichText::new(if d.name.is_empty() { id.as_str() } else { d.name.as_str() }).strong()).truncate());
+            let mut sub: Vec<String> = Vec::new();
+            if !d.name.is_empty() {
+                sub.push(id.clone());
+            }
+            if !d.group.is_empty() {
+                sub.push(d.group.clone());
+            }
+            sub.push(if d.online { t!("online").into() } else { t!("offline").into() });
+            if d.ask {
+                sub.push(t!("asks the person there").into());
+            }
+            ui.add(egui::Label::new(RichText::new(sub.join("  \u{00b7}  ")).small().weak()).truncate());
+        });
+        if act.is_none() {
+            if r.double_clicked() {
+                act = Some(open(self.default_mode(true)));
+            } else if r.clicked() {
+                act = Some(RowAct::Pick);
+            }
+        }
+        r.on_hover_text(t!("Double-click to open; a ticket from the team server lets you in, no password needed"));
+        act
     }
 
     /// Asks this network who is there, in the background.

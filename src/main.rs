@@ -9,6 +9,8 @@ mod console;
 #[cfg(all(target_os = "linux", feature = "remote"))]
 mod loginscreen;
 #[cfg(feature = "remote")]
+mod team;
+#[cfg(feature = "remote")]
 mod access;
 mod admin;
 #[cfg(feature = "remote")]
@@ -170,6 +172,9 @@ usage: sshremote                       open the window: connect screen, recent h
                                   Windows: add or remove the service alone (remote-access install
                                   also turns remote access on)
        sshremote sshremote://ID[@RELAY[:PORT]] --password P [--code C]  view a computer by its remote access ID
+       sshremote sshremote://ID[@RELAY[:PORT]] --team         ... of your team, with a ticket (sshremote team login)
+       sshremote team [status | join URL TOKEN | leave | login URL [NAME] | logout | devices]
+       sshremote team serve --listen ADDR --data DIR --url URL   the team server (docs/team.md); team admin NAME --data DIR
                                        (C: its authenticator app's code, with two-step sign-in)
 
 options:
@@ -262,6 +267,9 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
             "--remote" => o.remote = val()?,
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
+            // A computer of the person's team: a ticket from the team server instead of a password.
+            #[cfg(feature = "remote")]
+            "--team" => o.password = Some(net::TEAM_MARK.to_string()),
             // Two-step sign-in: the authenticator app's code, joined to the password.
             "--code" => code = Some(val()?),
             "--sound" => o.sound = true,
@@ -520,6 +528,9 @@ fn run(args: &[String]) -> Result<(), String> {
         // Remote access by ID through a relay: its settings, and the loop a service runs.
         #[cfg(feature = "remote")]
         "remote-access" => access::cli(&args[1..]),
+        // A team: this computer in one, a person signed in to one, or the team's own server.
+        #[cfg(feature = "remote")]
+        "team" => team::cli(&args[1..]),
         #[cfg(all(feature = "gui", feature = "remote"))]
         "--chat-window" => {
             let grant = args.iter().position(|a| a == "--grant").and_then(|i| args.get(i + 1)).and_then(|g| g.parse().ok());

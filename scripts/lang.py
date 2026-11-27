@@ -56,16 +56,17 @@ def js_string(lit):
 
 
 def web_keys(found):
-    """The web viewer's words: T("...") in its script, data-t="..." in its page."""
+    """The web pages' words (the web viewer, the team console): T("...") in their scripts, data-t="..." in their pages."""
     import html
-    for name, mark in (("app.js", JS_MARK), ("index.html", HTML_MARK)):
-        path = os.path.join(ROOT, "web", name)
+    pages = [("web", "app.js", JS_MARK), ("web", "index.html", HTML_MARK), ("assets/team", "console.js", JS_MARK), ("assets/team", "console.html", HTML_MARK)]
+    for folder, name, mark in pages:
+        path = os.path.join(ROOT, folder, name)
         if not os.path.exists(path):
             continue
         text = open(path, encoding="utf-8").read()
         for m in mark.finditer(text):
-            s = js_string(m.group(1)) if name == "app.js" else html.unescape(m.group(1))
-            found.setdefault(s, "web/" + name)
+            s = js_string(m.group(1)) if name.endswith(".js") else html.unescape(m.group(1))
+            found.setdefault(s, folder + "/" + name)
 
 
 def keys():
@@ -84,7 +85,17 @@ def keys():
             for m in MARK.finditer(text):
                 s = unescape(m.group(1)) if m.group(1) is not None else m.group(3)
                 found.setdefault(s, os.path.relpath(path, ROOT))
+            # The team server's words go out in English; the console and the app translate them.
+            if os.path.relpath(path, ROOT) == os.path.join("src", "team", "server.rs"):
+                for m in SERVER_SAID.finditer(text):
+                    s = unescape(m.group(1))
+                    # Not the API's own words about its fields, nor those made with named values.
+                    if " " in s and not s.startswith('"') and not re.search(r"\{[a-z]", s) and "uid={}" not in s:
+                        found.setdefault(s, os.path.relpath(path, ROOT))
     return found
+
+
+SERVER_SAID = re.compile(r'(?:fail\(\d+, &?(?:format!\()?|Err\((?:format!\()?|ok_or(?:_else\(\|\| format!\()?\()"((?:[^"\\]|\\.)*)"')
 
 
 def tag(s):

@@ -16,6 +16,8 @@ enum Page {
     About,
     #[cfg(feature = "remote")]
     Shortcuts(super::shortcuts::Page),
+    #[cfg(feature = "remote")]
+    Team(super::team::Page),
 }
 
 impl Page {
@@ -31,6 +33,8 @@ impl Page {
             Page::About => 7,
             #[cfg(feature = "remote")]
             Page::Shortcuts(_) => 8,
+            #[cfg(feature = "remote")]
+            Page::Team(_) => 9,
         }
     }
 
@@ -47,6 +51,8 @@ impl Page {
             Page::About => (t!("About"), ""),
             #[cfg(feature = "remote")]
             Page::Shortcuts(_) => (t!("Shortcuts"), t!("Keys of your own for a screen's actions: full screen, the host's screens, a screenshot, view only and more.")),
+            #[cfg(feature = "remote")]
+            Page::Team(_) => (t!("Team"), t!("Your organization's own team server: it can manage this computer, and lists the computers you may reach once you sign in.")),
         })
     }
 
@@ -112,6 +118,8 @@ impl Settings {
             "about" => Page::About,
             #[cfg(feature = "remote")]
             "shortcuts" => Page::Shortcuts(Default::default()),
+            #[cfg(feature = "remote")]
+            "team" => Page::Team(Default::default()),
             _ => Page::Appearance,
         };
         Settings { page }
@@ -180,6 +188,8 @@ impl App {
                     Page::About => self.about_page(ui),
                     #[cfg(feature = "remote")]
                     Page::Shortcuts(p) => p.ui(ui),
+                    #[cfg(feature = "remote")]
+                    Page::Team(p) => self.team_page(ui, p),
                 }
                 ui.add_space(12.0);
             });
@@ -217,6 +227,8 @@ impl App {
         if cfg!(feature = "remote") {
             pages.push((8, ic::KEYBOARD, t!("Shortcuts")));
         }
+        #[cfg(feature = "remote")]
+        pages.push((9, super::team::ICON, t!("Team")));
         pages.extend([(2, ic::KEY, t!("SSH keys")), (3, ic::LOCK_KEY, t!("Passwords"))]);
         if crate::modules::on("backup") {
             pages.push((4, ic::ARCHIVE, t!("Backup")));
@@ -254,6 +266,8 @@ impl App {
                     6 => Page::Parts,
                     #[cfg(feature = "remote")]
                     8 => Page::Shortcuts(Default::default()),
+                    #[cfg(feature = "remote")]
+                    9 => Page::Team(Default::default()),
                     _ => Page::About,
                 };
             }

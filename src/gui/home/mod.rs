@@ -277,6 +277,14 @@ impl App {
                 ssh_cmd: None,
                 mode: PaneMode::Screen,
             },
+            #[cfg(feature = "remote")]
+            How::Team { id, name, mode } => match super::team::launch(&id, &name, mode) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.error = Some(e);
+                    return;
+                }
+            },
             How::Terminal | How::Screen | How::Files | How::Ask(_) => {
                 let mode = match how {
                     How::Terminal => PaneMode::Terminal,
@@ -464,6 +472,9 @@ pub(super) enum How {
     App(u8, String, String),
     /// A computer by ID, its person asked to let this one in (no password given).
     Ask(PaneMode),
+    /// A computer of the person's team, by its ID and name, with a ticket from the team server.
+    #[cfg(feature = "remote")]
+    Team { id: String, name: String, mode: PaneMode },
 }
 
 /// An address, its port, and what to open on it.

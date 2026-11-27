@@ -543,7 +543,7 @@ fn who_proof(hk: &hkdf::Hkdf<sha2::Sha256>, shared: &[u8; 32], id: &str, key: &[
 
 /// The computer's side: a key for this exchange sent with WHO, the viewer's ID, key and proof
 /// read and checked, and `ids` asked whether it comes in; one that does not is told why.
-fn who_is_it(r: &mut SealedReader, w: &mut SealedWriter, hk: &hkdf::Hkdf<sha2::Sha256>, ids: Ids) -> io::Result<()> {
+fn who_is_it(r: &mut SealedReader, w: &mut SealedWriter, hk: &hkdf::Hkdf<sha2::Sha256>, ids: Ids, any_id: bool) -> io::Result<()> {
     let secret: [u8; 32] = crate::sys::random(32).try_into().map_err(|_| io::Error::other("random"))?;
     let (secret, public) = crate::relaylink::keypair(secret);
     w.write_all(WHO)?;
@@ -562,7 +562,8 @@ fn who_is_it(r: &mut SealedReader, w: &mut SealedWriter, hk: &hkdf::Hkdf<sha2::S
     r.read_exact(&mut key)?;
     r.read_exact(&mut proof)?;
     r.limit = CONFIRM.len();
-    let id = String::from_utf8(id).ok().filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
+    // A team's person may come from a device with no ID of its own: its key is what counts.
+    let id = String::from_utf8(id).ok().filter(|i| (any_id || !i.is_empty()) && i.bytes().all(|b| b.is_ascii_digit()));
     let proven = |id: &str| crate::relaylink::dh(&secret, &key).is_some_and(|s| who_proof(hk, &s, id, &key).iter().zip(&proof).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0);
     let verdict = match &id {
         Some(id) if proven(id) => ids(id, &key),
@@ -618,7 +619,7 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> i
 
 /// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
 fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
-    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None, ids: None } };
+    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None, ids: None, team: None } };
     let check = |code: &str| totp.is_some_and(|secret| crate::totp::check(secret, code));
     handshake_side(stream, side, judge, totp.map(|_| &check as TwoStep), punch).map(|(r, w, _)| (r, w))
 }
@@ -632,9 +633,18 @@ pub type TwoStep<'a> = &'a dyn Fn(&str) -> bool;
 /// now (`requests` says yes or no to each, once the exchange is made).
 enum Side<'a> {
     Viewer(&'a str),
-    /// `ids`: only some IDs come in (each shown with its device's key), as it says.
-    Agent { permanent: Option<&'a str>, one_time: Option<&'a str>, requests: Option<&'a dyn Fn() -> bool>, ids: Option<Ids<'a>> },
+    /// `ids`: only some IDs come in (each shown with its device's key), as it says. `team`: a
+    /// computer in a team takes tickets from its team server (`crate::team`).
+    Agent { permanent: Option<&'a str>, one_time: Option<&'a str>, requests: Option<&'a dyn Fn() -> bool>, ids: Option<Ids<'a>>, team: Option<TeamCheck<'a>> },
 }
+
+/// A team ticket as a computer in a team checks it: the tag it must be given as the password,
+/// and what the ticket lets in; None when it is no ticket for this computer.
+pub type TeamCheck<'a> = &'a dyn Fn(&str) -> Option<(String, crate::team::Ticket)>;
+
+/// What a viewer gives in place of a password to come in with a team ticket: this mark, the
+/// ticket, the mark again and its tag.
+pub const TEAM_MARK: &str = "\u{1}sshremote-team\u{1}";
 
 /// How a viewer came in, as the agent saw it.
 #[derive(Clone, Debug, PartialEq)]
@@ -644,6 +654,8 @@ pub enum Came {
     /// Without a password, asking: the person at the screen decides, comparing the code both
     /// sides were shown.
     Request(String),
+    /// With a ticket from the computer's team server.
+    Team(crate::team::Ticket),
 }
 
 fn handshake_side(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoStep>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
@@ -660,6 +672,11 @@ const ONE_TIME: u16 = 0x8000;
 /// The bit that says it gives none and asks to be let in: the exchange is then made with words
 /// everyone knows, and the code both sides show (`code`) is what tells a stranger in the middle.
 const REQUEST: u16 = 0x4000;
+/// The bit that says a team ticket comes first (its length in the bits below), and the password
+/// exchange is made with its tag.
+const TEAM: u16 = 0x2000;
+/// The longest ticket.
+const TICKET_MOST: usize = 0x0fff;
 const REQUEST_WORDS: &str = "sshremote request";
 /// What the agent answers a request it does not take, or not now (the size of `CONFIRM`).
 const NEEDS_PASSWORD: &[u8] = b"sshremote/1 needs";
@@ -671,6 +688,13 @@ pub const REQUEST_BUSY: &str = "the person at that computer is answering someone
 /// not take (`access::Config::from`); older viewers read it as a bad exchange.
 const NOT_FROM_HERE: u16 = 0xfffe;
 pub const NOT_FROM_HERE_WORDS: &str = "that computer takes viewers only from some addresses, and not from where you are";
+/// What the agent sends in place of its part to a password or a request where its team's policy
+/// lets in the team's people alone (docs/team.md); older viewers read it as a bad exchange.
+const TEAM_ONLY: u16 = 0xfffd;
+
+fn team_only() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, n!("that computer lets in only the people of its team, with no password: sign in to the team (Settings, Team) and open it from the team's computers"))
+}
 
 /// Turns a viewer away for where it is, once its part of the exchange is read (so the connection
 /// ends cleanly, and it hears why).
@@ -770,6 +794,35 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
     // The agent's answer to a request, decided when it is committed.
     let mut answer: Option<&[u8]> = None;
     let (state, msg, theirs, mut came) = match side {
+        Side::Viewer(_) if password.starts_with(TEAM_MARK) => {
+            let (ticket, tag) = password[TEAM_MARK.len()..].split_once(TEAM_MARK).ok_or_else(|| io::Error::other("bad team ticket"))?;
+            if ticket.len() > TICKET_MOST {
+                return Err(io::Error::other("the team ticket is too long"));
+            }
+            let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(tag.as_bytes()), &a, &b);
+            s.write_all(&(ticket.len() as u16 | TEAM).to_le_bytes())?;
+            s.write_all(ticket.as_bytes())?;
+            s.write_all(&(msg.len() as u16).to_le_bytes())?;
+            s.write_all(&msg)?;
+            let mut len = [0u8; 2];
+            s.read_exact(&mut len).map_err(|e| {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    io::Error::new(io::ErrorKind::ConnectionRefused, n!("the computer turned the team ticket away: it may be in no team, or older than 0.27"))
+                } else {
+                    e
+                }
+            })?;
+            if u16::from_le_bytes(len) == NOT_FROM_HERE {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_FROM_HERE_WORDS));
+            }
+            if u16::from_le_bytes(len) as usize != msg.len() {
+                return Err(io::Error::other("bad key exchange"));
+            }
+            let mut theirs = vec![0u8; msg.len()];
+            s.read_exact(&mut theirs)?;
+            let t = crate::team::Ticket::decode(ticket).ok_or_else(|| io::Error::other("bad team ticket"))?;
+            (state, msg, theirs, Came::Team(t))
+        }
         Side::Viewer(_) => {
             let once = looks_one_time(password);
             let request = password.trim().is_empty();
@@ -803,6 +856,9 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
             if u16::from_le_bytes(len) == NOT_FROM_HERE {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_FROM_HERE_WORDS));
             }
+            if u16::from_le_bytes(len) == TEAM_ONLY {
+                return Err(team_only());
+            }
             // Both sides' messages are the same size: anything else is not this program.
             if u16::from_le_bytes(len) as usize != msg.len() {
                 return Err(io::Error::other("bad key exchange"));
@@ -823,11 +879,51 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
             };
             (state, msg, theirs, came)
         }
-        Side::Agent { permanent, one_time, requests, .. } => {
+        Side::Agent { team, .. } if {
+            let mut peek = [0u8; 2];
+            s.peek(&mut peek).is_ok_and(|n| n == 2) && u16::from_le_bytes(peek) & (TEAM | ONE_TIME | REQUEST) == TEAM
+        } => {
+            let mut len = [0u8; 2];
+            s.read_exact(&mut len)?;
+            let n = (u16::from_le_bytes(len) & !TEAM) as usize;
+            if n > TICKET_MOST {
+                return Err(io::Error::other("the team ticket is too long"));
+            }
+            let mut ticket = vec![0u8; n];
+            s.read_exact(&mut ticket)?;
+            // A ticket that is not for this computer, too old, or any at all where none is
+            // taken: the exchange goes on with what nobody knows, and fails as a wrong password.
+            let checked = team.and_then(|check| check(&String::from_utf8_lossy(&ticket)));
+            let unknown = crate::sys::hex(&crate::sys::random(24));
+            let pw = checked.as_ref().map_or(unknown.as_str(), |c| c.0.as_str());
+            let (state, msg) = Spake2::<Ed25519Group>::start_b(&Password::new(pw.as_bytes()), &a, &b);
+            s.read_exact(&mut len)?;
+            if u16::from_le_bytes(len) as usize != msg.len() {
+                return Err(io::Error::other("bad key exchange"));
+            }
+            let mut theirs = vec![0u8; msg.len()];
+            s.read_exact(&mut theirs)?;
+            s.write_all(&(msg.len() as u16).to_le_bytes())?;
+            s.write_all(&msg)?;
+            let came = match checked {
+                Some((_, t)) => Came::Team(t),
+                None => Came::Lasting,
+            };
+            (state, msg, theirs, came)
+        }
+        Side::Agent { permanent, one_time, requests, team, .. } => {
             let mut len = [0u8; 2];
             s.read_exact(&mut len)?;
             let len = u16::from_le_bytes(len);
             let (once, request) = (len & ONE_TIME != 0, len & REQUEST != 0 && len & ONE_TIME == 0);
+            // Its team's people alone come in: the viewer hears so, and how to.
+            if permanent.is_none() && one_time.is_none() && requests.is_none() && team.is_some() {
+                let mut theirs = vec![0u8; ((len & !(ONE_TIME | REQUEST)) as usize).min(256)];
+                s.read_exact(&mut theirs)?;
+                s.write_all(&TEAM_ONLY.to_le_bytes())?;
+                s.flush()?;
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a password or a request where only the team's people come in"));
+            }
             // One that looks one-time where none are taken is checked as the lasting one (set
             // before one-time passwords, it may look like one); a lasting one where only one-time
             // ones are taken is one nobody knows. Either way a wrong guess counts as any other.
@@ -969,7 +1065,7 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
         if answer == CONFIRM
             && let Some(ids) = ids
         {
-            who_is_it(&mut r, &mut w, &hk, ids)?;
+            who_is_it(&mut r, &mut w, &hk, ids, false)?;
         }
         w.write_all(answer)?;
         w.flush()?;
@@ -989,7 +1085,8 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong password"));
         }
         // Two-step: the code is checked in turn too, and a wrong one counts as a wrong password.
-        if let Some(check) = totp {
+        // A team ticket stands for a person signed in to the team, two-step there.
+        if let Some(check) = totp.filter(|_| !matches!(came, Came::Team(_))) {
             w.write_all(CODE_PLEASE)?;
             w.flush()?;
             // Room for a trusted device's token, longer than a code.
@@ -1014,8 +1111,13 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
             }
         }
-        if let Some(ids) = ids {
-            who_is_it(&mut r, &mut w, &hk, ids)?;
+        if let Came::Team(t) = &came {
+            // The ticket was made for one device: the viewer proves it is that one.
+            let key = t.key;
+            let only = move |_id: &str, k: &[u8; 32]| if crate::team::same(k, &key) { Ok(()) } else { Err(IdRefused::OtherDevice) };
+            who_is_it(&mut r, &mut w, &hk, &only, true)?;
+        } else if let Some(ids) = ids {
+            who_is_it(&mut r, &mut w, &hk, ids, false)?;
         }
         got.copy_from_slice(CONFIRM);
         w.write_all(CONFIRM)?;
@@ -1060,8 +1162,9 @@ pub fn handshake_agent_passwords(
     judge: Judge,
     punch: Option<Punch>,
     ids: Option<Ids>,
+    team: Option<TeamCheck>,
 ) -> io::Result<(SealedReader, SealedWriter, Came)> {
-    handshake_side(stream, Side::Agent { permanent, one_time, requests, ids }, judge, two_step, punch)
+    handshake_side(stream, Side::Agent { permanent, one_time, requests, ids, team }, judge, two_step, punch)
 }
 
 /// A judge that checks at once.
@@ -1131,6 +1234,8 @@ pub fn accept_direct(s: &mut TcpStream, id: &str) -> bool {
 /// this network but has not been proven, which anyone there could have answered for it: a
 /// refusal there is put to the relay, which reaches the computer itself.
 pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[String]) -> Result<((SealedReader, SealedWriter), Way), String> {
+    let fresh = with_ticket(addr, password)?;
+    let password = fresh.as_ref();
     match connect_direct(addr, password, proven) {
         Straight::In(pair, at) => return Ok((pair, Way { straight: Some(at), refused: None })),
         Straight::Refused(_, why) => return Err(why),
@@ -1146,7 +1251,19 @@ pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[S
 }
 
 /// Viewer side: reaches the ID through its relay and runs the handshake.
+/// A computer of the person's team (the password is `TEAM_MARK`, maybe with a code or token
+/// joined, which a ticket does not need): a fresh ticket from the team server, at each connection.
+fn with_ticket<'a>(addr: &Address, password: &'a str) -> Result<std::borrow::Cow<'a, str>, String> {
+    if password.split(CODE_SEP).next() == Some(TEAM_MARK) {
+        crate::team::client::ticket_password(&addr.id).map(std::borrow::Cow::Owned)
+    } else {
+        Ok(std::borrow::Cow::Borrowed(password))
+    }
+}
+
 pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWriter), String> {
+    let fresh = with_ticket(addr, password)?;
+    let password = fresh.as_ref();
     // Dialled as remote access does: port 80 when the relay's own port is shut. For someone
     // else, a relay on this computer is told whom, so their calls are counted as theirs.
     let mut s = match addr.for_whom {
@@ -1297,7 +1414,7 @@ mod tests {
         let agent = thread::spawn(move || {
             let (s, _) = l.accept().unwrap();
             let take = || true;
-            handshake_agent_passwords(s, Some("lasting"), None, Some(&take), None, &now, agent_punch, None).unwrap()
+            handshake_agent_passwords(s, Some("lasting"), None, Some(&take), None, &now, agent_punch, None, None).unwrap()
         });
         let (vr, vw) = handshake_2fa(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now, None, p(true)).unwrap();
         let (ar, aw, came) = agent.join().unwrap();
@@ -1568,7 +1685,7 @@ mod tests {
             thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
                 let check = |c: &str| c.strip_prefix(TRUST_MARK).map_or_else(|| crate::totp::check(&secret, c), |t| t == "7e".repeat(32));
-                let _ = handshake_agent_passwords(s, Some("pw for both"), None, None, Some(&check), &now, None, None);
+                let _ = handshake_agent_passwords(s, Some("pw for both"), None, None, Some(&check), &now, None, None, None);
             });
             at
         };
@@ -1591,7 +1708,7 @@ mod tests {
             let port = l.local_addr().unwrap().port();
             let agent = thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
-                handshake_agent_passwords(s, lasting, once, None, None, &now, None, None).map(|(_, _, came)| came == Came::OneTime)
+                handshake_agent_passwords(s, lasting, once, None, None, &now, None, None, None).map(|(_, _, came)| came == Came::OneTime)
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ());
             let used = agent.join().unwrap();
@@ -1619,7 +1736,7 @@ mod tests {
                 let (s, _) = l.accept().unwrap();
                 let gate = move || take == Some(true);
                 let requests: Option<&dyn Fn() -> bool> = take.map(|_| &gate as &dyn Fn() -> bool);
-                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, None).map(|(_, _, c)| c).map_err(|e| e.to_string())
+                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, None, None).map(|(_, _, c)| c).map_err(|e| e.to_string())
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now).map(|(_, w)| w.ender().code()).map_err(|e| e.to_string());
             (viewer, agent.join().unwrap())
@@ -1636,6 +1753,79 @@ mod tests {
     /// A computer that lets in only some IDs: the viewer shows its own ID and its device's key,
     /// proven held; a listed one comes in (by password or by asking), one not listed or from
     /// another device than before is turned away and hears why, and one with no ID is told.
+    #[test]
+    fn a_team_ticket_lets_in_its_person_from_their_own_device() {
+        let dir = std::env::temp_dir().join(format!("sshremote-team-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::access::TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let my_key = crate::relaylink::keypair(crate::access::device_key()).1;
+        let team_key = [9u8; 32];
+        let ticket = |device: &str, key: [u8; 32], expires: u64| crate::team::Ticket {
+            device: device.into(),
+            user: "ana".into(),
+            display: "Ana".into(),
+            rights: 5,
+            ask: false,
+            key,
+            viewer: String::new(),
+            expires,
+            nonce: "01".into(),
+        };
+        // The viewer gives `t` with the tag made with `signer`; the computer is 482913075.
+        let try_in = |t: crate::team::Ticket, signer: [u8; 32], team_taken: bool| -> (Result<(), String>, Result<Came, String>) {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let agent = thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let check = |given: &str| {
+                    let t = crate::team::check_ticket(given, "482913075").ok()?;
+                    Some((crate::team::ticket_tag(&team_key, given), t))
+                };
+                let team: Option<TeamCheck> = team_taken.then_some(&check);
+                handshake_agent_passwords(s, Some("lasting"), None, None, None, &now, None, None, team).map(|(_, _, c)| c).map_err(|e| e.to_string())
+            });
+            let encoded = t.encode();
+            let given = format!("{TEAM_MARK}{encoded}{TEAM_MARK}{}", crate::team::ticket_tag(&signer, &encoded));
+            let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), &given, true, &now).map(|_| ()).map_err(|e| e.to_string());
+            (viewer, agent.join().unwrap())
+        };
+        let soon = crate::team::now() + 60;
+        let good = ticket("482913075", my_key, soon);
+        let (v, a) = try_in(good.clone(), team_key, true);
+        assert_eq!(v, Ok(()));
+        assert_eq!(a, Ok(Came::Team(good.clone())), "in as the ticket's person");
+        assert!(try_in(good.clone(), [1; 32], true).0.unwrap_err().contains("wrong password"), "a tag made without the computer's team key");
+        assert!(try_in(ticket("111111111", my_key, soon), team_key, true).1.is_err(), "a ticket for another computer");
+        assert!(try_in(ticket("482913075", my_key, soon - 120), team_key, true).1.is_err(), "an old ticket");
+        assert_eq!(try_in(ticket("482913075", [3; 32], soon), team_key, true).0.unwrap_err(), OTHER_DEVICE_WORDS, "made for another device");
+        assert!(try_in(good, team_key, false).1.is_err(), "a computer in no team takes none");
+        // A password still goes as before where tickets are taken.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let agent = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let check = |_: &str| None;
+            handshake_agent_passwords(s, Some("lasting"), None, None, None, &now, None, None, Some(&check)).map(|(_, _, c)| c).map_err(|e| e.to_string())
+        });
+        assert!(handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), "lasting", true, &now).is_ok());
+        assert_eq!(agent.join().unwrap(), Ok(Came::Lasting));
+        // Where the team's people alone come in, a password or a request hears so.
+        for given in ["lasting", ""] {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let agent = thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let check = |_: &str| None;
+                handshake_agent_passwords(s, None, None, None, None, &now, None, None, Some(&check)).map(|_| ()).map_err(|e| e.kind())
+            });
+            let e = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ()).unwrap_err();
+            assert_eq!((e.kind(), e.to_string()), (io::ErrorKind::PermissionDenied, team_only().to_string()), "{given:?}");
+            assert_eq!(agent.join().unwrap(), Err(io::ErrorKind::PermissionDenied));
+        }
+        crate::access::TEST_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn only_some_ids_come_in_each_from_its_own_device() {
         let dir = std::env::temp_dir().join(format!("sshremote-who-{}", std::process::id()));
@@ -1657,7 +1847,7 @@ mod tests {
                 };
                 let gate = || true;
                 let requests: Option<&dyn Fn() -> bool> = Some(&gate);
-                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, Some(&ids)).map_err(|e| e.to_string())?;
+                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, Some(&ids), None).map_err(|e| e.to_string())?;
                 seen.into_inner().unwrap().ok_or_else(|| "not asked".to_string())
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ()).map_err(|e| e.to_string());

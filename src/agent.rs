@@ -437,7 +437,7 @@ fn serve_with(
     }
     // A session by ID recorded, as the computer is set to: its viewer is told.
     let mut rec = SessionRecording(None);
-    if by_id() && crate::access::stored().ok().flatten().is_some_and(|c| c.record) {
+    if by_id() && crate::access::stored().ok().flatten().map(crate::access::with_policy).is_some_and(|c| c.record) {
         match crate::access::recordings_made().and_then(|d| crate::record::Recording::session(&d, cap.desktop_size())) {
             Ok(r) => {
                 rec.0 = Some(r);

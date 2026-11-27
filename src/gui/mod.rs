@@ -30,6 +30,8 @@ mod access_ui;
 mod remote;
 #[cfg(feature = "remote")]
 mod shortcuts;
+#[cfg(feature = "remote")]
+mod team;
 #[cfg(not(feature = "remote"))]
 #[path = "remote_off.rs"]
 mod remote;
@@ -1820,7 +1822,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: String::new(), id_keys: Vec::new() };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: String::new(), id_keys: Vec::new(), team: serde_json::Value::Null };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1852,7 +1854,8 @@ mod tests {
         let states = [
             "home", "home_off", "home_loading", "typed_ssh", "typed_id", "typed_words", "row_hover", "add_ssh", "add_id", "edit_config",
             "access_settings", "settings_appearance", "settings_connections", "settings_shortcuts", "settings_keys", "settings_passwords", "settings_backup",
-            "settings_extensions", "settings_parts", "settings_about", "quick", "narrow", "tags", "tag_picked",
+            "settings_extensions", "settings_parts", "settings_about", "quick", "narrow", "tags", "tag_picked", "settings_team", "settings_team_in",
+            "home_team",
         ];
         for dark in [true, false] {
             for name in states {
@@ -1874,8 +1877,8 @@ mod tests {
                 app.here_ssh_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
-                    let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: "718543859, 98765*".into(), id_keys: vec![("718543859".into(), "3ebfa6097815".into(), 0)] };
+                    let on = name != "home_off" && name != "settings_team";
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: "718543859, 98765*".into(), id_keys: vec![("718543859".into(), "3ebfa6097815".into(), 0)], team: serde_json::Value::Null };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1884,7 +1887,14 @@ mod tests {
                     app.access.service_looked = Some(Instant::now());
                 }
                 let mut w = workspace::Workspace::new(app.options());
+                // The team as made up for the pictures, or none (never the settings folder's).
+                #[cfg(feature = "remote")]
+                {
+                    let (state, devices) = if name.contains("team_in") || name == "home_team" { team::sample() } else { Default::default() };
+                    team::hold(&ctx, state, devices);
+                }
                 match name {
+                    "settings_team_in" => app.settings = Some(settings::Settings::at("team")),
                     "typed_ssh" => app.form.host = "dev@192.168.1.20:2222".into(),
                     "typed_id" => app.form.host = "123 456 789".into(),
                     "typed_words" => app.form.host = "my build".into(),

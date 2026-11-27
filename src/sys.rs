@@ -404,6 +404,33 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
+/// `path` opened to read, or to append to (made for its user alone if need be), as a file of its
+/// own: never through a link, nor one with another name (or nothing is opened). Root writing in a
+/// person's folder (the login screen's remote access) is so not led to another file by a link
+/// they put there.
+pub fn open_own(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    if append {
+        o.create(true).append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let f = o.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = f.metadata()?;
+        if !m.is_file() || m.nlink() != 1 {
+            return Err(std::io::Error::other("not a file of its own"));
+        }
+    }
+    Ok(f)
+}
+
 /// Writes `data` to `path` whole or not at all: beside it first, then renamed over it, so a
 /// reader never meets half a file. `private`: readable by its user only, from the start;
 /// `durable`: on the disk before it takes the old one's place, so not even a crash loses both.
@@ -516,6 +543,27 @@ pub fn end_tree(child: &mut std::process::Child) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_file_of_its_own_opens_and_a_link_does_not() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("sshremote-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (own, target) = (dir.join("own"), dir.join("target"));
+        std::fs::write(&target, "kept").unwrap();
+        super::open_own(&own, true).unwrap().write_all(b"a line\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&own).unwrap(), "a line\n");
+        // Put in its place: a link, or another name of a file elsewhere.
+        std::fs::remove_file(&own).unwrap();
+        std::os::unix::fs::symlink(&target, &own).unwrap();
+        assert!(super::open_own(&own, true).is_err() && super::open_own(&own, false).is_err());
+        std::fs::remove_file(&own).unwrap();
+        std::fs::hard_link(&target, &own).unwrap();
+        assert!(super::open_own(&own, true).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn arguments_are_quoted_for_the_c_runtime() {
         assert_eq!(super::quote_arg("plain"), "plain");
