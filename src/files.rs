@@ -342,7 +342,40 @@ fn prune(list: &Path) {
 pub struct Inbox {
     open: HashMap<u32, Incoming>,
     pub keep_broken: bool,
+    /// What a file whose name is taken there does: kept beside it ("name (2)"), in its place, or
+    /// not at all.
+    pub on_taken: OnTaken,
 }
+
+/// What a file coming in does when one of its name is there already.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum OnTaken {
+    #[default]
+    KeepBoth,
+    Replace,
+    Skip,
+}
+
+impl OnTaken {
+    pub fn from_u8(n: u8) -> OnTaken {
+        match n {
+            1 => OnTaken::Replace,
+            2 => OnTaken::Skip,
+            _ => OnTaken::KeepBoth,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            OnTaken::KeepBoth => 0,
+            OnTaken::Replace => 1,
+            OnTaken::Skip => 2,
+        }
+    }
+}
+
+/// What a file not taken in, as one of its name is there, ends with (the viewer says "skipped").
+pub const SKIPPED: &str = n!("skipped: one of that name is there already");
 
 impl Drop for Inbox {
     fn drop(&mut self) {
@@ -387,6 +420,9 @@ impl Inbox {
             Ok(p) => p,
             Err(text) => return Some(Note::Done { id, ok: false, text }),
         };
+        if self.on_taken == OnTaken::Skip && std::fs::symlink_metadata(dir.join(&leaf)).is_ok() {
+            return Some(Note::Done { id, ok: false, text: SKIPPED.into() });
+        }
         if self.keep_broken {
             prune_kept();
         }
@@ -487,6 +523,17 @@ impl Inbox {
         }
         let Incoming { file, part, dir, name, .. } = u;
         drop(file);
+        // In place of a file of its name (never of a folder, nor through a link).
+        let there = dir.join(&name);
+        if self.on_taken == OnTaken::Replace && std::fs::symlink_metadata(&there).is_ok_and(|m| m.is_file()) {
+            return Some(match std::fs::rename(&part, &there) {
+                Ok(()) => Note::Done { id, ok: true, text: there.display().to_string() },
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    Note::Done { id, ok: false, text: format!("{}: {e}", there.display()) }
+                }
+            });
+        }
         // The name is claimed by creating it, then the whole file replaces that empty one.
         let done = create_free(&dir, &name).and_then(|(claim, path)| {
             drop(claim);
@@ -1026,6 +1073,20 @@ mod tests {
         inbox.data(4, b"123");
         drop(inbox);
         assert_eq!(listing(), ["a (2).txt", "a.txt"], "nothing left of the broken ones");
+        // Set to replace: in the file's place; set to skip: not taken in at all.
+        let mut inbox = Inbox::default();
+        inbox.on_taken = OnTaken::Replace;
+        assert!(inbox.start_in(5, 3, &dir, "a.txt").is_none());
+        inbox.data(5, b"new");
+        assert!(matches!(inbox.end(5, true, ""), Some(Note::Done { ok: true, .. })));
+        assert_eq!((listing(), std::fs::read(dir.join("a.txt")).unwrap()), (vec!["a (2).txt".to_string(), "a.txt".to_string()], b"new".to_vec()));
+        inbox.on_taken = OnTaken::Skip;
+        assert!(matches!(inbox.start_in(6, 3, &dir, "a.txt"), Some(Note::Done { ok: false, text, .. }) if text == SKIPPED));
+        assert!(inbox.start_in(7, 1, &dir, "d.txt").is_none(), "a name not taken comes in as ever");
+        inbox.data(7, b"d");
+        assert!(matches!(inbox.end(7, true, ""), Some(Note::Done { ok: true, .. })));
+        assert_eq!(listing(), ["a (2).txt", "a.txt", "d.txt"]);
+        assert_eq!((OnTaken::from_u8(OnTaken::Skip.as_u8()), OnTaken::from_u8(9)), (OnTaken::Skip, OnTaken::KeepBoth));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

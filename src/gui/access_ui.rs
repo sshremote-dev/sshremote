@@ -12,6 +12,8 @@ pub(super) struct AccessUi {
     pub(super) cfg: Option<crate::access::Config>,
     pub(super) show_password: bool,
     pub(super) new_password: String,
+    /// An ID of one's own choosing, being typed.
+    pub(super) own_id: String,
     pub(super) relay: String,
     /// Two-step sign-in being set up: the new secret, and the code typed to show the app has it.
     #[cfg(feature = "remote")]

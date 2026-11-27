@@ -35,6 +35,9 @@ pub struct Computer {
     /// Where its password got in straight (`IP:PORT`, comma separated, the latest first): tried
     /// first, and what they say about a password stands.
     pub proven: String,
+    /// Where to reach it by its ID straight as the person said (`IP:PORT` or `IP`, comma
+    /// separated): another network, a VPN. Tried first, as proven ones are.
+    pub straight: String,
     /// An address found on this network turned down the password the relay took: only proven
     /// ones are tried from then on.
     pub found_refused: bool,
@@ -71,6 +74,7 @@ impl Computer {
             "mac": self.mac,
             "direct": self.direct,
             "proven": self.proven,
+            "straight": self.straight,
             "found_refused": self.found_refused,
             "tags": self.tags,
         })
@@ -89,6 +93,7 @@ impl Computer {
             mac: v.get("mac").and_then(Value::as_str).filter(|m| crate::lan::parse_mac(m).is_some()).unwrap_or("").to_string(),
             direct: v.get("direct").and_then(Value::as_str).unwrap_or("").to_string(),
             proven: v.get("proven").and_then(Value::as_str).unwrap_or("").to_string(),
+            straight: v.get("straight").and_then(Value::as_str).unwrap_or("").to_string(),
             found_refused: v.get("found_refused").and_then(Value::as_bool).unwrap_or(false),
             tags: tags(&v.get("tags").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         })
@@ -382,6 +387,23 @@ pub fn rename(was: &str, now: &str) {
 }
 
 /// Opened just now (with this port, when one was given).
+/// `IP` or `IP:PORT` (`[IPv6]:PORT`), with the port remote access takes straight when none is
+/// given.
+#[cfg(feature = "remote")]
+pub fn with_direct_port(a: &str) -> String {
+    let a = a.trim();
+    if a.parse::<std::net::SocketAddr>().is_ok() {
+        return a.to_string();
+    }
+    match a.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => format!("[{v6}]:{}", crate::net::DIRECT_PORT),
+        Ok(ip) => format!("{ip}:{}", crate::net::DIRECT_PORT),
+        // A host name: with its port, or remote access's.
+        Err(_) if a.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) => a.to_string(),
+        Err(_) => format!("{a}:{}", crate::net::DIRECT_PORT),
+    }
+}
+
 pub fn used(address: &str, port: Option<u16>) {
     update(address, |c| {
         c.last_used = crate::sys::now_secs();
@@ -423,6 +445,18 @@ pub fn forget(address: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "remote")]
+    #[test]
+    fn straight_addresses_take_remote_access_s_port_unless_given() {
+        let p = crate::net::DIRECT_PORT;
+        assert_eq!(with_direct_port("10.8.0.5"), format!("10.8.0.5:{p}"));
+        assert_eq!(with_direct_port(" 10.8.0.5:9000 "), "10.8.0.5:9000");
+        assert_eq!(with_direct_port("fd00::5"), format!("[fd00::5]:{p}"));
+        assert_eq!(with_direct_port("[fd00::5]:9000"), "[fd00::5]:9000");
+        assert_eq!(with_direct_port("office-pc.vpn"), format!("office-pc.vpn:{p}"));
+        assert_eq!(with_direct_port("office-pc.vpn:9000"), "office-pc.vpn:9000");
+    }
+
     use super::*;
 
     #[test]

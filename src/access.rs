@@ -76,6 +76,9 @@ pub struct Config {
     pub ids: String,
     /// The device each listed ID first came from: the ID, its key (hex), and when.
     pub id_keys: Vec<(String, String, u64)>,
+    /// Remote access run as a service puts newer releases in place by itself, between sessions
+    /// (`update::unattended`): nobody sits at such a computer to click "Update".
+    pub auto_update: bool,
     /// The team this computer is in (`team::client::Joined` as JSON), or null: kept with the rest,
     /// so that only who may change remote access can join a team, and the service reads it.
     pub team: serde_json::Value,
@@ -257,7 +260,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -305,6 +308,8 @@ impl Config {
                 })
                 .unwrap_or_default(),
             team: v.get("team").filter(|t| t.is_object()).cloned().unwrap_or_default(),
+            // On unless turned off: a computer nobody sits at would stay on an old release.
+            auto_update: v.get("auto_update").and_then(|x| x.as_bool()).unwrap_or(true),
         })
     }
 }
@@ -479,6 +484,7 @@ pub fn fresh() -> Config {
         record: false,
         ids: String::new(),
         id_keys: Vec::new(),
+        auto_update: true,
         team: serde_json::Value::Null,
     }
 }
@@ -556,6 +562,12 @@ fn write_settings(text: &str) -> Result<(), String> {
         hand_back(&f);
         Ok(())
     }
+}
+
+/// An ID a person chose: as `valid_id`, and not starting with 0 (as the relay keeps it). The relay
+/// says whether another computer has it already.
+pub fn own_id_ok(id: &str) -> bool {
+    valid_id(id) && !id.starts_with('0')
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -1866,7 +1878,8 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     // Files moved or changed in the session go to the team's audit log too, as who did it.
     let team_base = serde_json::json!({ "kind": "file", "session": n, "how": team_how, "user": team_user, "from": from.map(|a| a.to_string()) });
-    let _ = serve_viewer(r, w, grant, code.as_deref(), cfg, trust_offer, team_base);
+    let asking = Asking { code: code.as_deref(), how: &how, from: from_text.as_deref().unwrap_or("") };
+    let _ = serve_viewer(r, w, grant, asking, cfg, trust_offer, team_base);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     let path = match ender.straight() {
         Some(a) => crate::lang::fill(n!("straight from {}"), &[&a.ip()]),
@@ -2216,11 +2229,19 @@ impl Frames {
 
 /// `trust`: a token for the agent to give the viewer if it asks to be trusted, and where it is;
 /// `audit`: the team's record of this session, for its file events.
+/// What the person at the screen is told of a viewer who asks to come in: the two-step code both
+/// screens show (a request), how they came (a team's person by name, an ID proven), from where.
+struct Asking<'a> {
+    code: Option<&'a str>,
+    how: &'a str,
+    from: &'a str,
+}
+
 fn serve_viewer(
     mut r: crate::net::SealedReader,
     mut w: crate::net::SealedWriter,
     grant: u8,
-    code: Option<&str>,
+    asking: Asking,
     cfg: &Config,
     mut trust: Option<(String, String)>,
     audit: serde_json::Value,
@@ -2235,9 +2256,10 @@ fn serve_viewer(
     // keyboard and mouse (no terminal, files or clipboard as root).
     let (capture, grant) = if at_login_screen() { ("kms", grant & crate::grant::CONTROL) } else { ("auto", grant) };
     cmd.args(["--agent", "--capture", capture, "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    if let Some(c) = code {
+    if let Some(c) = asking.code {
         cmd.args(["--code", c]);
     }
+    cmd.args(["--who-how", asking.how, "--who-from", asking.from]);
     if cameras {
         cmd.arg("--cameras");
     }
@@ -2826,7 +2848,20 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("id") => {
-            c.id = new_id();
+            if c.team.is_object() {
+                return Err("this computer is in a team, which knows it by its ID: leave the team first (sshremote team leave)".into());
+            }
+            // One of one's own choosing, or a new one at random.
+            c.id = match args.get(1) {
+                Some(id) => {
+                    let id: String = id.chars().filter(|c| !c.is_whitespace()).collect();
+                    if !own_id_ok(&id) {
+                        return Err("usage: sshremote remote-access id [6 to 12 digits, not starting with 0]".into());
+                    }
+                    id
+                }
+                None => new_id(),
+            };
             save(&c)?;
             println!("ID: {}", crate::computers::spaced(&c.id));
             Ok(())
@@ -2994,6 +3029,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                     });
                     Role::LoginScreen(owner)
                 } else if service && uid != 0 {
+                    thread::spawn(|| crate::update::unattended(|| viewers_here() == 0));
                     Role::Owner(uid)
                 } else {
                     Role::Plain

@@ -98,7 +98,14 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         let list = |s: &str| s.split(',').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect::<Vec<_>>();
         // Straight, before the relay: where its password got in before, then where it was last
         // found on this network unless an address found there was caught answering for it.
-        let proven = known.as_ref().map(|c| list(&c.proven)).unwrap_or_default();
+        // The addresses the person gave first (the port remote access takes straight when none).
+        let given: Vec<String> = known.as_ref().map(|c| list(&c.straight)).unwrap_or_default().into_iter().map(|a| crate::computers::with_direct_port(&a)).collect();
+        let mut proven = given;
+        for p in known.as_ref().map(|c| list(&c.proven)).unwrap_or_default() {
+            if !proven.contains(&p) {
+                proven.push(p);
+            }
+        }
         let found: Vec<String> =
             known.as_ref().filter(|c| !c.found_refused).map(|c| list(&c.direct)).unwrap_or_default().into_iter().filter(|d| !proven.contains(d)).collect();
         // A device the computer trusts gives its token where the two-step code is asked.

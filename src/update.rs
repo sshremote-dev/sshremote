@@ -104,6 +104,40 @@ pub fn managed_by(exe: &Path) -> Option<&'static str> {
     }
 }
 
+/// Remote access run as a service, with nobody at the computer to click: a newer release put in
+/// place by itself (unless turned off: `access::Config::auto_update`, or a package manager keeps
+/// this copy), once `idle` says nobody is connected, and the service started again on it.
+#[cfg(feature = "remote")]
+pub fn unattended(idle: impl Fn() -> bool) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(600));
+    loop {
+        let on = crate::access::stored().ok().flatten().is_some_and(|c| c.auto_update);
+        let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
+        if on
+            && exe.as_deref().is_some_and(|e| managed_by(e).is_none())
+            && let Ok(Some(r)) = check()
+        {
+            // Not under someone working there: after they leave.
+            while !idle() {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            match install(&r) {
+                Ok(_) => {
+                    eprintln!("remote access: updated to {} by itself; starting again", r.version);
+                    // The service manager starts it again (systemd's Restart=always, launchd's
+                    // KeepAlive); the Windows service starts itself again through a helper.
+                    #[cfg(windows)]
+                    crate::service::start_again();
+                    std::process::exit(0);
+                }
+                Err(e) => eprintln!("remote access: the update to {} did not go in: {e}", r.version),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(6 * 3600));
+    }
+}
+
 /// Downloads the release, checks it against the list, and puts it in place of this program,
 /// which is returned to be started again.
 pub fn install(r: &Release) -> Result<PathBuf, String> {

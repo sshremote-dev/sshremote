@@ -263,6 +263,27 @@ pub fn code_arg() -> String {
     code().map(|c| format!(" --code {c}")).unwrap_or_default()
 }
 
+/// How the viewer came and from where, for a command line as Windows reads it (what could end
+/// the quotes left out): ` --who-how "..." --who-from "..."`, or nothing.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn who_arg() -> String {
+    let q = |s: &str| format!("\"{}\"", s.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').take(160).collect::<String>());
+    WHO.lock().unwrap_or_else(|e| e.into_inner()).clone().map(|(h, f)| format!(" --who-how {} --who-from {}", q(&h), q(&f))).unwrap_or_default()
+}
+
+/// The same as arguments of their own.
+pub fn who_args() -> Vec<String> {
+    WHO.lock().unwrap_or_else(|e| e.into_inner()).clone().map(|(h, f)| vec!["--who-how".into(), h, "--who-from".into(), f]).unwrap_or_default()
+}
+
+/// How the viewer by ID came and from where (remote access's words), for the person at the
+/// screen.
+static WHO: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+pub fn set_who(how: &str, from: &str) {
+    *WHO.lock().unwrap_or_else(|e| e.into_inner()) = Some((how.to_string(), from.to_string()));
+}
+
 /// The viewer by ID may see the cameras, as given on to the helper: ` --cameras`, or nothing.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn cameras_arg() -> &'static str {
@@ -472,6 +493,8 @@ fn serve_with(
     {
         send(enc, &ToClient::Notice(crate::lang::fill(n!("This computer's screen cannot be shown: {}. Its terminal and files work."), &[&why]))).map_err(io_err)?;
     }
+    // Awake, the screen on, for as long as someone looks at it.
+    let _awake = crate::sys::keep_awake();
     // Remote access run in the app without administrator rights (Windows): the viewer may ask the
     // person here for them.
     #[cfg(windows)]
@@ -934,6 +957,7 @@ fn serve_with(
                 ToAgent::Resumes => inbox.keep_broken = true,
                 // Remote access asks the person here (`access::Frames`).
                 ToAgent::AskElevation => {}
+                ToAgent::OnTaken(n) => inbox.on_taken = crate::files::OnTaken::from_u8(n),
                 // The sides switch: the person here gets a window onto the viewer's computer.
                 ToAgent::SwitchSides { address, password } => {
                     let text = if !by_id() || allowed & crate::grant::CONTROL == 0 {

@@ -323,6 +323,17 @@ impl Remote {
                     pick(ui, Fit::Fixed(p), &format!("{p}%"));
                 }
             });
+            // The mouse as the computer there should take it.
+            let mut swap = self.swap_buttons;
+            if ui.checkbox(&mut swap, t!("Trade the left and right buttons")).on_hover_text(t!("For a mouse set for the other hand here or there")).changed() {
+                self.swap_buttons = swap;
+                crate::hosts::set_setting("swap_buttons", if swap { "yes" } else { "no" });
+            }
+            let mut reverse = self.reverse_wheel;
+            if ui.checkbox(&mut reverse, t!("Turn the wheel the other way")).on_hover_text(t!("Scrolls there the other way from here, as between natural and classic scrolling")).changed() {
+                self.reverse_wheel = reverse;
+                crate::hosts::set_setting("reverse_wheel", if reverse { "yes" } else { "no" });
+            }
             let mut follow = self.follow;
             if ui.checkbox(&mut follow, t!("Follow the pointer there")).on_hover_text(t!("At a size larger than this pane, the picture moves with the pointer when the person there or a program moves it")).changed() {
                 self.follow = follow;
@@ -533,6 +544,49 @@ impl Remote {
                     }));
                     ui.close();
                 }
+            }
+            // The account's password there, typed at its sign-in or lock screen: as typed here, or
+            // as kept in this computer's password store for it.
+            ui.separator();
+            ui.label(egui::RichText::new(t!("Sign-in password there")).strong());
+            let name = crate::vault::sign_in_name(self.host());
+            let kept = *self.sign_in_kept.get_or_insert_with(|| crate::vault::get(&name).is_some_and(|p| !p.is_empty()));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.sign_in).password(true).desired_width(150.0).hint_text(t!("password")));
+                if ui.add_enabled(!self.sign_in.is_empty(), egui::Button::new(t!("Type it"))).on_hover_text(t!("Typed there with Enter after it, at its sign-in or lock screen")).clicked() {
+                    let (text, keep) = (std::mem::take(&mut self.sign_in), self.keep_sign_in);
+                    let name = name.clone();
+                    *action = Some(Box::new(move |r, _| {
+                        if keep {
+                            crate::vault::set(&name, &text)?;
+                            r.sign_in_kept = Some(true);
+                        }
+                        r.type_text(&text, true)
+                    }));
+                    ui.close();
+                }
+            });
+            ui.checkbox(&mut self.keep_sign_in, t!("Keep it for this computer"))
+                .on_hover_text(t!("In this computer's password store, apart from the password that reaches it"));
+            if kept {
+                ui.horizontal(|ui| {
+                    if ui.button(t!("Type the kept one")).clicked() {
+                        let name = name.clone();
+                        *action = Some(Box::new(move |r, _| {
+                            let p = crate::vault::get(&name).ok_or(t!("No password is kept for this computer."))?;
+                            r.type_text(&p, true)
+                        }));
+                        ui.close();
+                    }
+                    if ui.button(t!("Forget it")).clicked() {
+                        let name = name.clone();
+                        *action = Some(Box::new(move |r, _| {
+                            r.sign_in_kept = Some(false);
+                            crate::vault::delete(&name)
+                        }));
+                        ui.close();
+                    }
+                });
             }
             // A keyboard of another layout than the computer's: what it says on the keys, or
             // where they are (for games, and the computer's own layout).
@@ -866,7 +920,10 @@ impl Remote {
                 ui.menu_button(format!("{}  {}", ic::ARROW_CLOCKWISE, t!("Restart it")), |ui| {
                     ui.label(egui::RichText::new(t!("Programs there close; unsaved work may be lost.")).weak());
                     if ui.add(crate::gui::kit::danger(t!("Restart now"), true)).clicked() {
-                        *action = Some(Box::new(|r, _| r.send(ToAgent::Host { act: RESTART, on: true })));
+                        *action = Some(Box::new(|r, _| {
+                            r.restarting = true;
+                            r.send(ToAgent::Host { act: RESTART, on: true })
+                        }));
                         ui.close();
                     }
                 });

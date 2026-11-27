@@ -333,6 +333,35 @@ impl App {
                     crate::hosts::set_setting("all_monitors", if on { "yes" } else { "no" });
                 }
             });
+            // A file sent or fetched whose name is taken where it goes.
+            #[cfg(feature = "remote")]
+            kit::row(ui, t!("Files"), |ui| {
+                let now = crate::hosts::setting("on_taken").and_then(|v| v.parse::<u8>().ok()).unwrap_or(0);
+                let name = |n: u8| match n {
+                    1 => t!("A file of the same name is replaced"),
+                    2 => t!("A file of the same name is kept, the new one skipped"),
+                    _ => t!("Both are kept: the new one as \"name (2)\""),
+                };
+                egui::ComboBox::from_id_salt("on-taken").selected_text(name(now)).width(ui.available_width().min(360.0)).show_ui(ui, |ui| {
+                    for n in 0..3u8 {
+                        if ui.selectable_label(n == now, name(n)).clicked() {
+                            crate::hosts::set_setting("on_taken", &n.to_string());
+                        }
+                    }
+                });
+            });
+            // Every screen opened, recorded from its start.
+            #[cfg(feature = "remote")]
+            kit::row(ui, t!("Recording"), |ui| {
+                let mut on = crate::hosts::setting("record_outgoing").is_some_and(|v| v == "yes");
+                if ui
+                    .checkbox(&mut on, t!("Record every screen I open"))
+                    .on_hover_text(t!("From its start, as the record button in its pane does (at most 15 frames a second, only as it changes)"))
+                    .changed()
+                {
+                    crate::hosts::set_setting("record_outgoing", if on { "yes" } else { "no" });
+                }
+            });
             // Computers by ID: past the relay when a path through both routers is found.
             #[cfg(feature = "remote")]
             kit::row(ui, t!("By ID"), |ui| {

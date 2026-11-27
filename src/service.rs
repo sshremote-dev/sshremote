@@ -269,6 +269,8 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
+    // Newer releases put in place by themselves, between sessions.
+    std::thread::spawn(|| crate::update::unattended(|| crate::access::viewers_here() == 0));
     // Remote access by ID, from start-up and at the sign-in screen, while it is turned on.
     std::thread::spawn(|| {
         loop {
@@ -281,6 +283,29 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     });
     serve();
     report(SERVICE_STOPPED);
+}
+
+/// After an update: a helper (the new program) starts the service again once this one has
+/// stopped, as the service manager does not by itself.
+pub fn start_again() {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--start-service-again");
+        crate::sys::quiet(&mut cmd);
+        let _ = cmd.spawn();
+    }
+    report(SERVICE_STOPPED);
+}
+
+/// `--start-service-again`: waits for the service to stop, then starts it (on the new program).
+pub fn start_when_stopped() -> Result<(), String> {
+    for _ in 0..60 {
+        if stopped() {
+            return run("sc.exe", &["start", NAME]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    run("sc.exe", &["start", NAME])
 }
 
 /// Entry point for `sshremote --service`, run by the service control manager.

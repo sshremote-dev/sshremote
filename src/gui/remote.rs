@@ -168,6 +168,18 @@ pub(super) struct Remote {
     /// What can be done to the computer itself and what is on (`hostctl` bits), once asked.
     pub(super) host: Option<(u8, u8)>,
     pub(super) host_asked: bool,
+    /// Told to restart: the connection lost next is tried again for as long as a restart takes.
+    pub(in crate::gui) restarting: bool,
+    /// Left and right mouse buttons traded there, and the wheel turned the other way (kept).
+    pub(in crate::gui) swap_buttons: bool,
+    /// The sign-in password being typed in the keys menu, to type there (never shown).
+    pub(in crate::gui) sign_in: String,
+    pub(in crate::gui) keep_sign_in: bool,
+    /// Whether one is kept in the password store for this computer (looked up once).
+    pub(in crate::gui) sign_in_kept: Option<bool>,
+    pub(in crate::gui) reverse_wheel: bool,
+    /// This computer awake while it shows the other's screen (nobody types here meanwhile).
+    _awake: crate::sys::KeepAwake,
     /// A paste the keys of this frame already made (text or files), so the key's release does not
     /// make another.
     pub(super) paste_seen: bool,
@@ -344,7 +356,7 @@ impl Remote {
         let mut ctl = ctl;
         ctl.s.formats |= crate::proto::FORMAT_POINTER;
         let swap_cmd = swap_by_default(&sess.backend);
-        Remote {
+        let mut r = Remote {
             web: sess.backend == "browser",
             screenless: sess.backend == "none",
             screen_moved: false,
@@ -430,6 +442,13 @@ impl Remote {
             allowed: crate::grant::ALL,
             host: None,
             host_asked: false,
+            restarting: false,
+            swap_buttons: crate::hosts::setting("swap_buttons").is_some_and(|v| v == "yes"),
+            sign_in: String::new(),
+            keep_sign_in: false,
+            sign_in_kept: None,
+            reverse_wheel: crate::hosts::setting("reverse_wheel").is_some_and(|v| v == "yes"),
+            _awake: crate::sys::keep_awake(),
             paste_seen: false,
             pasting: None,
             term_drops: Vec::new(),
@@ -459,7 +478,18 @@ impl Remote {
             sent: Settled::default(),
             got: Settled::default(),
             ssh_cmd,
+        };
+        // Every screen opened is recorded, when set so (Settings, Connections).
+        if !r.web && !r.screenless && crate::hosts::setting("record_outgoing").is_some_and(|v| v == "yes") {
+            r.toggle_recording();
         }
+        // A file whose name is taken, there and here: as set (Settings, Connections).
+        let taken = crate::files::OnTaken::from_u8(crate::hosts::setting("on_taken").and_then(|v| v.parse().ok()).unwrap_or(0));
+        r.inbox.on_taken = taken;
+        if taken != crate::files::OnTaken::KeepBoth {
+            let _ = r.send(ToAgent::OnTaken(taken.as_u8()));
+        }
+        r
     }
 
     /// One frame of the pane, with the system keys taken from Windows for it; on an error the
@@ -1036,6 +1066,7 @@ impl Remote {
                             let folder = dir.unwrap_or_else(|| text.rsplit_once(['/', '\\']).map_or(text.clone(), |(d, _)| d.to_string()));
                             self.sent.add(name, folder);
                         }
+                        (None, false, false) if text == crate::files::SKIPPED => self.notify(&t!("{}: skipped, as one of that name is there", name)),
                         (None, false, false) => self.notify(&t!("{} failed: {}", name, crate::lang::tr_msg(&text))),
                     }
                 }

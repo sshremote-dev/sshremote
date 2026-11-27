@@ -178,8 +178,10 @@ fn reached_as(target: &Target, label: &str) -> String {
 /// id twice.
 static NEXT_PANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Seconds a lost connection is tried again before the pane asks.
+/// Seconds a lost connection is tried again before the pane asks; one to a computer told to
+/// restart, for as long as a restart takes.
 const GIVE_UP: f64 = 30.0;
+const GIVE_UP_RESTARTING: f64 = 300.0;
 /// How long a program asked to close (with its pane) is waited for while it asks nothing; and at
 /// most, while it asks something (answered in its pane).
 const ASKED_WAIT: Duration = Duration::from_secs(3);
@@ -214,12 +216,14 @@ struct Down {
     again: bool,
     /// The sign-in dialog was shown for this failure.
     asked: bool,
+    /// How long it is tried again before the pane asks.
+    patience: f64,
 }
 
 impl Down {
     fn new(again: bool, why: String) -> Down {
         let now = Instant::now();
-        Down { rx: None, since: now, next: now, attempt: 0, why, given_up: false, again, asked: false }
+        Down { rx: None, since: now, next: now, attempt: 0, why, given_up: false, again, asked: false, patience: GIVE_UP }
     }
 }
 
@@ -1263,6 +1267,10 @@ impl Workspace {
     #[cfg_attr(not(feature = "remote"), allow(unreachable_code))]
     fn lost(&mut self, i: usize, why: String) {
         let p = &mut self.panes[i];
+        #[cfg(feature = "remote")]
+        let restarting = matches!(&p.state, State::Live(r) if r.restarting);
+        #[cfg(not(feature = "remote"))]
+        let restarting = false;
         if let State::Live(r) = &mut p.state {
             p.mode = r.mode();
             p.prefs = Some(r.prefs());
@@ -1270,7 +1278,11 @@ impl Workspace {
             p.terms = r.take_terms().and_then(|mut t| t.keep_local().then_some(t));
             r.close();
         }
-        p.state = State::Down(Down::new(true, why));
+        let mut down = Down::new(true, why);
+        if restarting {
+            down.patience = GIVE_UP_RESTARTING;
+        }
+        p.state = State::Down(down);
     }
 
     /// One pane alone in its tab, or the grid again. What fills the tab is what takes the keys.
@@ -2014,7 +2026,7 @@ impl Down {
         let wait = 1u64 << (self.attempt - 1).min(3);
         self.next = Instant::now() + std::time::Duration::from_secs(wait);
         // A first attempt asks at once (a wrong host or password will not mend itself).
-        if !self.again || self.since.elapsed().as_secs_f64() > GIVE_UP {
+        if !self.again || self.since.elapsed().as_secs_f64() > self.patience {
             self.given_up = true;
         }
     }

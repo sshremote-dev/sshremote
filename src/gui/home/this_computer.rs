@@ -324,6 +324,15 @@ impl App {
                                 });
                             }
                         });
+                        // Nobody sits at a computer the service keeps reachable to click "Update".
+                        ui.add_space(4.0);
+                        if ui
+                            .checkbox(&mut cfg.auto_update, t!("Update by itself"))
+                            .on_hover_text(t!("The service puts new versions in place by itself, checked against sshremote.dev's signed list, when nobody is connected, and starts again on them"))
+                            .changed()
+                        {
+                            changed = true;
+                        }
                     });
                     ui.add_space(kit::GAP);
                     kit::heading(ui, t!("Access"));
@@ -363,10 +372,29 @@ impl App {
                         kit::row(ui, t!("ID"), |ui| {
                             ui.label(RichText::new(crate::computers::spaced(&cfg.id)).monospace().size(14.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(kit::secondary(t!("Take a new ID"))).on_hover_text(t!("Those who know the old ID can no longer use it")).clicked() {
+                                let in_team = cfg.team.is_object();
+                                if ui
+                                    .add_enabled(!in_team, kit::secondary(t!("Take a new ID")))
+                                    .on_hover_text(t!("Those who know the old ID can no longer use it"))
+                                    .on_disabled_hover_text(t!("This computer's team knows it by its ID: leave the team first"))
+                                    .clicked()
+                                {
                                     cfg.id = access::new_id();
                                     changed = true;
                                 }
+                            });
+                        });
+                        // One of one's own choosing, while no other computer has it.
+                        kit::row(ui, t!("Your own ID"), |ui| {
+                            let typed: String = self.access.own_id.chars().filter(|c| !c.is_whitespace()).collect();
+                            let ok = access::own_id_ok(&typed) && typed != cfg.id && !cfg.team.is_object();
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(ok, kit::secondary(t!("Use"))).on_hover_text(t!("If another computer has it, the relay says so and this one keeps trying until you choose another")).clicked() {
+                                    cfg.id = typed.clone();
+                                    self.access.own_id.clear();
+                                    changed = true;
+                                }
+                                ui.add(kit::field(&mut self.access.own_id, t!("6 to 12 digits, not starting with 0")));
                             });
                         });
                         kit::row(ui, t!("Relay"), |ui| {

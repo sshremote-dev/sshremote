@@ -294,6 +294,12 @@ pub fn trust_name(host: &str) -> String {
     format!("{host}{TRUSTED}")
 }
 
+/// Under which name the password of the account on `host` is kept (to type at its sign-in or
+/// lock screen), apart from the password that reaches it.
+pub fn sign_in_name(host: &str) -> String {
+    format!("{host} sign-in")
+}
+
 const TRUSTED: &str = " trusted";
 
 /// Removes a saved password, and the trust that computer gave with it.

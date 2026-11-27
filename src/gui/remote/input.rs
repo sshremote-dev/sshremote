@@ -188,7 +188,7 @@ impl Remote {
                     }
                     Event::PointerButton { pos: _, button, pressed, modifiers } if self.grab_set => {
                         self.sync_mods(*modifiers)?;
-                        self.send(ToAgent::Button { button: button_number(*button), pressed: *pressed })?;
+                        self.send(ToAgent::Button { button: self.host_button(*button), pressed: *pressed })?;
                         continue;
                     }
                     _ => {}
@@ -309,7 +309,7 @@ impl Remote {
                         self.host_pointer = Some((p.0 as i16, p.1 as i16));
                         self.send(ToAgent::Pointer { x: p.0, y: p.1 })?;
                     }
-                    let b = button_number(button);
+                    let b = self.host_button(button);
                     self.send(ToAgent::Button { button: b, pressed })?;
                     if self.click_pick && b == 1 && pressed {
                         self.pick_pressed = true;
@@ -335,8 +335,9 @@ impl Remote {
                         egui::MouseWheelUnit::Line => delta,
                         egui::MouseWheelUnit::Page => delta * 10.0,
                     };
-                    // Whole steps go now, the rest adds up with what comes next.
-                    self.wheel -= lines;
+                    // Whole steps go now, the rest adds up with what comes next (the other way
+                    // round when the wheel is set to turn the other way there).
+                    self.wheel -= if self.reverse_wheel { -lines } else { lines };
                     let (sy, sx) = (self.wheel.y.trunc() as i32, self.wheel.x.trunc() as i32);
                     self.wheel -= Vec2::new(sx as f32, sy as f32);
                     if sy != 0 {
@@ -414,6 +415,31 @@ impl Remote {
                 self.notify(t!("Nothing to paste into here"));
                 Ok(())
             }
+        }
+    }
+}
+
+impl Remote {
+    /// Types `text` there, as its keyboard would (a password at its sign-in or lock screen), then
+    /// Enter when `enter`.
+    pub(in crate::gui) fn type_text(&mut self, text: &str, enter: bool) -> Result<(), String> {
+        self.release_all()?;
+        for c in text.chars() {
+            self.send(ToAgent::Key { keysym: xk::of_char(c), mods: 0 })?;
+        }
+        if enter {
+            self.send(ToAgent::Key { keysym: xk::RETURN, mods: 0 })?;
+        }
+        Ok(())
+    }
+
+    /// The host's number for a button pressed here: left and right traded when set so (a
+    /// left-handed mouse here, or one set so there).
+    fn host_button(&self, b: egui::PointerButton) -> u8 {
+        match button_number(b) {
+            1 if self.swap_buttons => 3,
+            3 if self.swap_buttons => 1,
+            n => n,
         }
     }
 }

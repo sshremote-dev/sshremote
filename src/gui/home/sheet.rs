@@ -48,6 +48,8 @@ pub(in crate::gui) struct Sheet {
     password: String,
     /// Its network card's hardware address, for waking it.
     mac: String,
+    /// Where to reach a computer by ID straight, as typed (`Computer::straight`).
+    straight: String,
     /// Its tags, comma separated.
     tags: String,
     tunnels: Vec<TunnelForm>,
@@ -74,6 +76,7 @@ impl Sheet {
             relay: String::new(),
             password: String::new(),
             mac: String::new(),
+            straight: String::new(),
             tags: String::new(),
             tunnels: Vec::new(),
             problem: None,
@@ -118,6 +121,7 @@ impl Sheet {
         }
         s.tunnels = c.tunnels.iter().map(|t| TunnelForm { kind: t.kind, port: t.port.to_string(), dest: t.dest.clone(), auto: t.start_with_app }).collect();
         s.mac = c.mac.clone();
+        s.straight = c.straight.clone();
         s.tags = c.tags.join(", ");
         s
     }
@@ -191,6 +195,11 @@ impl Sheet {
         if !mac.is_empty() && crate::lan::parse_mac(&mac).is_none() {
             return Err(t!("The hardware address is six pairs of hex digits, such as 3c:52:82:1a:2b:3c.").into());
         }
+        let straight: Vec<String> = self.straight.split([',', ' ']).map(str::trim).filter(|a| !a.is_empty()).map(String::from).collect();
+        if straight.iter().any(|a| a.chars().any(|c| c.is_control() || c == '/') || a.len() > 255) {
+            return Err(t!("A straight address is an IP or a host name, with :PORT or not, such as 10.8.0.5 or 10.8.0.5:7073.").into());
+        }
+        let straight = straight.join(",");
         let (name, favorite, tags) = (self.name.trim().to_string(), self.favorite, crate::computers::tags(&self.tags));
         crate::computers::update(&address, |c| {
             c.name = name;
@@ -199,6 +208,7 @@ impl Sheet {
             c.port = port;
             c.tunnels = tunnels;
             c.mac = mac;
+            c.straight = straight;
         });
         if !self.password.is_empty() {
             crate::vault::set(&address, &std::mem::take(&mut self.password))?;
@@ -279,6 +289,8 @@ impl App {
                     kit::row(ui, t!("Tags"), |ui| ui.add(kit::field(&mut s.tags, t!("work, servers (optional)")))).on_hover_text(t!("Words to group it by: the list shows them, and picks the computers with one"));
                     if s.by_id {
                         kit::row(ui, t!("ID"), |ui| ui.add(kit::field(&mut s.id, "123 456 789")));
+                        kit::row(ui, t!("Straight at"), |ui| ui.add(kit::field(&mut s.straight, t!("its IP on a VPN or another network (optional)"))))
+                            .on_hover_text(t!("Tried before the relay, at port 7073 unless another is given; it lets viewers come straight in when set so (Remote access settings)"));
                         // Reached through the relay this computer uses, set in remote access's
                         // settings; one added through another keeps it until told otherwise.
                         let mine = crate::computers::relay();

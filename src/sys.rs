@@ -404,6 +404,90 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
+/// Keeps this computer awake, its screen on, for as long as it lives: during a session, on the
+/// computer shown (its picture would go black) and on the one watching (nobody types there).
+pub struct KeepAwake {
+    #[cfg(windows)]
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(not(windows))]
+    child: Option<std::process::Child>,
+    /// Linux: the desktop portal's inhibition, held while this connection to the session bus
+    /// lives.
+    #[cfg(all(unix, not(target_os = "macos"), feature = "remote"))]
+    _bus: Option<zbus::Connection>,
+}
+
+pub fn keep_awake() -> KeepAwake {
+    // Windows: the state of the thread that sets it, so a thread of its own holds it.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState};
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            // SAFETY: plain flags for this thread.
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) };
+            let _ = rx.recv();
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        });
+        KeepAwake { stop: Some(tx) }
+    }
+    // macOS: caffeinate, for as long as this program runs (or until let go).
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("/usr/bin/caffeinate");
+        cmd.args(["-di", "-w", &std::process::id().to_string()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        KeepAwake { child: cmd.spawn().ok() }
+    }
+    // Linux: the desktop's own (the portal's Inhibit, which a service of the person's session may
+    // ask for too); else logind's lock, held by a child that waits for nothing (polkit lets only
+    // the session at the screen have it).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        #[cfg(feature = "remote")]
+        if let Some(bus) = portal_inhibit() {
+            return KeepAwake { child: None, _bus: Some(bus) };
+        }
+        let mut cmd = Command::new("systemd-inhibit");
+        cmd.args(["--what=idle:sleep", "--who=SSH Remote", "--why=A remote session", "--mode=block", "sleep", "infinity"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        KeepAwake {
+            child: cmd.spawn().ok(),
+            #[cfg(feature = "remote")]
+            _bus: None,
+        }
+    }
+}
+
+/// The portal's Inhibit of suspending and going idle (4 | 8), for as long as the connection
+/// asking lives.
+#[cfg(all(unix, not(target_os = "macos"), feature = "remote"))]
+fn portal_inhibit() -> Option<zbus::Connection> {
+    use std::collections::HashMap;
+    zbus::block_on(async {
+        let conn = zbus::Connection::session().await.ok()?;
+        let p = zbus::Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Inhibit").await.ok()?;
+        let options: HashMap<&str, zbus::Variant> = HashMap::from([("reason", zbus::Variant::from("A remote session"))]);
+        let _: zbus::OwnedObjectPath = p.call("Inhibit", &("", 4u32 | 8u32, options)).await.ok()?;
+        Some(conn)
+    })
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(tx) = self.stop.take() {
+            let _ = tx.send(());
+        }
+        #[cfg(not(windows))]
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 /// `path` opened to read, or to append to (made for its user alone if need be), as a file of its
 /// own: never through a link, nor one with another name (or nothing is opened). Root writing in a
 /// person's folder (the login screen's remote access) is so not led to another file by a link

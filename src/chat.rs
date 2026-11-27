@@ -178,11 +178,12 @@ impl Window {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let name = if self.by_id.is_some() { n!("Someone connected by this computer's ID").to_string() } else { viewer_name() };
         let by_id = self.by_id.map(|g| format!(" --by-id --grant {g}{}", crate::agent::code_arg())).unwrap_or_default();
+        let who = if self.by_id.is_some() { crate::agent::who_args() } else { Vec::new() };
         // An agent run as SYSTEM shows it as the person signed in at the screen, never as SYSTEM.
         #[cfg(windows)]
         match crate::console_user::acting() {
             crate::console_user::Acting::User(u) => {
-                let line = format!("\"{}\" --chat-window \"{}\"{by_id}", exe.display(), name);
+                let line = format!("\"{}\" --chat-window \"{}\"{by_id}{}", exe.display(), name, if who.is_empty() { String::new() } else { crate::agent::who_arg() });
                 let (proc, stdin, stdout) = crate::console_user::spawn_piped(&u, &line)?;
                 self.listen(Box::new(stdout));
                 self.child = Some((Proc::AsUser(proc), Box::new(stdin)));
@@ -194,6 +195,7 @@ impl Window {
         let mut cmd = Command::new(exe);
         cmd.arg("--chat-window").arg(&name).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         cmd.args(by_id.split_whitespace());
+        cmd.args(&who);
         #[cfg(target_os = "linux")]
         {
             // An agent started over ssh has no display variables; the desktop session uses the
@@ -257,7 +259,9 @@ fn viewer_name() -> String {
 /// `sshremote --chat-window NAME`: the small window shown on the remote desktop.
 #[cfg(feature = "gui")]
 /// `code`: the viewer asked without a password, and was shown this code.
-pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<String>) -> Result<(), String> {
+/// `who`: how the viewer by ID came (a team's person by name, an ID proven) and from where, as
+/// remote access says it.
+pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<String>, who: Option<(String, String)>) -> Result<(), String> {
     crate::lang::start();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -385,6 +389,7 @@ pub fn run_window(name: String, by_id: bool, grant: Option<u8>, code: Option<Str
                 call: None,
                 minimized_once: false,
                 code,
+                who,
                 give_back,
                 placed: false,
                 compact,
@@ -420,6 +425,8 @@ struct ChatApp {
     minimized_once: bool,
     /// They asked without a password: the code their screen shows, to compare before letting them in.
     code: Option<String>,
+    /// How they came and from where (remote access's words, translated here).
+    who: Option<(String, String)>,
     /// Started when the window first draws (it shows right after): gives the keyboard back to
     /// the window that had it, where the desktop gives it to this one anyway.
     give_back: Option<Box<dyn FnOnce() + Send>>,
@@ -453,6 +460,7 @@ pub fn host_window_for_test(asking: bool, rights_open: bool, compact: bool) -> i
         call: None,
         minimized_once: false,
         code: asking.then(|| "482913".to_string()),
+        who: Some(("with a team ticket, as Ana Lee (ana)".into(), "203.0.113.7".into())),
         give_back: None,
         placed: true,
         compact,
@@ -859,6 +867,16 @@ impl ChatApp {
                         ui.label(RichText::new(t!("Someone wants to connect")).strong().size(16.0));
                         let how = if self.code.is_some() { t!("They have this computer's ID, not its password.") } else { t!("They have this computer's ID and its password.") };
                         ui.label(RichText::new(how).weak());
+                        // Who, as far as this computer knows it for sure: a team's person, an
+                        // ID proven, the way in and where from.
+                        if let Some((came, from)) = &self.who {
+                            let came = crate::lang::tr_msg(came);
+                            let text = if from.is_empty() { came.into_owned() } else { t!("{}, from {}", came, from) };
+                            // Remote access's words go inside others; here they start the line.
+                            let mut chars = text.chars();
+                            let text: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+                            ui.label(RichText::new(text).strong());
+                        }
                     });
                 });
                 // Asked without a password: the code both screens show tells whether it is really them.

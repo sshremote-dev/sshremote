@@ -1058,7 +1058,18 @@ impl App {
         let by_id = c.id().is_some();
         let web = is_web(c);
         let weak = row.visuals().weak_text_color();
-        kit::mark(&mut row, if web { ic::APP_WINDOW } else if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, weak);
+        // A computer by ID: whether its relay sees it now (looked up in the background).
+        #[cfg(feature = "remote")]
+        let online = if by_id { online_now(ui.ctx(), &c.address) } else { None };
+        #[cfg(not(feature = "remote"))]
+        let online: Option<bool> = None;
+        kit::mark(&mut row, if web { ic::APP_WINDOW } else if by_id { ic::GLOBE } else { ic::HARD_DRIVES }, if online == Some(true) { super::super::brand() } else { weak });
+        if let Some(on) = online {
+            let m = row.min_rect();
+            let at = egui::pos2(m.right() - 5.0, m.center().y + 11.0);
+            row.painter().circle_filled(at, 5.5, if row.visuals().dark_mode { row.visuals().faint_bg_color } else { egui::Color32::WHITE });
+            row.painter().circle_filled(at, 4.0, if on { good() } else { weak });
+        }
         let mut right = row.new_child(egui::UiBuilder::new().max_rect(row.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
         right.spacing_mut().item_spacing.x = 2.0;
         if lit {
@@ -1175,6 +1186,43 @@ fn how(m: PaneMode) -> How {
         PaneMode::Screen => How::Screen,
         PaneMode::Files => How::Files,
     }
+}
+
+/// Whether the relays see the computers kept by ID: looked up every 30 s in the background, at
+/// most 50 of them (the relay answers 600 a minute from one address).
+#[cfg(feature = "remote")]
+static ONLINE: std::sync::Mutex<Option<std::collections::HashMap<String, bool>>> = std::sync::Mutex::new(None);
+
+/// What is known of `address` (a computer by ID) now; the lookups start with the first ask.
+#[cfg(feature = "remote")]
+fn online_now(ctx: &egui::Context, address: &str) -> Option<bool> {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let ctx = ctx.clone();
+    STARTED.call_once(move || {
+        std::thread::spawn(move || {
+            loop {
+                let ids: Vec<(String, crate::net::Address)> =
+                    crate::computers::all().into_iter().filter_map(|c| Some((c.address.clone(), crate::net::Address::parse(&c.address)?))).take(50).collect();
+                let mut seen = std::collections::HashMap::new();
+                for (address, a) in ids {
+                    if let Ok(on) = crate::access::online(&a.id, &a.relay) {
+                        seen.insert(address, on);
+                    }
+                }
+                let changed = {
+                    let mut o = ONLINE.lock().unwrap_or_else(|e| e.into_inner());
+                    let changed = o.as_ref() != Some(&seen);
+                    *o = Some(seen);
+                    changed
+                };
+                if changed {
+                    ctx.request_repaint();
+                }
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+    });
+    ONLINE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|o| o.get(address).copied())
 }
 
 #[cfg(test)]

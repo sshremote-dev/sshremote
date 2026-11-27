@@ -228,6 +228,9 @@ pub enum ToAgent {
         address: String,
         password: String,
     },
+    /// What a file sent there does when one of its name is there (`files::OnTaken`: 0 kept
+    /// beside it, 1 in its place, 2 not sent).
+    OnTaken(u8),
     /// What an agent for a session by ID hands out for `TrustMe`, given by the remote access
     /// service as the first message, before the viewer's (later ones are passed over).
     TrustToken(String),
@@ -881,6 +884,10 @@ impl ToAgent {
                 put_str(&mut b, password);
                 62
             }
+            ToAgent::OnTaken(n) => {
+                b.push(*n);
+                63
+            }
             ToAgent::TrustToken(t) => {
                 b.extend_from_slice(t.as_bytes());
                 55
@@ -1077,6 +1084,7 @@ impl ToAgent {
             KIND_TRUST_ME => ToAgent::TrustMe,
             KIND_ASK_ELEVATION => ToAgent::AskElevation,
             62 => ToAgent::SwitchSides { address: c.str()?, password: c.str()? },
+            63 => ToAgent::OnTaken(c.u8()?),
             55 => ToAgent::TrustToken(String::from_utf8_lossy(c.rest()).into_owned()),
             52 => ToAgent::FileResume {
                 id: c.u32()?,

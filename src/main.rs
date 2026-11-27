@@ -531,6 +531,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--uninstall-service" => service::uninstall(),
         #[cfg(all(windows, feature = "remote"))]
         "--service" => service::dispatch(),
+        #[cfg(all(windows, feature = "remote"))]
+        "--start-service-again" => service::start_when_stopped(),
         #[cfg(feature = "gui")]
         "--tray" => gui::run_tray(),
         #[cfg(feature = "remote")]
@@ -544,7 +546,9 @@ fn run(args: &[String]) -> Result<(), String> {
         "--chat-window" => {
             let grant = args.iter().position(|a| a == "--grant").and_then(|i| args.get(i + 1)).and_then(|g| g.parse().ok());
             let code = args.iter().position(|a| a == "--code").and_then(|i| args.get(i + 1)).filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit())).cloned();
-            chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant, code)
+            let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+            let who = get("--who-how").zip(get("--who-from"));
+            chat::run_window(args.get(1).cloned().unwrap_or_else(|| "Viewer".into()), args.iter().any(|a| a == "--by-id"), grant, code, who)
         }
         // The black windows that hide a Mac's screen from whoever sits there (`hostctl`).
         #[cfg(all(target_os = "macos", feature = "remote"))]
@@ -601,6 +605,9 @@ fn run(args: &[String]) -> Result<(), String> {
                 agent::mark_by_id(get("--grant").and_then(|g| g.parse().ok()).unwrap_or(grant::ALL), args.iter().any(|a| a == "--cameras"));
                 if let Some(c) = get("--code") {
                     agent::set_code(c);
+                }
+                if let (Some(h), Some(f)) = (get("--who-how"), get("--who-from")) {
+                    agent::set_who(h, f);
                 }
             }
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
