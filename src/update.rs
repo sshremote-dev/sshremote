@@ -388,7 +388,7 @@ mod tests {
         for p in platforms {
             let (file, os, arch) = (p["file"].as_str().unwrap(), p["os"].as_str().unwrap(), p["arch"].as_str().unwrap());
             assert!(["linux", "windows", "macos"].contains(&os), "{file}: {os}");
-            assert!(["x86_64", "aarch64"].contains(&arch) || (os == "macos" && arch == "universal"), "{file}: {arch}");
+            assert!(["x86_64", "aarch64"].contains(&arch) || (os == "macos" && arch == "universal") || (os == "windows" && arch == "x86"), "{file}: {arch}");
             assert!(["ci", "mac"].contains(&p["build"]["by"].as_str().unwrap()), "{file}");
             assert!(names.insert(file), "{file} twice");
         }
