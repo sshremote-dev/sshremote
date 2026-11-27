@@ -85,6 +85,9 @@ pub struct Config {
     pub files_way: u8,
     /// The desktop's picture taken away during sessions by ID (less to send).
     pub plain_wallpaper: bool,
+    /// The ID was chosen by the person (`remote-access id NUMBER`): one the relay says is
+    /// another computer's is kept, and said, rather than swapped for a new one.
+    pub own_id: bool,
     /// The team this computer is in (`team::client::Joined` as JSON), or null: kept with the rest,
     /// so that only who may change remote access can join a team, and the service reads it.
     pub team: serde_json::Value,
@@ -266,7 +269,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "own_id": self.own_id, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -319,6 +322,7 @@ impl Config {
             clip_way: v.get("clip_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
             files_way: v.get("files_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
             plain_wallpaper: v.get("plain_wallpaper").and_then(|x| x.as_bool()).unwrap_or(false),
+            own_id: v.get("own_id").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
 }
@@ -497,6 +501,7 @@ pub fn fresh() -> Config {
         clip_way: 0,
         files_way: 0,
         plain_wallpaper: false,
+        own_id: false,
         team: serde_json::Value::Null,
     }
 }
@@ -1530,6 +1535,8 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let answer = writeln!(s, "listen {} {}", cfg.id, cfg.token).and_then(|_| line(&mut s));
         let refused = match answer.as_deref() {
             Ok("ok") => None,
+            // Another computer holds the ID the person chose: said, until they choose another.
+            Ok("taken") if cfg.own_id => Some(crate::lang::fill(n!("Another computer has the ID {}: choose another, or take a new one."), &[&crate::computers::spaced(&cfg.id)])),
             Ok("taken") => {
                 // Another computer holds that ID: take a new one, if it can be kept.
                 cfg.id = new_id();
@@ -2892,15 +2899,15 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 return Err("this computer is in a team, which knows it by its ID: leave the team first (sshremote team leave)".into());
             }
             // One of one's own choosing, or a new one at random.
-            c.id = match args.get(1) {
+            (c.id, c.own_id) = match args.get(1) {
                 Some(id) => {
                     let id: String = id.chars().filter(|c| !c.is_whitespace()).collect();
                     if !own_id_ok(&id) {
                         return Err("usage: sshremote remote-access id [6 to 12 digits, not starting with 0]".into());
                     }
-                    id
+                    (id, true)
                 }
-                None => new_id(),
+                None => (new_id(), false),
             };
             save(&c)?;
             println!("ID: {}", crate::computers::spaced(&c.id));

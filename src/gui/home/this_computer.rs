@@ -379,7 +379,7 @@ impl App {
                                     .on_disabled_hover_text(t!("This computer's team knows it by its ID: leave the team first"))
                                     .clicked()
                                 {
-                                    cfg.id = access::new_id();
+                                    (cfg.id, cfg.own_id) = (access::new_id(), false);
                                     changed = true;
                                 }
                             });
@@ -390,7 +390,7 @@ impl App {
                             let ok = access::own_id_ok(&typed) && typed != cfg.id && !cfg.team.is_object();
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add_enabled(ok, kit::secondary(t!("Use"))).on_hover_text(t!("If another computer has it, the relay says so and this one keeps trying until you choose another")).clicked() {
-                                    cfg.id = typed.clone();
+                                    (cfg.id, cfg.own_id) = (typed.clone(), true);
                                     self.access.own_id.clear();
                                     changed = true;
                                 }
