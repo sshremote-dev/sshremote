@@ -144,7 +144,7 @@ impl Sheet {
             && !port.is_empty()
         {
             if !self.port.trim().is_empty() && self.port.trim() != port {
-                return Err("The port is given twice, after the address and as Port.".into());
+                return Err(t!("The port is given twice, after the address and as Port.").into());
             }
             (self.address, self.port) = (host, port);
         }
@@ -153,24 +153,24 @@ impl Sheet {
         if self.by_id {
             let id: String = self.id.chars().filter(|c| !c.is_whitespace()).collect();
             if !(6..=12).contains(&id.len()) || !id.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("An ID is 6 to 12 digits, as that computer shows it.".into());
+                return Err(t!("An ID is 6 to 12 digits, as that computer shows it.").into());
             }
         } else if !self.in_config && !matches!(super::connect::typed(&address), Typed::Ssh { .. }) {
-            return Err("The address is user@host, a host name or an IP, such as dev@192.168.1.20.".into());
+            return Err(t!("The address is user@host, a host name or an IP, such as dev@192.168.1.20.").into());
         }
         let port = if self.by_id || self.in_config || self.port.trim().is_empty() {
             None
         } else {
-            Some(self.port.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or("The port is a number from 1 to 65535.")?)
+            Some(self.port.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or(t!("The port is a number from 1 to 65535."))?)
         };
         let tunnels = self.tunnels.iter().map(TunnelForm::tunnel).collect::<Result<Vec<_>, _>>()?;
         if self.by_id && tunnels.iter().any(|t| t.kind != Kind::Local) {
-            return Err("Through a computer reached by its ID, a tunnel goes from here to there only.".into());
+            return Err(t!("Through a computer reached by its ID, a tunnel goes from here to there only.").into());
         }
         // Another computer's address, or another block of ~/.ssh/config, is never taken over.
         let in_file = self.in_config && !self.by_id;
         if address != self.was && (crate::computers::get(&address).is_some() || (in_file && crate::tools::config_entry(&address).is_some())) {
-            return Err(format!("{address} is a computer of its own already: change that one instead."));
+            return Err(t!("{} is a computer of its own already: change that one instead.", address));
         }
         if in_file && self.editable && self.entry != self.entry_was {
             let was_alias = if self.was_in_config { self.was.clone() } else { String::new() };
@@ -189,7 +189,7 @@ impl Sheet {
         }
         let mac = self.mac.trim().to_lowercase().replace('-', ":");
         if !mac.is_empty() && crate::lan::parse_mac(&mac).is_none() {
-            return Err("The hardware address is six pairs of hex digits, such as 3c:52:82:1a:2b:3c.".into());
+            return Err(t!("The hardware address is six pairs of hex digits, such as 3c:52:82:1a:2b:3c.").into());
         }
         let (name, favorite, tags) = (self.name.trim().to_string(), self.favorite, crate::computers::tags(&self.tags));
         crate::computers::update(&address, |c| {
@@ -248,13 +248,13 @@ impl App {
         let (modal, fit) = super::super::modal(ctx, "computer-sheet", Vec2::new(640.0, 0.0));
         let r = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
-            let title = if new { "Add a computer".to_string() } else if s.name.trim().is_empty() { s.was.clone() } else { s.name.trim().chars().take(48).collect() };
+            let title = if new { t!("Add a computer").to_string() } else if s.name.trim().is_empty() { s.was.clone() } else { s.name.trim().chars().take(48).collect() };
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(RichText::new(title).size(18.0).strong()).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut star = RichText::new(ic::STAR).size(18.0);
                     star = if s.favorite { star.family(filled()).color(warn()) } else { star.color(ui.visuals().weak_text_color()) };
-                    let tip = if s.favorite { "A favorite: first in the list" } else { "Make it a favorite: first in the list" };
+                    let tip = if s.favorite { t!("A favorite: first in the list") } else { t!("Make it a favorite: first in the list") };
                     if ui.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(30.0))).on_hover_text(tip).clicked() {
                         s.favorite = !s.favorite;
                     }
@@ -263,7 +263,7 @@ impl App {
             ui.add_space(10.0);
             if new {
                 let mut way = usize::from(s.by_id);
-                if kit::segmented(ui, &mut way, &[&format!("{}  By SSH", ic::TERMINAL), &format!("{}  By its remote access ID", ic::GLOBE)]) {
+                if kit::segmented(ui, &mut way, &[&format!("{}  {}", ic::TERMINAL, t!("By SSH")), &format!("{}  {}", ic::GLOBE, t!("By its remote access ID"))]) {
                     s.by_id = way == 1;
                 }
                 ui.add_space(10.0);
@@ -275,51 +275,51 @@ impl App {
             egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
                 kit::card(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    kit::row(ui, "Name", |ui| ui.add(kit::field(&mut s.name, "as the list shows it (optional)")));
-                    kit::row(ui, "Tags", |ui| ui.add(kit::field(&mut s.tags, "work, servers (optional)"))).on_hover_text("Words to group it by: the list shows them, and picks the computers with one");
+                    kit::row(ui, t!("Name"), |ui| ui.add(kit::field(&mut s.name, t!("as the list shows it (optional)"))));
+                    kit::row(ui, t!("Tags"), |ui| ui.add(kit::field(&mut s.tags, t!("work, servers (optional)")))).on_hover_text(t!("Words to group it by: the list shows them, and picks the computers with one"));
                     if s.by_id {
-                        kit::row(ui, "ID", |ui| ui.add(kit::field(&mut s.id, "123 456 789")));
+                        kit::row(ui, t!("ID"), |ui| ui.add(kit::field(&mut s.id, "123 456 789")));
                         // Reached through the relay this computer uses, set in remote access's
                         // settings; one added through another keeps it until told otherwise.
                         let mine = crate::computers::relay();
                         let other = !s.relay.trim().is_empty() && s.relay.trim() != mine;
                         kit::row(ui, "", |ui| {
                             let through = if other { s.relay.trim().to_string() } else { mine.clone() };
-                            ui.label(RichText::new(format!("{}  Through {through}", ic::GLOBE)).weak().size(12.5));
-                            if other && ui.add(kit::ghost(format!("Use {mine}"))).on_hover_text("The relay this computer uses").clicked() {
+                            ui.label(RichText::new(format!("{}  {}", ic::GLOBE, t!("Through {}", through))).weak().size(12.5));
+                            if other && ui.add(kit::ghost(t!("Use {}", mine))).on_hover_text(t!("The relay this computer uses")).clicked() {
                                 s.relay.clear();
                             }
                         });
                     } else if s.in_config {
                         let on = s.editable;
-                        kit::row(ui, "Alias", |ui| ui.add_enabled(on, kit::field(&mut s.entry.alias, "web1"))).on_hover_text("The name ssh and other programs know it by: ssh ALIAS");
+                        kit::row(ui, t!("Alias"), |ui| ui.add_enabled(on, kit::field(&mut s.entry.alias, "web1"))).on_hover_text(t!("The name ssh and other programs know it by: ssh ALIAS"));
                         if !on {
-                            kit::notice(ui, kit::Tone::Info, "", "Its block of ~/.ssh/config is in a file it includes, or names other computers too: change it in the file.");
+                            kit::notice(ui, kit::Tone::Info, "", t!("Its block of ~/.ssh/config is in a file it includes, or names other computers too: change it in the file."));
                         } else {
-                            kit::row(ui, "Host", |ui| {
+                            kit::row(ui, t!("Host"), |ui| {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.add(kit::field(&mut s.entry.port, "22").desired_width(64.0));
-                                    ui.label(RichText::new("Port").weak());
-                                    ui.add(kit::field(&mut s.entry.hostname, "192.168.1.20 or web1.example.com"));
+                                    ui.label(RichText::new(t!("Port")).weak());
+                                    ui.add(kit::field(&mut s.entry.hostname, t!("192.168.1.20 or web1.example.com")));
                                 });
                             });
-                            kit::row(ui, "User", |ui| ui.add(kit::field(&mut s.entry.user, "your name there")));
-                            kit::row(ui, "Key file", |ui| ui.add(kit::field(&mut s.entry.identity, "~/.ssh/id_ed25519 (optional)")));
+                            kit::row(ui, t!("User"), |ui| ui.add(kit::field(&mut s.entry.user, t!("your name there"))));
+                            kit::row(ui, t!("Key file"), |ui| ui.add(kit::field(&mut s.entry.identity, t!("~/.ssh/id_ed25519 (optional)"))));
                         }
                     } else if web {
-                        kit::row(ui, "Address", |ui| ui.add(kit::field(&mut s.address, "https://…")));
+                        kit::row(ui, t!("Address"), |ui| ui.add(kit::field(&mut s.address, "https://…")));
                     } else {
-                        kit::row(ui, "Address", |ui| {
+                        kit::row(ui, t!("Address"), |ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add(kit::field(&mut s.port, "22").desired_width(64.0));
-                                ui.label(RichText::new("Port").weak());
+                                ui.label(RichText::new(t!("Port")).weak());
                                 ui.add(kit::field(&mut s.address, "user@host"));
                             });
                         });
                     }
                     if !s.by_id && !s.was_in_config && !web {
                         let r = kit::row(ui, "", |ui| {
-                            ui.checkbox(&mut s.in_config, "Keep it in ~/.ssh/config").on_hover_text("As an alias, with its user, port and key: ssh and other programs know it too")
+                            ui.checkbox(&mut s.in_config, t!("Keep it in ~/.ssh/config")).on_hover_text(t!("As an alias, with its user, port and key: ssh and other programs know it too"))
                         });
                         if r.changed() && s.in_config {
                             // The address typed becomes the alias's host and user.
@@ -338,22 +338,22 @@ impl App {
                     if web {
                         return;
                     }
-                    kit::row(ui, "Wake address", |ui| {
-                        ui.add(kit::field(&mut s.mac, "its network card's, to wake it (optional)"))
-                            .on_hover_text("Wake-on-LAN: the hardware address of its network card, such as 3c:52:82:1a:2b:3c; computers found on this network bring theirs")
+                    kit::row(ui, t!("Wake address"), |ui| {
+                        ui.add(kit::field(&mut s.mac, t!("its network card's, to wake it (optional)")))
+                            .on_hover_text(t!("Wake-on-LAN: the hardware address of its network card, such as 3c:52:82:1a:2b:3c; computers found on this network bring theirs"))
                     });
                     let saved_pw = !new && crate::vault::has(&s.was);
-                    kit::row(ui, "Password", |ui| {
-                        let hint = if saved_pw { "saved: type to replace it" } else if s.by_id { "the one set on that computer" } else { "none: your SSH keys sign in" };
+                    kit::row(ui, t!("Password"), |ui| {
+                        let hint = if saved_pw { t!("saved: type to replace it") } else if s.by_id { t!("the one set on that computer") } else { t!("none: your SSH keys sign in") };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if saved_pw
-                                && ui.add(kit::secondary("Forget")).on_hover_text("Take the saved password out of the password store").clicked()
+                                && ui.add(kit::secondary(t!("Forget"))).on_hover_text(t!("Take the saved password out of the password store")).clicked()
                                 && let Err(e) = crate::vault::delete(&s.was)
                             {
                                 s.problem = Some(e);
                             }
                             ui.add_enabled(crate::vault::backend().is_some(), kit::field(&mut s.password, hint).password(true))
-                                .on_disabled_hover_text("This system has no password store sshremote can use");
+                                .on_disabled_hover_text(t!("This system has no password store sshremote can use"));
                         });
                     });
                 });
@@ -364,7 +364,7 @@ impl App {
             });
             if let Some(p) = s.problem.clone() {
                 ui.add_space(10.0);
-                kit::notice(ui, kit::Tone::Bad, &p, "");
+                kit::notice(ui, kit::Tone::Bad, &crate::lang::tr_msg(&p), "");
             }
             ui.add_space(14.0);
             ui.separator();
@@ -373,9 +373,9 @@ impl App {
                 if !new {
                     if s.sure_to_remove {
                         let what = match (s.was_in_config, s.editable) {
-                            (true, true) => "Remove it and its ~/.ssh/config block",
-                            (true, false) => "Forget its name, password and tunnels",
-                            _ => "Remove it, its password and tunnels",
+                            (true, true) => t!("Remove it and its ~/.ssh/config block"),
+                            (true, false) => t!("Forget its name, password and tunnels"),
+                            _ => t!("Remove it, its password and tunnels"),
                         };
                         if ui.add(kit::danger(what, true)).clicked() {
                             match s.remove() {
@@ -384,15 +384,15 @@ impl App {
                             }
                             saved = true;
                         }
-                        if ui.add(kit::secondary("Keep it")).clicked() {
+                        if ui.add(kit::secondary(t!("Keep it"))).clicked() {
                             s.sure_to_remove = false;
                         }
-                    } else if ui.add(kit::danger(format!("{}  Remove", ic::TRASH), false)).clicked() {
+                    } else if ui.add(kit::danger(format!("{}  {}", ic::TRASH, t!("Remove")), false)).clicked() {
                         s.sure_to_remove = true;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(theme::primary(if new { "Add" } else { "Save" }).min_size(Vec2::new(88.0, kit::CONTROL_H))).clicked() {
+                    if ui.add(theme::primary(if new { t!("Add") } else { t!("Save") }).min_size(Vec2::new(88.0, kit::CONTROL_H))).clicked() {
                         match s.save() {
                             Ok(_) => {
                                 close = true;
@@ -401,7 +401,7 @@ impl App {
                             Err(e) => s.problem = Some(e),
                         }
                     }
-                    if ui.add(kit::secondary("Cancel").min_size(Vec2::new(88.0, kit::CONTROL_H))).clicked() {
+                    if ui.add(kit::secondary(t!("Cancel")).min_size(Vec2::new(88.0, kit::CONTROL_H))).clicked() {
                         close = true;
                     }
                 });
@@ -421,9 +421,9 @@ impl App {
     /// way to add one.
     fn tunnel_rows(&mut self, ui: &mut egui::Ui, s: &mut Sheet) {
         ui.horizontal(|ui| {
-            kit::heading(ui, "Tunnels");
+            kit::heading(ui, t!("Tunnels"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(kit::ghost(format!("{}  Add a tunnel", ic::PLUS))).clicked() {
+                if ui.add(kit::ghost(format!("{}  {}", ic::PLUS, t!("Add a tunnel")))).clicked() {
                     s.tunnels.push(TunnelForm { kind: Kind::Local, port: String::new(), dest: "localhost:".into(), auto: false });
                 }
             });
@@ -435,9 +435,9 @@ impl App {
         kit::card(ui, |ui| {
             if s.tunnels.is_empty() {
                 let about = if s.by_id {
-                    "Ports forwarded through this computer while SSH Remote runs, with its saved password: a port here that leads somewhere it reaches."
+                    t!("Ports forwarded through this computer while SSH Remote runs, with its saved password: a port here that leads somewhere it reaches.")
                 } else {
-                    "Ports forwarded through this computer while SSH Remote runs, signing in with your SSH keys: a port here that leads somewhere it reaches, one there that leads here, or a SOCKS proxy."
+                    t!("Ports forwarded through this computer while SSH Remote runs, signing in with your SSH keys: a port here that leads somewhere it reaches, one there that leads here, or a SOCKS proxy.")
                 };
                 ui.add(egui::Label::new(RichText::new(about).weak().size(12.5)).wrap());
                 return;
@@ -448,14 +448,14 @@ impl App {
                 }
                 ui.push_id(i, |ui| {
                     ui.horizontal(|ui| {
-                        combo("kind", t.kind.name()).width(130.0).show_ui(ui, |ui| {
+                        combo("kind", crate::lang::tr(t.kind.name())).width(130.0).show_ui(ui, |ui| {
                             crate::gui::menu_look(ui);
                             // Through a computer by its ID only a port here leads there.
                             for k in Kind::ALL.into_iter().filter(|k| !by_id || *k == Kind::Local) {
-                                ui.selectable_value(&mut t.kind, k, k.name());
+                                ui.selectable_value(&mut t.kind, k, crate::lang::tr(k.name()));
                             }
                         });
-                        let port_hint = if t.kind == Kind::Remote { "port there" } else { "port here" };
+                        let port_hint = if t.kind == Kind::Remote { t!("port there") } else { t!("port here") };
                         ui.add(kit::field(&mut t.port, port_hint).desired_width(84.0));
                         if t.kind != Kind::Socks {
                             ui.label(RichText::new(ic::ARROW_RIGHT).weak());
@@ -464,19 +464,19 @@ impl App {
                     });
                     let state = t.tunnel().ok().map(|k| (crate::tunnels::state(&address, &k), k));
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut t.auto, "Open when SSH Remote starts");
+                        ui.checkbox(&mut t.auto, t!("Open when SSH Remote starts"));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icon(ui, ic::TRASH, "Remove this tunnel", false).clicked() {
+                            if icon(ui, ic::TRASH, t!("Remove this tunnel"), false).clicked() {
                                 gone = Some(i);
                             }
                             match &state {
                                 Some((State::On | State::Starting, k)) => {
-                                    if ui.add(kit::secondary("Stop")).clicked() {
+                                    if ui.add(kit::secondary(t!("Stop"))).clicked() {
                                         crate::tunnels::stop(&address, k);
                                     }
                                 }
                                 Some((_, k)) => {
-                                    if ui.add_enabled(!address.is_empty(), kit::secondary("Start")).clicked()
+                                    if ui.add_enabled(!address.is_empty(), kit::secondary(t!("Start"))).clicked()
                                         && let Err(e) = crate::tunnels::start(&address, port, k)
                                     {
                                         s.problem = Some(e);
@@ -486,21 +486,21 @@ impl App {
                             }
                             match &state {
                                 Some((State::On, _)) => {
-                                    ui.label(RichText::new("Open").color(good()).size(12.5));
+                                    ui.label(RichText::new(t!("Active")).color(good()).size(12.5));
                                     kit::dot(ui, good());
                                 }
                                 Some((State::Starting, _)) => {
-                                    ui.label(RichText::new("Opening\u{2026}").color(warn()).size(12.5));
+                                    ui.label(RichText::new(t!("Opening\u{2026}")).color(warn()).size(12.5));
                                     ui.add(egui::Spinner::new().size(12.0).color(warn()));
                                 }
                                 Some((State::Failed(why), _)) => {
-                                    ui.add(egui::Label::new(RichText::new(why).color(bad()).size(12.5)).truncate()).on_hover_text(why);
+                                    ui.add(egui::Label::new(RichText::new(crate::lang::tr_msg(why)).color(bad()).size(12.5)).truncate()).on_hover_text(crate::lang::tr_msg(why));
                                 }
                                 Some((State::Off, _)) => {
-                                    ui.label(RichText::new("Closed").weak().size(12.5));
+                                    ui.label(RichText::new(t!("Closed")).weak().size(12.5));
                                 }
                                 None => {
-                                    ui.label(RichText::new("Fill in the ports").weak().size(12.5));
+                                    ui.label(RichText::new(t!("Fill in the ports")).weak().size(12.5));
                                 }
                             }
                             if matches!(state, Some((State::Starting | State::On, _))) {

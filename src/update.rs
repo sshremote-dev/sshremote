@@ -49,25 +49,25 @@ fn file_name() -> Option<&'static str> {
 pub fn check() -> Result<Option<Release>, String> {
     let url = index_url();
     let data = crate::ext::fetch(&url)?;
-    let sig = crate::ext::fetch(&format!("{url}.sig")).map_err(|_| "the list of downloads came without its signature".to_string())?;
-    crate::ext::verify_with(&data, &sig, crate::ext::SIGNERS, NAMESPACE).map_err(|e| format!("the list of downloads is not signed by sshremote.dev ({e})"))?;
+    let sig = crate::ext::fetch(&format!("{url}.sig")).map_err(|_| n!("the list of downloads came without its signature").to_string())?;
+    crate::ext::verify_with(&data, &sig, crate::ext::SIGNERS, NAMESPACE).map_err(|e| crate::lang::fill(n!("the list of downloads is not signed by sshremote.dev ({})"), &[&e]))?;
     release_in(&data, &url, env!("CARGO_PKG_VERSION"))
 }
 
 /// The release a list offers this system over version `ours`; `url` is where the list came from.
 fn release_in(list: &[u8], url: &str, ours: &str) -> Result<Option<Release>, String> {
-    let v: serde_json::Value = serde_json::from_slice(list).map_err(|e| format!("the list of downloads: {e}"))?;
-    let version = v["version"].as_str().ok_or("the list of downloads names no version")?.to_string();
+    let v: serde_json::Value = serde_json::from_slice(list).map_err(|e| crate::lang::fill(n!("the list of downloads: {}"), &[&e]))?;
+    let version = v["version"].as_str().ok_or(n!("the list of downloads names no version"))?.to_string();
     if !newer(&version, ours) {
         return Ok(None);
     }
-    let file = v["files"].as_array().and_then(|f| f.iter().find(|f| for_here(f))).ok_or_else(|| format!("version {version} has no build for this system ({} on {})", OS, ARCH))?;
-    let name = file["name"].as_str().ok_or("a file is listed without its name")?;
-    let (Some(size), Some(sha256)) = (file["size"].as_u64(), file["sha256"].as_str()) else { return Err(format!("{name} is listed without its size and checksum")) };
+    let file = v["files"].as_array().and_then(|f| f.iter().find(|f| for_here(f))).ok_or_else(|| crate::lang::fill(n!("version {} has no build for this system ({} on {})"), &[&version, &OS, &ARCH]))?;
+    let name = file["name"].as_str().ok_or(n!("a file is listed without its name"))?;
+    let (Some(size), Some(sha256)) = (file["size"].as_u64(), file["sha256"].as_str()) else { return Err(crate::lang::fill(n!("{} is listed without its size and checksum"), &[&name])) };
     // Where the list says it is (its release on GitHub), or beside the list.
     let at = match file["url"].as_str() {
         Some(u) if u.starts_with("https://") => u.to_string(),
-        Some(u) => return Err(format!("{name} is listed at {u}, which is not https")),
+        Some(u) => return Err(crate::lang::fill(n!("{} is listed at {}, which is not https"), &[&name, &u])),
         None => format!("{}/{name}", url.rsplit_once('/').map_or(url, |(d, _)| d)),
     };
     Ok(Some(Release { version, url: at, size, sha256: sha256.to_lowercase() }))
@@ -95,7 +95,7 @@ pub fn install(r: &Release) -> Result<PathBuf, String> {
     use sha2::Digest;
     let sum: String = sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
     if data.len() as u64 != r.size || sum != r.sha256 {
-        return Err(format!("the download of {} is not the file the list names; nothing was changed", r.version));
+        return Err(crate::lang::fill(n!("the download of {} is not the file the list names; nothing was changed"), &[&r.version]));
     }
     #[cfg(target_os = "macos")]
     return mac::place(&exe, &data).map(|_| exe);
@@ -121,10 +121,10 @@ mod mac {
 
     /// Writes the zip's entries under `to`, with their permissions; none may reach outside it.
     fn unzip(data: &[u8], to: &Path) -> Result<(), String> {
-        let mut z = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("the download is no zip ({e})"))?;
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| crate::lang::fill(n!("the download is no zip ({})"), &[&e]))?;
         for i in 0..z.len() {
             let mut f = z.by_index(i).map_err(|e| e.to_string())?;
-            let Some(rel) = f.enclosed_name() else { return Err(format!("{} would land outside the app", f.name().unwrap_or_default())) };
+            let Some(rel) = f.enclosed_name() else { return Err(crate::lang::fill(n!("{} would land outside the app"), &[&f.name().unwrap_or_default()])) };
             // macOS's own archiver keeps file metadata apart; nothing of the app is in it.
             if rel.starts_with("__MACOSX") {
                 continue;
@@ -150,10 +150,10 @@ mod mac {
 
     pub fn place(exe: &Path, data: &[u8]) -> Result<(), String> {
         let home = bundle(exe);
-        let dir = home.as_deref().and_then(Path::parent).or_else(|| exe.parent()).ok_or("no folder for this program")?;
+        let dir = home.as_deref().and_then(Path::parent).or_else(|| exe.parent()).ok_or(n!("no folder for this program"))?;
         let unpacked = dir.join(".sshremote-update");
         let _ = std::fs::remove_dir_all(&unpacked);
-        let written = |e: String| format!("this program's folder cannot be written ({}: {e}); get the new version from sshremote.dev", dir.display());
+        let written = |e: String| crate::lang::fill(n!("this program's folder cannot be written ({}: {}); get the new version from sshremote.dev"), &[&dir.display(), &e]);
         std::fs::create_dir_all(&unpacked).map_err(|e| written(e.to_string()))?;
         let done = (|| {
             unzip(data, &unpacked).map_err(written)?;
@@ -162,21 +162,21 @@ mod mac {
                 .flatten()
                 .map(|e| e.path())
                 .find(|p| p.extension().is_some_and(|e| e == "app"))
-                .ok_or("the download holds no app")?;
+                .ok_or(n!("the download holds no app"))?;
             match &home {
                 // The app as a whole: the one running moves aside, keeps running, and goes.
                 Some(app) => {
                     let old = unpacked.join("old.app");
-                    std::fs::rename(app, &old).map_err(|e| format!("this app could not be moved aside ({e})"))?;
+                    std::fs::rename(app, &old).map_err(|e| crate::lang::fill(n!("this app could not be moved aside ({})"), &[&e]))?;
                     if let Err(e) = std::fs::rename(&new_app, app) {
                         let _ = std::fs::rename(&old, app);
-                        return Err(format!("the new version could not be put in place ({e})"));
+                        return Err(crate::lang::fill(n!("the new version could not be put in place ({})"), &[&e]));
                     }
                     Ok(())
                 }
                 None => {
                     let new = new_app.join("Contents/MacOS/sshremote");
-                    std::fs::rename(&new, exe).map_err(|e| format!("the new version could not be put in place ({e})"))
+                    std::fs::rename(&new, exe).map_err(|e| crate::lang::fill(n!("the new version could not be put in place ({})"), &[&e]))
                 }
             }
         })();
@@ -189,9 +189,9 @@ mod mac {
 /// overwritten, so the one running moves aside (`tidy` removes it at the next start).
 #[cfg(not(target_os = "macos"))]
 fn place(exe: &Path, data: &[u8]) -> Result<(), String> {
-    let dir = exe.parent().ok_or("no folder for this program")?;
+    let dir = exe.parent().ok_or(n!("no folder for this program"))?;
     let new = dir.join(".sshremote-update.new");
-    std::fs::write(&new, data).map_err(|e| format!("this program's folder cannot be written ({}: {e}); get the new version from sshremote.dev", dir.display()))?;
+    std::fs::write(&new, data).map_err(|e| crate::lang::fill(n!("this program's folder cannot be written ({}: {}); get the new version from sshremote.dev"), &[&dir.display(), &e]))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -203,17 +203,17 @@ fn place(exe: &Path, data: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&old);
         if let Err(e) = std::fs::rename(exe, &old) {
             let _ = std::fs::remove_file(&new);
-            return Err(format!("this program could not be moved aside ({e})"));
+            return Err(crate::lang::fill(n!("this program could not be moved aside ({})"), &[&e]));
         }
         if let Err(e) = std::fs::rename(&new, exe) {
             let _ = std::fs::rename(&old, exe);
-            return Err(format!("the new version could not be put in place ({e})"));
+            return Err(crate::lang::fill(n!("the new version could not be put in place ({})"), &[&e]));
         }
     }
     #[cfg(not(windows))]
     std::fs::rename(&new, exe).map_err(|e| {
         let _ = std::fs::remove_file(&new);
-        format!("the new version could not be put in place ({e})")
+        crate::lang::fill(n!("the new version could not be put in place ({})"), &[&e])
     })?;
     Ok(())
 }

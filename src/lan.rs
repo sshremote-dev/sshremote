@@ -123,7 +123,7 @@ pub fn parse_mac(mac: &str) -> Option<[u8; 6]> {
 /// Wakes the computer whose network card has `mac`, if it is set to wake that way: the magic
 /// packet (six 0xff, then the address sixteen times) to every broadcast address here.
 pub fn wake(mac: &str) -> Result<(), String> {
-    let m = parse_mac(mac).ok_or("That is not a hardware address (such as 3c:52:82:1a:2b:3c).")?;
+    let m = parse_mac(mac).ok_or(n!("That is not a hardware address (such as 3c:52:82:1a:2b:3c)."))?;
     let mut packet = vec![0xffu8; 6];
     for _ in 0..16 {
         packet.extend_from_slice(&m);
@@ -136,7 +136,7 @@ pub fn wake(mac: &str) -> Result<(), String> {
             sent |= sock.send_to(&packet, SocketAddr::from((to, port))).is_ok();
         }
     }
-    if sent { Ok(()) } else { Err("no network to send it on".into()) }
+    if sent { Ok(()) } else { Err(n!("no network to send it on").into()) }
 }
 
 /// Where a broadcast reaches this network: each interface's own, and the general one.

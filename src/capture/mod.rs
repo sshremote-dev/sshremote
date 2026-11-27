@@ -20,6 +20,8 @@ pub(crate) fn gnome_helper_update() {
     gnome::update_helper();
 }
 #[cfg(target_os = "linux")]
+mod kms;
+#[cfg(target_os = "linux")]
 mod portal;
 #[cfg(target_os = "linux")]
 mod pw;
@@ -95,21 +97,21 @@ pub struct Monitor {
 }
 
 /// What a click outside the shared window or program answers, so the viewer can tell the way out.
-pub const OUTSIDE: &str = "That is outside the shared window. To reach other windows, share the whole screen (the Share button, or Ctrl+] v in a terminal).";
+pub const OUTSIDE: &str = n!("That is outside the shared window. To reach other windows, share the whole screen (the Share button, or Ctrl+] v in a terminal).");
 
 /// What the mouse for games answers while a window or program is shared: its movement would take
 /// the pointer where the viewer cannot see.
-pub const WHOLE_SCREEN_MOUSE: &str = "The mouse for games moves the pointer over the whole screen: share the whole screen for it (the Share button).";
+pub const WHOLE_SCREEN_MOUSE: &str = n!("The mouse for games moves the pointer over the whole screen: share the whole screen for it (the Share button).");
 
 /// Shown in the window chooser when GNOME Shell lacks the sshremote helper; the viewer offers to install it.
 pub const NEEDS_HELPER: &str =
-    "Picking from a list on GNOME needs the sshremote helper, a small GNOME Shell extension.";
+    n!("Picking from a list on GNOME needs the sshremote helper, a small GNOME Shell extension.");
 
 pub trait Capture {
     /// Opens the desktop's own "choose what to share" dialog on the remote screen; returns what to
     /// tell the viewer. The choice arrives later through `poll_share`.
     fn pick(&mut self) -> Result<String, String> {
-        Err("this desktop has no sharing dialog of its own; pick from the list".into())
+        Err(n!("this desktop has no sharing dialog of its own; pick from the list").into())
     }
     /// A change of what is shared that the viewer did not ask for: the outcome of `pick`, or the
     /// shared window having closed. `kind` as in `Share`.
@@ -118,21 +120,21 @@ pub trait Capture {
     }
     /// Installs what listing windows needs (the GNOME Shell helper); returns what to tell the viewer.
     fn install_helper(&mut self) -> Result<String, String> {
-        Err("nothing to install for this desktop".into())
+        Err(n!("nothing to install for this desktop").into())
     }
     /// The windows that could be shared on their own.
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
-        Err("This desktop can only share whole screens.".into())
+        Err(n!("This desktop can only share whole screens.").into())
     }
     /// Brings window `id` (of `windows`) to the front, as a taskbar does.
     fn bring_forward(&mut self, _id: u64) -> Result<(), String> {
-        Err("this desktop does not let programs bring windows to the front; click the window instead".into())
+        Err(n!("this desktop does not let programs bring windows to the front; click the window instead").into())
     }
     /// Shares a window or a program instead of the whole screen; returns what is shown, in words.
     fn share(&mut self, scope: Share) -> Result<String, String> {
         match scope {
-            Share::Screen => Ok("the whole screen".into()),
-            _ => Err("This desktop can only share whole screens.".into()),
+            Share::Screen => Ok(n!("the whole screen").into()),
+            _ => Err(n!("This desktop can only share whole screens.").into()),
         }
     }
     fn name(&self) -> &'static str;
@@ -146,7 +148,7 @@ pub trait Capture {
     }
     /// Captures another monitor; the desktop size changes with it.
     fn select(&mut self, _index: usize) -> Result<(), String> {
-        Err("this capture backend has one screen".into())
+        Err(n!("this capture backend has one screen").into())
     }
     /// The system's name for the monitor shown (`DISPLAY1`, an output such as `DP-1`), by which
     /// its resolution is set (`display`); None where the backend cannot tell.
@@ -293,8 +295,13 @@ fn linux_desktop() -> Result<Box<dyn Capture>, String> {
     }
     if wayland {
         // Through the desktop's portal (X11 here would see only the programs under Xwayland).
-        let name = if desktop.is_empty() { "this desktop".to_string() } else { desktop.replace(':', " / ") };
-        return wayland::Wayland::open().map(|w| Box::new(w) as Box<dyn Capture>).map_err(|e| format!("{name} did not share its screen through its portal: {e}"));
+        return wayland::Wayland::open().map(|w| Box::new(w) as Box<dyn Capture>).map_err(|e| {
+            if desktop.is_empty() {
+                crate::lang::fill(n!("this desktop did not share its screen through its portal: {}"), &[&e])
+            } else {
+                crate::lang::fill(n!("{} did not share its screen through its portal: {}"), &[&desktop.replace(':', " / "), &e])
+            }
+        });
     }
     Ok(Box::new(x11::X11::open()?))
 }
@@ -315,12 +322,14 @@ pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {
         #[cfg(target_os = "linux")]
         "wlroots" => Ok(Box::new(wlrcopy::WlrCopy::open()?)),
         #[cfg(target_os = "linux")]
+        "kms" => Ok(Box::new(kms::Kms::open()?)),
+        #[cfg(target_os = "linux")]
         "auto" => linux_desktop(),
         #[cfg(windows)]
         "windows" | "auto" => Ok(Box::new(windows::Gdi::open()?)),
         #[cfg(target_os = "macos")]
         "mac" | "auto" => Ok(Box::new(mac::Mac::open()?)),
-        _ => Err(format!("capture backend '{name}' is not available on this system")),
+        _ => Err(crate::lang::fill(n!("capture backend '{}' is not available on this system"), &[&name])),
     }
 }
 

@@ -24,19 +24,26 @@ pub const ASK: u8 = 128;
 
 /// Each right with its name in a list and in a sentence.
 pub const RIGHTS: [(u8, &str, &str); 7] = [
-    (CONTROL, "Use the keyboard and mouse", "keyboard and mouse"),
-    (CLIPBOARD, "Copy and paste", "clipboard"),
-    (FILES, "Send and fetch files", "files"),
-    (SOUND, "Hear this computer's sound and call it", "sound and calls"),
-    (TERMINAL, "Open terminals", "terminals"),
-    (POWER, "Restart or lock this computer, block its keyboard and hide its screen", "restart and lock"),
-    (PORTS, "Reach ports through this computer (tunnels)", "ports"),
+    (CONTROL, n!("Use the keyboard and mouse"), n!("keyboard and mouse")),
+    (CLIPBOARD, n!("Copy and paste"), n!("clipboard")),
+    (FILES, n!("Send and fetch files"), n!("files")),
+    (SOUND, n!("Hear this computer's sound and call it"), n!("sound and calls")),
+    (TERMINAL, n!("Open terminals"), n!("terminals")),
+    (POWER, n!("Restart or lock this computer, block its keyboard and hide its screen"), n!("restart and lock")),
+    (PORTS, n!("Reach ports through this computer (tunnels)"), n!("ports")),
 ];
 
-/// The rights in `bits`, as words: "keyboard and mouse, files".
+/// The rights in `bits`, as words: "keyboard and mouse, files". English, as it is sent.
 pub fn words(bits: u8) -> String {
     let names: Vec<&str> = RIGHTS.iter().filter(|(b, ..)| bits & b != 0).map(|(.., w)| *w).collect();
-    if names.is_empty() { "nothing but watching".into() } else { names.join(", ") }
+    if names.is_empty() { n!("nothing but watching").into() } else { names.join(", ") }
+}
+
+/// [`words`] in the reader's language, for the window to show.
+pub fn shown(bits: u8) -> String {
+    let names: Vec<&str> = RIGHTS.iter().filter(|(b, ..)| bits & b != 0).map(|(.., w)| crate::lang::tr(w)).collect();
+    // The separator of a list, as the language writes it.
+    if names.is_empty() { t!("nothing but watching").into() } else { names.join(t!(", ")) }
 }
 
 /// The right a request needs, if any.

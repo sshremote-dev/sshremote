@@ -152,6 +152,8 @@
   .view.on { display: block; }
   #vterm { padding: 6px 8px; background: #0b0d11; }
   #vscreen { background: #000; }
+  /* In a right-to-left language too: the host's terminal and screen, and its paths, run left to right. */
+  #vterm, #vscreen, #path { direction: ltr; }
   #vscreen canvas { width: 100%; height: 100%; object-fit: contain; outline: none; display: block; }
   /* The terminal below the screen. */
   #views.split #vscreen { bottom: 38%; }
@@ -228,7 +230,7 @@
 
   /* Menus, dialogs, notices */
   .menu { position: fixed; z-index: 50; min-width: 210px; padding: 5px; background: var(--raised); border: 1px solid var(--line); border-radius: var(--r);
-          box-shadow: 0 10px 30px #000a; }
+          box-shadow: 0 10px 30px #000a; max-height: calc(100vh - 8px); max-height: calc(100dvh - 8px); overflow-y: auto; }
   .menu button { display: flex; width: 100%; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 5px; background: none; text-align: left; cursor: pointer; }
   .menu button:hover, .menu button:focus-visible { background: var(--hover); outline: none; }
   .menu button kbd { margin-left: auto; color: var(--faint); font: 11px var(--mono); }
@@ -264,59 +266,60 @@
   <header class="top">
     <a class="brand" href="./"><img src="favicon.svg" alt=""><span>SSH Remote</span><small>web</small></a>
     <nav>
-      <a href="https://sshremote.dev/" id="sitelink" title="The SSH Remote site"><span>sshremote.dev</span></a>
-      <a href="https://sshremote.dev/docs.html#relay" class="hide-narrow">How it works</a>
-      <a href="https://sshremote.dev/#download" class="btn solid">Get the app</a>
+      <a href="https://sshremote.dev/" id="sitelink" title="The SSH Remote site" data-t-title="The SSH Remote site"><span>sshremote.dev</span></a>
+      <a href="https://sshremote.dev/docs.html#relay" class="hide-narrow" data-t="How it works">How it works</a>
+      <a href="https://sshremote.dev/#download" class="btn solid" data-t="Get the app">Get the app</a>
+      <button class="btn icon" id="lang" type="button"></button>
       <button class="btn icon" id="theme" type="button"></button>
     </nav>
   </header>
   <div class="cols">
     <div>
       <section class="card">
-        <h2>Connect to a computer</h2>
-        <p class="sub">Its terminal, screen and files, here in the page, with nothing to install.</p>
+        <h2 data-t="Connect to a computer">Connect to a computer</h2>
+        <p class="sub" data-t="Its terminal, screen and files, here in the page, with nothing to install.">Its terminal, screen and files, here in the page, with nothing to install.</p>
         <form id="form" autocomplete="off">
-          <label class="field" for="addr"><span id="addrlabel">Remote access ID or SSH host</span> <span class="kind" id="kind"></span></label>
-          <input id="addr" placeholder="123 456 789  or  user@192.168.1.20" spellcheck="false" autocapitalize="off" aria-label="ID or SSH host" autofocus>
-          <label class="field" for="pw" id="pwlabel">Password</label>
+          <label class="field" for="addr"><span id="addrlabel" data-t="Remote access ID or SSH host">Remote access ID or SSH host</span> <span class="kind" id="kind"></span></label>
+          <input id="addr" placeholder="123 456 789  or  user@192.168.1.20" data-t-placeholder="123 456 789  or  user@192.168.1.20" spellcheck="false" autocapitalize="off" aria-label="ID or SSH host" data-t-aria-label="ID or SSH host" autofocus>
+          <label class="field" for="pw" id="pwlabel" data-t="Password">Password</label>
           <div class="row" id="pwrow">
-            <input id="pw" type="password" placeholder="Password" aria-label="Password" autocomplete="off">
-            <input id="code" placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" autocomplete="one-time-code" hidden>
-            <input id="port" placeholder="Port 22" inputmode="numeric" aria-label="Port" hidden>
+            <input id="pw" type="password" placeholder="Password" aria-label="Password" data-t-aria-label="Password" autocomplete="off">
+            <input id="code" placeholder="Code from the app" data-t-placeholder="Code from the app" inputmode="numeric" maxlength="6" aria-label="Two-step code" data-t-aria-label="Two-step code" autocomplete="one-time-code" hidden>
+            <input id="port" placeholder="Port 22" data-t-placeholder="Port 22" inputmode="numeric" aria-label="Port" data-t-aria-label="Port" hidden>
           </div>
           <p class="hint" id="hint"></p>
-          <label class="check" id="keeprow"><input type="checkbox" id="keep"> Remember the password on this browser</label>
+          <label class="check" id="keeprow"><input type="checkbox" id="keep"> <span data-t="Remember the password on this browser">Remember the password on this browser</span></label>
           <div id="gatebox" class="note" hidden>
-            <p><b>SSH leaves from this gateway's server, so only its owner may use it.</b> Sign in to the gateway first; the SSH host's own password comes next. Not its owner? Reach the computer by its ID, or <a href="https://sshremote.dev/#download">use the app</a>.</p>
-            <label class="field" for="gatepw">Gateway password</label>
-            <input id="gatepw" type="password" placeholder="Set where this gateway runs" autocomplete="current-password">
-            <label class="check"><input type="checkbox" id="gatekeep" checked> Keep this browser signed in for 30 days</label>
+            <p><b data-t="SSH leaves from this gateway's server, so only its owner may use it.">SSH leaves from this gateway's server, so only its owner may use it.</b> <span data-t="Sign in to the gateway first; the SSH host's own password comes next. Not its owner? Reach the computer by its ID, or &lt;a&gt;use the app&lt;/a&gt;.">Sign in to the gateway first; the SSH host's own password comes next. Not its owner? Reach the computer by its ID, or <a href="https://sshremote.dev/#download">use the app</a>.</span></p>
+            <label class="field" for="gatepw" data-t="Gateway password">Gateway password</label>
+            <input id="gatepw" type="password" placeholder="Set where this gateway runs" data-t-placeholder="Set where this gateway runs" autocomplete="current-password">
+            <label class="check"><input type="checkbox" id="gatekeep" checked> <span data-t="Keep this browser signed in for 30 days">Keep this browser signed in for 30 days</span></label>
           </div>
           <div id="error" role="alert"></div>
-          <button class="btn primary" id="go">Connect</button>
+          <button class="btn primary" id="go" data-t="Connect">Connect</button>
         </form>
       </section>
     </div>
     <div>
       <section class="section">
-        <h3>Computers <span class="count" id="savedn"></span></h3>
+        <h3><span data-t="Computers">Computers</span> <span class="count" id="savedn"></span></h3>
         <div class="list" id="saved"></div>
       </section>
       <section class="section" id="gatesec" hidden>
-        <h3>On this gateway <button class="btn" id="signout" type="button">Sign out</button></h3>
+        <h3><span data-t="On this gateway">On this gateway</span> <button class="btn" id="signout" type="button" data-t="Sign out">Sign out</button></h3>
         <div class="list" id="ghosts"></div>
       </section>
       <section class="card guide" id="guide">
-        <h3>Reaching a computer by its ID</h3>
+        <h3 data-t="Reaching a computer by its ID">Reaching a computer by its ID</h3>
         <ol>
-          <li><span><b>On that computer</b>, install SSH Remote and turn on <b>Remote access by ID</b>: it shows a 9-digit ID and its passwords.</span></li>
-          <li><span><b>Here</b>, type the ID and a password it shows. Without one, leave it empty: the person there is asked to let you in, and both screens show a code to compare.</span></li>
-          <li><span>Pick <b>Terminal</b>, <b>Screen</b> or <b>Files</b> at the top, and switch at any time.</span></li>
+          <li><span data-t="&lt;b&gt;On that computer&lt;/b&gt;, install SSH Remote and turn on &lt;b&gt;Remote access by ID&lt;/b&gt;: it shows a 9-digit ID and its passwords."><b>On that computer</b>, install SSH Remote and turn on <b>Remote access by ID</b>: it shows a 9-digit ID and its passwords.</span></li>
+          <li><span data-t="&lt;b&gt;Here&lt;/b&gt;, type the ID and a password it shows. Without one, leave it empty: the person there is asked to let you in, and both screens show a code to compare."><b>Here</b>, type the ID and a password it shows. Without one, leave it empty: the person there is asked to let you in, and both screens show a code to compare.</span></li>
+          <li><span data-t="Pick &lt;b&gt;Terminal&lt;/b&gt;, &lt;b&gt;Screen&lt;/b&gt; or &lt;b&gt;Files&lt;/b&gt; at the top, and switch at any time.">Pick <b>Terminal</b>, <b>Screen</b> or <b>Files</b> at the top, and switch at any time.</span></li>
         </ol>
       </section>
     </div>
   </div>
-  <footer>What you save stays in this browser only. <a href="#" id="gatelink">Sign in to this gateway</a></footer>
+  <footer><span data-t="What you save stays in this browser only.">What you save stays in this browser only.</span> <a href="#" id="gatelink" data-t="Sign in to this gateway">Sign in to this gateway</a></footer>
 </main>
 
 <div id="client" hidden>
@@ -324,43 +327,43 @@
     <div id="who"><i class="dot" id="dot"></i><b id="name"></b><span id="state"></span></div>
     <button class="btn icon" id="limits" hidden></button>
     <div class="seg" role="tablist">
-      <button class="btn" data-view="term" title="Its terminal"><span>Terminal</span></button>
-      <button class="btn" data-view="screen" title="Its screen"><span>Screen</span></button>
-      <button class="btn" data-view="files" title="Its files"><span>Files</span></button>
+      <button class="btn" data-view="term" title="Its terminal" data-t-title="Its terminal"><span data-t="Terminal">Terminal</span></button>
+      <button class="btn" data-view="screen" title="Its screen" data-t-title="Its screen"><span data-t="Screen">Screen</span></button>
+      <button class="btn" data-view="files" title="Its files" data-t-title="Its files"><span data-t="Files">Files</span></button>
     </div>
     <div id="stools" class="row" hidden></div>
     <div class="grow"></div>
-    <button class="btn icon" id="full" title="Full screen"></button>
-    <button class="btn icon" id="fold" title="Fold the toolbar into a small tab"></button>
+    <button class="btn icon" id="full" title="Full screen" data-t-title="Full screen"></button>
+    <button class="btn icon" id="fold" title="Fold the toolbar into a small tab" data-t-title="Fold the toolbar into a small tab"></button>
     <span class="sep"></span>
-    <button class="btn danger" id="bye" title="Close the connection"><span class="tx">Close</span></button>
+    <button class="btn danger" id="bye" title="Close the connection" data-t-title="Close the connection"><span class="tx" data-t="Close">Close</span></button>
   </div>
-  <div id="banner" hidden><span id="bannertext"></span><span class="grow"></span><button class="btn primary" id="again">Reconnect</button><button class="btn solid" id="home2">Close</button></div>
-  <button id="tab" title="Show the toolbar"><i class="dot" id="tabdot"></i><span id="tabname"></span></button>
+  <div id="banner" hidden><span id="bannertext"></span><span class="grow"></span><button class="btn primary" id="again">Reconnect</button><button class="btn solid" id="home2" data-t="Close">Close</button></div>
+  <button id="tab" title="Show the toolbar" data-t-title="Show the toolbar"><i class="dot" id="tabdot"></i><span id="tabname"></span></button>
   <div id="views">
     <div id="vterm" class="view"></div>
-    <div id="vscreen" class="view"><canvas id="canvas" tabindex="-1"></canvas><textarea id="kbd" aria-label="Keyboard for the host" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><div class="wait" id="swait"></div></div>
+    <div id="vscreen" class="view"><canvas id="canvas" tabindex="-1"></canvas><textarea id="kbd" aria-label="Keyboard for the host" data-t-aria-label="Keyboard for the host" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><div class="wait" id="swait"></div></div>
     <div id="vfiles" class="view">
       <div class="ftools">
-        <button class="btn icon" id="fup" title="Up one folder (Backspace)"></button>
-        <button class="btn icon" id="fhome" title="Home folder"></button>
-        <button class="btn icon" id="freload" title="Reload"></button>
-        <input id="path" spellcheck="false" autocomplete="off" aria-label="Folder">
+        <button class="btn icon" id="fup" title="Up one folder (Backspace)" data-t-title="Up one folder (Backspace)"></button>
+        <button class="btn icon" id="fhome" title="Home folder" data-t-title="Home folder"></button>
+        <button class="btn icon" id="freload" title="Reload" data-t-title="Reload"></button>
+        <input id="path" spellcheck="false" autocomplete="off" aria-label="Folder" data-t-aria-label="Folder">
         <button class="btn icon" id="fhidden"></button>
-        <button class="btn solid" id="fnew" title="New folder"></button>
-        <button class="btn primary" id="fsend" title="Upload files or a folder here"></button>
+        <button class="btn solid" id="fnew" title="New folder" data-t-title="New folder"></button>
+        <button class="btn primary" id="fsend" title="Upload files or a folder here" data-t-title="Upload files or a folder here"></button>
         <input id="fpick" type="file" multiple hidden>
         <input id="fpickdir" type="file" webkitdirectory hidden>
       </div>
       <div id="ftable" tabindex="0"></div>
       <div id="fsel"></div>
       <div id="xfers"></div>
-      <div id="drop">Drop files or folders to upload them here</div>
+      <div id="drop" data-t="Drop files or folders to upload them here">Drop files or folders to upload them here</div>
     </div>
-    <aside id="chat" hidden aria-label="Chat with the person at the host">
-      <header><span class="grow">Chat with the host</span><button class="btn icon" id="chatx" title="Close the chat" type="button"></button></header>
+    <aside id="chat" hidden aria-label="Chat with the person at the host" data-t-aria-label="Chat with the person at the host">
+      <header><span class="grow" data-t="Chat with the host">Chat with the host</span><button class="btn icon" id="chatx" title="Close the chat" data-t-title="Close the chat" type="button"></button></header>
       <div id="chatlog" role="log" aria-live="polite"></div>
-      <form id="chatform"><input id="chatin" placeholder="Message to the host" autocomplete="off" aria-label="Message"><button class="btn primary" type="submit">Send</button></form>
+      <form id="chatform"><input id="chatin" placeholder="Message to the host" data-t-placeholder="Message to the host" autocomplete="off" aria-label="Message" data-t-aria-label="Message"><button class="btn primary" type="submit" data-t="Send">Send</button></form>
     </aside>
   </div>
 </div>

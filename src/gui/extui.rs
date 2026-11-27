@@ -65,7 +65,7 @@ fn status_bar(ui: &mut egui::Ui, rect: Rect, items: &[crate::exthost::Item], has
     c.spacing_mut().item_spacing.x = 4.0;
     if has_panels {
         let glyph = if side.open { ic::LAYOUT } else { ic::ARTICLE };
-        if c.add(egui::Button::new(RichText::new(glyph).size(13.0)).frame_when_inactive(false)).on_hover_text("Extension panels").clicked() {
+        if c.add(egui::Button::new(RichText::new(glyph).size(13.0)).frame_when_inactive(false)).on_hover_text(t!("Extension panels")).clicked() {
             side.open = !side.open;
         }
     }
@@ -110,7 +110,7 @@ fn side_panel(ui: &mut egui::Ui, rect: Rect, panels: &[crate::exthost::Panel], s
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(ic::X).frame_when_inactive(false)).on_hover_text("Hide the panels").clicked() {
+            if ui.add(egui::Button::new(ic::X).frame_when_inactive(false)).on_hover_text(t!("Hide the panels")).clicked() {
                 side.open = false;
             }
         });
@@ -182,10 +182,10 @@ pub(super) fn question(ctx: &egui::Context, side: &mut Side) {
         ui.add_space(8.0);
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.horizontal(|ui| {
-            if ui.add(theme::primary(a.submit.as_str())).clicked() || enter {
+            if ui.add(theme::primary(crate::lang::tr_msg(&a.submit))).clicked() || enter {
                 done = Some(Some(side.answers.clone()));
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(t!("Cancel")).clicked() {
                 done = Some(None);
             }
         });
@@ -236,10 +236,10 @@ pub(super) enum Run {
 /// What the palette offers: the workspace's own commands and the extensions' commands.
 pub(super) fn entries() -> Vec<Entry> {
     let mut out: Vec<Entry> = [
-        ("New tab", "tab"),
-        ("Split right", "right"),
-        ("Split down", "down"),
-        ("Show or hide the extension panels", "side"),
+        (t!("New tab"), "tab"),
+        (t!("Split right"), "right"),
+        (t!("Split down"), "down"),
+        (t!("Show or hide the extension panels"), "side"),
     ]
     .into_iter()
     .map(|(label, id)| Entry { label: label.into(), run: Run::Builtin(id) })
@@ -268,7 +268,7 @@ pub(super) fn palette(ctx: &egui::Context, filter: &mut String, at: &mut usize) 
     let mut close = false;
     let r = modal.show(ctx, |ui| {
         ui.set_width(fit.x);
-        let edit = ui.add(egui::TextEdit::singleline(filter).hint_text("Type a command").desired_width(fit.x));
+        let edit = ui.add(egui::TextEdit::singleline(filter).hint_text(t!("Type a command")).desired_width(fit.x));
         edit.request_focus();
         let (up, down, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if up {
@@ -281,7 +281,7 @@ pub(super) fn palette(ctx: &egui::Context, filter: &mut String, at: &mut usize) 
         ui.add_space(4.0);
         egui::ScrollArea::vertical().max_height(fit.y - 40.0).auto_shrink([false, true]).show(ui, |ui| {
             if all.is_empty() {
-                ui.label(RichText::new("No command matches").weak());
+                ui.label(RichText::new(t!("No command matches")).weak());
             }
             for (n, e) in all.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(fit.x, 26.0), Sense::click());

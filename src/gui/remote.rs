@@ -493,18 +493,18 @@ impl Remote {
         if self.uploads.is_empty() && self.sent.due() {
             let s = std::mem::take(&mut self.sent);
             let text = if s.count == 1 {
-                format!("{} saved on the SSH host in {}", s.name, s.folder)
+                t!("{} saved on the SSH host in {}", s.name, s.folder)
             } else {
-                format!("{} files saved on the SSH host in {}", s.count, s.folder)
+                t!("{} files saved on the SSH host in {}", s.count, s.folder)
             };
             self.notify(&text);
         }
         if self.downloads.is_empty() && self.got.due() {
             let s = std::mem::take(&mut self.got);
             let text = if s.count == 1 {
-                format!("Downloaded {} to {}", s.name, s.folder)
+                t!("Downloaded {} to {}", s.name, s.folder)
             } else {
-                format!("{} files downloaded to {}", s.count, s.folder)
+                t!("{} files downloaded to {}", s.count, s.folder)
             };
             self.notify(&text);
         }
@@ -516,7 +516,7 @@ impl Remote {
     }
 
     pub(super) fn send(&mut self, m: ToAgent) -> Result<(), String> {
-        self.sess.send(m).map_err(|e| format!("connection lost: {e}"))
+        self.sess.send(m).map_err(|e| t!("connection lost: {}", e))
     }
 
     /// The host's screen `i` here from now on (kept for the next connection too).
@@ -603,7 +603,7 @@ impl Remote {
             }
             if self.screenless {
                 // No picture will come: what there is instead, said where it would be.
-                let text = "This computer's screen cannot be shown here.\nIts terminal and files work: pick them above.";
+                let text = t!("This computer's screen cannot be shown here.\nIts terminal and files work: pick them above.");
                 ui.painter().text(pic_area.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(15.0), ui.visuals().weak_text_color());
                 None
             } else {
@@ -646,7 +646,7 @@ impl Remote {
         }
         if self.click_pick {
             // A hint over the picture while the next click chooses the window.
-            let text = format!("{}  Click the window to share   ·   Esc cancels", ic::CURSOR_CLICK);
+            let text = format!("{}  {}   ·   {}", ic::CURSOR_CLICK, t!("Click the window to share"), t!("Esc cancels"));
             let painter =
                 ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("click-pick")));
             let galley = painter.layout_no_wrap(text, FontId::proportional(15.0), Color32::WHITE);
@@ -739,7 +739,7 @@ impl Remote {
                 Ok(ok) => {
                     self.image_in = None;
                     self.copied_there();
-                    self.notify(if ok { "A picture copied there is on this computer's clipboard" } else { "A picture copied there could not be put on this computer's clipboard" });
+                    self.notify(if ok { t!("A picture copied there is on this computer's clipboard") } else { t!("A picture copied there could not be put on this computer's clipboard") });
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.image_in = None,
                 Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -816,7 +816,7 @@ impl Remote {
                         pl.push(&p);
                     }
                 }
-                Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&t),
+                Ok(Ev::Net(ToClient::Notice(t))) => self.notify(&crate::lang::tr_msg(&t)),
                 Ok(Ev::Net(ToClient::Allowed(bits))) => self.allowed = bits,
                 Ok(Ev::Net(ToClient::HostState { can, on })) => self.host = Some((can, on)),
                 Ok(Ev::Net(ToClient::ClipFiles(list))) => {
@@ -837,13 +837,14 @@ impl Remote {
                             self.clip_in = None;
                             let n = paths.len();
                             match crate::clip::put_files_here(&paths) {
-                                Ok(()) => self.notify(&format!("{n} {} copied there now on the clipboard here: paste them in a folder", if n == 1 { "item" } else { "items" })),
-                                Err(e) => self.notify(&format!("The files copied there could not go on the clipboard here: {e}")),
+                                Ok(()) if n == 1 => self.notify(&t!("{} item copied there now on the clipboard here: paste them in a folder", n)),
+                                Ok(()) => self.notify(&t!("{} items copied there now on the clipboard here: paste them in a folder", n)),
+                                Err(e) => self.notify(&t!("The files copied there could not go on the clipboard here: {}", crate::lang::tr_msg(&e))),
                             }
                         }
                     }
                 }
-                Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::session::save_snapshot(&png)),
+                Ok(Ev::Net(ToClient::Snapshot(png))) => self.notify(&crate::lang::tr_msg(&crate::session::save_snapshot(&png))),
                 Ok(Ev::Net(ToClient::Chat(t))) => {
                     // A message is cut where a chat stops being one.
                     let t = crate::chat::trimmed(&t);
@@ -851,7 +852,7 @@ impl Remote {
                     match self.chat.as_mut() {
                         Some((lines, _)) => lines.push((true, t, crate::chat::now())),
                         None => {
-                            self.notify(&format!("Message: {t}"));
+                            self.notify(&t!("Message: {}", t));
                             self.chat_lines.push((true, t, crate::chat::now()));
                             self.unread += 1;
                         }
@@ -909,20 +910,20 @@ impl Remote {
                         p.0 = Some(if error.is_empty() { Ok(list) } else { Err(error) });
                     }
                 }
-                Ok(Ev::Net(ToClient::Launched { text, .. })) => self.notify(&text),
+                Ok(Ev::Net(ToClient::Launched { text, .. })) => self.notify(&crate::lang::tr_msg(&text)),
                 // The chooser shows what happened; a helper in place may list the windows already.
                 Ok(Ev::Net(ToClient::HelperInstalled { ok, text })) => {
                     if let Some(p) = self.picker.as_mut() {
                         p.0 = Some(Err(text.clone()));
                     }
-                    self.notify(&text);
+                    self.notify(&crate::lang::tr_msg(&text));
                     if ok {
                         let _ = self.send(ToAgent::ListWindows);
                     }
                 }
                 Ok(Ev::Net(ToClient::Sharing { kind, text })) => {
                     if kind != self.sharing.0 || text != self.sharing.1 {
-                        self.notify(&format!("Now sharing {text}"));
+                        self.notify(&t!("Now sharing {}", crate::lang::tr_msg(&text)));
                     }
                     self.sharing = (kind, text);
                 }
@@ -933,22 +934,22 @@ impl Remote {
                 }
                 Ok(Ev::Net(ToClient::TermExit { id, text })) => match self.terms.as_mut() {
                     Some(t) => t.exited(id, text),
-                    None => self.notify(&format!("Terminal: {text}")),
+                    None => self.notify(&t!("Terminal: {}", crate::lang::tr_msg(&text))),
                 },
                 Ok(Ev::Net(ToClient::OpDone { ok, text })) => match self.files.as_mut() {
                     Some(f) => {
                         let cmd = f.op_done(ok, &text);
                         self.file_cmd(cmd)?;
                     }
-                    None => self.notify(&text),
+                    None => self.notify(&crate::lang::tr_msg(&text)),
                 },
                 Ok(Ev::Net(ToClient::FetchStart { id, size, tag, name })) => self.fetch_started(id, size, tag, name)?,
                 Ok(Ev::Net(ToClient::FetchData { id, data })) => {
-                    let note = self.sess.fetch_data(&mut self.inbox, id, &data).map_err(|e| format!("connection lost: {e}"))?;
+                    let note = self.sess.fetch_data(&mut self.inbox, id, &data).map_err(|e| t!("connection lost: {}", e))?;
                     if let Some(crate::files::Note::Done { text, .. }) = note {
                         let name = self.downloads.iter().find(|d| d.0 == id).map(|d| d.1.clone()).unwrap_or_default();
                         self.downloads.retain(|d| d.0 != id);
-                        self.notify(&format!("{name} failed: {text}"));
+                        self.notify(&t!("{} failed: {}", name, crate::lang::tr_msg(&text)));
                     }
                 }
                 Ok(Ev::Net(ToClient::FetchEnd { id, ok, text })) => {
@@ -956,7 +957,7 @@ impl Remote {
                         // Already cancelled or failed here; one that could not even be opened
                         // there says why.
                         if !ok && text != "cancelled" {
-                            self.notify(&format!("Download failed: {text}"));
+                            self.notify(&t!("Download failed: {}", crate::lang::tr_msg(&text)));
                         }
                         continue;
                     }
@@ -972,8 +973,8 @@ impl Remote {
                             let folder = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
                             self.got.add(name, folder.display().to_string());
                         }
-                        Some(crate::files::Note::Done { text, .. }) => self.notify(&format!("{name} failed: {text}")),
-                        _ => self.notify(&format!("Download failed: {text}")),
+                        Some(crate::files::Note::Done { text, .. }) => self.notify(&t!("{} failed: {}", name, crate::lang::tr_msg(&text))),
+                        _ => self.notify(&t!("Download failed: {}", crate::lang::tr_msg(&text))),
                     }
                     // After the file is closed, so the listing shows its full size.
                     if tag != 0 && let Some(f) = self.files.as_mut() {
@@ -993,7 +994,7 @@ impl Remote {
                         self.uploads.retain(|u| u.id != id);
                         if !ok {
                             self.pasting = None;
-                            self.notify(&format!("The paste failed: {text}"));
+                            self.notify(&t!("The paste failed: {}", crate::lang::tr_msg(&text)));
                         } else if left.is_empty() {
                             let (batch, names) = (batch.clone(), std::mem::take(names));
                             self.pasting = None;
@@ -1011,14 +1012,14 @@ impl Remote {
                         self.file_cmd(cmd)?;
                     }
                     match (error, cancelled, ok) {
-                        (Some(e), ..) => self.notify(&format!("{name} failed: {e}")),
-                        (None, true, _) => self.notify(&format!("{name}: upload cancelled")),
+                        (Some(e), ..) => self.notify(&t!("{} failed: {}", name, e)),
+                        (None, true, _) => self.notify(&t!("{}: upload cancelled", name)),
                         (None, false, true) => {
                             // The host's own path for one in its Downloads folder.
                             let folder = dir.unwrap_or_else(|| text.rsplit_once(['/', '\\']).map_or(text.clone(), |(d, _)| d.to_string()));
                             self.sent.add(name, folder);
                         }
-                        (None, false, false) => self.notify(&format!("{name} failed: {text}")),
+                        (None, false, false) => self.notify(&t!("{} failed: {}", name, crate::lang::tr_msg(&text))),
                     }
                 }
                 Ok(Ev::Net(ToClient::Error(e)) | Ev::Closed(e)) => {
@@ -1027,7 +1028,7 @@ impl Remote {
                 }
                 Ok(_) => {}
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
-                Err(mpsc::TryRecvError::Disconnected) => return Err("connection closed".into()),
+                Err(mpsc::TryRecvError::Disconnected) => return Err(t!("connection closed").into()),
             }
         }
     }
@@ -1184,18 +1185,12 @@ impl Remote {
     /// host and display settings.
     pub(super) fn details(&self) -> String {
         let state = match self.ctl.rtt {
-            r if r < 80.0 => "good",
-            r if r < 250.0 => "slow",
-            _ => "poor",
+            r if r < 80.0 => t!("Connection good"),
+            r if r < 250.0 => t!("Connection slow"),
+            _ => t!("Connection poor"),
         };
-        format!(
-            "Connection {state}\nRound trip {:.0} ms, {:.0} KB/s, {:.0} fps\n{}\n{}",
-            self.ctl.rtt,
-            self.ctl.kbps,
-            self.ctl.fps_now,
-            self.label,
-            self.ctl.describe()
-        )
+        let rate = t!("Round trip {} ms, {} KB/s, {} fps", format!("{:.0}", self.ctl.rtt), format!("{:.0}", self.ctl.kbps), format!("{:.0}", self.ctl.fps_now));
+        format!("{state}\n{rate}\n{}\n{}", self.label, crate::lang::tr_msg(&self.ctl.describe()))
     }
 
     /// Watching only: keys, clicks and the wheel do not reach the host.
@@ -1254,8 +1249,8 @@ impl Remote {
     fn trusted(&mut self, token: String) {
         let Some(address) = self.trust_for.take() else { return };
         match crate::vault::set(&crate::vault::trust_name(&address), &token) {
-            Ok(()) => self.notify(&format!("That computer will not ask for the code here for {} days", crate::access::TRUST_DAYS)),
-            Err(e) => self.notify(&format!("This computer could not be trusted there: {e}")),
+            Ok(()) => self.notify(&t!("That computer will not ask for the code here for {} days", crate::access::TRUST_DAYS)),
+            Err(e) => self.notify(&t!("This computer could not be trusted there: {}", crate::lang::tr_msg(&e))),
         }
     }
 
@@ -1411,13 +1406,13 @@ impl Remote {
             screens.get(if on { (at + 1) % n } else { (at + n - 1) % n }).copied()
         };
         match a {
-            Action::CtrlAltDel if self.view_only || self.mirror => self.notify("View only: Ctrl+Alt+Del was not sent"),
-            Action::CtrlAltDel if self.sess.backend == "mac" => self.notify("A Mac has no Ctrl+Alt+Del (Option+Cmd+Esc force quits)"),
+            Action::CtrlAltDel if self.view_only || self.mirror => self.notify(t!("View only: Ctrl+Alt+Del was not sent")),
+            Action::CtrlAltDel if self.sess.backend == "mac" => self.notify(t!("A Mac has no Ctrl+Alt+Del (Option+Cmd+Esc force quits)")),
             Action::CtrlAltDel => return self.send(ToAgent::SecureAttention),
             Action::FullScreen => self.full_toggle = true,
             Action::NextScreen | Action::PrevScreen => match step(a == Action::NextScreen) {
                 Some(i) if i != self.monitor => return self.show_monitor(i),
-                _ => self.notify("That computer shows one screen"),
+                _ => self.notify(t!("That computer shows one screen")),
             },
             Action::Screenshot => return self.send(ToAgent::Snapshot),
             Action::Record => self.toggle_recording(),
@@ -1428,7 +1423,7 @@ impl Remote {
             Action::ViewOnly if self.mirror => {}
             Action::ViewOnly => {
                 self.view_only = !self.view_only;
-                self.notify(if self.view_only { "View only: keys and clicks stay here" } else { "Keys and clicks reach that computer again" });
+                self.notify(if self.view_only { t!("View only: keys and clicks stay here") } else { t!("Keys and clicks reach that computer again") });
             }
             Action::Pause => return self.set_paused(!self.paused),
             Action::Repaint => return self.menu('r'),
@@ -1436,7 +1431,7 @@ impl Remote {
             Action::GameMouse => {
                 self.games = !self.games;
                 self.games_held = self.games;
-                self.notify(if self.games { "The mouse is held for the game: Ctrl+Alt lets it go" } else { "The mouse is yours again" });
+                self.notify(if self.games { t!("The mouse is held for the game: Ctrl+Alt lets it go") } else { t!("The mouse is yours again") });
             }
             Action::Lock => return self.send(ToAgent::Host { act: crate::hostctl::LOCK, on: true }),
         }
@@ -1472,7 +1467,7 @@ impl Remote {
             match crate::audio::Player::new() {
                 Ok(p) => self.sound = Some(p),
                 Err(e) => {
-                    self.notify(&format!("Sound: {e}"));
+                    self.notify(&t!("Sound: {}", crate::lang::tr_msg(&e)));
                     return Ok(());
                 }
             }
@@ -1585,7 +1580,7 @@ impl Remote {
                     self.sound = Some(pl);
                     self.send(ToAgent::Audio(true))?;
                 }
-                Err(e) => self.notify(&format!("Sound: {e}")),
+                Err(e) => self.notify(&t!("Sound: {}", crate::lang::tr_msg(&e))),
             }
         }
         self.user_paused = p.paused;
@@ -1614,19 +1609,19 @@ impl Remote {
         if state == CALL_TALKING {
             match crate::audio::microphone() {
                 Ok(m) => self.call_mic = Some(m),
-                Err(e) => self.notify(&format!("The microphone here: {e}; you can still hear them")),
+                Err(e) => self.notify(&t!("The microphone here: {}; you can still hear them", crate::lang::tr_msg(&e))),
             }
             match crate::audio::Player::new() {
                 Ok(p) => self.call_player = Some(p),
-                Err(e) => self.notify(&format!("The speakers here: {e}")),
+                Err(e) => self.notify(&t!("The speakers here: {}", crate::lang::tr_msg(&e))),
             }
-            self.notify("In a call with the person at that computer");
+            self.notify(t!("In a call with the person at that computer"));
         } else if state == CALL_DECLINED || state == CALL_ENDED {
             (self.call_mic, self.call_player) = (None, None);
             if state == CALL_DECLINED {
-                self.notify("They did not answer the call");
+                self.notify(t!("They did not answer the call"));
             } else if was == CALL_TALKING {
-                self.notify("The call ended");
+                self.notify(t!("The call ended"));
             }
         }
     }
@@ -1638,14 +1633,14 @@ impl Remote {
         match self.recording.take() {
             None => {
                 self.recording = Some(crate::record::Recording::start(self.host()));
-                self.notify("Recording the screen (at most 15 frames a second, only as it changes)");
+                self.notify(t!("Recording the screen (at most 15 frames a second, only as it changes)"));
             }
             Some(r) => match r.stop() {
                 Ok(files) => {
                     let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
-                    self.notify(&format!("Recorded: {}", list.join(", ")));
+                    self.notify(&t!("Recorded: {}", list.join(", ")));
                 }
-                Err(e) => self.notify(&format!("The recording failed: {e}")),
+                Err(e) => self.notify(&t!("The recording failed: {}", crate::lang::tr_msg(&e))),
             },
         }
     }

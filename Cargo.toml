@@ -30,6 +30,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rasterlottie = { optional = true, version = "0.3", default-features = false, features = ["images", "text", "dotlottie"] }
 # .lottie packages opened here, so their animation can be read as the format allows (in the tree already).
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# Already in the build through png and zip: the language tables are carried deflated.
+flate2 = "1"
 serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
@@ -88,7 +90,10 @@ x11rb = { optional = true, version = "0.13", default-features = false, features 
 uiautomation = { optional = true, version = "0.25" }
 # Already in the tree through uiautomation; its COM interfaces drive Desktop Duplication.
 windows = { optional = true, version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Data_Pdf", "Foundation", "Storage", "Storage_Streams"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_Console", "Win32_System_IO", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Services", "Win32_System_Time", "Win32_UI_Shell", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_System_Environment", "Win32_Networking_WinSock", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Graphics_Printing", "Win32_Storage_Xps", "Win32_Devices_Display"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Media", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_Console", "Win32_System_IO", "Win32_Security_Authorization", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Services", "Win32_System_Time", "Win32_UI_Shell", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_System_Environment", "Win32_Networking_WinSock", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Graphics_Printing", "Win32_Storage_Xps", "Win32_Devices_Display"] }
+
+[build-dependencies]
+flate2 = "1"
 
 [features]
 default = ["gui", "remote", "web", "mcp"]
@@ -118,3 +123,8 @@ strip = "debuginfo"
 
 [dev-dependencies]
 wat = "1"
+
+# egui's text layout (epaint 0.37.0, MIT OR Apache-2.0) with right-to-left text drawn in reading
+# order: Arabic, Persian, Urdu and Hebrew mixed with other words, also over several lines.
+[patch.crates-io]
+epaint = { path = "vendor/epaint" }

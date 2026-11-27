@@ -495,7 +495,7 @@ fn handle(ext: &str, msg: &Value) {
             }
             with(|s| {
                 let name = s.running.iter().find(|r| r.id == ext).map_or(ext.to_string(), |r| r.name.clone());
-                let submit = if str_of("submit").is_empty() { "OK".to_string() } else { str_of("submit") };
+                let submit = if str_of("submit").is_empty() { n!("OK").to_string() } else { str_of("submit") };
                 s.asks.push(Ask { ext: ext.into(), name, id, title: str_of("title"), prompt: str_of("prompt"), fields, submit, form });
             });
             // Answered when the user is done.

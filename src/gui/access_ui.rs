@@ -144,18 +144,18 @@ impl App {
         // When the service runs remote access, this window's own loop is off: the relay says.
         let local = if svc.runs { access::State::Off } else { access::state() };
         if !cfg.enabled {
-            return (weak, "Off: nobody can connect by ID".into());
+            return (weak, t!("Off: nobody can connect by ID").into());
         }
         if !svc.runs && access::locked() {
-            return (bad(), "Too many wrong passwords in a row from many places: for a day, or until you set a new one, only places you came in from lately are let in".into());
+            return (bad(), t!("Too many wrong passwords in a row from many places: for a day, or until you set a new one, only places you came in from lately are let in").into());
         }
         match (&local, online) {
-            (access::State::InUse(n), _) => (good(), format!("A viewer is connected ({n})")),
-            (access::State::Failed(e), _) => (bad(), e.clone()),
-            (_, Some(Ok(true))) => (good(), format!("Ready: waiting at {}", cfg.relay)),
-            (_, Some(Ok(false))) => (bad(), if svc.runs { "Not at the relay yet: the service connects in a moment".into() } else { "Connecting to the relay\u{2026}".into() }),
-            (_, Some(Err(e))) => (bad(), format!("The relay could not be reached: {e}")),
-            (_, None) => (weak, "Connecting\u{2026}".into()),
+            (access::State::InUse(n), _) => (good(), t!("A viewer is connected ({})", n)),
+            (access::State::Failed(e), _) => (bad(), crate::lang::tr_msg(e).into_owned()),
+            (_, Some(Ok(true))) => (good(), t!("Ready: waiting at {}", cfg.relay)),
+            (_, Some(Ok(false))) => (bad(), if svc.runs { t!("Not at the relay yet: the service connects in a moment").into() } else { t!("Connecting to the relay\u{2026}").into() }),
+            (_, Some(Err(e))) => (bad(), t!("The relay could not be reached: {}", crate::lang::tr_msg(&e))),
+            (_, None) => (weak, t!("Connecting\u{2026}").into()),
         }
     }
 
@@ -190,7 +190,7 @@ impl App {
     #[cfg(feature = "remote")]
     pub(super) fn service_change(&mut self, install: bool) {
         let r = if install { crate::access::install_service() } else { crate::access::uninstall_service() };
-        self.error = r.err().map(|e| format!("Service: {e}"));
+        self.error = r.err().map(|e| t!("Service: {}", crate::lang::tr_msg(&e)));
         self.access.service_looked = None;
         *self.access.service.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.service = None;

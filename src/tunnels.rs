@@ -29,9 +29,9 @@ impl Kind {
 
     pub fn name(self) -> &'static str {
         match self {
-            Kind::Local => "Here to there",
-            Kind::Remote => "There to here",
-            Kind::Socks => "SOCKS proxy",
+            Kind::Local => n!("Here to there"),
+            Kind::Remote => n!("There to here"),
+            Kind::Socks => n!("SOCKS proxy"),
         }
     }
 
@@ -52,12 +52,12 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// What it does, in a few words: "8080 → localhost:80".
+    /// What it does, in a few words, for the window: "here 8080 → localhost:80".
     pub fn label(&self) -> String {
         match self.kind {
-            Kind::Local => format!("here {} → {}", self.port, self.dest),
-            Kind::Remote => format!("there {} → {}", self.port, self.dest),
-            Kind::Socks => format!("SOCKS on {}", self.port),
+            Kind::Local => t!("here {} → {}", self.port, self.dest),
+            Kind::Remote => t!("there {} → {}", self.port, self.dest),
+            Kind::Socks => t!("SOCKS on {}", self.port),
         }
     }
 
@@ -74,7 +74,7 @@ impl Tunnel {
     /// that exists, and somewhere to lead to.
     pub fn problem(&self) -> Option<&'static str> {
         if self.port == 0 {
-            return Some("The port is a number from 1 to 65535.");
+            return Some(n!("The port is a number from 1 to 65535."));
         }
         if self.kind == Kind::Socks {
             return None;
@@ -82,7 +82,7 @@ impl Tunnel {
         let ok = |s: &str| !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_whitespace);
         match self.dest.rsplit_once(':') {
             Some((host, port)) if ok(host) && port.parse::<u16>().is_ok_and(|p| p > 0) => None,
-            _ => Some("Where it leads is HOST:PORT, such as localhost:5432."),
+            _ => Some(n!("Where it leads is HOST:PORT, such as localhost:5432.")),
         }
     }
 
@@ -105,13 +105,13 @@ impl Tunnel {
 pub fn plain(why: &str) -> String {
     let l = why.to_lowercase();
     if l.contains("permission denied") {
-        "the computer wants a password, which a tunnel cannot type: install your key on it (Settings > SSH keys)".into()
+        n!("the computer wants a password, which a tunnel cannot type: install your key on it (Settings > SSH keys)").into()
     } else if l.contains("address already in use") || l.contains("cannot listen") || l.contains("forwarding failed") {
-        "that port is already taken; pick another".into()
+        n!("that port is already taken; pick another").into()
     } else if l.contains("could not resolve") || l.contains("no such host") {
-        "the computer's name is not known".into()
+        n!("the computer's name is not known").into()
     } else if l.contains("timed out") || l.contains("connection refused") || l.contains("unreachable") {
-        "the computer could not be reached".into()
+        n!("the computer could not be reached").into()
     } else {
         why.trim().to_string()
     }
@@ -188,7 +188,7 @@ pub fn start(address: &str, port: Option<u16>, t: &Tunnel) -> Result<(), String>
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start ssh: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| crate::lang::fill(n!("cannot start ssh: {}"), &[&e]))?;
     crate::sys::tie(&child);
     let said = std::sync::Arc::new(Mutex::new(String::new()));
     if let Some(mut err) = child.stderr.take() {
@@ -225,9 +225,9 @@ impl Run {
 #[cfg(feature = "remote")]
 fn start_by_id(runs: &mut Vec<Run>, address: &str, t: &Tunnel) -> Result<(), String> {
     if t.kind != Kind::Local {
-        return Err("Through a computer reached by its ID, a tunnel goes from here to there only.".into());
+        return Err(n!("Through a computer reached by its ID, a tunnel goes from here to there only.").into());
     }
-    let password = crate::vault::get(address).ok_or("Save its password first: a tunnel has nobody to ask for it.")?;
+    let password = crate::vault::get(address).ok_or(n!("Save its password first: a tunnel has nobody to ask for it."))?;
     let fwd = crate::porttunnel::open(address, password, t.port, &t.dest)?;
     runs.push(Run {
         address: address.into(),
@@ -243,7 +243,8 @@ fn start_by_id(runs: &mut Vec<Run>, address: &str, t: &Tunnel) -> Result<(), Str
 
 #[cfg(not(feature = "remote"))]
 fn start_by_id(_: &mut Vec<Run>, _: &str, _: &Tunnel) -> Result<(), String> {
-    Err(crate::not_built("tunnels through a computer reached by its ID"))
+    // A build made without a part (`cargo build` with fewer features) says so.
+    Err(n!("this sshremote was built without tunnels through a computer reached by its ID").into())
 }
 
 /// Closes `t` of the computer at `address`, and forgets why it failed if it did.
@@ -274,7 +275,7 @@ pub fn state(address: &str, t: &Tunnel) -> State {
         && let Ok(Some(status)) = c.try_wait()
     {
         r.child = None;
-        r.ended = Some(format!("ssh ended ({status})"));
+        r.ended = Some(crate::lang::fill(n!("ssh ended ({})"), &[&status]));
     }
     match (&r.child, &r.ended) {
         (Some(_), _) if r.since.elapsed() < std::time::Duration::from_secs(3) => State::Starting,
@@ -323,7 +324,7 @@ pub fn start_with_app() -> Vec<String> {
     for c in crate::computers::all() {
         for t in c.tunnels.iter().filter(|t| t.start_with_app) {
             if let Err(e) = start(&c.address, c.port, t) {
-                out.push(format!("{} {}: {e}", c.label(), t.label()));
+                out.push(format!("{} {}: {}", crate::lang::tr_msg(&c.label()), t.label(), crate::lang::tr_msg(&e)));
             }
         }
     }

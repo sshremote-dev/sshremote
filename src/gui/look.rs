@@ -71,7 +71,7 @@ fn layer_name(src: &str) -> String {
     }
     super::lottie::built_in(src).map_or_else(
         || std::path::Path::new(src).file_name().map_or(src.to_string(), |n| n.to_string_lossy().into_owned()),
-        |b| b.label.to_string(),
+        |b| crate::lang::tr(b.label).to_string(),
     )
 }
 
@@ -310,7 +310,7 @@ fn picture(ctx: &egui::Context, path: &str, play: bool, px: f32) -> Result<Optio
     let (path, play) = if let Some(rest) = path.strip_prefix("ext:") {
         if crate::ext::label(path).is_none() {
             let id = rest.split('/').next().unwrap_or("");
-            return Err(format!("needs the extension {id}: Settings > Extensions"));
+            return Err(t!("needs the extension {}: Settings > Extensions", id));
         }
         resolved = crate::ext::resolve(path);
         (resolved.as_str(), play && !crate::ext::is_still(path))
@@ -674,13 +674,13 @@ fn hud_line(l: &Look, s: &Stats) -> String {
     let gb = |b: f64| b / (1u64 << 30) as f64;
     let mut parts = Vec::new();
     if l.hud_cpu && let Some(c) = s.cpu {
-        parts.push(format!("CPU {c:.0}%"));
+        parts.push(t!("CPU {}%", format!("{c:.0}")));
     }
     if l.hud_ram && let Some((u, t)) = s.ram {
-        parts.push(format!("RAM {:.1}/{:.0} GB", gb(u), gb(t)));
+        parts.push(t!("RAM {}/{} GB", format!("{:.1}", gb(u)), format!("{:.0}", gb(t))));
     }
     if l.hud_disk && let Some((u, t)) = s.disk {
-        parts.push(format!("Disk {:.0}%", u / t * 100.0));
+        parts.push(t!("Disk {}%", format!("{:.0}", u / t * 100.0)));
     }
     if l.hud_clock {
         parts.push(s.clock.clone());
@@ -881,7 +881,7 @@ pub(crate) fn pane_overlay(ui: &egui::Ui, rect: Rect, ssh: Option<&[String]>, la
         Some(s) => hud_line(&l, &s),
         None => "\u{2026}".to_string(),
     };
-    let who = if ssh.is_some() { label.to_string() } else { "this computer".to_string() };
+    let who = if ssh.is_some() { label.to_string() } else { t!("this computer").to_string() };
     let text = if line.is_empty() { who } else { format!("{who}  \u{B7}  {line}") };
     let (back, ink) = hud_colours(&l);
     let painter = ui.painter().with_clip_rect(rect);
@@ -1052,8 +1052,9 @@ pub(crate) fn frame(ctx: &egui::Context) {
     sweep_pictures(ctx);
     let l = get();
     let fonts_key = egui::Id::unique("look-fonts-applied");
-    let want = (l.ui_font.clone(), l.mono_font.clone());
-    match ctx.data(|d| d.get_temp::<(String, String)>(fonts_key)) {
+    // A language of another script brings its own fonts.
+    let want = (l.ui_font.clone(), l.mono_font.clone(), crate::lang::current());
+    match ctx.data(|d| d.get_temp::<(String, String, &'static str)>(fonts_key)) {
         // The window's first frame: its fonts were just set up with the look.
         None => {
             ctx.data_mut(|d| d.insert_temp(fonts_key, want));
@@ -1118,7 +1119,7 @@ fn editor_window(ctx: &egui::Context) {
     let mut open = true;
     let mut l = get();
     let before = l.clone();
-    let shown = egui::Window::new(RichText::new(format!("{}  Appearance", ic::EYE)).strong())
+    let shown = egui::Window::new(RichText::new(format!("{}  {}", ic::EYE, t!("Appearance"))).strong())
         .id(egui::Id::unique("look-editor"))
         .open(&mut open)
         .collapsible(false)
@@ -1174,6 +1175,37 @@ pub(crate) fn page(ui: &mut egui::Ui) {
     }
 }
 
+/// The language of every window: the system's, or one chosen here.
+fn language_row(ui: &mut egui::Ui) {
+    use crate::lang;
+    ui.horizontal(|ui| {
+        ui.label(t!("Language"));
+        let chosen = lang::chosen();
+        let name = |code: &str| lang::find(code).map_or("English", |l| l.name);
+        let shown = if chosen.is_empty() { t!("The system's ({})", name(lang::system())) } else { name(&chosen).to_string() };
+        egui::ComboBox::from_id_salt("look-language").selected_text(shown).height(420.0).show_ui(ui, |ui| {
+            let mut pick = None;
+            if ui.selectable_label(chosen.is_empty(), t!("The system's ({})", name(lang::system()))).clicked() {
+                pick = Some("");
+            }
+            ui.separator();
+            let mut all: Vec<&lang::Lang> = lang::LANGS.iter().collect();
+            all.sort_by_key(|l| l.english);
+            for l in all {
+                let here = lang::tr_msg(l.english);
+                let label = if l.name == here { l.name.to_string() } else { format!("{}  ·  {here}", l.name) };
+                if ui.selectable_label(chosen == l.code, label).clicked() {
+                    pick = Some(l.code);
+                }
+            }
+            if let Some(code) = pick {
+                lang::choose(code);
+                ui.ctx().request_repaint();
+            }
+        });
+    });
+}
+
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
     ui.label(RichText::new(text).strong().size(15.0));
@@ -1194,7 +1226,7 @@ fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [u8; 3]) -> bool {
 fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut String, mono_first: bool) {
     let list = fonts(ui.ctx());
     let current = if value.is_empty() {
-        "The system's own".to_string()
+        t!("The system's own").to_string()
     } else {
         list.as_ref().and_then(|l| l.iter().find(|f| f.path == *value).map(|f| f.name.clone())).unwrap_or_else(|| {
             std::path::Path::new(value.as_str()).file_stem().map_or(value.clone(), |s| s.to_string_lossy().into_owned())
@@ -1203,12 +1235,12 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut Str
     // A click in the search field keeps the list open; one outside closes it.
     let list_box = egui::ComboBox::from_id_salt(id).selected_text(current).width(300.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     list_box.show_ui(ui, |ui| {
-        ui.add(egui::TextEdit::singleline(filter).hint_text("Search fonts").desired_width(280.0));
-        if ui.selectable_label(value.is_empty(), "The system's own").clicked() {
+        ui.add(egui::TextEdit::singleline(filter).hint_text(t!("Search fonts")).desired_width(280.0));
+        if ui.selectable_label(value.is_empty(), t!("The system's own")).clicked() {
             value.clear();
         }
         let Some(list) = list else {
-            ui.label(RichText::new("Reading the fonts\u{2026}").weak());
+            ui.label(RichText::new(t!("Reading the fonts\u{2026}")).weak());
             return;
         };
         let f = filter.to_lowercase();
@@ -1218,7 +1250,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut Str
         }
         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
             for x in shown.into_iter().take(400) {
-                let label = if mono_first && x.mono { format!("{}  (monospaced)", x.name) } else { x.name.clone() };
+                let label = if mono_first && x.mono { format!("{}  ({})", x.name, t!("monospaced")) } else { x.name.clone() };
                 if ui.selectable_label(*value == x.path, label).clicked() {
                     *value = x.path.clone();
                 }
@@ -1229,23 +1261,24 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, filter: &mut Str
 
 fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
     ui.spacing_mut().item_spacing.y = 8.0;
-    heading(ui, "Interface");
+    heading(ui, t!("Interface"));
+    language_row(ui);
     ui.horizontal(|ui| {
-        ui.label("Theme");
+        ui.label(t!("Theme"));
         let dark = super::theme::dark();
-        if ui.selectable_label(dark, "Dark").clicked() && !dark {
+        if ui.selectable_label(dark, t!("Dark")).clicked() && !dark {
             super::theme::set_theme(ui.ctx(), true);
         }
-        if ui.selectable_label(!dark, "Light").clicked() && dark {
+        if ui.selectable_label(!dark, t!("Light")).clicked() && dark {
             super::theme::set_theme(ui.ctx(), false);
         }
     });
     ui.horizontal(|ui| {
-        ui.label("Font");
+        ui.label(t!("Font"));
         font_picker(ui, "look-ui-font", &mut l.ui_font, &mut ed.ui_filter, false);
     });
     let mut pct = (ed.scale_drag.unwrap_or(l.ui_scale) * 100.0).round();
-    let size = ui.add(egui::Slider::new(&mut pct, 70.0..=160.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Size"));
+    let size = ui.add(egui::Slider::new(&mut pct, 70.0..=160.0).step_by(5.0).fixed_decimals(0).suffix("%").text(t!("Size")));
     if size.dragged() {
         ed.scale_drag = Some(pct / 100.0);
     } else if size.changed() {
@@ -1257,30 +1290,30 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         l.ui_scale = v;
     }
 
-    heading(ui, "Terminal");
+    heading(ui, t!("Terminal"));
     ui.horizontal(|ui| {
-        ui.label("Font");
+        ui.label(t!("Font"));
         font_picker(ui, "look-mono-font", &mut l.mono_font, &mut ed.mono_filter, true);
     });
     crate::termwin::size_picker(ui);
-    ui.checkbox(&mut l.custom_colors, "My own colours (else the colour scheme)");
+    ui.checkbox(&mut l.custom_colors, t!("My own colours (else the colour scheme)"));
     if l.custom_colors {
-        color_row(ui, "Text", &mut l.fg);
-        color_row(ui, "Background", &mut l.bg);
+        color_row(ui, t!("Text"), &mut l.fg);
+        color_row(ui, t!("Background"), &mut l.bg);
     } else {
         crate::termwin::scheme_picker(ui);
     }
     crate::termwin::cursor_picker(ui);
     crate::termwin::copy_select_picker(ui);
 
-    heading(ui, "Background layers");
-    ui.label(RichText::new("Behind the terminal panes, the top of the list in front. Add built-in ones or your own pictures and animations (PNG, JPEG, WebP, GIF, Lottie); drop a file on this window to add it.").weak().size(12.0));
+    heading(ui, t!("Background layers"));
+    ui.label(RichText::new(t!("Behind the terminal panes, the top of the list in front. Add built-in ones or your own pictures and animations (PNG, JPEG, WebP, GIF, Lottie); drop a file on this window to add it.")).weak().size(12.0));
     // Added layers go to the top of the list, in front, right under these.
     ui.horizontal(|ui| {
-        ui.menu_button(format!("{}  Add built-in", ic::PLUS), |ui| {
+        ui.menu_button(format!("{}  {}", ic::PLUS, t!("Add built-in")), |ui| {
             for b in super::lottie::BUILT_INS {
-                let kind = if b.still { "picture" } else { "animation" };
-                if ui.button(format!("{}  ({kind})", b.label)).clicked() {
+                let kind = if b.still { t!("picture") } else { t!("animation") };
+                if ui.button(format!("{}  ({kind})", crate::lang::tr(b.label))).clicked() {
                     let fit = if b.id == "builtin:brand" { Fit::Whole } else { Fit::Fill };
                     l.layers.insert(0, BgLayer { src: b.id.to_string(), on: true, strength: 0.5, fit, scope: Scope::Window });
                     ui.close();
@@ -1289,22 +1322,22 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
             let ext = crate::ext::layers();
             if !ext.is_empty() {
                 ui.separator();
-                ui.label(RichText::new("From extensions").weak().size(12.0));
+                ui.label(RichText::new(t!("From extensions")).weak().size(12.0));
             }
             for (src, label, still) in ext {
-                let kind = if still { "picture" } else { "animation" };
+                let kind = if still { t!("picture") } else { t!("animation") };
                 if ui.button(format!("{label}  ({kind})")).clicked() {
                     l.layers.insert(0, BgLayer { src, on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
                     ui.close();
                 }
             }
         });
-        ui.add(egui::TextEdit::singleline(&mut ed.new_file).hint_text("Your file's path").desired_width(220.0));
-        if ui.add_enabled(!ed.new_file.trim().is_empty(), egui::Button::new("Add")).clicked() {
+        ui.add(egui::TextEdit::singleline(&mut ed.new_file).hint_text(t!("Your file's path")).desired_width(220.0));
+        if ui.add_enabled(!ed.new_file.trim().is_empty(), egui::Button::new(t!("Add"))).clicked() {
             l.layers.insert(0, BgLayer { src: ed.new_file.trim().to_string(), on: true, strength: 0.5, fit: Fit::Fill, scope: Scope::Window });
             ed.new_file.clear();
         }
-        if ui.button("Defaults").on_hover_text("The default layers again").clicked() {
+        if ui.button(t!("Defaults")).on_hover_text(t!("The default layers again")).clicked() {
             l.layers = Look::default().layers;
         }
     });
@@ -1320,31 +1353,31 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
                 }
                 ui.label(RichText::new(layer_name(&ly.src)).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(ic::X).on_hover_text("Remove").clicked() {
+                    if ui.small_button(ic::X).on_hover_text(t!("Remove")).clicked() {
                         act = Some((i, 0));
                     }
-                    if ui.small_button(ic::CARET_DOWN).on_hover_text("Further back").clicked() {
+                    if ui.small_button(ic::CARET_DOWN).on_hover_text(t!("Further back")).clicked() {
                         act = Some((i, 1));
                     }
-                    if ui.small_button(ic::CARET_UP).on_hover_text("Further forward").clicked() {
+                    if ui.small_button(ic::CARET_UP).on_hover_text(t!("Further forward")).clicked() {
                         act = Some((i, -1));
                     }
                 });
             });
             if let Err(e) = picture(ui.ctx(), &ly.src, false, 64.0) {
-                ui.colored_label(super::bad(), format!("Cannot use it: {e}"));
+                ui.colored_label(super::bad(), t!("Cannot use it: {}", crate::lang::tr_msg(&e)));
             }
             let mut pct = (ly.strength * 100.0).round();
-            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Strength")).changed() {
+            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text(t!("Strength"))).changed() {
                 ly.strength = pct / 100.0;
             }
             ui.horizontal_wrapped(|ui| {
-                for (f, name) in [(Fit::Fill, "Fill"), (Fit::Whole, "Fit"), (Fit::Stretch, "Stretch"), (Fit::Tile, "Tile"), (Fit::Center, "Centre")] {
+                for (f, name) in [(Fit::Fill, t!("Fill")), (Fit::Whole, t!("Fit")), (Fit::Stretch, t!("Stretch")), (Fit::Tile, t!("Tile")), (Fit::Center, t!("Centre"))] {
                     ui.selectable_value(&mut ly.fit, f, name);
                 }
                 ui.separator();
-                ui.selectable_value(&mut ly.scope, Scope::Window, "Whole window");
-                ui.selectable_value(&mut ly.scope, Scope::Pane, "Each pane");
+                ui.selectable_value(&mut ly.scope, Scope::Window, t!("Whole window"));
+                ui.selectable_value(&mut ly.scope, Scope::Pane, t!("Each pane"));
             });
         });
     }
@@ -1356,37 +1389,37 @@ fn editor(ui: &mut egui::Ui, l: &mut Look, ed: &mut Editor) {
         Some((i, 1)) if i + 1 < l.layers.len() => l.layers.swap(i, i + 1),
         _ => {}
     }
-    heading(ui, "Overlay");
-    ui.checkbox(&mut l.hud, "Show the load and the time");
+    heading(ui, t!("Overlay"));
+    ui.checkbox(&mut l.hud, t!("Show the load and the time"));
     if l.hud {
         // In the panes, each from the computer it runs on (its SSH host's, or this one's).
         l.hud_scope = HudScope::Terminals;
-        ui.checkbox(&mut l.hud_active_only, "Only in the active pane");
+        ui.checkbox(&mut l.hud_active_only, t!("Only in the active pane"));
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut l.hud_cpu, "CPU");
-            ui.checkbox(&mut l.hud_ram, "Memory");
-            ui.checkbox(&mut l.hud_disk, "Disk");
-            ui.checkbox(&mut l.hud_clock, "Time");
+            ui.checkbox(&mut l.hud_ram, t!("Memory"));
+            ui.checkbox(&mut l.hud_disk, t!("Disk"));
+            ui.checkbox(&mut l.hud_clock, t!("Time"));
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label("Corner");
-            for (c, name) in [(Corner::TopLeft, "Top left"), (Corner::TopRight, "Top right"), (Corner::BottomLeft, "Bottom left"), (Corner::BottomRight, "Bottom right")] {
+            ui.label(t!("Corner"));
+            for (c, name) in [(Corner::TopLeft, t!("Top left")), (Corner::TopRight, t!("Top right")), (Corner::BottomLeft, t!("Bottom left")), (Corner::BottomRight, t!("Bottom right"))] {
                 ui.selectable_value(&mut l.hud_corner, c, name);
             }
         });
         let mut pct = (l.hud_text * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 10.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Text: faint to strong")).changed() {
+        if ui.add(egui::Slider::new(&mut pct, 10.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text(t!("Text: faint to strong"))).changed() {
             l.hud_text = pct / 100.0;
         }
-        color_row(ui, "Background colour", &mut l.hud_bg);
+        color_row(ui, t!("Background colour"), &mut l.hud_bg);
         let mut pct = (l.hud_bg_alpha * 100.0).round();
-        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text("Background: clear to solid")).changed() {
+        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text(t!("Background: clear to solid"))).changed() {
             l.hud_bg_alpha = pct / 100.0;
         }
     }
     ui.add_space(8.0);
     ui.separator();
-    if ui.button(format!("{}  Back to the defaults", ic::ARROW_CLOCKWISE)).clicked() {
+    if ui.button(format!("{}  {}", ic::ARROW_CLOCKWISE, t!("Back to the defaults"))).clicked() {
         *l = Look::default();
         crate::termwin::reset_look();
     }

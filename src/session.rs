@@ -19,8 +19,8 @@ pub fn save_snapshot(png: &[u8]) -> String {
     // (The folder made first: a computer without a desktop may have no Downloads.)
     let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, png));
     match saved {
-        Ok(()) => format!("Screenshot saved to {}", path.display()),
-        Err(e) => format!("Screenshot: {e}"),
+        Ok(()) => t!("Screenshot saved to {}", path.display()),
+        Err(e) => t!("Screenshot: {}", e),
     }
 }
 
@@ -160,7 +160,7 @@ impl Session {
                 Err(e) => last = e,
             }
         }
-        Err(format!("{last}\nsshremote was not found on that Windows computer: install SSH Remote there (This computer, Start with the computer), or put sshremote.exe on its PATH."))
+        Err(crate::lang::fill(n!("{}\nsshremote was not found on that Windows computer: install SSH Remote there (This computer, Start with the computer), or put sshremote.exe on its PATH."), &[&last]))
     }
 
     fn open_once(target: &Target, hidden: bool, note: &dyn Fn(&str)) -> Result<(Session, mpsc::Sender<Ev>, mpsc::Receiver<Ev>), String> {
@@ -169,11 +169,11 @@ impl Session {
         // two can be compared (never one the other side sends, which someone between could copy).
         let code = link.code();
         let say = |t: &str| match &code {
-            Some(c) => note(&format!("{t}\nYour code is {c}: the person there must see the same one.")),
+            Some(c) => note(&format!("{}\n{}", crate::lang::tr_msg(t), t!("Your code is {}: the person there must see the same one.", c))),
             None => note(t),
         };
         if code.is_some() {
-            say("Asking the person at that computer to let you in\u{2026}");
+            say(n!("Asking the person at that computer to let you in\u{2026}"));
         }
         let reader = std::mem::replace(&mut link.reader, Box::new(io::empty()));
         let writer = std::mem::replace(&mut link.writer, Box::new(io::sink()));
@@ -211,13 +211,14 @@ impl Session {
                                 if !told.insert(k) {
                                     continue;
                                 }
-                                Ok(ToClient::Notice(format!(
-                                    "The SSH host's sshremote is newer than this one and sent something it does not know (message {k}); update it here."
+                                Ok(ToClient::Notice(crate::lang::fill(
+                                    n!("The SSH host's sshremote is newer than this one and sent something it does not know (message {}); update it here."),
+                                    &[&k],
                                 )))
                             }
                             Err(e) => Err(e.to_string()),
                         },
-                        Ok(None) => Err("connection closed".into()),
+                        Ok(None) => Err(n!("connection closed").into()),
                         Err(e) => Err(e.to_string()),
                     };
                     let stop = msg.is_err();
@@ -273,7 +274,7 @@ impl Session {
             }
             _ => {
                 sess.link.close();
-                Err("the agent did not answer within 60 s".into())
+                Err(n!("the agent did not answer within 60 s").into())
             }
         }
     }
@@ -692,8 +693,12 @@ impl Control {
 
     /// The settings in effect, e.g. "Auto: true colour, 100%, 30 fps".
     pub fn describe(&self) -> String {
-        let s = format!("{}, {}% size, {} fps", self.s.mode.label(), self.s.scale, self.s.fps);
-        if self.auto.is_some() { format!("Auto: {s}") } else { s }
+        let mode = crate::lang::tr(self.s.mode.label());
+        if self.auto.is_some() {
+            t!("Auto: {}, {}% size, {} fps", mode, self.s.scale, self.s.fps)
+        } else {
+            t!("{}, {}% size, {} fps", mode, self.s.scale, self.s.fps)
+        }
     }
 
     pub fn preset_label(&self) -> String {

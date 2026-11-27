@@ -60,7 +60,7 @@ impl Terms {
                 self.open.insert(id, shell);
                 None
             }
-            Err(e) => Some(ToClient::TermExit { id, text: format!("cannot start a shell: {e}") }),
+            Err(e) => Some(ToClient::TermExit { id, text: crate::lang::fill(n!("cannot start a shell: {}"), &[&e]) }),
         }
     }
 
@@ -101,7 +101,7 @@ fn read_loop(mut output: File, tx: mpsc::SyncSender<Out>, wake: Box<dyn Fn() + S
     loop {
         match output.read(&mut buf) {
             Ok(0) | Err(_) => {
-                let _ = tx.send(Out::Exit("the shell ended".into()));
+                let _ = tx.send(Out::Exit(n!("the shell ended").into()));
                 wake();
                 return;
             }
@@ -245,8 +245,8 @@ mod sys {
             // Taken, so the drop does not signal a process id that may be reused.
             let status = self.child.lock().ok()?.take()?.wait().ok()?;
             Some(match status.code() {
-                Some(c) => format!("the shell exited with code {c}"),
-                None => "the shell was ended by a signal".into(),
+                Some(c) => crate::lang::fill(n!("the shell exited with code {}"), &[&c]),
+                None => n!("the shell was ended by a signal").into(),
             })
         }
     }
@@ -435,7 +435,7 @@ mod sys {
         pub fn exit_text(&self) -> Option<String> {
             let mut code = 0u32;
             unsafe { GetExitCodeProcess(self.process as HANDLE, &mut code) };
-            Some(format!("the shell exited with code {code}"))
+            Some(crate::lang::fill(n!("the shell exited with code {}"), &[&code]))
         }
     }
 

@@ -65,7 +65,7 @@ pub struct KeyTool {
 }
 
 const KINDS: [(&str, &[&str]); 3] = [
-    ("Ed25519 (recommended)", &["-t", "ed25519"]),
+    (n!("Ed25519 (recommended)"), &["-t", "ed25519"]),
     ("RSA 4096", &["-t", "rsa", "-b", "4096"]),
     ("ECDSA 521", &["-t", "ecdsa", "-b", "521"]),
 ];
@@ -93,34 +93,34 @@ impl KeyTool {
     fn generate(&mut self, actions: &mut Vec<ToolAction>) {
         let name = self.name.trim();
         if name.is_empty() || name.contains(['/', '\\']) {
-            self.status = Some((false, "Give the key a file name, such as id_ed25519_work.".into()));
+            self.status = Some((false, t!("Give the key a file name, such as id_ed25519_work.").into()));
             return;
         }
         // The private key takes the name itself; ".pub" would make it look like a public key.
         if name.ends_with(".pub") {
-            self.status = Some((false, "The name is the private key's: leave out .pub (ssh-keygen adds it for the public one).".into()));
+            self.status = Some((false, t!("The name is the private key's: leave out .pub (ssh-keygen adds it for the public one).").into()));
             return;
         }
         let dir = ssh_dir();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(name);
         if path.exists() {
-            self.status = Some((false, format!("{} exists already; choose another name.", path.display())));
+            self.status = Some((false, t!("{} exists already; choose another name.", path.display())));
             return;
         }
         let mut argv: Vec<String> = ["ssh-keygen"].iter().chain(KINDS[self.kind].1).map(|s| s.to_string()).collect();
         argv.extend(["-C".into(), self.comment.clone(), "-f".into(), path.to_string_lossy().into_owned()]);
         // A passphrase given with -N shows in the process list: ssh-keygen asks for it in a terminal instead.
         if self.protect {
-            actions.push(ToolAction::Terminal { title: format!("Create key {name}"), argv });
-            self.status = Some((true, format!("ssh-keygen asks for the passphrase of {} in the terminal.", path.display())));
+            actions.push(ToolAction::Terminal { title: crate::lang::fill(n!("Create key {}"), &[&name]), argv });
+            self.status = Some((true, t!("ssh-keygen asks for the passphrase of {} in the terminal.", path.display())));
             return;
         }
         let out = quiet(Command::new(&argv[0]).args(&argv[1..]).arg("-N").arg("")).output();
         self.status = Some(match out {
-            Ok(o) if o.status.success() => (true, format!("Created {} and {}.pub", path.display(), path.display())),
+            Ok(o) if o.status.success() => (true, t!("Created {} and {}.pub", path.display(), path.display())),
             Ok(o) => (false, String::from_utf8_lossy(&o.stderr).trim().to_string()),
-            Err(e) => (false, format!("ssh-keygen: {e} (is OpenSSH installed?)")),
+            Err(e) => (false, t!("ssh-keygen: {} (is OpenSSH installed?)", e)),
         });
         self.keys = list_keys();
     }
@@ -136,20 +136,20 @@ impl KeyTool {
             self.listed = std::time::Instant::now();
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
-        ui.label(RichText::new("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.").weak());
+        ui.label(RichText::new(t!("Your key pairs in ~/.ssh. Copy a public key, or install it on a host so ssh signs in without a password.")).weak());
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(primary(format!("{}  Create a key", ic::PLUS))).clicked() {
+            if ui.add(primary(format!("{}  {}", ic::PLUS, t!("Create a key")))).clicked() {
                 self.creating = true;
                 self.status = None;
             }
-            if ui.button(format!("{}  Open the .ssh folder", ic::FOLDER_OPEN)).clicked() {
+            if ui.button(format!("{}  {}", ic::FOLDER_OPEN, t!("Open the .ssh folder"))).clicked() {
                 open_path(&ssh_dir());
             }
         });
         ui.add_space(8.0);
         if self.keys.is_empty() {
-            ui.label(RichText::new("No keys yet.").weak());
+            ui.label(RichText::new(t!("No keys yet.")).weak());
         }
         for (i, k) in self.keys.iter().enumerate() {
             egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(crate::gui::theme::R_MD).inner_margin(8.0).show(ui, |ui| {
@@ -159,12 +159,12 @@ impl KeyTool {
                     let kind = k.public.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
                     ui.label(RichText::new(kind).weak().small());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon(ui, ic::UPLOAD, "Install on a host: adds the public key to its ~/.ssh/authorized_keys", false).clicked() {
+                        if icon(ui, ic::UPLOAD, t!("Install on a host: adds the public key to its ~/.ssh/authorized_keys"), false).clicked() {
                             self.installing = Some(i);
                         }
-                        if icon(ui, ic::COPY, "Copy the public key", false).clicked() {
+                        if icon(ui, ic::COPY, t!("Copy the public key"), false).clicked() {
                             ui.ctx().copy_text(k.public.clone());
-                            self.status = Some((true, format!("Copied the public key of {}", k.name)));
+                            self.status = Some((true, t!("Copied the public key of {}", k.name)));
                         }
                     });
                 });
@@ -191,24 +191,24 @@ impl KeyTool {
     fn forms(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ToolAction>) {
         if self.creating {
             let ready = !self.name.trim().is_empty();
-            let answer = form_page(ui, "Create a key", "Create key", ready, &self.status, |ui| {
+            let answer = form_page(ui, t!("Create a key"), t!("Create key"), ready, &self.status, |ui| {
                 egui::Grid::new("keygen").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label("Type");
-                    combo("keytype", KINDS[self.kind].0).width(FIELD_W).show_ui(ui, |ui| {
+                    ui.label(t!("Type"));
+                    combo("keytype", crate::lang::tr(KINDS[self.kind].0)).width(FIELD_W).show_ui(ui, |ui| {
                         crate::gui::menu_look(ui);
                         for (i, k) in KINDS.iter().enumerate() {
-                            ui.selectable_value(&mut self.kind, i, k.0);
+                            ui.selectable_value(&mut self.kind, i, crate::lang::tr(k.0));
                         }
                     });
                     ui.end_row();
-                    ui.label("File name");
+                    ui.label(t!("File name"));
                     ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("id_ed25519_work").desired_width(FIELD_W));
                     ui.end_row();
-                    ui.label("Comment");
+                    ui.label(t!("Comment"));
                     ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(FIELD_W));
                     ui.end_row();
-                    ui.label("Passphrase");
-                    ui.checkbox(&mut self.protect, "Ask for one in a terminal");
+                    ui.label(t!("Passphrase"));
+                    ui.checkbox(&mut self.protect, t!("Ask for one in a terminal"));
                     ui.end_row();
                 });
             });
@@ -228,10 +228,10 @@ impl KeyTool {
         if let Some(i) = self.installing {
             let name = self.keys.get(i).map_or(String::new(), |k| k.name.clone());
             let ready = !self.host.trim().is_empty();
-            let answer = form_page(ui, &format!("Install {name} on a host"), "Install", ready, &None, |ui| {
-                ui.label(RichText::new("A terminal opens to sign in once with the password; after that ssh uses the key.").weak());
+            let answer = form_page(ui, &t!("Install {} on a host", name), t!("Install"), ready, &None, |ui| {
+                ui.label(RichText::new(t!("A terminal opens to sign in once with the password; after that ssh uses the key.")).weak());
                 ui.add_space(6.0);
-                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W + 80.0));
+                ui.add(egui::TextEdit::singleline(&mut self.host).hint_text(t!("user@host or alias")).desired_width(FIELD_W + 80.0));
             });
             match answer {
                 Some(true) => {
@@ -245,7 +245,7 @@ impl KeyTool {
                         let script = format!(
                             "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '{key}' ~/.ssh/authorized_keys || {{ [ -z \"$(tail -c1 ~/.ssh/authorized_keys)\" ] || echo >> ~/.ssh/authorized_keys; echo '{key}' >> ~/.ssh/authorized_keys; }}) && echo 'Key {name} installed on' $(hostname)"
                         );
-                        actions.push(ToolAction::Terminal { title: format!("Install key on {host}"), argv: vec!["ssh".into(), host, script] });
+                        actions.push(ToolAction::Terminal { title: crate::lang::fill(n!("Install key on {}"), &[&host]), argv: vec!["ssh".into(), host, script] });
                     }
                     self.installing = None;
                 }
@@ -285,7 +285,7 @@ fn rewrite_config(change: impl FnOnce(&str) -> String) -> Result<(), String> {
 /// Puts `entry` in ~/.ssh/config: the block of `was` changed, or a new one at the end.
 pub fn save_config_entry(was: &str, entry: &HostEntry) -> Result<(), String> {
     if entry.alias.trim().is_empty() || entry.alias.contains(char::is_whitespace) {
-        return Err("A name of one word is needed, such as web1.".into());
+        return Err(n!("A name of one word is needed, such as web1.").into());
     }
     if let Some(p) = host_problem(entry) {
         return Err(p);
@@ -412,17 +412,17 @@ pub fn upsert_host(text: &str, was: &str, h: &HostEntry) -> String {
 pub fn host_problem(h: &HostEntry) -> Option<String> {
     let bad = |v: &str| v.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '#' | '"' | '\''));
     if bad(h.hostname.trim()) {
-        return Some("The host name or address cannot hold spaces, quotes or #.".into());
+        return Some(n!("The host name or address cannot hold spaces, quotes or #.").into());
     }
     if bad(h.user.trim()) {
-        return Some("The user name cannot hold spaces, quotes or #.".into());
+        return Some(n!("The user name cannot hold spaces, quotes or #.").into());
     }
     let port = h.port.trim();
     if !port.is_empty() && !port.parse::<u16>().is_ok_and(|p| p > 0) {
-        return Some("The port is a number from 1 to 65535.".into());
+        return Some(n!("The port is a number from 1 to 65535.").into());
     }
     if h.identity.contains(['"', '\n', '\r']) {
-        return Some("The key file's path cannot hold quotes or line breaks.".into());
+        return Some(n!("The key file's path cannot hold quotes or line breaks.").into());
     }
     None
 }
@@ -473,31 +473,32 @@ impl VaultTool {
         {
             let Some(store) = crate::vault::backend() else {
                 ui.label(
-                    RichText::new("This system has no password store sshremote can use. On Linux, install secret-tool (libsecret-tools).")
+                    RichText::new(t!("This system has no password store sshremote can use. On Linux, install secret-tool (libsecret-tools)."))
                         .color(bad()),
                 );
                 return;
             };
             ui.label(
-                RichText::new(format!(
-                    "Passwords for SSH logins, kept in {store}. The remote screen and terminal tabs answer the password prompt with them; SSH keys are still the better choice."
+                RichText::new(t!(
+                    "Passwords for SSH logins, kept in {}. The remote screen and terminal tabs answer the password prompt with them; SSH keys are still the better choice.",
+                    store
                 ))
                 .weak(),
             );
             ui.add_space(8.0);
-            if ui.add(primary(format!("{}  Save a password", ic::PLUS))).clicked() {
+            if ui.add(primary(format!("{}  {}", ic::PLUS, t!("Save a password")))).clicked() {
                 self.adding = true;
                 self.status = None;
             }
             ui.add_space(4.0);
             let mut remove = None;
             if self.hosts.is_empty() {
-                ui.label(RichText::new("No saved passwords yet.").weak().italics());
+                ui.label(RichText::new(t!("No saved passwords yet.")).weak().italics());
             }
             egui::Grid::new("vault").striped(true).num_columns(2).spacing([14.0, 2.0]).min_row_height(30.0).show(ui, |ui| {
                 for h in &self.hosts {
                     ui.label(RichText::new(h).strong());
-                    if icon(ui, ic::TRASH, &format!("Forget the password of {h}"), false).clicked() {
+                    if icon(ui, ic::TRASH, &t!("Forget the password of {}", h), false).clicked() {
                         remove = Some(h.clone());
                     }
                     ui.end_row();
@@ -505,7 +506,7 @@ impl VaultTool {
             });
             if let Some(h) = remove {
                 self.status = Some(match crate::vault::delete(&h) {
-                    Ok(()) => (true, format!("Removed the password of {h}")),
+                    Ok(()) => (true, t!("Removed the password of {}", h)),
                     Err(e) => (false, e),
                 });
                 self.hosts = crate::vault::list();
@@ -531,12 +532,12 @@ impl VaultTool {
         {
             let ready = !self.host.trim().is_empty() && !self.password.is_empty();
             let status = self.status.clone();
-            let answer = form_page(ui, "Save a password", "Save", ready, &status, |ui| {
+            let answer = form_page(ui, t!("Save a password"), t!("Save"), ready, &status, |ui| {
                 egui::Grid::new("vault-add").striped(false).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label("Host");
+                    ui.label(t!("Host"));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(egui::TextEdit::singleline(&mut self.host).hint_text("user@host or alias").desired_width(FIELD_W - 34.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.host).hint_text(t!("user@host or alias")).desired_width(FIELD_W - 34.0));
                         let r = crate::gui::icon_menu(ui, ic::CARET_DOWN, |ui| {
                             for h in known {
                                 if ui.button(h).clicked() {
@@ -545,10 +546,10 @@ impl VaultTool {
                                 }
                             }
                         });
-                        r.on_hover_text("A known host");
+                        r.on_hover_text(t!("A known host"));
                     });
                     ui.end_row();
-                    ui.label("Password");
+                    ui.label(t!("Password"));
                     ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(FIELD_W));
                     ui.end_row();
                 });
@@ -557,7 +558,7 @@ impl VaultTool {
                 Some(true) => {
                     let host = self.host.trim().to_string();
                     self.status = Some(match crate::vault::set(&host, &self.password) {
-                        Ok(()) => (true, format!("Saved the password of {host}")),
+                        Ok(()) => (true, t!("Saved the password of {}", host)),
                         Err(e) => (false, e),
                     });
                     self.password.clear();
@@ -624,32 +625,32 @@ impl BackupTool {
             return self.forms(ui, changed);
         }
         ui.label(
-            RichText::new(
-                "Your computers, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day.",
-            )
+            RichText::new(t!(
+                "Your computers, settings, ~/.ssh/config and known_hosts. With a passphrase, also the saved passwords and every file of ~/.ssh, private keys included, all encrypted with it. A copy without those is made automatically each day."
+            ))
             .weak(),
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(primary(format!("{}  Back up now", ic::DOWNLOAD))).clicked() {
+            if ui.add(primary(format!("{}  {}", ic::DOWNLOAD, t!("Back up now")))).clicked() {
                 self.dialog = Some(BackupForm::Save);
                 self.status = None;
             }
-            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Restore", ic::UPLOAD)).min_size(egui::vec2(0.0, 32.0)))
-                .on_disabled_hover_text("Choose a backup below first")
+            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  {}", ic::UPLOAD, t!("Restore"))).min_size(egui::vec2(0.0, 32.0)))
+                .on_disabled_hover_text(t!("Choose a backup below first"))
                 .clicked()
             {
                 self.dialog = Some(BackupForm::Restore);
                 self.status = None;
             }
-            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  Delete", ic::TRASH)).min_size(egui::vec2(0.0, 32.0)))
-                .on_disabled_hover_text("Choose a backup below first")
+            if ui.add_enabled(self.chosen.is_some(), egui::Button::new(format!("{}  {}", ic::TRASH, t!("Delete"))).min_size(egui::vec2(0.0, 32.0)))
+                .on_disabled_hover_text(t!("Choose a backup below first"))
                 .clicked()
             {
                 self.dialog = Some(BackupForm::Delete);
                 self.status = None;
             }
-            if ui.button(format!("{}  Folder", ic::FOLDER)).clicked() {
+            if ui.button(format!("{}  {}", ic::FOLDER, t!("Folder"))).clicked() {
                 let dir = crate::backup::folder();
                 let _ = std::fs::create_dir_all(&dir);
                 open_path(&dir);
@@ -658,11 +659,17 @@ impl BackupTool {
         ui.add_space(8.0);
         ui.spacing_mut().item_spacing.y = 2.0;
         if self.list.is_empty() {
-            ui.label(RichText::new("No backups yet.").weak().italics());
+            ui.label(RichText::new(t!("No backups yet.")).weak().italics());
         }
         for (p, when, pw) in &self.list {
             let auto = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("auto-"));
-            let label = format!("{}  {when}{}{}", ic::ARCHIVE, if auto { "   automatic" } else { "" }, if *pw { "   with passwords" } else { "" });
+            let when = match (auto, *pw) {
+                (false, false) => when.clone(),
+                (true, false) => t!("{}   automatic", when),
+                (false, true) => t!("{}   with passwords", when),
+                (true, true) => t!("{}   automatic   with passwords", when),
+            };
+            let label = format!("{}  {when}", ic::ARCHIVE);
             let on = self.chosen.as_ref() == Some(p);
             let b = choice(label, on).min_size(egui::vec2(ui.available_width(), 30.0));
             if ui.add(b).on_hover_text(p.display().to_string()).clicked() {
@@ -692,21 +699,22 @@ impl BackupTool {
         match self.dialog {
             Some(BackupForm::Save) => {
                 let min = crate::backup::MIN_PASSPHRASE;
-                let answer = form_page(ui, "Back up now", "Back up", true, &status, |ui| {
-                    ui.label(RichText::new(format!(
-                        "With a passphrase (at least {min} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored."
+                let answer = form_page(ui, t!("Back up now"), t!("Back up"), true, &status, |ui| {
+                    ui.label(RichText::new(t!(
+                        "With a passphrase (at least {} characters), saved passwords and all of ~/.ssh, private keys too, are included, encrypted with it. Keep it: without it they cannot be restored.",
+                        min
                     )).weak());
                     ui.add_space(6.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text("passphrase (optional)").desired_width(FIELD_W + 80.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true).hint_text(t!("passphrase (optional)")).desired_width(FIELD_W + 80.0));
                 });
                 match answer {
                     Some(true) => {
                         if !self.passphrase.is_empty() && self.passphrase.chars().count() < min {
-                            self.status = Some((false, format!("Use a passphrase of at least {min} characters, or none.")));
+                            self.status = Some((false, t!("Use a passphrase of at least {} characters, or none.", min)));
                         } else {
                             let pass = Some(self.passphrase.as_str()).filter(|p| !p.is_empty());
                             self.status = Some(match crate::backup::save(pass) {
-                                Ok(p) => (true, format!("Saved {}", p.display())),
+                                Ok(p) => (true, t!("Saved {}", p.display())),
                                 Err(e) => (false, e),
                             });
                             self.passphrase.clear();
@@ -720,19 +728,19 @@ impl BackupTool {
             }
             Some(BackupForm::Delete) => {
                 let what = self.chosen.as_ref().and_then(|p| self.list.iter().find(|(q, ..)| q == p)).map(|(p, when, _)| (p.clone(), when.clone()));
-                let answer = form_page(ui, "Delete this backup?", "Delete", what.is_some(), &status, |ui| {
+                let answer = form_page(ui, t!("Delete this backup?"), t!("Delete"), what.is_some(), &status, |ui| {
                     if let Some((p, when)) = &what {
-                        ui.label(RichText::new(format!("The backup of {when}")).strong());
+                        ui.label(RichText::new(t!("The backup of {}", when)).strong());
                         ui.label(RichText::new(p.display().to_string()).weak().small());
                         ui.add_space(4.0);
-                        ui.label(RichText::new("It is gone for good: it cannot be restored afterwards.").weak());
+                        ui.label(RichText::new(t!("It is gone for good: it cannot be restored afterwards.")).weak());
                     }
                 });
                 match answer {
                     Some(true) => {
                         if let Some((p, _)) = &what {
                             self.status = Some(match crate::backup::delete(p) {
-                                Ok(()) => (true, "Deleted.".to_string()),
+                                Ok(()) => (true, t!("Deleted.").to_string()),
                                 Err(e) => (false, e),
                             });
                         }
@@ -747,11 +755,11 @@ impl BackupTool {
                 }
             }
             Some(BackupForm::Restore) => {
-                let answer = form_page(ui, "Restore this backup", "Restore", self.chosen.is_some(), &status, |ui| {
-                    ui.checkbox(&mut self.ssh_config, "Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)");
-                    ui.checkbox(&mut self.ssh_files, "Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)");
+                let answer = form_page(ui, t!("Restore this backup"), t!("Restore"), self.chosen.is_some(), &status, |ui| {
+                    ui.checkbox(&mut self.ssh_config, t!("Replace ~/.ssh/config with the backup's (the current one is kept as config.bak)"));
+                    ui.checkbox(&mut self.ssh_files, t!("Restore the files of ~/.ssh, keys included (needs the passphrase; changed files are kept as .bak)"));
                     ui.add_space(6.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text("passphrase, for passwords and keys").desired_width(FIELD_W + 80.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.restore_pass).password(true).hint_text(t!("passphrase, for passwords and keys")).desired_width(FIELD_W + 80.0));
                 });
                 match answer {
                     Some(true) => {
@@ -797,14 +805,14 @@ fn form_page(
     fields(ui);
     if let Some((ok, text)) = status_line.as_ref().filter(|s| !s.0) {
         ui.add_space(6.0);
-        ui.label(RichText::new(text).color(if *ok { good() } else { bad() }));
+        ui.label(RichText::new(crate::lang::tr_msg(text)).color(if *ok { good() } else { bad() }));
     }
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         if ui.add_enabled(ready, primary(ok)).clicked() {
             answer = Some(true);
         }
-        if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(0.0, 32.0))).clicked() {
+        if ui.add(egui::Button::new(t!("Cancel")).min_size(egui::vec2(0.0, 32.0))).clicked() {
             answer = Some(false);
         }
     });
@@ -822,7 +830,8 @@ const FIELD_W: f32 = 300.0;
 
 fn status(ui: &mut egui::Ui, s: &Option<(bool, String)>) {
     if let Some((ok, text)) = s {
-        ui.label(RichText::new(text).color(if *ok { good() } else { bad() }));
+        // Errors from elsewhere come in English.
+        ui.label(RichText::new(crate::lang::tr_msg(text)).color(if *ok { good() } else { bad() }));
     }
 }
 

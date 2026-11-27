@@ -115,7 +115,7 @@ fn files_as_user() -> Result<Option<crate::console_user::AsUser>, &'static str> 
         Acting::Nobody => Err(NOBODY),
         Acting::User(u) => {
             crate::files::set_home(Some(u.profile.clone()));
-            u.impersonate().map(Some).ok_or("could not act as the person signed in at that computer")
+            u.impersonate().map(Some).ok_or(n!("could not act as the person signed in at that computer"))
         }
     }
 }
@@ -177,7 +177,7 @@ fn mac_signed_out() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-const MAC_NOBODY: &str = "Nobody is signed in at that Mac: its terminals, files, programs and chat open once someone signs in.";
+const MAC_NOBODY: &str = n!("Nobody is signed in at that Mac: its terminals, files, programs and chat open once someone signs in.");
 
 /// The viewer came by this computer's remote access ID (rather than over ssh as its owner).
 static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -320,19 +320,20 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         // show over it).
         #[cfg(target_os = "macos")]
         if mac_signed_out() && grant() & crate::grant::ASK != 0 {
-            return Err("Nobody is signed in at that Mac to let you in.".into());
+            return Err(n!("Nobody is signed in at that Mac to let you in.").into());
         }
         #[cfg(target_os = "macos")]
         let tell = !mac_signed_out();
+        // Root's at a Linux login screen has nobody signed in to tell.
         #[cfg(not(target_os = "macos"))]
-        let tell = true;
+        let tell = backend != "kms";
         if grant() & crate::grant::ASK != 0 {
             // Asked before the screen is opened: nothing of it is seen until then.
             send(enc, &ToClient::Notice(crate::chat::WAITING.into())).and_then(|()| enc.flush()).map_err(|e| e.to_string())?;
             allowed = match chat.ask(allowed, ASK_FOR) {
                 Ok(Some(a)) => a,
-                Ok(None) => return Err("The person at that computer did not let you in.".into()),
-                Err(e) => return Err(format!("Nobody could let you in at that computer: {e}")),
+                Ok(None) => return Err(n!("The person at that computer did not let you in.").into()),
+                Err(e) => return Err(crate::lang::fill(n!("Nobody could let you in at that computer: {}"), &[&e])),
             };
         } else {
             // Someone who came by this computer's ID is made known to the person at the screen,
@@ -343,10 +344,19 @@ fn serve(enc: &mut Wire, input: Box<dyn Read + Send>, backend: &str) -> Result<(
         }
     }
     // A screen that cannot be shared leaves the rest of the session: terminals, files, clipboard.
-    let mut cap = capture::open(backend).unwrap_or_else(|e| -> Box<dyn capture::Capture> {
-        eprintln!("sshremote: no screen to share: {e}");
-        Box::new(capture::NoScreen(e))
-    });
+    let mut cap = match capture::open(backend) {
+        Ok(c) => c,
+        // Locked, where root's remote access shows the lock screen (Linux): this connection
+        // ends and the viewer, connecting again, comes to the lock screen there.
+        #[cfg(target_os = "linux")]
+        Err(_) if by_id() && crate::loginscreen::installed() && crate::console::now().is_some_and(|c| !matches!(c, crate::console::Console::Open(_))) => {
+            return Err(n!("The screen is locked: on to the lock screen").into());
+        }
+        Err(e) => {
+            eprintln!("sshremote: no screen to share: {e}");
+            Box::new(capture::NoScreen(e))
+        }
+    };
     // The cameras after the monitors, where the viewer may look at them.
     let cams = if cameras_allowed() { capture::camera::list() } else { Vec::new() };
     if !cams.is_empty() {
@@ -423,7 +433,7 @@ fn serve_with(
     if cap.name() == "none"
         && let Err(why) = cap.windows()
     {
-        send(enc, &ToClient::Notice(format!("This computer's screen cannot be shown: {why}. Its terminal and files work."))).map_err(io_err)?;
+        send(enc, &ToClient::Notice(crate::lang::fill(n!("This computer's screen cannot be shown: {}. Its terminal and files work."), &[&why]))).map_err(io_err)?;
     }
     // A session by ID recorded, as the computer is set to: its viewer is told.
     let mut rec = SessionRecording(None);
@@ -431,13 +441,13 @@ fn serve_with(
         match crate::access::recordings_made().and_then(|d| crate::record::Recording::session(&d, cap.desktop_size())) {
             Ok(r) => {
                 rec.0 = Some(r);
-                send(enc, &ToClient::Notice("This computer records this session.".into())).map_err(io_err)?;
+                send(enc, &ToClient::Notice(n!("This computer records this session.").into())).map_err(io_err)?;
             }
             Err(e) => eprintln!("sshremote agent: the session is not recorded: {e}"),
         }
     }
     if cap.name() == "portal-view" {
-        send(enc, &ToClient::Notice("This desktop lets its screen be seen, not controlled: it has no remote-desktop portal (as with Sway). Its terminal and files work.".into())).map_err(io_err)?;
+        send(enc, &ToClient::Notice(n!("This desktop lets its screen be seen, not controlled: it has no remote-desktop portal (as with Sway). Its terminal and files work.").into())).map_err(io_err)?;
     }
 
     let (tx, rx) = mpsc::channel::<Heard>();
@@ -486,13 +496,13 @@ fn serve_with(
                         }
                     }
                     Err(_) => {
-                        let _ = why_tx.send(format!("the agent could not read message {k} (different versions?)"));
+                        let _ = why_tx.send(crate::lang::fill(n!("the agent could not read message {} (different versions?)"), &[&k]));
                         break;
                     }
                 },
                 Ok(None) => break,
                 Err(e) => {
-                    let _ = why_tx.send(format!("the agent's input broke: {e}"));
+                    let _ = why_tx.send(crate::lang::fill(n!("the agent's input broke: {}"), &[&e]));
                     break;
                 }
             }
@@ -542,7 +552,13 @@ fn serve_with(
     // A viewer kept from some things is told what it may do.
     if allowed != crate::grant::ALL {
         send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
-        send(enc, &ToClient::Notice(format!("The person at that computer lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
+        let told = if cap.name() == "kms" {
+            // Root's remote access on a Linux login or lock screen: nobody chose this.
+            n!("This is the computer's login or lock screen: the keyboard and mouse work here, and the rest once someone signs in.").to_string()
+        } else {
+            crate::lang::fill(n!("The person at that computer lets you use: {}."), &[&crate::grant::words(allowed)])
+        };
+        send(enc, &ToClient::Notice(told)).map_err(io_err)?;
     }
     // Rights a request was turned away for since they last changed: said once each.
     let mut told_off = 0u8;
@@ -610,7 +626,7 @@ fn serve_with(
         }
         msgs.splice(0..0, queued.drain(..));
         for k in skipped.try_iter() {
-            let text = format!("The SSH host's sshremote is older than this one and passed over a request it does not know (message {k}); update it there.");
+            let text = crate::lang::fill(n!("The SSH host's sshremote is older than this one and passed over a request it does not know (message {}); update it there."), &[&k]);
             send(enc, &ToClient::Notice(text)).map_err(io_err)?;
         }
         for m in msgs {
@@ -623,7 +639,7 @@ fn serve_with(
             if let Some(need) = crate::grant::needed(&m)
                 && allowed & need == 0
             {
-                let why = format!("The person at that computer does not let you use {}.", crate::grant::words(need));
+                let why = crate::lang::fill(n!("The person at that computer does not let you use {}."), &[&crate::grant::words(need)]);
                 // A file's end follows its refused start: one answer is enough.
                 if !matches!(m, ToAgent::FileEnd { .. }) {
                     for r in refused(&m, &why) {
@@ -733,7 +749,7 @@ fn serve_with(
                         send(enc, &ToClient::CallState(crate::chat::CALL_RINGING)).map_err(io_err)?;
                     }
                     Err(e) => {
-                        send(enc, &ToClient::Notice(format!("Nobody can answer at that computer: {e}"))).map_err(io_err)?;
+                        send(enc, &ToClient::Notice(crate::lang::fill(n!("Nobody can answer at that computer: {}"), &[&e]))).map_err(io_err)?;
                         send(enc, &ToClient::CallState(crate::chat::CALL_ENDED)).map_err(io_err)?;
                     }
                 },
@@ -756,16 +772,16 @@ fn serve_with(
                     let dir = crate::files::clipboard_dir(&batch);
                     let paths: Vec<_> = names.iter().map(|n| dir.join(n)).filter(|p| p.starts_with(&dir) && p.exists()).collect();
                     if allowed & crate::grant::CLIPBOARD == 0 {
-                        send(enc, &ToClient::Notice("The person at that computer does not let you use the clipboard.".into())).map_err(io_err)?;
+                        send(enc, &ToClient::Notice(n!("The person at that computer does not let you use the clipboard.").into())).map_err(io_err)?;
                     } else if paths.is_empty() || !clip.set_files(paths) {
-                        send(enc, &ToClient::Notice("The files could not be put on that computer's clipboard.".into())).map_err(io_err)?;
+                        send(enc, &ToClient::Notice(n!("The files could not be put on that computer's clipboard.").into())).map_err(io_err)?;
                     } else {
                         shortcut(cap.as_mut(), 'v');
                     }
                 }
                 ToAgent::Host { act, on } => {
                     if act != crate::hostctl::QUERY {
-                        let text = host.act(act, on).unwrap_or_else(|e| format!("This computer: {e}"));
+                        let text = host.act(act, on).unwrap_or_else(|e| crate::lang::fill(n!("This computer: {}"), &[&e]));
                         send(enc, &ToClient::Notice(text)).map_err(io_err)?;
                     }
                     let can = if allowed & crate::grant::POWER != 0 { crate::hostctl::can() } else { 0 };
@@ -805,10 +821,10 @@ fn serve_with(
                     }
                     let m = match last.as_ref().map(crate::shot::png_from_bgrx) {
                         Some(Ok(png)) => ToClient::Snapshot(png),
-                        Some(Err(e)) => ToClient::Notice(format!("Screenshot: {e}")),
+                        Some(Err(e)) => ToClient::Notice(crate::lang::fill(n!("Screenshot: {}"), &[&e])),
                         // No screen to share at all: why (what NoScreen holds).
-                        None if cap.name() == "none" => ToClient::Notice(format!("Screenshot: no screen to share: {}", cap.windows().err().unwrap_or_default())),
-                        None => ToClient::Notice("Screenshot: no picture yet".into()),
+                        None if cap.name() == "none" => ToClient::Notice(crate::lang::fill(n!("Screenshot: no screen to share: {}"), &[&cap.windows().err().unwrap_or_default()])),
+                        None => ToClient::Notice(n!("Screenshot: no picture yet").into()),
                     };
                     send(enc, &m).map_err(io_err)?;
                 }
@@ -863,7 +879,7 @@ fn serve_with(
                 ToAgent::ClipImage(png) if png.is_empty() => {}
                 ToAgent::ClipImage(png) => {
                     if !clip.set_image(png) {
-                        send(enc, &ToClient::Notice("The picture could not be put on this computer's clipboard".into())).map_err(io_err)?;
+                        send(enc, &ToClient::Notice(n!("The picture could not be put on this computer's clipboard").into())).map_err(io_err)?;
                     }
                 }
                 ToAgent::FileStart { id, size, dir, name } => {
@@ -925,7 +941,7 @@ fn serve_with(
                 }
                 ToAgent::Chat(text) => {
                     if let Err(e) = chat.show(&crate::chat::trimmed(&text)) {
-                        send(enc, &ToClient::Notice(format!("Chat: {e}"))).map_err(io_err)?;
+                        send(enc, &ToClient::Notice(crate::lang::fill(n!("Chat: {}"), &[&e]))).map_err(io_err)?;
                     }
                 }
                 ToAgent::Audio(on) => {
@@ -933,7 +949,7 @@ fn serve_with(
                     if on {
                         match crate::audio::capture() {
                             Ok(c) => sound = Some(c.waking(poke.clone())),
-                            Err(e) => send(enc, &ToClient::Notice(format!("Sound: {e}"))).map_err(io_err)?,
+                            Err(e) => send(enc, &ToClient::Notice(crate::lang::fill(n!("Sound: {}"), &[&e]))).map_err(io_err)?,
                         }
                     }
                 }
@@ -973,7 +989,7 @@ fn serve_with(
                         }
                         Some(Ok((_, None))) => Ok(()),
                         Some(Err(e)) => Err(e),
-                        None => Err("The resolution of that screen cannot be set from here.".to_string()),
+                        None => Err(n!("The resolution of that screen cannot be set from here.").to_string()),
                     };
                     if let Err(e) = done {
                         send(enc, &ToClient::Notice(e)).map_err(io_err)?;
@@ -1092,22 +1108,22 @@ fn serve_with(
                 }
                 ToAgent::PickOnRemote => match cap.pick() {
                     Ok(text) => {
-                        send(enc, &ToClient::Sharing { kind: 0, text: "the whole screen".into() }).map_err(io_err)?;
+                        send(enc, &ToClient::Sharing { kind: 0, text: n!("the whole screen").into() }).map_err(io_err)?;
                         resized!();
                         send(enc, &ToClient::Notice(text)).map_err(io_err)?;
                     }
-                    Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+                    Err(e) => send(enc, &ToClient::Notice(crate::lang::fill(n!("Sharing: {}"), &[&e]))).map_err(io_err)?,
                 },
                 ToAgent::InstallHelper => {
                     let reply = match cap.install_helper() {
                         Ok(text) => ToClient::HelperInstalled { ok: true, text },
-                        Err(e) => ToClient::HelperInstalled { ok: false, text: format!("Could not install the helper: {e}") },
+                        Err(e) => ToClient::HelperInstalled { ok: false, text: crate::lang::fill(n!("Could not install the helper: {}"), &[&e]) },
                     };
                     send(enc, &reply).map_err(io_err)?;
                 }
                 ToAgent::Apps => {
                     let list = crate::apps::list();
-                    let error = if list.is_empty() { "no programs were found on that computer".to_string() } else { String::new() };
+                    let error = if list.is_empty() { n!("no programs were found on that computer").to_string() } else { String::new() };
                     let list = list.into_iter().map(|a| (a.id, a.name, a.detail)).collect();
                     send(enc, &ToClient::AppList { list, error }).map_err(io_err)?;
                 }
@@ -1123,7 +1139,7 @@ fn serve_with(
                             ui.pin(kind);
                             resized!();
                         }
-                        Err(e) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+                        Err(e) => send(enc, &ToClient::Notice(crate::lang::fill(n!("Sharing: {}"), &[&e]))).map_err(io_err)?,
                     }
                 }
             }
@@ -1146,10 +1162,10 @@ fn serve_with(
                         send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
                         ui.pin(kind);
                         resized!();
-                        ToClient::Launched { ok: true, text: format!("{} opened, shown alone", l.what) }
+                        ToClient::Launched { ok: true, text: crate::lang::fill(n!("{} opened, shown alone"), &[&l.what]) }
                     }
-                    Some(Err(e)) => ToClient::Launched { ok: true, text: format!("{} opened; it cannot be shown alone here ({e})", l.what) },
-                    None => ToClient::Launched { ok: true, text: format!("{} opened, with no window of its own to show alone", l.what) },
+                    Some(Err(e)) => ToClient::Launched { ok: true, text: crate::lang::fill(n!("{} opened; it cannot be shown alone here ({})"), &[&l.what, &e]) },
+                    None => ToClient::Launched { ok: true, text: crate::lang::fill(n!("{} opened, with no window of its own to show alone"), &[&l.what]) },
                 };
                 send(enc, &reply).map_err(io_err)?;
             }
@@ -1161,7 +1177,7 @@ fn serve_with(
             }
         }
         if host.taken_back() {
-            send(enc, &ToClient::Notice("The person at that computer took its keyboard and mouse back (Ctrl+P).".into())).map_err(io_err)?;
+            send(enc, &ToClient::Notice(n!("The person at that computer took its keyboard and mouse back (Ctrl+P).").into())).map_err(io_err)?;
             send(enc, &ToClient::HostState { can: crate::hostctl::can(), on: host.on() }).map_err(io_err)?;
         }
         if let Some(Some((Some(mic), _))) = call.as_ref() {
@@ -1172,8 +1188,8 @@ fn serve_with(
         for text in chat.replies() {
             // The call answered here: the microphone and the speakers here join it.
             if text == crate::chat::ANSWER && call.is_some() {
-                let mic = crate::audio::microphone().map(|m| m.waking(poke.clone())).map_err(|e| send(enc, &ToClient::Notice(format!("The microphone there: {e}")))).ok();
-                let player = crate::audio::Player::new().map_err(|e| send(enc, &ToClient::Notice(format!("The speakers there: {e}")))).ok();
+                let mic = crate::audio::microphone().map(|m| m.waking(poke.clone())).map_err(|e| send(enc, &ToClient::Notice(crate::lang::fill(n!("The microphone there: {}"), &[&e])))).ok();
+                let player = crate::audio::Player::new().map_err(|e| send(enc, &ToClient::Notice(crate::lang::fill(n!("The speakers there: {}"), &[&e])))).ok();
                 call = Some(Some((mic, player)));
                 send(enc, &ToClient::CallState(crate::chat::CALL_TALKING)).map_err(io_err)?;
                 continue;
@@ -1186,7 +1202,7 @@ fn serve_with(
             }
             // The person at the screen ended it.
             if text == crate::chat::END || text == crate::chat::DENY {
-                return Err("The person at that computer's screen ended the connection.".into());
+                return Err(n!("The person at that computer's screen ended the connection.").into());
             }
             // The person at the screen changed what the viewer may do: what was taken away stops.
             if let Some(now) = text.strip_prefix(crate::chat::ALLOW).and_then(|b| b.parse::<u8>().ok()) {
@@ -1223,7 +1239,7 @@ fn serve_with(
                     ports = crate::porttunnel::Ports::waking(poke.clone());
                 }
                 send(enc, &ToClient::Allowed(allowed)).map_err(io_err)?;
-                send(enc, &ToClient::Notice(format!("The person at that computer now lets you use: {}.", crate::grant::words(allowed)))).map_err(io_err)?;
+                send(enc, &ToClient::Notice(crate::lang::fill(n!("The person at that computer now lets you use: {}."), &[&crate::grant::words(allowed)]))).map_err(io_err)?;
                 continue;
             }
             send(enc, &ToClient::Chat(text)).map_err(io_err)?;
@@ -1235,7 +1251,7 @@ fn serve_with(
         }
         if let Some(e) = sound.as_ref().and_then(|c| c.failed.try_recv().ok()) {
             sound = None;
-            send(enc, &ToClient::Notice(format!("Sound: {e}"))).map_err(io_err)?;
+            send(enc, &ToClient::Notice(crate::lang::fill(n!("Sound: {}"), &[&e]))).map_err(io_err)?;
         }
         for m in terms.poll() {
             send(enc, &m).map_err(io_err)?;
@@ -1286,7 +1302,7 @@ fn serve_with(
                 send(enc, &ToClient::Sharing { kind, text }).map_err(io_err)?;
                 ui.pin(kind);
             }
-            Some(Err(e)) => send(enc, &ToClient::Notice(format!("Sharing: {e}"))).map_err(io_err)?,
+            Some(Err(e)) => send(enc, &ToClient::Notice(crate::lang::fill(n!("Sharing: {}"), &[&e]))).map_err(io_err)?,
             None => {}
         }
         let (Some(s), Some(red)) = (settings, reducer.as_ref()) else {

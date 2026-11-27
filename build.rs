@@ -1,9 +1,30 @@
-//! Embeds the logo as the Windows executable icon, and its manifest, when a resource compiler is
-//! available: MinGW's windres for the GNU toolchain, the Windows SDK's rc for MSVC.
+//! Deflates the language tables, and embeds the logo as the Windows executable icon, and its
+//! manifest, when a resource compiler is available: MinGW's windres for the GNU toolchain, the
+//! Windows SDK's rc for MSVC.
 
 use std::path::{Path, PathBuf};
 
+/// Each language's table deflated, for the program to carry (it inflates only the one it speaks).
+fn lang_tables() {
+    use std::io::Write;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("lang");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("lang");
+    std::fs::create_dir_all(&out).unwrap();
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        let p = e.path();
+        if p.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", p.display());
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&std::fs::read(&p).unwrap()).unwrap();
+        std::fs::write(out.join(format!("{}.z", p.file_name().unwrap().to_string_lossy())), z.finish().unwrap()).unwrap();
+    }
+}
+
 fn main() {
+    lang_tables();
     println!("cargo:rerun-if-changed=assets/sshremote.ico");
     println!("cargo:rerun-if-changed=assets/sshremote.manifest");
     println!("cargo:rerun-if-env-changed=SSHREMOTE_REQUIRE_RESOURCES");

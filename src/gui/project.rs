@@ -44,7 +44,7 @@ pub(crate) struct Project {
 }
 
 /// The name the tabs of the window closed last are kept under.
-pub(crate) const LAST: &str = "Last session";
+pub(crate) const LAST: &str = n!("Last session");
 
 impl Tree {
     pub(crate) fn panes(&self) -> usize {
@@ -137,7 +137,7 @@ fn raw() -> Result<Vec<Value>, String> {
     match std::fs::read_to_string(&f) {
         Ok(t) => match serde_json::from_str::<Value>(&t) {
             Ok(Value::Array(a)) => Ok(a),
-            _ => Err(format!("{} could not be read: correct it or move it away first", f.display())),
+            _ => Err(t!("{} could not be read: correct it or move it away first", f.display())),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("{}: {e}", f.display())),
@@ -149,7 +149,7 @@ pub(crate) fn get(name: &str) -> Option<Project> {
 }
 
 fn write(v: &[Value]) -> Result<(), String> {
-    let f = file().ok_or("no settings folder")?;
+    let f = file().ok_or(t!("no settings folder"))?;
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -161,10 +161,10 @@ fn write(v: &[Value]) -> Result<(), String> {
 pub(crate) fn save(name: &str, tabs: Vec<Tree>) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("A project needs a name".into());
+        return Err(t!("A project needs a name").into());
     }
     if tabs.is_empty() {
-        return Err("There are no tabs to keep".into());
+        return Err(t!("There are no tabs to keep").into());
     }
     let mut all = raw()?;
     all.retain(|p| p.get("name").and_then(Value::as_str).map(str::trim) != Some(name));

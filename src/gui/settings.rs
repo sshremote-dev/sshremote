@@ -37,16 +37,16 @@ impl Page {
     /// Its title and what it is for; Connections and About write their own.
     fn title(&self) -> Option<(&'static str, &'static str)> {
         Some(match self {
-            Page::Appearance => ("Appearance", "Theme, fonts, colours, background pictures and the load overlay."),
-            Page::Keys(_) => ("SSH keys", "Your key pairs: copy one, install it on a computer, or create one."),
-            Page::Passwords(_) => ("Saved passwords", "Passwords for SSH and for IDs, in the system's password store."),
-            Page::Backup(_) => ("Backup and restore", "Computers, settings and ~/.ssh, by hand or each day."),
-            Page::Extensions => ("Extensions", "Looks, commands, status bar items, panels and features. Each one can do only what its card says."),
-            Page::Parts => ("Parts", "What this app is made of."),
+            Page::Appearance => (t!("Appearance"), t!("Theme, fonts, colours, background pictures and the load overlay.")),
+            Page::Keys(_) => (t!("SSH keys"), t!("Your key pairs: copy one, install it on a computer, or create one.")),
+            Page::Passwords(_) => (t!("Saved passwords"), t!("Passwords for SSH and for IDs, in the system's password store.")),
+            Page::Backup(_) => (t!("Backup and restore"), t!("Computers, settings and ~/.ssh, by hand or each day.")),
+            Page::Extensions => (t!("Extensions"), t!("Looks, commands, status bar items, panels and features. Each one can do only what its card says.")),
+            Page::Parts => (t!("Parts"), t!("What this app is made of.")),
             Page::Connections => return None,
-            Page::About => ("About", ""),
+            Page::About => (t!("About"), ""),
             #[cfg(feature = "remote")]
-            Page::Shortcuts(_) => ("Shortcuts", "Keys of your own for a screen's actions: full screen, the host's screens, a screenshot, view only and more."),
+            Page::Shortcuts(_) => (t!("Shortcuts"), t!("Keys of your own for a screen's actions: full screen, the host's screens, a screenshot, view only and more.")),
         })
     }
 
@@ -136,17 +136,17 @@ impl App {
             let v = ui.visuals().clone();
             ui.painter().rect_filled(nav, CornerRadius::same(theme::R_MD), if v.dark_mode { v.extreme_bg_color } else { v.panel_fill });
             let mut n = ui.new_child(egui::UiBuilder::new().max_rect(nav.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-            n.label(RichText::new(format!("{}  Settings", ic::GEAR)).size(15.0).strong());
+            n.label(RichText::new(format!("{}  {}", ic::GEAR, t!("Settings"))).size(15.0).strong());
             n.add_space(10.0);
             self.settings_nav(&mut n, &mut s);
             let mut b = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
             // Close, at the top right corner of the page.
             let x = Rect::from_min_size(body.right_top() - Vec2::new(30.0, 0.0), Vec2::splat(30.0));
-            close = b.put(x, tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked();
+            close = b.put(x, tool_button(ic::X, false)).on_hover_text(t!("Close (Esc)")).clicked();
             egui::ScrollArea::vertical().id_salt(("settings-page", s.page.key())).auto_shrink([false, false]).show(&mut b, |ui| {
                 ui.set_max_width(ui.available_width() - 14.0);
                 if s.page.in_form() {
-                    if ui.add(kit::ghost(format!("{}  Back", ic::ARROW_LEFT))).clicked() {
+                    if ui.add(kit::ghost(format!("{}  {}", ic::ARROW_LEFT, t!("Back")))).clicked() {
                         s.page.back();
                     }
                     ui.add_space(4.0);
@@ -162,11 +162,11 @@ impl App {
                         None => kit::notice(
                             ui,
                             kit::Tone::Warn,
-                            "No password store on this computer",
+                            t!("No password store on this computer"),
                             if cfg!(windows) {
-                                "Windows' Credential Manager could not be reached."
+                                t!("Windows' Credential Manager could not be reached.")
                             } else {
-                                "Passwords are kept in the system's password store through secret-tool. Install it (the package libsecret-tools on Debian and Ubuntu) and come back: until then, passwords are asked each time."
+                                t!("Passwords are kept in the system's password store through secret-tool. Install it (the package libsecret-tools on Debian and Ubuntu) and come back: until then, passwords are asked each time.")
                             },
                         ),
                         Some(_) => {
@@ -213,15 +213,15 @@ impl App {
         ui.spacing_mut().item_spacing.y = 2.0;
         let updates = crate::ext::updates_waiting().filter(|n| *n > 0);
         let width = ui.available_width();
-        let mut pages: Vec<(u8, &str, &str)> = vec![(0, ic::PALETTE, "Appearance"), (1, ic::PLUGS, "Connections")];
+        let mut pages: Vec<(u8, &str, &str)> = vec![(0, ic::PALETTE, t!("Appearance")), (1, ic::PLUGS, t!("Connections"))];
         if cfg!(feature = "remote") {
-            pages.push((8, ic::KEYBOARD, "Shortcuts"));
+            pages.push((8, ic::KEYBOARD, t!("Shortcuts")));
         }
-        pages.extend([(2, ic::KEY, "SSH keys"), (3, ic::LOCK_KEY, "Passwords")]);
+        pages.extend([(2, ic::KEY, t!("SSH keys")), (3, ic::LOCK_KEY, t!("Passwords"))]);
         if crate::modules::on("backup") {
-            pages.push((4, ic::ARCHIVE, "Backup"));
+            pages.push((4, ic::ARCHIVE, t!("Backup")));
         }
-        pages.extend([(5, ic::PUZZLE_PIECE, "Extensions"), (6, ic::SQUARES_FOUR, "Parts"), (7, ic::INFO, "About")]);
+        pages.extend([(5, ic::PUZZLE_PIECE, t!("Extensions")), (6, ic::SQUARES_FOUR, t!("Parts")), (7, ic::INFO, t!("About"))]);
         for (key, glyph, name) in pages {
             let on = s.page.key() == key;
             let (rect, r) = ui.allocate_exact_size(Vec2::new(width, 34.0), egui::Sense::click());
@@ -263,15 +263,15 @@ impl App {
     /// How the screen and files reach a computer: the picture's quality, the agent started there,
     /// how its screen is read, and passwords.
     fn connections_page(&mut self, ui: &mut egui::Ui) {
-        kit::title(ui, "Connections", "How screens and files reach a computer. A screen's own menu changes these for that connection only; here is where every new one starts. A terminal is plain ssh and needs none of this.");
+        kit::title(ui, t!("Connections"), t!("How screens and files reach a computer. A screen's own menu changes these for that connection only; here is where every new one starts. A terminal is plain ssh and needs none of this."));
         kit::card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            kit::row(ui, "New screens", |ui| {
-                let current = self.form.preset.map_or("Auto (adapts to the connection)".into(), |i| preset_text(&PRESETS[i]));
+            kit::row(ui, t!("New screens"), |ui| {
+                let current = self.form.preset.map_or(t!("Auto (adapts to the connection)").into(), |i| preset_text(&PRESETS[i]));
                 let before = self.form.preset;
                 combo("quality", current).width(300.0).show_ui(ui, |ui| {
                     crate::gui::menu_look(ui);
-                    ui.selectable_value(&mut self.form.preset, None, "Auto (adapts to the connection)");
+                    ui.selectable_value(&mut self.form.preset, None, t!("Auto (adapts to the connection)"));
                     for (i, p) in PRESETS.iter().enumerate() {
                         ui.selectable_value(&mut self.form.preset, Some(i), preset_text(p));
                     }
@@ -280,39 +280,40 @@ impl App {
                     crate::hosts::set_setting("preset", &self.form.preset.map(|i| i.to_string()).unwrap_or_default());
                 }
             });
-            kit::row(ui, "At start", |ui| {
+            kit::row(ui, t!("At start"), |ui| {
                 let mut on = crate::gui::project::reopen_at_start();
                 if ui
-                    .checkbox(&mut on, "Open the tabs of the last session")
-                    .on_hover_text("The tabs open when SSH Remote was closed, as they were divided; passwords are asked again where none is saved")
+                    .checkbox(&mut on, t!("Open the tabs of the last session"))
+                    .on_hover_text(t!("The tabs open when SSH Remote was closed, as they were divided; passwords are asked again where none is saved"))
                     .changed()
                 {
                     crate::hosts::set_setting("reopen_last", if on { "yes" } else { "no" });
                 }
             });
             // auto picks the capture for the computer's desktop.
-            kit::row(ui, "Screen capture", |ui| {
+            kit::row(ui, t!("Screen capture"), |ui| {
                 let test = cfg!(feature = "test-desktop").then_some("synthetic");
                 let options: Vec<&str> = ["auto", "gnome", "x11", "portal", "windows"].into_iter().chain(test).collect();
                 let mut i = options.iter().position(|o| *o == self.form.capture).unwrap_or(0);
-                if kit::segmented(ui, &mut i, &options) {
+                let shown: Vec<&str> = options.iter().map(|o| if *o == "auto" { t!("auto") } else { *o }).collect();
+                if kit::segmented(ui, &mut i, &shown) {
                     self.form.capture = options[i].to_string();
                     crate::hosts::set_setting("capture", &self.form.capture);
                 }
             });
             // How sshremote is started on the computer, over SSH.
-            kit::row(ui, "Agent command", |ui| {
+            kit::row(ui, t!("Agent command"), |ui| {
                 if ui.add(kit::field(&mut self.form.remote, crate::options::REMOTE)).changed() {
                     crate::hosts::set_setting("agent_command", self.form.remote.trim());
                 }
             });
             // A host's several screens over this computer's several monitors.
             #[cfg(feature = "remote")]
-            kit::row(ui, "Full screen", |ui| {
+            kit::row(ui, t!("Full screen"), |ui| {
                 let mut on = super::dock::all_monitors();
                 if ui
-                    .checkbox(&mut on, "Use all my monitors for a computer with several screens")
-                    .on_hover_text("Full screen puts each of its screens on one of this computer's monitors, where it lies on the computer, a window each; leaving full screen in one ends it in all. Off: full screen shows the one screen chosen.")
+                    .checkbox(&mut on, t!("Use all my monitors for a computer with several screens"))
+                    .on_hover_text(t!("Full screen puts each of its screens on one of this computer's monitors, where it lies on the computer, a window each; leaving full screen in one ends it in all. Off: full screen shows the one screen chosen."))
                     .changed()
                 {
                     crate::hosts::set_setting("all_monitors", if on { "yes" } else { "no" });
@@ -320,16 +321,16 @@ impl App {
             });
             // Computers by ID: past the relay when a path through both routers is found.
             #[cfg(feature = "remote")]
-            kit::row(ui, "By ID", |ui| {
+            kit::row(ui, t!("By ID"), |ui| {
                 let mut on = crate::net::straight_paths();
-                if ui.checkbox(&mut on, "Go straight to the computer when a path through the routers is found").on_hover_text("The relay carries the session until then, and when there is none. The computer learns this one's address.").changed() {
+                if ui.checkbox(&mut on, t!("Go straight to the computer when a path through the routers is found")).on_hover_text(t!("The relay carries the session until then, and when there is none. The computer learns this one's address.")).changed() {
                     crate::hosts::set_setting("straight_paths", if on { "yes" } else { "no" });
                 }
             });
             // Networks that let nothing out but through a proxy.
-            kit::row(ui, "Proxy", |ui| {
-                ui.add(kit::field(&mut self.form.proxy, "socks5://host:1080 or http://host:8080").desired_width(300.0))
-                    .on_hover_text("The relay (computers by ID), updates and extensions are reached through it. One that wants a name and password: http://name:password@host:8080 (shown with *** for the password). SSH keeps its own settings (ProxyCommand). Empty: straight.");
+            kit::row(ui, t!("Proxy"), |ui| {
+                ui.add(kit::field(&mut self.form.proxy, t!("socks5://host:1080 or http://host:8080")).desired_width(300.0))
+                    .on_hover_text(t!("The relay (computers by ID), updates and extensions are reached through it. One that wants a name and password: http://name:password@host:8080 (shown with *** for the password). SSH keeps its own settings (ProxyCommand). Empty: straight."));
                 let set = self.form.proxy_set.clone();
                 let before = set.as_ref().ok().and_then(|u| crate::proxy::Proxy::parse(u).ok());
                 let typed = self.form.proxy.trim().to_string();
@@ -339,53 +340,53 @@ impl App {
                     Some(Ok(p)) => p.url(),
                     _ => String::new(),
                 };
-                if ui.add_enabled(ok && set.as_ref() != Ok(&url), kit::secondary("Use")).on_disabled_hover_text(match &parsed {
-                    Some(Err(e)) => e.clone(),
-                    _ => "In use".to_string(),
+                if ui.add_enabled(ok && set.as_ref() != Ok(&url), kit::secondary(t!("Use"))).on_disabled_hover_text(match &parsed {
+                    Some(Err(e)) => crate::lang::tr_msg(e).into_owned(),
+                    _ => t!("In use").to_string(),
                 }).clicked()
                 {
                     crate::hosts::set_setting("proxy", &url);
                     self.form.proxy = parsed.and_then(Result::ok).map(|p| p.shown()).unwrap_or_default();
                     #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
-                    let mut said = Ok(if url.is_empty() { "Straight from now on".to_string() } else { "Through it from now on".to_string() });
+                    let mut said = Ok(if url.is_empty() { t!("Straight from now on").to_string() } else { t!("Through it from now on").to_string() });
                     // Remote access by ID here too, which a service reads from its own settings.
                     #[cfg(feature = "remote")]
                     match crate::access::stored() {
                         Ok(Some(mut c)) if c.proxy != url => {
                             c.proxy = url.clone();
                             if let Err(e) = crate::access::save(&c) {
-                                said = Err(format!("In use for this person; remote access by ID keeps its own until saved as administrator ({e})"));
+                                said = Err(t!("In use for this person; remote access by ID keeps its own until saved as administrator ({})", crate::lang::tr_msg(&e)));
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => said = Err(format!("In use for this person; remote access by ID keeps its own: as administrator, sshremote remote-access proxy URL ({e})")),
+                        Err(e) => said = Err(t!("In use for this person; remote access by ID keeps its own: as administrator, sshremote remote-access proxy URL ({})", crate::lang::tr_msg(&e))),
                     }
                     self.form.proxy_set = Ok(url);
                     *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(said);
                 }
                 #[cfg(feature = "remote")]
-                if set.as_ref().is_ok_and(|s| !s.is_empty()) && ui.add(kit::ghost("Try")).on_hover_text("Reaches the relay through it").clicked() {
+                if set.as_ref().is_ok_and(|s| !s.is_empty()) && ui.add(kit::ghost(t!("Try"))).on_hover_text(t!("Reaches the relay through it")).clicked() {
                     let said = self.form.proxy_said.clone();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
                         let relay = crate::access::relay();
-                        let r = crate::access::dial(&relay).map(|_| format!("Reached the relay {relay} through it")).map_err(|e| e.to_string());
+                        let r = crate::access::dial(&relay).map(|_| t!("Reached the relay {} through it", relay)).map_err(|e| crate::lang::tr_msg(&e.to_string()).into_owned());
                         *said.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                         ctx.request_repaint();
                     });
-                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok("Trying\u{2026}".into()));
+                    *self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(t!("Trying\u{2026}").into()));
                 }
             });
             let said = self.form.proxy_said.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(said) = said.or_else(|| self.form.proxy_set.clone().err().map(Err)) {
+            if let Some(said) = said.or_else(|| self.form.proxy_set.clone().err().map(|e| Err(crate::lang::tr_msg(&e).into_owned()))) {
                 let (text, colour) = match said {
                     Ok(t) => (t, ui.visuals().weak_text_color()),
                     Err(e) => (e, super::bad()),
                 };
                 ui.add(egui::Label::new(RichText::new(text).size(12.0).color(colour)).wrap());
             }
-            kit::row(ui, "Passwords", |ui| {
-                let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember the passwords typed, in the system's password store"));
+            kit::row(ui, t!("Passwords"), |ui| {
+                let r = ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, t!("Remember the passwords typed, in the system's password store")));
                 if r.changed() {
                     crate::hosts::set_setting("remember_password", if self.form.remember { "yes" } else { "no" });
                 }
@@ -401,16 +402,16 @@ impl App {
                 super::paint_logo(ui.painter(), r, brand());
                 ui.vertical(|ui| {
                     ui.label(RichText::new("SSH Remote").size(18.0).strong());
-                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak());
+                    ui.label(RichText::new(t!("Version {}", env!("CARGO_PKG_VERSION"))).weak());
                 });
             });
             ui.add_space(8.0);
-            ui.label("Terminals, screens and files of your computers, over SSH or by a remote access ID.");
+            ui.label(t!("Terminals, screens and files of your computers, over SSH or by a remote access ID."));
             ui.horizontal(|ui| {
                 ui.hyperlink_to("sshremote.dev", "https://sshremote.dev");
-                ui.hyperlink_to("Documentation", "https://sshremote.dev/docs.html");
+                ui.hyperlink_to(t!("Documentation"), "https://sshremote.dev/docs.html");
                 // MIT itself; what is built into it, under each one's own license.
-                if ui.link("Open-source licenses").on_hover_text("SSH Remote is under the MIT license; the licenses of the open-source software built into it open in a text editor").clicked() {
+                if ui.link(t!("Open-source licenses")).on_hover_text(t!("SSH Remote is under the MIT license; the licenses of the open-source software built into it open in a text editor")).clicked() {
                     let path = crate::hosts::config_dir().unwrap_or_else(std::env::temp_dir).join("THIRD-PARTY-NOTICES.txt");
                     if crate::sys::write_whole(&path, crate::NOTICES.as_bytes(), false, false).is_ok() {
                         crate::tools::open_path(&path);
@@ -419,8 +420,8 @@ impl App {
             });
             let mut on = crate::hosts::setting("updates").is_none_or(|v| v != "off");
             if ui
-                .checkbox(&mut on, "Look for a newer version once a day")
-                .on_hover_text("Reads sshremote.dev's signed list of downloads; a newer version is offered on the home screen, never put in place unasked")
+                .checkbox(&mut on, t!("Look for a newer version once a day"))
+                .on_hover_text(t!("Reads sshremote.dev's signed list of downloads; a newer version is offered on the home screen, never put in place unasked"))
                 .changed()
             {
                 crate::hosts::set_setting("updates", if on { "on" } else { "off" });
@@ -428,19 +429,19 @@ impl App {
         });
         if cfg!(windows) {
             ui.add_space(kit::GAP);
-            kit::heading(ui, "Administrator rights");
+            kit::heading(ui, t!("Administrator rights"));
             kit::card(ui, |ui| {
-                ui.add(egui::Label::new(RichText::new(crate::admin::ADDS).size(12.5)).wrap());
+                ui.add(egui::Label::new(RichText::new(crate::lang::tr(crate::admin::ADDS)).size(12.5)).wrap());
                 ui.add_space(6.0);
                 if crate::admin::elevated() {
-                    ui.label(RichText::new(format!("{}  Running as administrator", ic::SHIELD_CHECK)).color(good()));
-                } else if ui.add(kit::secondary(format!("{}  Restart as administrator", ic::SHIELD_CHECK))).clicked() {
+                    ui.label(RichText::new(format!("{}  {}", ic::SHIELD_CHECK, t!("Running as administrator"))).color(good()));
+                } else if ui.add(kit::secondary(format!("{}  {}", ic::SHIELD_CHECK, t!("Restart as administrator")))).clicked() {
                     self.restart_elevated(ui.ctx());
                 }
                 #[cfg(windows)]
                 {
                     let mut ask = crate::admin::ask_at_start();
-                    if ui.checkbox(&mut ask, "Ask for administrator rights at start").changed() {
+                    if ui.checkbox(&mut ask, t!("Ask for administrator rights at start")).changed() {
                         crate::admin::set_ask_at_start(ask);
                     }
                 }

@@ -66,20 +66,20 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::CtrlAltDel => "Send Ctrl+Alt+Del",
-            Action::FullScreen => "Full screen on or off",
-            Action::NextScreen => "The host's next screen",
-            Action::PrevScreen => "The host's screen before",
-            Action::Screenshot => "Screenshot",
-            Action::Record => "Start or stop recording",
-            Action::Chat => "Chat open or closed",
-            Action::Call => "Call, or hang up",
-            Action::ViewOnly => "View only on or off",
-            Action::Sound => "Sound on or off",
-            Action::Pause => "Pause or resume the picture",
-            Action::Repaint => "Repaint the whole screen",
-            Action::GameMouse => "Mouse for games on or off",
-            Action::Lock => "Lock that computer",
+            Action::CtrlAltDel => t!("Send Ctrl+Alt+Del"),
+            Action::FullScreen => t!("Full screen on or off"),
+            Action::NextScreen => t!("The host's next screen"),
+            Action::PrevScreen => t!("The host's screen before"),
+            Action::Screenshot => t!("Screenshot"),
+            Action::Record => t!("Start or stop recording"),
+            Action::Chat => t!("Chat open or closed"),
+            Action::Call => t!("Call, or hang up"),
+            Action::ViewOnly => t!("View only on or off"),
+            Action::Sound => t!("Sound on or off"),
+            Action::Pause => t!("Pause or resume the picture"),
+            Action::Repaint => t!("Repaint the whole screen"),
+            Action::GameMouse => t!("Mouse for games on or off"),
+            Action::Lock => t!("Lock that computer"),
         }
     }
 
@@ -153,14 +153,14 @@ impl Combo {
         self.ctrl || self.alt || self.cmd
     }
 
-    /// Keys the app keeps for itself in a screen pane, whatever is set here.
+    /// Keys the app keeps for itself in a screen pane, whatever is set here: what is said of one.
     pub fn reserved(&self) -> Option<&'static str> {
         let ca = self.ctrl && self.alt && !self.cmd;
         match self.key {
-            Key::Enter if ca && !self.shift => Some("full screen, always"),
-            Key::PageUp | Key::PageDown if ca => Some("the tabs and panes"),
-            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 if ca && self.shift => Some("the host's screens by number"),
-            Key::Delete if ca && !self.shift => Some("this computer's own Ctrl+Alt+Del"),
+            Key::Enter if ca && !self.shift => Some(n!("{} is kept for full screen, always")),
+            Key::PageUp | Key::PageDown if ca => Some(n!("{} is kept for the tabs and panes")),
+            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 if ca && self.shift => Some(n!("{} is kept for the host's screens by number")),
+            Key::Delete if ca && !self.shift => Some(n!("{} is kept for this computer's own Ctrl+Alt+Del")),
             _ => None,
         }
     }
@@ -266,12 +266,12 @@ impl Page {
                 Some((key, m)) => {
                     let c = Combo::of(m, key);
                     if !c.held() {
-                        self.said = Some("Hold Ctrl, Alt (Option) or Cmd with the key: alone or with Shift it types".into());
+                        self.said = Some(t!("Hold Ctrl, Alt (Option) or Cmd with the key: alone or with Shift it types").into());
                     } else if let Some(what) = c.reserved() {
-                        self.said = Some(format!("{} is kept for {what}", c.text()));
+                        self.said = Some(crate::lang::fill(crate::lang::tr(what), &[&c.text()]));
                     } else {
                         let lost = keys.set(a, Some(c));
-                        self.said = lost.map(|l| format!("{} was {}'s: that one has no key now", c.text(), l.label()));
+                        self.said = lost.map(|l| t!("{} was {}'s: that one has no key now", c.text(), l.label()));
                         self.taking = None;
                     }
                 }
@@ -279,20 +279,20 @@ impl Page {
             }
         }
         kit::card(ui, |ui| {
-            ui.checkbox(&mut keys.on, "Use these keys in screens").on_hover_text("Off: every key goes to the host, as it is pressed");
+            ui.checkbox(&mut keys.on, t!("Use these keys in screens")).on_hover_text(t!("Off: every key goes to the host, as it is pressed"));
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Taken before the host sees them, in the screen being worked in. Click a key to press another for it.").small().weak());
+            ui.label(egui::RichText::new(t!("Taken before the host sees them, in the screen being worked in. Click a key to press another for it.")).small().weak());
             ui.add_space(8.0);
             egui::Grid::new("shortcut-keys").num_columns(3).spacing([16.0, 6.0]).show(ui, |ui| {
                 for a in ALL {
                     ui.label(a.label());
                     let taking = self.taking == Some(a);
-                    let text = if taking { "Press the keys\u{2026}".to_string() } else { keys.key_of(a).map_or_else(|| "None".to_string(), |c| c.text()) };
+                    let text = if taking { t!("Press the keys\u{2026}").to_string() } else { keys.key_of(a).map_or_else(|| t!("None").to_string(), |c| c.text()) };
                     if ui.add_enabled(keys.on, egui::Button::new(egui::RichText::new(text).monospace()).selected(taking).min_size(egui::vec2(200.0, 0.0))).clicked() {
                         self.taking = if taking { None } else { Some(a) };
                         self.said = None;
                     }
-                    if ui.add_enabled(keys.on && keys.key_of(a).is_some(), egui::Button::new("Clear")).clicked() {
+                    if ui.add_enabled(keys.on && keys.key_of(a).is_some(), egui::Button::new(t!("Clear"))).clicked() {
                         keys.set(a, None);
                     }
                     ui.end_row();
@@ -303,7 +303,7 @@ impl Page {
                 ui.label(egui::RichText::new(s).small().color(crate::gui::warn()));
                 ui.add_space(4.0);
             }
-            if ui.add_enabled(keys.on && keys.bound != Keys::first().bound, egui::Button::new("Back to the first keys")).clicked() {
+            if ui.add_enabled(keys.on && keys.bound != Keys::first().bound, egui::Button::new(t!("Back to the first keys"))).clicked() {
                 keys.bound = Keys::first().bound;
                 self.taking = None;
             }

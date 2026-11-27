@@ -26,8 +26,8 @@ impl App {
             ui.set_height(fit.y);
             let close = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Open").size(16.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(tool_button(ic::X, false)).on_hover_text("Close (Esc)").clicked())
+                    ui.label(RichText::new(t!("Open")).size(16.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(tool_button(ic::X, false)).on_hover_text(t!("Close (Esc)")).clicked())
                         .inner
                 })
                 .inner;

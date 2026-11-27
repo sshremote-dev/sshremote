@@ -192,11 +192,11 @@ fn scheme() -> &'static Scheme {
 
 /// The cursor's shape: a thin bar as in VS Code and Windows Terminal, a block, or an underline.
 static CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-const CURSORS: [&str; 3] = ["Bar", "Block", "Underline"];
+const CURSORS: [&str; 3] = [n!("Bar"), n!("Block"), n!("Underline")];
 /// Selected text goes to the clipboard as it is selected, in every terminal.
 static COPY_SELECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// What the automatic colour scheme is called wherever it is chosen.
-const AUTO_NAME: &str = "Automatic (follows the app theme)";
+const AUTO_NAME: &str = n!("Automatic (follows the app theme)");
 
 /// The text and Markdown views are made again from the scrollback at most this often (seconds)
 /// while output streams in.
@@ -241,7 +241,7 @@ fn set_term_size(size: f32) {
 pub(crate) fn size_picker(ui: &mut egui::Ui) {
     let now = f32::from_bits(TERM_SIZE.load(std::sync::atomic::Ordering::Relaxed));
     let mut size = if now > 0.0 { now } else { crate::hosts::setting("term_font").and_then(|v| v.parse().ok()).unwrap_or(14.0) };
-    if ui.add(egui::Slider::new(&mut size, 8.0..=32.0).step_by(1.0).text("Text size")).changed() {
+    if ui.add(egui::Slider::new(&mut size, 8.0..=32.0).step_by(1.0).text(t!("Text size"))).changed() {
         set_term_size(size);
     }
 }
@@ -250,7 +250,7 @@ pub(crate) fn size_picker(ui: &mut egui::Ui) {
 /// in a terminal's menu.
 fn scheme_list(ui: &mut egui::Ui) -> bool {
     let current = SCHEME.load(std::sync::atomic::Ordering::Relaxed);
-    let names = std::iter::once((AUTO, AUTO_NAME)).chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
+    let names = std::iter::once((AUTO, crate::lang::tr(AUTO_NAME))).chain(SCHEMES.iter().enumerate().map(|(k, sc)| (k, sc.0)));
     let mut chosen = false;
     for (k, name) in names {
         if ui.selectable_label(k == current, name).clicked() {
@@ -264,15 +264,15 @@ fn scheme_list(ui: &mut egui::Ui) -> bool {
 
 fn scheme_name() -> &'static str {
     match SCHEME.load(std::sync::atomic::Ordering::Relaxed) {
-        AUTO => AUTO_NAME,
-        k => SCHEMES.get(k).map_or(AUTO_NAME, |s| s.0),
+        AUTO => crate::lang::tr(AUTO_NAME),
+        k => SCHEMES.get(k).map_or(crate::lang::tr(AUTO_NAME), |s| s.0),
     }
 }
 
 /// The terminal's colour scheme, for Appearance: a list that opens from its name.
 pub(crate) fn scheme_picker(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.label("Colour scheme");
+        ui.label(t!("Colour scheme"));
         egui::ComboBox::from_id_salt("term-scheme").selected_text(scheme_name()).width(260.0).show_ui(ui, |ui| {
             crate::gui::menu_look(ui);
             scheme_list(ui);
@@ -283,10 +283,10 @@ pub(crate) fn scheme_picker(ui: &mut egui::Ui) {
 /// The cursor's shape, the same in Settings and in a terminal's menu.
 pub(crate) fn cursor_picker(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.label("Cursor");
+        ui.label(t!("Cursor"));
         let current = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
         for (k, name) in CURSORS.iter().enumerate() {
-            if ui.selectable_label(k == current, *name).clicked() {
+            if ui.selectable_label(k == current, crate::lang::tr(name)).clicked() {
                 CURSOR.store(k, std::sync::atomic::Ordering::Relaxed);
                 crate::hosts::set_setting("term_cursor", &k.to_string());
             }
@@ -297,7 +297,7 @@ pub(crate) fn cursor_picker(ui: &mut egui::Ui) {
 /// Copy on select, the same in Settings and in a terminal's menu.
 pub(crate) fn copy_select_picker(ui: &mut egui::Ui) {
     let mut on = COPY_SELECT.load(std::sync::atomic::Ordering::Relaxed);
-    if ui.checkbox(&mut on, "Copy on select").changed() {
+    if ui.checkbox(&mut on, t!("Copy on select")).changed() {
         COPY_SELECT.store(on, std::sync::atomic::Ordering::Relaxed);
         crate::hosts::set_setting("term_copy_select", if on { "1" } else { "0" });
     }
@@ -592,9 +592,9 @@ impl TermWindow {
     /// The terminal of a remote-screen session: shells on its SSH host.
     pub fn new(system: Option<Vec<String>>) -> Self {
         let mut profiles =
-            vec![Profile { name: "Shell on the SSH host".into(), icon: ic::MONITOR, launch: Launch::Agent }];
+            vec![Profile { name: n!("Shell on the SSH host").into(), icon: ic::MONITOR, launch: Launch::Agent }];
         profiles.extend(local_profiles());
-        let mut w = Self::with_profiles(profiles, "sshremote-terminal", "Terminal");
+        let mut w = Self::with_profiles(profiles, "sshremote-terminal", t!("Terminal"));
         w.system = system;
         w
     }
@@ -609,7 +609,7 @@ impl TermWindow {
 
     /// A terminal of one shell, `profile`, to show inside another window (a workspace pane).
     pub fn single(profile: Profile) -> Self {
-        let mut w = Self::with_profiles(local_profiles(), "sshremote-pane-terminal", "Terminal");
+        let mut w = Self::with_profiles(local_profiles(), "sshremote-pane-terminal", t!("Terminal"));
         w.pending.push((profile, None));
         w.bare = true;
         w
@@ -748,7 +748,7 @@ impl TermWindow {
                 let waker = ctx.clone();
                 match crate::pty::Local::spawn(argv, size.0, size.1, Box::new(move || waker.request_repaint())) {
                     Ok(l) => (Backend::Local(l), None),
-                    Err(e) => (Backend::Agent, Some(format!("cannot start {}: {e}", profile.name))),
+                    Err(e) => (Backend::Agent, Some(t!("cannot start {}: {}", crate::lang::tr_msg(&profile.name), e))),
                 }
             }
         };
@@ -757,7 +757,7 @@ impl TermWindow {
             term,
             parser: Processor::new(),
             events: rx,
-            title: profile.name.clone(),
+            title: crate::lang::tr_msg(&profile.name).into_owned(),
             custom: None,
             exited,
             hold: matches!(profile.launch, Launch::Tool(_)),
@@ -978,7 +978,7 @@ impl TermWindow {
                         out.push(Cmd::Send(ToAgent::TermInput { id: t.id, data: s.into_bytes() }))
                     }
                     TermEvent::Title(s) => t.title = tab_title(&s),
-                    TermEvent::ResetTitle => t.title = format!("Shell {}", t.id),
+                    TermEvent::ResetTitle => t.title = t!("Shell {}", t.id),
                     TermEvent::ClipboardStore(_, s) => ctx.copy_text(s),
                     // A program asking the colours (to pick a light or dark theme) or the size in
                     // pixels gets them, as from any terminal.
@@ -1071,11 +1071,11 @@ impl TermWindow {
             let title_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 10.0 };
             let mut title = t.custom.clone().unwrap_or_else(|| t.title.clone());
             if ended {
-                title.push_str(" (ended)");
+                title = t!("{} (ended)", title);
             }
             let count = self.panes(group).len();
             if count > 1 {
-                title = format!("{title}  ({count} panes)");
+                title = t!("{}  ({} panes)", title, count);
             }
             let title_rect =
                 Rect::from_min_max(Pos2::new(rect.left() + 32.0, rect.top()), Pos2::new(title_right, rect.bottom()));
@@ -1111,7 +1111,7 @@ impl TermWindow {
                 if cr.clicked() {
                     close = Some(group);
                 }
-                cr.on_hover_text("Close (middle click on the tab also closes)");
+                cr.on_hover_text(t!("Close (middle click on the tab also closes)"));
             }
             if r.clicked() && close.is_none() {
                 self.active = i;
@@ -1157,7 +1157,7 @@ impl TermWindow {
             ui.painter().rect_filled(plus.shrink(2.0), CornerRadius::same(crate::gui::theme::R_SM), hover_fill);
         }
         ui.painter().text(plus.center(), Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(15.0), strong);
-        if pr.on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
+        if pr.on_hover_text(t!("New tab (Ctrl+Shift+T)")).clicked() {
             self.open_tab();
         }
         // The profiles: local shells, ssh hosts, the SSH host's own shell.
@@ -1170,7 +1170,7 @@ impl TermWindow {
             ui.set_min_width(240.0);
             for (k, p) in profiles.iter().enumerate() {
                 let shortcut = if k < 9 { format!("Ctrl+Shift+{}", k + 1) } else { String::new() };
-                if ui.add(egui::Button::new(format!("{}  {}", p.icon, p.name)).shortcut_text(shortcut)).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", p.icon, crate::lang::tr_msg(&p.name))).shortcut_text(shortcut)).clicked() {
                     self.pending.push((p.clone(), None));
                     ui.close();
                 }
@@ -1199,7 +1199,7 @@ impl TermWindow {
 
     fn system_button(&mut self, ui: &mut egui::Ui) {
         if let Some(cmd) = &self.system
-            && ui.add(crate::gui::tool_button(ic::ARROW_SQUARE_OUT, false)).on_hover_text("Open this host in the system terminal (ssh)").clicked()
+            && ui.add(crate::gui::tool_button(ic::ARROW_SQUARE_OUT, false)).on_hover_text(t!("Open this host in the system terminal (ssh)")).clicked()
         {
             let _ = spawn_system(cmd);
         }
@@ -1217,9 +1217,9 @@ impl TermWindow {
             .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
             .ui(ui, |ui| crate::gui::menu(ui, |ui| {
                 ui.set_min_width(260.0);
-                ui.label(RichText::new("All terminals").strong());
+                ui.label(RichText::new(t!("All terminals")).strong());
                 size_picker(ui);
-                ui.menu_button(format!("Colour scheme: {}", scheme_name()), |ui| {
+                ui.menu_button(t!("Colour scheme: {}", scheme_name()), |ui| {
                     crate::gui::menu_look(ui);
                     if scheme_list(ui) {
                         ui.close();
@@ -1227,38 +1227,38 @@ impl TermWindow {
                 });
                 cursor_picker(ui);
                 copy_select_picker(ui);
-                if ui.button(format!("{}  All appearance settings\u{2026}", ic::SLIDERS_HORIZONTAL)).on_hover_text("Fonts, colours, background pictures and the load overlay, in Settings").clicked() {
+                if ui.button(format!("{}  {}", ic::SLIDERS_HORIZONTAL, t!("All appearance settings\u{2026}"))).on_hover_text(t!("Fonts, colours, background pictures and the load overlay, in Settings")).clicked() {
                     crate::gui::ask_settings("appearance");
                     ui.close();
                 }
                 ui.separator();
-                ui.menu_button(format!("{}  Keyboard shortcuts", ic::KEYBOARD), |ui| {
+                ui.menu_button(format!("{}  {}", ic::KEYBOARD, t!("Keyboard shortcuts")), |ui| {
                     crate::gui::menu_look(ui);
                     // A pane of the workspace has one shell: tabs and splits are the workspace's.
                     let tabs: &[(&str, &str)] = if bare {
                         &[]
                     } else {
                         &[
-                            ("Ctrl+Shift+T", "New tab"),
-                            ("Ctrl+Shift+W", "Close pane or tab"),
-                            ("Ctrl+Tab", "Next tab"),
-                            ("Alt+Shift+= / -", "Split right / down"),
-                            ("Alt+Shift+D", "Split along the longer side"),
-                            ("Alt+arrows", "Move between panes"),
-                            ("Double-click a tab", "Rename it"),
+                            ("Ctrl+Shift+T", n!("New tab")),
+                            ("Ctrl+Shift+W", n!("Close pane or tab")),
+                            ("Ctrl+Tab", n!("Next tab")),
+                            ("Alt+Shift+= / -", n!("Split right / down")),
+                            ("Alt+Shift+D", n!("Split along the longer side")),
+                            ("Alt+arrows", n!("Move between panes")),
+                            (n!("Double-click a tab"), n!("Rename it")),
                         ]
                     };
                     let common = [
-                        ("Ctrl+Shift+F", "Find"),
-                        ("Ctrl+Shift+C / V", "Copy / paste"),
-                        ("Ctrl+Insert / Shift+Insert", "Copy / paste"),
-                        ("Ctrl+= / Ctrl+-", "Text size"),
-                        ("Ctrl+click", "Open a link"),
+                        ("Ctrl+Shift+F", n!("Find")),
+                        ("Ctrl+Shift+C / V", n!("Copy / paste")),
+                        ("Ctrl+Insert / Shift+Insert", n!("Copy / paste")),
+                        ("Ctrl+= / Ctrl+-", n!("Text size")),
+                        ("Ctrl+click", n!("Open a link")),
                     ];
                     egui::Grid::new("term-shortcuts").num_columns(2).spacing(Vec2::new(14.0, 4.0)).show(ui, |ui| {
                         for (k, v) in tabs.iter().chain(common.iter()) {
-                            ui.label(RichText::new(*k).monospace().size(12.0));
-                            ui.label(RichText::new(*v).weak().size(12.0));
+                            ui.label(RichText::new(crate::lang::tr(k)).monospace().size(12.0));
+                            ui.label(RichText::new(crate::lang::tr(v)).weak().size(12.0));
                             ui.end_row();
                         }
                     });
@@ -1272,9 +1272,9 @@ impl TermWindow {
     fn view_switch(&mut self, ui: &mut egui::Ui, fold: bool, rtl: bool) {
         let Some(t) = self.tabs.get_mut(self.active) else { return };
         let mut views = [
-            (View::Terminal, ic::TERMINAL, "Terminal", "Terminal"),
-            (View::Text, ic::TEXT_T, "Text", "Plain text of the whole buffer, to select and copy"),
-            (View::Markdown, ic::ARTICLE, "Markdown", "Read the output as Markdown, with copy buttons on code (agent replies)"),
+            (View::Terminal, ic::TERMINAL, t!("Terminal"), t!("Terminal")),
+            (View::Text, ic::TEXT_T, t!("Text"), t!("Plain text of the whole buffer, to select and copy")),
+            (View::Markdown, ic::ARTICLE, "Markdown", t!("Read the output as Markdown, with copy buttons on code (agent replies)")),
         ];
         if rtl {
             views.reverse();
@@ -1295,7 +1295,7 @@ impl TermWindow {
                     }
                 })
                 .0
-                .on_hover_text("How this shell is shown");
+                .on_hover_text(t!("How this shell is shown"));
         } else {
             for &(v, glyph, _, tip) in &views {
                 if ui.add(crate::gui::tool_button(glyph, t.view == v)).on_hover_text(tip).clicked() {
@@ -1514,7 +1514,7 @@ impl TermWindow {
             let mut done = None;
             let modal = egui::Modal::new(egui::Id::unique("rename-tab")).show(ui.ctx(), |ui| {
                 ui.set_width(300.0);
-                ui.label(RichText::new("Rename tab").strong());
+                ui.label(RichText::new(t!("Rename tab")).strong());
                 let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
                 if !r.has_focus() {
                     r.request_focus();
@@ -1523,10 +1523,10 @@ impl TermWindow {
                     done = Some(true);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Rename").clicked() {
+                    if ui.button(t!("Rename")).clicked() {
                         done = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t!("Cancel")).clicked() {
                         done = Some(false);
                     }
                 });
@@ -1577,7 +1577,7 @@ fn find_local_profiles() -> Vec<Profile> {
         if found(r"C:\Program Files\PowerShell\7\pwsh.exe") {
             add("PowerShell 7", vec![r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]);
         }
-        add("Command Prompt", vec!["cmd.exe"]);
+        add(n!("Command Prompt"), vec!["cmd.exe"]);
         if found(r"C:\Program Files\Git\bin\bash.exe") {
             add("Git Bash", vec![r"C:\Program Files\Git\bin\bash.exe", "--login", "-i"]);
         }
@@ -1585,7 +1585,7 @@ fn find_local_profiles() -> Vec<Profile> {
             add("WSL", vec!["wsl.exe"]);
         }
     } else {
-        add("Shell", Vec::new());
+        add(n!("Shell"), Vec::new());
         for (name, path) in [("bash", "/bin/bash"), ("zsh", "/usr/bin/zsh"), ("fish", "/usr/bin/fish")] {
             if std::path::Path::new(path).exists() {
                 add(name, vec![path, "-l"]);

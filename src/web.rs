@@ -210,6 +210,11 @@ fn serve(conn: TcpStream, gate: &Gate) -> Result<(), String> {
         "/addon-fit.js" => page(&conn, &req, "text/javascript", FIT_JS.as_bytes()),
         "/favicon.svg" => page(&conn, &req, "image/svg+xml", LOGO.as_bytes()),
         "/xterm.css" => page(&conn, &req, "text/css", XTERM_CSS.as_bytes()),
+        // The page's words in a language of the app's, fetched by its script.
+        p if p.starts_with("/lang/") => match p.strip_prefix("/lang/").and_then(|f| f.strip_suffix(".json")).and_then(crate::lang::table_json) {
+            Some(table) => page(&conn, &req, "application/json", table.as_bytes()),
+            None => respond(&conn, "404 Not Found", "text/plain", b"not here"),
+        },
         "/ws" => {
             let key = req.headers.get("sec-websocket-key").ok_or("not a WebSocket")?;
             // Another site's page may not use a signed-in browser's socket.
@@ -472,10 +477,10 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     if v.get("id").is_some() {
         let id: String = text("id").chars().filter(|c| c.is_ascii_digit()).collect();
         if blocked {
-            return send_json(&w, serde_json::json!({ "error": "Too many failed tries; try again later." }));
+            return send_json(&w, serde_json::json!({ "error": n!("Too many failed tries; try again later.") }));
         }
         if !crate::access::valid_id(&id) {
-            return send_json(&w, serde_json::json!({ "error": "An ID is 9 digits." }));
+            return send_json(&w, serde_json::json!({ "error": n!("An ID is 9 digits.") }));
         }
         let agent = match &gate.local {
             Some(capture) => crate::transport::Target::Local { capture: capture.clone() },
@@ -500,7 +505,7 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     // Everything else runs from this computer, for whoever holds the gateway's password (or a
     // sign-in it gave): its own shells and hosts, and SSH to any host.
     if gate.id_only {
-        return send_json(&w, serde_json::json!({ "error": "This gateway opens computers by ID only." }));
+        return send_json(&w, serde_json::json!({ "error": n!("This gateway opens computers by ID only.") }));
     }
     let signed = v.get("gateway").cloned().unwrap_or_default();
     let field = |k: &str| signed.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -534,11 +539,11 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
             std::thread::sleep(Duration::from_secs(2));
         }
         let text = if blocked {
-            "Too many wrong passwords; try again later."
+            n!("Too many wrong passwords; try again later.")
         } else if field("password").is_empty() {
-            "Signed out: sign in to this gateway again."
+            n!("Signed out: sign in to this gateway again.")
         } else {
-            "Wrong password for this gateway."
+            n!("Wrong password for this gateway.")
         };
         return send_json(&w, serde_json::json!({ "error": text, "signin": true }));
     }
@@ -561,7 +566,7 @@ fn session(mut r: BufReader<TcpStream>, w: TcpStream, gate: &Gate, who: IpAddr) 
     } else {
         // Anything ssh takes as a destination, never an option.
         if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
-            return send_json(&w, serde_json::json!({ "error": "Enter a host, for example user@192.168.1.20" }));
+            return send_json(&w, serde_json::json!({ "error": n!("Enter a host, for example user@192.168.1.20") }));
         }
         // One of the gateway's computers opens on its own port unless the browser gives another.
         let port = o.get("port").and_then(|x| x.as_u64()).filter(|p| (1..=65535).contains(p)).map(|p| p as u16).or_else(|| crate::computers::get(&host).and_then(|c| c.port));
@@ -916,7 +921,7 @@ fn quality_state(ctl: &crate::session::Control) -> serde_json::Value {
 fn quality_list() -> serde_json::Value {
     crate::proto::PRESETS
         .iter()
-        .map(|p| serde_json::json!({ "name": p.name, "text": format!("{}, {}% size, {} fps", p.mode.label(), p.scale, p.fps) }))
+        .map(|p| serde_json::json!({ "name": p.name, "text": crate::lang::fill(n!("{}, {}% size, {} fps"), &[&p.mode.label(), &p.scale, &p.fps]) }))
         .collect()
 }
 
@@ -962,7 +967,7 @@ fn serve_page(
     use crate::proto::{ToAgent, ToClient};
     use crate::session::Ev;
     let io = |e: std::io::Error| e.to_string();
-    let _ = send_json(&w, serde_json::json!({ "status": format!("Connecting to {}\u{2026}", open.name) }));
+    let _ = send_json(&w, serde_json::json!({ "status": crate::lang::fill(n!("Connecting to {}\u{2026}"), &[&open.name]) }));
     // Rung by the agent's messages, the browser's and the shell here's output, so the loop below
     // takes each at once rather than after its wait for the agent (keys waited up to 10 ms).
     let (bell, rung) = mpsc::channel::<()>();
@@ -1082,7 +1087,7 @@ fn serve_page(
                         msgs.extend(rx.try_iter().take(256));
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
-                    Err(mpsc::TryRecvError::Disconnected) => msgs.push(Ev::Closed("the session ended".into())),
+                    Err(mpsc::TryRecvError::Disconnected) => msgs.push(Ev::Closed(n!("the session ended").into())),
                 }
             }
             Agent::Connecting(c) => match c.try_recv() {
@@ -1365,7 +1370,7 @@ fn serve_page(
                     let on = v == "screen";
                     // The screen or the files: an agent not reached yet is reached now.
                     if v != "terminal" && matches!(agent, Agent::Idle) {
-                        let _ = send_json(&w, serde_json::json!({ "status": "Connecting for the screen and files\u{2026}" }));
+                        let _ = send_json(&w, serde_json::json!({ "status": n!("Connecting for the screen and files\u{2026}") }));
                         let (tx, rx) = mpsc::channel();
                         let (target, at) = (open.agent.clone(), settings(&ctl, view));
                         let (w, b) = (w.clone(), bell.clone());
@@ -1421,7 +1426,7 @@ fn serve_page(
                     Some(png) if !png.is_empty() => Some(ToAgent::ClipImage(png)),
                     Some(_) => None,
                     None => {
-                        let _ = send_json(&w, serde_json::json!({ "notice": "The picture is larger than 4 MB: paste it as a file instead." }));
+                        let _ = send_json(&w, serde_json::json!({ "notice": n!("The picture is larger than 4 MB: paste it as a file instead.") }));
                         None
                     }
                 },
@@ -1490,25 +1495,26 @@ fn serve_page(
     Ok(Opened::Yes)
 }
 
-/// Why a connection failed, in the words of someone who only typed an ID and a password.
+/// Why a connection failed, in the words of someone who only typed an ID and a password (in
+/// English, marked: the page shows them in its visitor's language).
 fn plain(e: &str) -> String {
     let l = e.to_lowercase();
     if l.contains("offline") || l.contains("no agent with that id") {
-        "That computer is not online: its remote access is off, or it has no network.".into()
+        n!("That computer is not online: its remote access is off, or it has no network.").into()
     } else if l.contains("without its password") {
-        "That computer lets nobody in without its password: type it.".into()
+        n!("That computer lets nobody in without its password: type it.").into()
     } else if l.contains("only from some addresses") {
-        "That computer takes viewers only from some addresses, and this gateway's is not one of them.".into()
+        n!("That computer takes viewers only from some addresses, and this gateway's is not one of them.").into()
     } else if l.contains("answering someone else") {
-        "Someone else is asking that computer just now; try again in a few seconds.".into()
+        n!("Someone else is asking that computer just now; try again in a few seconds.").into()
     } else if l.contains("authenticator") {
-        "The password was right; that computer wants the code of its authenticator app too.".into()
+        n!("The password was right; that computer wants the code of its authenticator app too.").into()
     } else if l.contains("wrong code") {
-        "Wrong code from the authenticator app (the password was right).".into()
+        n!("Wrong code from the authenticator app (the password was right).").into()
     } else if l.contains("wrong password") || l.contains("permission") {
-        "Wrong password for that computer.".into()
+        n!("Wrong password for that computer.").into()
     } else if l.contains("busy") || l.contains("try again") {
-        "That computer is busy; try again in a moment.".into()
+        n!("That computer is busy; try again in a moment.").into()
     } else {
         e.to_string()
     }
@@ -1660,6 +1666,18 @@ Host: x
         let mut js = String::new();
         script.read_to_string(&mut js).unwrap();
         assert!(js.starts_with("HTTP/1.1 200") && js.contains("class Client") && !body.contains("<script>"));
+        // The page's words in the visitor's language, for the app's languages only.
+        let get_file = |path: &str| {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        let ko = get_file("/web/lang/ko.json");
+        assert!(ko.starts_with("HTTP/1.1 200") && ko.contains("Content-Type: application/json") && ko.contains("connect-src 'self'"), "{ko}");
+        assert!(get_file("/web/lang/en.json").ends_with("\r\n\r\n{}"));
+        assert!(get_file("/web/lang/xx.json").starts_with("HTTP/1.1 404") && get_file("/lang/../app.js").starts_with("HTTP/1.1 404"));
 
         let open = || {
             let mut s = TcpStream::connect(&addr).unwrap();

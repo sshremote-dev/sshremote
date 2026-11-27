@@ -124,7 +124,7 @@ impl Job {
 fn label(paths: &[PathBuf]) -> String {
     match paths {
         [one] => one.file_name().map_or_else(|| one.display().to_string(), |n| n.to_string_lossy().into_owned()),
-        many => format!("{} files", many.len()),
+        many => t!("{} files", many.len()),
     }
 }
 
@@ -312,9 +312,17 @@ fn note(t: &mut Tab, ui: &egui::Ui, area: Rect, end: Option<Outcome>, out: &mut 
     let (done, total) = (job.done.load(Ordering::Acquire), job.total.load(Ordering::Acquire).max(1));
     let pct = (done.min(total) * 100 / total) as u32;
     let (text, bad) = match &end {
-        None => (format!("{}  Copying {} to {}  {pct}%  {} of {}", ic::UPLOAD, job.what, job.to, crate::sys::human(done), crate::sys::human(total)), false),
-        Some(Ok(p)) => (format!("{}  {} there, typed at the prompt", ic::CHECK, if p.len() == 1 { "Copied".to_string() } else { format!("{} copied", p.len()) }), false),
-        Some(Err(e)) => (format!("{}  {} not copied: {e}", ic::WARNING, job.what), true),
+        None => {
+            let (done, total) = (crate::sys::human(done), crate::sys::human(total));
+            let copying = match job.to.as_str() {
+                "here" => t!("Copying {} to here  {}%  {} of {}", job.what, pct, done, total),
+                "the host" => t!("Copying {} to the host  {}%  {} of {}", job.what, pct, done, total),
+                to => t!("Copying {} to {}  {}%  {} of {}", job.what, to, pct, done, total),
+            };
+            (format!("{}  {}", ic::UPLOAD, copying), false)
+        }
+        Some(Ok(p)) => (format!("{}  {}", ic::CHECK, if p.len() == 1 { t!("Copied there, typed at the prompt").to_string() } else { t!("{} copied there, typed at the prompt", p.len()) }), false),
+        Some(Err(e)) => (format!("{}  {}", ic::WARNING, t!("{} not copied: {}", job.what, crate::lang::tr_msg(e))), true),
     };
     let running = end.is_none();
     let id = egui::Id::unique(("term-drop", t.id));
@@ -330,7 +338,7 @@ fn note(t: &mut Tab, ui: &egui::Ui, area: Rect, end: Option<Outcome>, out: &mut 
                 ui.set_max_width((area.width() - 40.0).clamp(160.0, 520.0));
                 ui.horizontal(|ui| {
                     ui.add(egui::Label::new(RichText::new(text).size(12.5).color(if bad { crate::gui::bad() } else { v.text_color() })).truncate());
-                    if running && ui.small_button(ic::X).on_hover_text("Stop copying").clicked() {
+                    if running && ui.small_button(ic::X).on_hover_text(t!("Stop copying")).clicked() {
                         cancel = true;
                     }
                 });
@@ -353,9 +361,9 @@ fn note(t: &mut Tab, ui: &egui::Ui, area: Rect, end: Option<Outcome>, out: &mut 
 /// The hint over a pane while files are dragged over it.
 pub(super) fn hint(t: &Tab, ui: &egui::Ui, area: Rect) {
     let text = match place(t) {
-        Place::Here => "Drop to type their paths".to_string(),
-        Place::Ssh { host, .. } => format!("Drop to copy them to {host} and type their paths"),
-        Place::Agent => "Drop to copy them to the host and type their paths".to_string(),
+        Place::Here => t!("Drop to type their paths").to_string(),
+        Place::Ssh { host, .. } => t!("Drop to copy them to {} and type their paths", host),
+        Place::Agent => t!("Drop to copy them to the host and type their paths").to_string(),
     };
     let p = ui.painter();
     p.rect_filled(area, CornerRadius::same(4), ACCENT.gamma_multiply(0.10));
@@ -412,7 +420,7 @@ fn ssh_copy(host: &str, port: Option<&str>, opts: &[String], paths: &[PathBuf], 
     let mut taken = std::collections::HashSet::new();
     for p in paths {
         if cancel.load(Ordering::Acquire) {
-            return Err("stopped".into());
+            return Err(t!("stopped").into());
         }
         // Two files of one name (from two folders) both arrive, the second as "name-2".
         let name = crate::files::unique(crate::files::typable(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), &mut taken);
@@ -545,7 +553,7 @@ impl Sftp {
         let mut init = vec![FXP_INIT];
         init.extend_from_slice(&3u32.to_be_bytes());
         if s.send(&init).is_err() || !matches!(s.read(), Ok((FXP_VERSION, _))) {
-            return Err(s.why("the host's SFTP did not answer"));
+            return Err(s.why(t!("the host's SFTP did not answer")));
         }
         Ok(s)
     }
@@ -561,7 +569,7 @@ impl Sftp {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let err = self.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let why = first_line(&err).unwrap_or(otherwise).to_string();
-        if why.to_lowercase().contains("permission denied") { "it needs SSH keys, or a password saved for this host".into() } else { why }
+        if why.to_lowercase().contains("permission denied") { t!("it needs SSH keys, or a password saved for this host").into() } else { why }
     }
 
     fn send(&mut self, body: &[u8]) -> std::io::Result<()> {
@@ -588,14 +596,14 @@ impl Sftp {
         let mut b = vec![kind];
         b.extend_from_slice(&id.to_be_bytes());
         b.extend_from_slice(rest);
-        self.send(&b).map_err(|_| self.why("the connection ended"))?;
+        self.send(&b).map_err(|_| self.why(t!("the connection ended")))?;
         Ok(id)
     }
 
     /// A reply's status: Ok, or its message.
     fn status(kind: u8, body: &[u8]) -> Result<(), String> {
         if kind != FXP_STATUS || body.len() < 8 {
-            return Err("an unexpected SFTP reply".into());
+            return Err(t!("an unexpected SFTP reply").into());
         }
         let code = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
         if code == 0 {
@@ -605,11 +613,11 @@ impl Sftp {
             let n = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
             m.get(..n)
         });
-        Err(msg.map(|m| String::from_utf8_lossy(m).into_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| format!("SFTP error {code}")))
+        Err(msg.map(|m| String::from_utf8_lossy(m).into_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| t!("SFTP error {}", code)))
     }
 
     fn reply(&mut self) -> Result<(u8, Vec<u8>), String> {
-        self.read().map_err(|_| self.why("the connection ended"))
+        self.read().map_err(|_| self.why(t!("the connection ended")))
     }
 
     fn realpath(&mut self, path: &str) -> Result<String, String> {
@@ -618,10 +626,10 @@ impl Sftp {
         self.request(FXP_REALPATH, &b)?;
         let (kind, body) = self.reply()?;
         if kind != FXP_NAME || body.len() < 12 {
-            return Self::status(kind, &body).and(Err("no home folder".into()));
+            return Self::status(kind, &body).and(Err(t!("no home folder").into()));
         }
         let n = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
-        body.get(12..12 + n).map(|s| String::from_utf8_lossy(s).into_owned()).ok_or_else(|| "a bad SFTP reply".into())
+        body.get(12..12 + n).map(|s| String::from_utf8_lossy(s).into_owned()).ok_or_else(|| t!("a bad SFTP reply").into())
     }
 
     /// Makes each folder of `path` that is not there yet.
@@ -656,10 +664,10 @@ impl Sftp {
         self.request(FXP_OPEN, &b)?;
         let (kind, body) = self.reply()?;
         if kind != FXP_HANDLE || body.len() < 8 {
-            return Self::status(kind, &body).and(Err("the host did not open it".into())).map_err(|e| format!("{to}: {e}"));
+            return Self::status(kind, &body).and(Err(t!("the host did not open it").into())).map_err(|e| format!("{to}: {e}"));
         }
         let n = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
-        let handle = body.get(8..8 + n).ok_or("a bad SFTP reply")?.to_vec();
+        let handle = body.get(8..8 + n).ok_or(t!("a bad SFTP reply"))?.to_vec();
         let mut offset = 0u64;
         let mut flying = 0usize;
         let mut sizes = std::collections::HashMap::new();
@@ -704,7 +712,7 @@ impl Sftp {
         self.request(FXP_CLOSE, &c)?;
         let (kind, body) = self.reply()?;
         if cancel.load(Ordering::Acquire) {
-            return Err("stopped".into());
+            return Err(t!("stopped").into());
         }
         if let Some(e) = failed {
             return Err(format!("{to}: {e}"));

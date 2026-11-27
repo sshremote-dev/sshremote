@@ -94,7 +94,7 @@ impl Pane {
     }
 
     fn shown_path(path: &str) -> String {
-        if path == DRIVES { "Drives".into() } else { path.to_string() }
+        if path == DRIVES { t!("Drives").into() } else { path.to_string() }
     }
 
     pub fn set_list(&mut self, path: String, mut entries: Vec<DirEntry>, error: String) {
@@ -115,7 +115,7 @@ impl Pane {
     /// selected and their size, or what the folder holds.
     fn summary(&self) -> String {
         if self.loading {
-            return "Loading...".to_string();
+            return t!("Loading...").to_string();
         }
         let shown = self.visible();
         let picked: Vec<&DirEntry> = self.selected().collect();
@@ -124,22 +124,22 @@ impl Pane {
                 let dirs = shown.iter().filter(|&&i| self.entries[i].dir).count();
                 let files = shown.len() - dirs;
                 let size: u64 = shown.iter().map(|&i| &self.entries[i]).filter(|e| !e.dir).map(|e| e.size).sum();
-                format!("{}, {} ({})", count(dirs, "folder"), count(files, "file"), human(size))
+                format!("{}, {} ({})", folders(dirs), files_count(files), human(size))
             }
             [e] => {
-                let what = if e.dir { "folder".to_string() } else { human(e.size) };
+                let what = if e.dir { t!("folder").to_string() } else { human(e.size) };
                 let when = crate::files::local_time(e.mtime);
                 if when.is_empty() {
                     format!("{}  \u{b7}  {what}", e.name)
                 } else {
-                    format!("{}  \u{b7}  {what}  \u{b7}  modified {when}", e.name)
+                    format!("{}  \u{b7}  {what}  \u{b7}  {}", e.name, t!("modified {}", when))
                 }
             }
             many => {
                 let size: u64 = many.iter().filter(|e| !e.dir).map(|e| e.size).sum();
                 let dirs = many.iter().filter(|e| e.dir).count();
-                let folders = if dirs > 0 { format!(", {}", count(dirs, "folder")) } else { String::new() };
-                format!("{} of {} selected ({}{folders})", many.len(), shown.len(), human(size))
+                let folders = if dirs > 0 { format!(", {}", folders(dirs)) } else { String::new() };
+                t!("{} of {} selected ({}{})", many.len(), shown.len(), human(size), folders)
             }
         }
     }
@@ -180,9 +180,14 @@ fn is_text(name: &str) -> bool {
     ) || name.starts_with('.') && !name.contains('/')
 }
 
+/// "1 folder", "3 folders".
+fn folders(n: usize) -> String {
+    if n == 1 { t!("1 folder").into() } else { t!("{} folders", n) }
+}
+
 /// "1 file", "3 files".
-fn count(n: usize, what: &str) -> String {
-    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+fn files_count(n: usize) -> String {
+    if n == 1 { t!("1 file").into() } else { t!("{} files", n) }
 }
 
 pub struct FileWindow {
@@ -233,7 +238,7 @@ impl FileWindow {
     }
 
     pub fn op_done(&mut self, ok: bool, text: &str) -> Cmd {
-        self.status = if ok { text.to_string() } else { format!("Failed: {text}") };
+        self.status = if ok { crate::lang::tr_msg(text).into_owned() } else { t!("Failed: {}", crate::lang::tr_msg(text)) };
         self.refresh_remote()
     }
 
@@ -270,7 +275,7 @@ impl FileWindow {
             out.push(Cmd::Send(ToAgent::FileOp { op, path, arg }));
         } else {
             if let ToClient::OpDone { ok, text } = crate::files::op(op, &path, &arg) {
-                self.status = if ok { text } else { format!("Failed: {text}") };
+                self.status = if ok { crate::lang::tr_msg(&text).into_owned() } else { t!("Failed: {}", crate::lang::tr_msg(&text)) };
             }
             self.refresh_local();
         }
@@ -295,7 +300,7 @@ impl FileWindow {
             ui.add_space(4.0);
             if transfers.is_empty() {
                 (self.moved, self.rate) = (None, 0.0);
-                let hint = "Drag files between the two sides, or drop files from the desktop on this window to upload.";
+                let hint = t!("Drag files between the two sides, or drop files from the desktop on this window to upload.");
                 ui.label(RichText::new(if self.status.is_empty() { hint } else { &self.status }).weak());
             } else {
                 // All of them at once: how far, how fast, how long still.
@@ -314,19 +319,17 @@ impl FileWindow {
                 let left = size.saturating_sub(done);
                 let eta = if self.rate > 1.0 {
                     let s = (left as f64 / self.rate).round() as u64;
-                    if s >= 60 { format!(", about {} min {} s left", s / 60, s % 60) } else { format!(", about {s} s left") }
+                    if s >= 60 { t!(", about {} min {} s left", s / 60, s % 60) } else { t!(", about {} s left", s) }
                 } else {
                     String::new()
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Transfers ({})", transfers.len())).strong());
+                    ui.label(RichText::new(t!("Transfers ({})", transfers.len())).strong());
                     let frac = if size == 0 { 1.0 } else { done as f32 / size as f32 };
                     let speed = if self.rate > 1.0 { format!("  \u{b7}  {}/s{eta}", human(self.rate as u64)) } else { String::new() };
                     ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).text(format!(
-                        "{} of {}  ({:.0}%){speed}",
-                        human(done),
-                        human(size),
-                        frac * 100.0
+                        "{}{speed}",
+                        t!("{} of {}  ({}%)", human(done), human(size), format!("{:.0}", frac * 100.0))
                     )));
                 });
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
@@ -338,13 +341,13 @@ impl FileWindow {
                             ui.add_sized([280.0, 18.0], egui::Label::new(&t.name).truncate());
                             let frac = if t.size == 0 { 1.0 } else { t.done as f32 / t.size as f32 };
                             ui.add(
-                                egui::ProgressBar::new(frac).desired_width(ui.available_width() - 170.0).text(format!(
+                                egui::ProgressBar::new(frac).desired_width(ui.available_width() - 170.0).text(t!(
                                     "{} of {}",
                                     human(t.done),
                                     human(t.size)
                                 )),
                             );
-                            if ui.button(RichText::new(ic::X_CIRCLE)).on_hover_text("Cancel").clicked() {
+                            if ui.button(RichText::new(ic::X_CIRCLE)).on_hover_text(t!("Cancel")).clicked() {
                                 out.push(Cmd::Cancel(t.upload, t.id));
                             }
                         });
@@ -363,7 +366,7 @@ impl FileWindow {
             let h = ui.available_height();
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(Vec2::new(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.pane_ui(ui, false, "This computer", out)
+                    self.pane_ui(ui, false, t!("This computer"), out)
                 });
                 ui.allocate_ui_with_layout(Vec2::new(gap - 16.0, h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.vertical_centered(|ui| {
@@ -372,7 +375,7 @@ impl FileWindow {
                         let b = egui::Button::new(RichText::new(ic::ARROW_RIGHT).size(18.0))
                             .frame_when_inactive(false)
                             .min_size(Vec2::splat(40.0));
-                        if ui.add_enabled(up, b).on_hover_text("Upload the selection to the remote folder").clicked() {
+                        if ui.add_enabled(up, b).on_hover_text(t!("Upload the selection to the remote folder")).clicked() {
                             let paths = self.local.selected_paths();
                             self.transfer(false, paths, out);
                         }
@@ -380,14 +383,14 @@ impl FileWindow {
                         let b = egui::Button::new(RichText::new(ic::ARROW_LEFT).size(18.0))
                             .frame_when_inactive(false)
                             .min_size(Vec2::splat(40.0));
-                        if ui.add_enabled(down, b).on_hover_text("Download the selection to this computer").clicked() {
+                        if ui.add_enabled(down, b).on_hover_text(t!("Download the selection to this computer")).clicked() {
                             let paths = self.remote.selected_paths();
                             self.transfer(true, paths, out);
                         }
                     });
                 });
                 ui.allocate_ui_with_layout(Vec2::new(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.pane_ui(ui, true, &format!("SSH host: {host}"), out)
+                    self.pane_ui(ui, true, &t!("SSH host: {}", host), out)
                 });
             });
         });
@@ -412,17 +415,17 @@ impl FileWindow {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let p = self.pane(remote);
                         let (g, tip) = if p.hidden {
-                            (ic::EYE, "Hide hidden files")
+                            (ic::EYE, t!("Hide hidden files"))
                         } else {
-                            (ic::EYE_SLASH, "Show hidden files")
+                            (ic::EYE_SLASH, t!("Show hidden files"))
                         };
                         if crate::gui::icon(ui, g, tip, p.hidden).clicked() {
                             p.hidden = !p.hidden;
                         }
-                        if crate::gui::icon(ui, ic::FOLDER_PLUS, "New folder", false).clicked() {
-                            self.dialog = Some(Dialog::NewFolder { remote, name: "New folder".into() });
+                        if crate::gui::icon(ui, ic::FOLDER_PLUS, t!("New folder"), false).clicked() {
+                            self.dialog = Some(Dialog::NewFolder { remote, name: t!("New folder").into() });
                         }
-                        if crate::gui::icon(ui, ic::ARROWS_CLOCKWISE, "Refresh", false).clicked() {
+                        if crate::gui::icon(ui, ic::ARROWS_CLOCKWISE, t!("Refresh"), false).clicked() {
                             let path = self.pane(remote).path.clone();
                             self.go(remote, path, out);
                         }
@@ -433,15 +436,15 @@ impl FileWindow {
                     });
                 });
                 ui.horizontal(|ui| {
-                    if crate::gui::icon(ui, ic::ARROW_UP, "Up one folder (Backspace)", false).clicked() {
+                    if crate::gui::icon(ui, ic::ARROW_UP, t!("Up one folder (Backspace)"), false).clicked() {
                         let path = self.pane(remote).parent();
                         self.go(remote, path, out);
                     }
-                    if crate::gui::icon(ui, ic::HOUSE, "Home folder", false).clicked() {
+                    if crate::gui::icon(ui, ic::HOUSE, t!("Home folder"), false).clicked() {
                         self.go(remote, String::new(), out);
                     }
                     if cfg!(windows) || remote {
-                        let tip = "Drives (Windows)";
+                        let tip = t!("Drives (Windows)");
                         if crate::gui::icon(ui, ic::HARD_DRIVES, tip, false).clicked() {
                             self.go(remote, DRIVES.into(), out);
                         }
@@ -454,7 +457,7 @@ impl FileWindow {
                         // Taken, so the list does not also open its selection with it.
                         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                             let typed = p.typed.trim().to_string();
-                            let path = if typed == "Drives" { DRIVES.into() } else { typed };
+                            let path = if typed == "Drives" || typed == t!("Drives") { DRIVES.into() } else { typed };
                             self.go(remote, path, out);
                         } else {
                             p.typed = p.path.clone();
@@ -463,7 +466,7 @@ impl FileWindow {
                 });
                 let p = self.pane(remote);
                 if !p.error.is_empty() {
-                    ui.colored_label(crate::gui::bad(), &p.error);
+                    ui.colored_label(crate::gui::bad(), crate::lang::tr_msg(&p.error));
                 }
                 let footer = 26.0;
                 let table_frame = egui::Frame::new()
@@ -503,16 +506,16 @@ impl FileWindow {
         // Column headers that sort.
         let (head, _) = ui.allocate_exact_size(Vec2::new(width, row_h), Sense::hover());
         let cols = [
-            (Sort::Name, "Name", Rect::from_min_max(head.min, egui::pos2(head.max.x - size_w - date_w, head.max.y))),
+            (Sort::Name, n!("Name"), Rect::from_min_max(head.min, egui::pos2(head.max.x - size_w - date_w, head.max.y))),
             (
                 Sort::Size,
-                "Size",
+                n!("Size"),
                 Rect::from_min_max(
                     egui::pos2(head.max.x - size_w - date_w, head.min.y),
                     egui::pos2(head.max.x - date_w, head.max.y),
                 ),
             ),
-            (Sort::Modified, "Modified", Rect::from_min_max(egui::pos2(head.max.x - date_w, head.min.y), head.max)),
+            (Sort::Modified, n!("Modified"), Rect::from_min_max(egui::pos2(head.max.x - date_w, head.min.y), head.max)),
         ];
         let weak = ui.visuals().weak_text_color();
         for (key, name, rect) in cols {
@@ -528,7 +531,7 @@ impl FileWindow {
             } else {
                 (rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER)
             };
-            ui.painter().text(pos, align, format!("{name} {mark}"), FontId::proportional(12.5), color);
+            ui.painter().text(pos, align, format!("{} {mark}", crate::lang::tr(name)), FontId::proportional(12.5), color);
             if r.clicked() {
                 if p.sort == key {
                     p.ascending = !p.ascending;
@@ -641,25 +644,25 @@ impl FileWindow {
                     r.context_menu(|ui| {
                         crate::gui::menu_look(ui);
                         let mut item = |ui: &mut egui::Ui, g: &str, label: &'static str| {
-                            if ui.button(format!("{g}  {label}")).clicked() {
+                            if ui.button(format!("{g}  {}", crate::lang::tr(label))).clicked() {
                                 menu_action = Some((label, i));
                                 ui.close();
                             }
                         };
                         if e.dir {
-                            item(ui, ic::FOLDER_OPEN, "Open");
+                            item(ui, ic::FOLDER_OPEN, n!("Open"));
                         }
                         item(
                             ui,
                             if remote { ic::DOWNLOAD } else { ic::UPLOAD },
-                            if remote { "Download" } else { "Upload" },
+                            if remote { n!("Download") } else { n!("Upload") },
                         );
                         let _ = other;
                         ui.separator();
-                        item(ui, ic::PENCIL, "Rename");
-                        item(ui, ic::TRASH, "Delete");
+                        item(ui, ic::PENCIL, n!("Rename"));
+                        item(ui, ic::TRASH, n!("Delete"));
                         ui.separator();
-                        item(ui, ic::FOLDER_PLUS, "New folder");
+                        item(ui, ic::FOLDER_PLUS, n!("New folder"));
                     });
                 }
             },
@@ -688,7 +691,7 @@ impl FileWindow {
                 }
                 "Rename" => self.dialog = Some(Dialog::Rename { remote, path: p.child(&e.name), name: e.name }),
                 "Delete" => self.dialog = Some(Dialog::Delete { remote, paths: p.selected_paths() }),
-                _ => self.dialog = Some(Dialog::NewFolder { remote, name: "New folder".into() }),
+                _ => self.dialog = Some(Dialog::NewFolder { remote, name: t!("New folder").into() }),
             }
         }
     }
@@ -735,7 +738,7 @@ impl FileWindow {
         let modal = egui::Modal::new(egui::Id::unique("sshremote-file-dialog")).show(ctx, |ui| {
             ui.set_width(360.0);
             let deleting = matches!(d, Dialog::Delete { .. });
-            let title = if matches!(d, Dialog::NewFolder { .. }) { "New folder" } else { "Rename" };
+            let title = if matches!(d, Dialog::NewFolder { .. }) { t!("New folder") } else { t!("Rename") };
             match d {
                 Dialog::NewFolder { name, .. } | Dialog::Rename { name, .. } => {
                     ui.label(RichText::new(title).strong().size(16.0));
@@ -749,21 +752,22 @@ impl FileWindow {
                     }
                 }
                 Dialog::Delete { paths, .. } => {
-                    ui.label(RichText::new("Delete").strong().size(16.0));
-                    let what = if paths.len() == 1 { paths[0].clone() } else { format!("{} items", paths.len()) };
-                    ui.label(format!(
-                        "Delete {what}? Folders are deleted with everything in them. This cannot be undone."
+                    ui.label(RichText::new(t!("Delete")).strong().size(16.0));
+                    let what = if paths.len() == 1 { paths[0].clone() } else { t!("{} items", paths.len()) };
+                    ui.label(t!(
+                        "Delete {}? Folders are deleted with everything in them. This cannot be undone.",
+                        what
                     ));
                 }
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let label = if deleting { "Delete" } else { "OK" };
+                let label = if deleting { t!("Delete") } else { t!("OK") };
                 let fill = if deleting { Color32::from_rgb(200, 62, 62) } else { ACCENT };
                 if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(fill)).clicked() {
                     done = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     done = Some(false);
                 }
             });

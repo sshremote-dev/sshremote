@@ -196,7 +196,7 @@ pub(crate) fn create_free(dir: &Path, name: &str) -> std::io::Result<(File, Path
             Err(e) => return Err(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{}: no free name left", dir.join(name).display())))
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, crate::lang::fill(n!("{}: no free name left"), &[&dir.join(name).display()])))
 }
 
 /// Transfers open at once; more are refused rather than holding ever more files open.
@@ -368,10 +368,10 @@ impl Inbox {
     /// The folder a file `name` (perhaps "sub/file") goes into under `dir`, made, and its name.
     fn place(&self, dir: &Path, name: &str) -> Result<(PathBuf, String), String> {
         if self.open.len() >= MAX_OPEN {
-            return Err("too many transfers at once".into());
+            return Err(n!("too many transfers at once").into());
         }
         if name.len() > MAX_NAME || name.split(['/', '\\']).count() > MAX_DEPTH {
-            return Err("the name is too long".into());
+            return Err(n!("the name is too long").into());
         }
         let mut parts = clean_relative(name);
         let leaf = parts.pop().unwrap_or_else(|| "file".into());
@@ -461,7 +461,7 @@ impl Inbox {
         let u = self.open.get_mut(&id)?;
         if u.received + data.len() as u64 > u.size {
             self.open.remove(&id)?.discard();
-            return Some(Note::Done { id, ok: false, text: "more data than the file's size".into() });
+            return Some(Note::Done { id, ok: false, text: n!("more data than the file's size").into() });
         }
         if let Err(e) = u.file.write_all(data) {
             let text = format!("{}: {e}", u.dir.join(&u.name).display());
@@ -481,7 +481,7 @@ impl Inbox {
         let mut u = self.open.remove(&id)?;
         let whole = sent_ok && u.file.flush().is_ok() && u.received == u.size;
         if !whole {
-            let text = if !sent_ok { why.to_string() } else { format!("incomplete: {} of {} bytes", u.received, u.size) };
+            let text = if !sent_ok { why.to_string() } else { crate::lang::fill(n!("incomplete: {} of {} bytes"), &[&u.received, &u.size]) };
             u.discard();
             return Some(Note::Done { id, ok: false, text });
         }
@@ -593,7 +593,7 @@ impl Outbox {
         } else if p.is_file() {
             self.push_file(p, name, tag, false);
         } else {
-            let mut out = vec![ToClient::FetchEnd { id: 0, ok: false, text: format!("{path}: not found") }];
+            let mut out = vec![ToClient::FetchEnd { id: 0, ok: false, text: crate::lang::fill(n!("{}: not found"), &[&path]) }];
             self.done_if_last(tag, &mut out);
             return out;
         }
@@ -686,7 +686,7 @@ impl Outbox {
                 Queued::Folder { .. } => tag != 0 && q.tag() == tag,
             };
             if hit && let Queued::File(o) = q && o.file.is_some() {
-                out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "cancelled".into() });
+                out.push(ToClient::FetchEnd { id: o.id, ok: false, text: n!("cancelled").into() });
             }
             !hit
         });
@@ -776,7 +776,7 @@ impl Outbox {
                         let (id, size, tag, name) = (o.id, o.size, o.tag, o.name.clone());
                         out.push(if again.is_some() { ToClient::FetchAt { id, size, tag, from, name } } else { ToClient::FetchStart { id, size, tag, name } });
                         if at.is_err() {
-                            out.push(ToClient::FetchEnd { id, ok: false, text: format!("{}: cannot be read", o.path.display()) });
+                            out.push(ToClient::FetchEnd { id, ok: false, text: crate::lang::fill(n!("{}: cannot be read"), &[&o.path.display()]) });
                             self.pop(&mut out);
                             continue;
                         }
@@ -791,7 +791,7 @@ impl Outbox {
             if o.sent - o.acked.min(o.sent) >= WINDOW {
                 let since = *o.stalled.get_or_insert_with(std::time::Instant::now);
                 if since.elapsed() > STALL {
-                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text: "the other side stopped taking the file".into() });
+                    out.push(ToClient::FetchEnd { id: o.id, ok: false, text: n!("the other side stopped taking the file").into() });
                     self.pop(&mut out);
                     continue;
                 }
@@ -806,7 +806,7 @@ impl Outbox {
             self.buf.resize(want, 0);
             match o.file.as_mut().map(|f| f.read(&mut self.buf[..want])) {
                 Some(Ok(0)) => {
-                    let text = format!("{}: it got shorter while being sent", o.path.display());
+                    let text = crate::lang::fill(n!("{}: it got shorter while being sent"), &[&o.path.display()]);
                     out.push(ToClient::FetchEnd { id: o.id, ok: false, text });
                     self.pop(&mut out);
                 }
@@ -910,7 +910,7 @@ pub fn list(path: &str) -> ToClient {
 pub fn op(op: FileOp, path: &str, arg: &str) -> ToClient {
     let p = Path::new(path);
     let r = match op {
-        FileOp::Mkdir => std::fs::create_dir(p).map(|_| format!("Created {path}")),
+        FileOp::Mkdir => std::fs::create_dir(p).map(|_| crate::lang::fill(n!("Created {}"), &[&path])),
         FileOp::Rename => {
             let name = clean(arg);
             let to = p.with_file_name(&name);
@@ -918,9 +918,9 @@ pub fn op(op: FileOp, path: &str, arg: &str) -> ToClient {
             // ("report" to "Report" where case does not count) is a rename all the same.
             let same = matches!((std::fs::canonicalize(p), std::fs::canonicalize(&to)), (Ok(a), Ok(b)) if a == b);
             if std::fs::symlink_metadata(&to).is_ok() && !same {
-                Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{name} already exists")))
+                Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, crate::lang::fill(n!("{} already exists"), &[&name])))
             } else {
-                std::fs::rename(p, &to).map(|_| format!("Renamed to {name}"))
+                std::fs::rename(p, &to).map(|_| crate::lang::fill(n!("Renamed to {}"), &[&name]))
             }
         }
         FileOp::Delete => {
@@ -929,7 +929,7 @@ pub fn op(op: FileOp, path: &str, arg: &str) -> ToClient {
             } else {
                 std::fs::remove_file(p)
             };
-            r.map(|_| format!("Deleted {path}"))
+            r.map(|_| crate::lang::fill(n!("Deleted {}"), &[&path]))
         }
     };
     match r {

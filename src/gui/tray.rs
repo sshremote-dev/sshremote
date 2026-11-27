@@ -18,6 +18,10 @@ pub(super) struct Status {
     /// Who comes in and how: asked first, straight through the routers, found on this network,
     /// straight in from it, asking without a password.
     pub settings: Option<[bool; 5]>,
+    /// The language the menu speaks: the window may change it while the icon stays (elsewhere
+    /// the menu is made again as it opens).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub lang: &'static str,
     /// Viewers connected by the ID now.
     #[cfg(feature = "remote")]
     pub connected: Vec<crate::access::Viewer>,
@@ -74,58 +78,58 @@ pub(super) enum Entry {
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(super) fn entries(s: &Status) -> Vec<Entry> {
     let it = |id: usize, label: &str, enabled: bool, checked: Option<bool>| Entry::Item { id, label: label.to_string(), enabled, checked };
-    let mut m = vec![it(item::OPEN, "Open SSH Remote", true, None), Entry::Separator];
+    let mut m = vec![it(item::OPEN, t!("Open SSH Remote"), true, None), Entry::Separator];
     match &s.access {
         Some((on, id)) => {
-            m.push(it(item::ACCESS, "Remote access by ID", true, Some(*on)));
-            m.push(it(item::COPY_ID, &format!("Copy the ID {}", crate::computers::spaced(id)), *on, None));
+            m.push(it(item::ACCESS, t!("Remote access by ID"), true, Some(*on)));
+            m.push(it(item::COPY_ID, &t!("Copy the ID {}", crate::computers::spaced(id)), *on, None));
         }
-        None => m.push(it(0, "Remote access by ID: not set up", false, None)),
+        None => m.push(it(0, t!("Remote access by ID: not set up"), false, None)),
     }
     // Who comes in and how: the switches of the remote access settings, as worded there and in
     // their order.
     let mut who = match s.settings {
         Some([ask, straight, nearby, direct, requests]) => vec![
-            it(item::ASK, "Ask the person at this computer before letting anyone in", true, Some(ask)),
-            it(item::REQUESTS, "Let people without the password ask to come in", true, Some(requests)),
-            it(item::NEARBY, "Let computers on this network find this one", true, Some(nearby)),
-            it(item::DIRECT, "Let viewers on this network come straight in", true, Some(direct)),
-            it(item::STRAIGHT, "Let viewers by ID go straight through the routers", true, Some(straight)),
+            it(item::ASK, t!("Ask the person at this computer before letting anyone in"), true, Some(ask)),
+            it(item::REQUESTS, t!("Let people without the password ask to come in"), true, Some(requests)),
+            it(item::NEARBY, t!("Let computers on this network find this one"), true, Some(nearby)),
+            it(item::DIRECT, t!("Let viewers on this network come straight in"), true, Some(direct)),
+            it(item::STRAIGHT, t!("Let viewers by ID go straight through the routers"), true, Some(straight)),
         ],
-        None => vec![it(0, "Not set up", false, None)],
+        None => vec![it(0, t!("Not set up"), false, None)],
     };
     who.push(Entry::Separator);
-    who.push(it(item::SETTINGS, "All remote access settings\u{2026}", true, None));
-    m.push(Entry::Sub { label: "Who comes in".into(), entries: who });
+    who.push(it(item::SETTINGS, t!("All remote access settings\u{2026}"), true, None));
+    m.push(Entry::Sub { label: t!("Who comes in").into(), entries: who });
     // Whoever is connected: their window brought up, or their connection ended, each.
     #[cfg(feature = "remote")]
     match s.connected.len() {
-        0 => m.push(it(0, "Nobody is connected", false, None)),
+        0 => m.push(it(0, t!("Nobody is connected"), false, None)),
         n => {
             let mut sub = Vec::new();
             if cfg!(windows) {
-                sub.push(it(item::SHOW, if n == 1 { "Show their window" } else { "Show their windows" }, true, None));
+                sub.push(it(item::SHOW, if n == 1 { t!("Show their window") } else { t!("Show their windows") }, true, None));
                 sub.push(Entry::Separator);
             }
             for (i, v) in s.connected.iter().take(item::END_MOST).enumerate() {
-                sub.push(it(item::END + i, &format!("End: {}", v.describe()), true, None));
+                sub.push(it(item::END + i, &t!("End: {}", crate::lang::tr_msg(&v.describe())), true, None));
             }
-            m.push(Entry::Sub { label: if n == 1 { "1 connected now".into() } else { format!("{n} connected now") }, entries: sub });
+            m.push(Entry::Sub { label: if n == 1 { t!("1 connected now").into() } else { t!("{} connected now", n) }, entries: sub });
         }
     }
     let svc = match s.service {
-        Some((true, runs)) => vec![it(item::START, "Start", !runs, None), it(item::STOP, "Stop", runs, None), it(item::REMOVE, "Remove", true, None)],
-        Some((false, _)) => vec![it(item::INSTALL, "Install: start remote access with the computer", true, None)],
-        None => vec![it(0, "Looking\u{2026}", false, None)],
+        Some((true, runs)) => vec![it(item::START, t!("Start"), !runs, None), it(item::STOP, t!("Stop"), runs, None), it(item::REMOVE, t!("Remove"), true, None)],
+        Some((false, _)) => vec![it(item::INSTALL, t!("Install: start remote access with the computer"), true, None)],
+        None => vec![it(0, t!("Looking\u{2026}"), false, None)],
     };
     let label = match s.service {
-        Some((true, true)) => "Service: running",
-        Some((true, false)) => "Service: stopped",
-        _ => "Service",
+        Some((true, true)) => t!("Service: running"),
+        Some((true, false)) => t!("Service: stopped"),
+        _ => t!("Service"),
     };
     m.push(Entry::Sub { label: label.into(), entries: svc });
     m.push(Entry::Separator);
-    m.push(it(item::QUIT, if s.alone { "Hide this icon until the next sign-in" } else { "Quit" }, true, None));
+    m.push(it(item::QUIT, if s.alone { t!("Hide this icon until the next sign-in") } else { t!("Quit") }, true, None));
     m
 }
 
@@ -149,10 +153,10 @@ fn act(n: usize, status: &Status) -> Result<(), String> {
             #[cfg(not(windows))]
             let given = crate::admin::relaunch(&args)?;
             let _ = exe;
-            if given { Ok(()) } else { Err("administrator rights were not given".into()) }
+            if given { Ok(()) } else { Err(t!("administrator rights were not given").into()) }
         };
         let change = |f: &dyn Fn(&mut access::Config)| -> Result<(), String> {
-            let mut c = access::stored()?.ok_or("remote access is not set up")?;
+            let mut c = access::stored()?.ok_or(t!("remote access is not set up"))?;
             f(&mut c);
             access::save(&c)
         };
@@ -225,7 +229,8 @@ fn icon_at(icon: &eframe::egui::IconData, size: usize) -> Vec<[u8; 4]> {
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "remote"))]
 fn read_status() -> Status {
-    let mut st = Status { alone: true, ..Default::default() };
+    crate::lang::set(&crate::hosts::setting_now("language").unwrap_or_default());
+    let mut st = Status { alone: true, lang: crate::lang::current(), ..Default::default() };
     st.service = Some((crate::access::service_installed(), crate::access::service_runs()));
     let v: Option<serde_json::Value> =
         crate::access::state_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok());
@@ -261,7 +266,7 @@ pub fn run_alone() -> Result<(), String> {
         return Ok(());
     }
     let status: Shared = std::sync::Arc::new(std::sync::Mutex::new(read_status()));
-    let tray = Tray::start(0, status.clone(), super::app_icon().as_ref()).ok_or("the notification area is not there")?;
+    let tray = Tray::start(0, status.clone(), super::app_icon().as_ref()).ok_or(t!("the notification area is not there"))?;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
         if QUIT.load(std::sync::atomic::Ordering::Relaxed) {
@@ -302,12 +307,12 @@ mod sni {
 
     fn tip(s: &Status) -> String {
         let mut t = match &s.access {
-            Some((true, id)) => format!("Reachable by ID {}", crate::computers::spaced(id)),
-            Some((false, _)) => "Remote access is off".to_string(),
-            None => "Remote access is not set up".to_string(),
+            Some((true, id)) => t!("Reachable by ID {}", crate::computers::spaced(id)),
+            Some((false, _)) => t!("Remote access is off").to_string(),
+            None => t!("Remote access is not set up").to_string(),
         };
         if !s.connected.is_empty() {
-            t.push_str(&format!("; {} connected now", s.connected.len()));
+            t.push_str(&format!("; {}", t!("{} connected now", s.connected.len())));
         }
         t
     }
@@ -569,7 +574,7 @@ mod sni {
             watcher
                 .call_method("RegisterStatusNotifierItem", &(name.as_str(),))
                 .await
-                .map_err(|_| "the top bar shows no icons here (GNOME needs its AppIndicator extension)".to_string())?;
+                .map_err(|_| t!("the top bar shows no icons here (GNOME needs its AppIndicator extension)").to_string())?;
             Ok::<_, String>(Some(conn))
         })?;
         let Some(conn) = conn else { return Ok(()) };
@@ -585,7 +590,7 @@ mod sni {
             }
             *status.lock().unwrap_or_else(|e| e.into_inner()) = now.clone();
             // A change of what the menu says: told, so an open one is made again.
-            let said = (format!("{:?}{:?}{:?}{:?}", now.access, now.service, now.settings, now.connected), revision.load(Ordering::Relaxed));
+            let said = (format!("{:?}{:?}{:?}{:?}{}", now.access, now.service, now.settings, now.connected, now.lang), revision.load(Ordering::Relaxed));
             if said.0 != last.0 || said.1 != last.1 {
                 if said.0 != last.0 {
                     revision.fetch_add(1, Ordering::Relaxed);
@@ -756,12 +761,12 @@ mod win {
         nid.hIcon = inner.as_ref().map_or(std::ptr::null_mut(), |i| i.icon as HICON);
         let status = inner.as_ref().and_then(|i| i.status.lock().ok().map(|s| s.clone())).unwrap_or_default();
         let tip = match &status.access {
-            Some((true, id)) => format!("SSH Remote: reachable by ID {}", crate::computers::spaced(id)),
-            Some((false, _)) => "SSH Remote: remote access is off".to_string(),
+            Some((true, id)) => t!("SSH Remote: reachable by ID {}", crate::computers::spaced(id)),
+            Some((false, _)) => t!("SSH Remote: remote access is off").to_string(),
             None => "SSH Remote".to_string(),
         };
         #[cfg(feature = "remote")]
-        let tip = if status.connected.is_empty() { tip } else { format!("{tip}; {} connected now", status.connected.len()) };
+        let tip = if status.connected.is_empty() { tip } else { format!("{tip}; {}", t!("{} connected now", status.connected.len())) };
         copy(&mut nid.szTip, &tip);
         let mut inner = inner;
         if what == NIM_MODIFY
@@ -816,7 +821,8 @@ mod win {
         unsafe extern "system" fn each(h: HWND, found: LPARAM) -> windows_sys::core::BOOL {
             let mut buf = [0u16; 128];
             let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
-            if String::from_utf16_lossy(&buf[..n]).starts_with(CONNECTED_WINDOWS) {
+            let title = String::from_utf16_lossy(&buf[..n]);
+            if title.starts_with(CONNECTED_WINDOWS) || [t!("SSH Remote: someone is connected"), t!("SSH Remote: someone wants to connect")].contains(&title.as_str()) {
                 show(h as isize);
                 unsafe { *(found as *mut usize) += 1 };
             }
@@ -856,7 +862,7 @@ mod win {
                         item::OPEN | item::SETTINGS => open(main),
                         item::SHOW => {
                             if show_connected() == 0 {
-                                tell(hwnd, "Nobody connected by this computer's ID has a window open here now.");
+                                tell(hwnd, t!("Nobody connected by this computer's ID has a window open here now."));
                             }
                         }
                         // The icon's own program only goes; the window's quits with it.
@@ -868,7 +874,7 @@ mod win {
                         }
                         n => {
                             if let Err(e) = act(n, &status) {
-                                tell(hwnd, &e);
+                                tell(hwnd, &crate::lang::tr_msg(&e));
                             }
                         }
                     }

@@ -150,7 +150,7 @@ impl Remote {
             if self.click_pick && matches!(e, Event::Key { key: Key::Escape, .. }) {
                 if matches!(e, Event::Key { pressed: true, .. }) {
                     self.click_pick = false;
-                    self.notify("Choosing a window cancelled");
+                    self.notify(t!("Choosing a window cancelled"));
                 }
                 continue;
             }
@@ -173,13 +173,13 @@ impl Remote {
                             self.let_go_armed = true;
                         } else if std::mem::take(&mut self.let_go_armed) {
                             self.games_held = false;
-                            self.notify("The mouse is yours again: click the picture to hold it for the game");
+                            self.notify(t!("The mouse is yours again: click the picture to hold it for the game"));
                         }
                     }
                     Event::PointerButton { pos, button, pressed: true, .. } if !self.games_held && shown.is_some_and(|r| r.contains(*pos)) && !over_toolbar(*pos) => {
                         self.games_held = true;
                         self.hold_click = Some(*button);
-                        self.notify("The mouse is held for the game: Ctrl+Alt lets it go");
+                        self.notify(t!("The mouse is held for the game: Ctrl+Alt lets it go"));
                         continue;
                     }
                     Event::PointerButton { button, pressed: false, .. } if self.hold_click == Some(*button) => {
@@ -398,7 +398,7 @@ impl Remote {
                 self.send(ToAgent::Key { keysym: 'v' as u32, mods: crate::proto::MOD_CTRL })
             }
             PaneMode::Screen => {
-                self.notify("View only: nothing was pasted");
+                self.notify(t!("View only: nothing was pasted"));
                 Ok(())
             }
             // The terminal takes it as a paste from the keyboard would.
@@ -407,7 +407,7 @@ impl Remote {
                 Ok(())
             }
             PaneMode::Files => {
-                self.notify("Nothing to paste into here");
+                self.notify(t!("Nothing to paste into here"));
                 Ok(())
             }
         }

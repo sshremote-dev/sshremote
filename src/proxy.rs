@@ -55,12 +55,12 @@ impl Proxy {
     /// as in a URL (%40 for @).
     pub fn parse(url: &str) -> Result<Proxy, String> {
         let url = url.trim();
-        let (scheme, rest) = url.split_once("://").ok_or("a proxy is written socks5://host:port or http://host:port")?;
+        let (scheme, rest) = url.split_once("://").ok_or(n!("a proxy is written socks5://host:port or http://host:port"))?;
         let (kind, default_port) = match scheme.to_ascii_lowercase().as_str() {
             "socks5" | "socks5h" | "socks" => (Kind::Socks5, 1080),
             "http" => (Kind::Http, 8080),
-            "https" => return Err("a proxy spoken to over TLS (https://) is not supported: use its http:// or socks5:// address".into()),
-            other => return Err(format!("{other}:// is no kind of proxy known here: socks5:// or http://")),
+            "https" => return Err(n!("a proxy spoken to over TLS (https://) is not supported: use its http:// or socks5:// address").into()),
+            other => return Err(crate::lang::fill(n!("{}:// is no kind of proxy known here: socks5:// or http://"), &[&other])),
         };
         let rest = rest.trim_end_matches('/');
         let (login, place) = match rest.rsplit_once('@') {
@@ -73,19 +73,19 @@ impl Proxy {
         let (host, port) = match place.strip_prefix('[') {
             // [v6]:port
             Some(v6) => {
-                let (h, after) = v6.split_once(']').ok_or("an IPv6 address needs its closing ]")?;
+                let (h, after) = v6.split_once(']').ok_or(n!("an IPv6 address needs its closing ]"))?;
                 if !after.is_empty() && !after.starts_with(':') {
-                    return Err(format!("{after} after the IPv6 address is no port"));
+                    return Err(crate::lang::fill(n!("{} after the IPv6 address is no port"), &[&after]));
                 }
-                (h.to_string(), after.strip_prefix(':').map(|p| p.parse::<u16>().map_err(|_| format!("{p} is no port"))).transpose()?)
+                (h.to_string(), after.strip_prefix(':').map(|p| p.parse::<u16>().map_err(|_| crate::lang::fill(n!("{} is no port"), &[&p]))).transpose()?)
             }
             None => match place.rsplit_once(':') {
-                Some((h, p)) => (h.to_string(), Some(p.parse::<u16>().map_err(|_| format!("{p} is no port"))?)),
+                Some((h, p)) => (h.to_string(), Some(p.parse::<u16>().map_err(|_| crate::lang::fill(n!("{} is no port"), &[&p]))?)),
                 None => (place.to_string(), None),
             },
         };
         if host.is_empty() {
-            return Err("the proxy's address is missing".into());
+            return Err(n!("the proxy's address is missing").into());
         }
         Ok(Proxy { kind, host, port: port.unwrap_or(default_port), login })
     }
@@ -128,7 +128,7 @@ impl Proxy {
 
     /// A connection to `host`:`port` through the proxy; the proxy looks the name up.
     pub fn connect(&self, host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
-        let mut last = io::Error::other("the proxy's address has no address");
+        let mut last = io::Error::other(n!("the proxy's address has no address"));
         let mut s = None;
         for a in std::net::ToSocketAddrs::to_socket_addrs(&(self.host.as_str(), self.port))? {
             match TcpStream::connect_timeout(&a, timeout) {
@@ -139,7 +139,7 @@ impl Proxy {
                 Err(e) => last = e,
             }
         }
-        let mut s = s.ok_or_else(|| io::Error::new(last.kind(), format!("the proxy {}:{} does not answer: {last}", self.host, self.port)))?;
+        let mut s = s.ok_or_else(|| io::Error::new(last.kind(), crate::lang::fill(n!("the proxy {}:{} does not answer: {}"), &[&self.host, &self.port, &last])))?;
         s.set_nodelay(true)?;
         s.set_read_timeout(Some(OPEN_LIMIT))?;
         s.set_write_timeout(Some(OPEN_LIMIT))?;
@@ -153,18 +153,18 @@ impl Proxy {
     }
 
     fn socks5(&self, s: &mut TcpStream, host: &str, port: u16) -> io::Result<()> {
-        let refused = |what: String| io::Error::new(io::ErrorKind::PermissionDenied, format!("the proxy {}", what));
+        let refused = |why: String| io::Error::new(io::ErrorKind::PermissionDenied, why);
         s.write_all(if self.login.is_some() { &[5, 2, 0, 2] } else { &[5, 1, 0] })?;
         let mut r = [0u8; 2];
         s.read_exact(&mut r)?;
         if r[0] != 5 {
-            return Err(io::Error::other(format!("{}:{} is no SOCKS5 proxy", self.host, self.port)));
+            return Err(io::Error::other(crate::lang::fill(n!("{}:{} is no SOCKS5 proxy"), &[&self.host, &self.port])));
         }
         match (r[1], &self.login) {
             (0, _) => {}
             (2, Some((name, pw))) => {
                 if name.len() > 255 || pw.len() > 255 {
-                    return Err(io::Error::other("the proxy's name or password is too long for SOCKS5"));
+                    return Err(io::Error::other(n!("the proxy's name or password is too long for SOCKS5")));
                 }
                 let mut m = vec![1, name.len() as u8];
                 m.extend_from_slice(name.as_bytes());
@@ -173,11 +173,11 @@ impl Proxy {
                 s.write_all(&m)?;
                 s.read_exact(&mut r)?;
                 if r[1] != 0 {
-                    return Err(refused("did not take its name and password".into()));
+                    return Err(refused(n!("the proxy did not take its name and password").into()));
                 }
             }
-            (2, None) => return Err(refused("wants a name and password: socks5://name:password@host:port".into())),
-            _ => return Err(refused("takes no way of signing in this program knows".into())),
+            (2, None) => return Err(refused(n!("the proxy wants a name and password: socks5://name:password@host:port").into())),
+            _ => return Err(refused(n!("the proxy takes no way of signing in this program knows").into())),
         }
         let mut m = vec![5, 1, 0];
         match host.parse::<std::net::IpAddr>() {
@@ -193,7 +193,7 @@ impl Proxy {
                 m.extend_from_slice(&[3, host.len() as u8]);
                 m.extend_from_slice(host.as_bytes());
             }
-            Err(_) => return Err(io::Error::other("the name is too long for SOCKS5")),
+            Err(_) => return Err(io::Error::other(n!("the name is too long for SOCKS5"))),
         }
         m.extend_from_slice(&port.to_be_bytes());
         s.write_all(&m)?;
@@ -201,15 +201,15 @@ impl Proxy {
         s.read_exact(&mut head)?;
         if head[1] != 0 {
             let why = match head[1] {
-                2 => "does not let it through",
-                3 => "finds no way to that network",
-                4 => "cannot reach that computer",
-                5 => "was refused by that computer",
-                6 => "timed out on the way",
-                7 | 8 => "does not take such a request",
-                _ => "failed",
+                2 => n!("the proxy does not let it through ({}:{})"),
+                3 => n!("the proxy finds no way to that network ({}:{})"),
+                4 => n!("the proxy cannot reach that computer ({}:{})"),
+                5 => n!("the proxy was refused by that computer ({}:{})"),
+                6 => n!("the proxy timed out on the way ({}:{})"),
+                7 | 8 => n!("the proxy does not take such a request ({}:{})"),
+                _ => n!("the proxy failed ({}:{})"),
             };
-            return Err(refused(format!("{why} ({host}:{port})")));
+            return Err(refused(crate::lang::fill(why, &[&host, &port])));
         }
         // The address it bound, read past.
         let rest = match head[3] {
@@ -220,7 +220,7 @@ impl Proxy {
                 s.read_exact(&mut n)?;
                 n[0] as usize
             }
-            _ => return Err(io::Error::other("the proxy's answer is not SOCKS5")),
+            _ => return Err(io::Error::other(n!("the proxy's answer is not SOCKS5"))),
         };
         let mut skip = vec![0u8; rest + 2];
         s.read_exact(&mut skip)
@@ -241,11 +241,11 @@ impl Proxy {
         let mut b = [0u8; 1];
         while !head.ends_with(b"\r\n\r\n") {
             if s.read(&mut b)? == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the proxy hung up"));
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, n!("the proxy hung up")));
             }
             head.push(b[0]);
             if head.len() > 16 << 10 {
-                return Err(io::Error::other("the proxy's answer goes on and on"));
+                return Err(io::Error::other(n!("the proxy's answer goes on and on")));
             }
         }
         let text = String::from_utf8_lossy(&head);
@@ -253,9 +253,9 @@ impl Proxy {
         let code = status.split_whitespace().nth(1).unwrap_or("");
         match code {
             c if c.starts_with('2') => Ok(()),
-            "407" if self.login.is_some() => Err(io::Error::new(io::ErrorKind::PermissionDenied, "the proxy did not take its name and password")),
-            "407" => Err(io::Error::new(io::ErrorKind::PermissionDenied, "the proxy wants a name and password: http://name:password@host:port")),
-            _ => Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("the proxy did not open the way to {target}: {}", status.trim()))),
+            "407" if self.login.is_some() => Err(io::Error::new(io::ErrorKind::PermissionDenied, n!("the proxy did not take its name and password"))),
+            "407" => Err(io::Error::new(io::ErrorKind::PermissionDenied, n!("the proxy wants a name and password: http://name:password@host:port"))),
+            _ => Err(io::Error::new(io::ErrorKind::PermissionDenied, crate::lang::fill(n!("the proxy did not open the way to {}: {}"), &[&target, &status.trim()]))),
         }
     }
 }
@@ -267,7 +267,7 @@ pub fn current() -> Result<Option<Proxy>, String> {
     let set = crate::hosts::setting_now("proxy").filter(|p| !p.trim().is_empty());
     #[cfg(feature = "remote")]
     let set = set.or_else(|| crate::access::stored().ok().flatten().map(|c| c.proxy).filter(|p| !p.trim().is_empty()));
-    set.map(|s| Proxy::parse(&s).map_err(|e| format!("the proxy set cannot be used ({e})"))).transpose()
+    set.map(|s| Proxy::parse(&s).map_err(|e| crate::lang::fill(n!("the proxy set cannot be used ({})"), &[&e]))).transpose()
 }
 
 /// Whether nothing is to go through a proxy (one that cannot be read counts as set).

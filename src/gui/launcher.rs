@@ -52,9 +52,9 @@ impl Mode {
     /// As a button that opens it.
     pub(crate) fn button(self) -> String {
         match self {
-            Mode::Search => format!("{}  Search programs", ic::SEARCH),
-            Mode::Command => format!("{}  Run a command", ic::TERMINAL),
-            Mode::File => format!("{}  Open a file", ic::FOLDER_OPEN),
+            Mode::Search => format!("{}  {}", ic::SEARCH, t!("Search programs")),
+            Mode::Command => format!("{}  {}", ic::TERMINAL, t!("Run a command")),
+            Mode::File => format!("{}  {}", ic::FOLDER_OPEN, t!("Open a file")),
         }
     }
 }
@@ -210,13 +210,13 @@ impl Launcher {
         let keys = ui.memory(|m| m.has_focus(id));
         let (down, up) = if keys { ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp))) } else { (false, false) };
         let before = self.find.clone();
-        let (_, enter) = self.field(ui, "launcher-find", format!("{}  Type a program's name", ic::SEARCH));
+        let (_, enter) = self.field(ui, "launcher-find", format!("{}  {}", ic::SEARCH, t!("Type a program's name")));
         if self.find != before {
             self.sel = 0;
         }
         let h = self.room(ui);
         let list = match programs {
-            Programs::Coming => return body(ui, h, |ui| note(ui, "Looking at what is installed\u{2026}")),
+            Programs::Coming => return body(ui, h, |ui| note(ui, t!("Looking at what is installed\u{2026}"))),
             Programs::Listed(l) => l,
         };
         let q = self.find.trim();
@@ -224,12 +224,12 @@ impl Launcher {
         let mut rows: Vec<(Option<&str>, &Prog)> = Vec::new();
         if q.is_empty() {
             for (i, p) in self.recent.iter().filter_map(|r| list.iter().find(|p| p.id == r.as_str())).take(5).enumerate() {
-                rows.push(((i == 0).then_some("Recent"), p));
+                rows.push(((i == 0).then_some(t!("Recent")), p));
             }
             let mut all: Vec<&Prog> = list.iter().collect();
             all.sort_by_cached_key(|p| p.name.to_lowercase());
             for (i, p) in all.into_iter().enumerate() {
-                rows.push(((i == 0).then_some("All programs"), p));
+                rows.push(((i == 0).then_some(t!("All programs")), p));
             }
         } else {
             let mut found: Vec<(u8, usize, String, &Prog)> = list
@@ -242,14 +242,14 @@ impl Launcher {
             found.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
             for (i, (_, _, _, p)) in found.into_iter().enumerate() {
                 rows.push((match i {
-                    0 => Some("Best match"),
-                    1 => Some("Programs"),
+                    0 => Some(t!("Best match")),
+                    1 => Some(t!("Programs")),
                     _ => None,
                 }, p));
             }
         }
         if rows.is_empty() {
-            return body(ui, h, |ui| note(ui, if list.is_empty() { "No programs were found there" } else { "No program by that name: try Command to run it by its file" }));
+            return body(ui, h, |ui| note(ui, if list.is_empty() { t!("No programs were found there") } else { t!("No program by that name: try Command to run it by its file") }));
         }
         let last = rows.len() - 1;
         if down {
@@ -269,7 +269,7 @@ impl Launcher {
                         ui.label(RichText::new(*h).small().weak());
                     }
                     let best = !q.is_empty() && i == 0;
-                    let r = row(ui, ic::APP_WINDOW, p.name, if best { if p.detail.is_empty() { "Program" } else { p.detail } } else { "" }, i == self.sel, best);
+                    let r = row(ui, ic::APP_WINDOW, p.name, if best { if p.detail.is_empty() { t!("Program") } else { p.detail } } else { "" }, i == self.sel, best);
                     let r = if p.detail.is_empty() || best { r } else { r.on_hover_text(p.detail) };
                     if moved && i == self.sel {
                         r.scroll_to_me(None);
@@ -288,9 +288,9 @@ impl Launcher {
     fn command(&mut self, ui: &mut egui::Ui) -> Option<Ask> {
         let mut pick = None;
         ui.horizontal(|ui| {
-            let run = egui::Button::new(format!("{}  Run", ic::PLAY));
+            let run = egui::Button::new(format!("{}  {}", ic::PLAY, t!("Run")));
             let w = ui.available_width() - 74.0;
-            let (_, enter) = ui.allocate_ui(Vec2::new(w, ui.spacing().interact_size.y), |ui| self.field(ui, "launcher-line", "A program, a folder, a file or an address".into())).inner;
+            let (_, enter) = ui.allocate_ui(Vec2::new(w, ui.spacing().interact_size.y), |ui| self.field(ui, "launcher-line", t!("A program, a folder, a file or an address").into())).inner;
             let typed = self.line.trim().to_string();
             if (ui.add_enabled(!typed.is_empty(), run).clicked() || enter) && !typed.is_empty() {
                 pick = Some(command_pick(&typed));
@@ -299,13 +299,13 @@ impl Launcher {
         let commands = self.commands.clone();
         let h = self.room(ui);
         body(ui, h, |ui| {
-            note(ui, "It opens in a pane of its own, its window alone: \"notepad\", \"gedit notes.txt\", a folder, ~/report.pdf, https://\u{2026}");
+            note(ui, t!("It opens in a pane of its own, its window alone: \"notepad\", \"gedit notes.txt\", a folder, ~/report.pdf, https://\u{2026}"));
             if !commands.is_empty() {
                 ui.add_space(6.0);
-                ui.label(RichText::new("Run before").small().weak());
+                ui.label(RichText::new(t!("Run before")).small().weak());
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for c in &commands {
-                        let r = row(ui, ic::CLOCK_COUNTER_CLOCKWISE, c, "", false, false).on_hover_text("Run it again");
+                        let r = row(ui, ic::CLOCK_COUNTER_CLOCKWISE, c, "", false, false).on_hover_text(t!("Run it again"));
                         if r.clicked() {
                             pick = Some(command_pick(c));
                         }
@@ -328,13 +328,13 @@ impl Launcher {
         let at = self.folder.as_ref().map(|f| f.path.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             let up = parent(&at);
-            if ui.add_enabled(!at.is_empty() && up != at, egui::Button::new(ic::ARROW_UP)).on_hover_text("The folder it is in").clicked() {
+            if ui.add_enabled(!at.is_empty() && up != at, egui::Button::new(ic::ARROW_UP)).on_hover_text(t!("The folder it is in")).clicked() {
                 ask = Some(Ask::List(up));
             }
-            if ui.button(ic::HOUSE).on_hover_text("The home folder").clicked() {
+            if ui.button(ic::HOUSE).on_hover_text(t!("The home folder")).clicked() {
                 ask = Some(Ask::List(String::new()));
             }
-            let hint = if at == DRIVES { "The drives".to_string() } else { "A folder, or a file to open".to_string() };
+            let hint = if at == DRIVES { t!("The drives").to_string() } else { t!("A folder, or a file to open").to_string() };
             // The keyboard once the folder's path is in the field, to be replaced by typing.
             let wait = self.folder.is_none() && std::mem::take(&mut self.focus);
             let (_, enter) = self.field(ui, "launcher-path", hint);
@@ -355,16 +355,16 @@ impl Launcher {
         let h = self.room(ui);
         body(ui, h, |ui| {
             let Some(f) = &self.folder else {
-                note(ui, "Reading the folder\u{2026}");
+                note(ui, t!("Reading the folder\u{2026}"));
                 return;
             };
             if !f.error.is_empty() {
-                note(ui, &format!("It could not be read: {}", f.error));
+                note(ui, &t!("It could not be read: {}", crate::lang::tr_msg(&f.error)));
                 return;
             }
             let shown: Vec<&DirEntry> = f.entries.iter().filter(|e| !e.name.starts_with('.') && !(e.dir && LEGACY.contains(&e.name.as_str()))).collect();
             if shown.is_empty() {
-                note(ui, "Nothing in this folder");
+                note(ui, t!("Nothing in this folder"));
             }
             egui::ScrollArea::vertical().max_height(h - 40.0).auto_shrink([false, false]).show(ui, |ui| {
                 for e in shown {
@@ -383,12 +383,12 @@ impl Launcher {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if f.path != DRIVES && ui.button(format!("{}  Open this folder", ic::FOLDER_OPEN)).on_hover_text("In the computer's file manager, in a pane").clicked() {
+                if f.path != DRIVES && ui.button(format!("{}  {}", ic::FOLDER_OPEN, t!("Open this folder"))).on_hover_text(t!("In the computer's file manager, in a pane")).clicked() {
                     open = Some(f.path.clone());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let picked = self.file.clone();
-                    if ui.add_enabled(picked.is_some(), egui::Button::new("Open")).on_hover_text("With the program that opens it").clicked()
+                    if ui.add_enabled(picked.is_some(), egui::Button::new(t!("Open"))).on_hover_text(t!("With the program that opens it")).clicked()
                         && let Some(name) = picked
                     {
                         open = Some(join(&f.path, &name));

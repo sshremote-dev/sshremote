@@ -23,8 +23,8 @@ impl App {
         let bar = super::chrome::title_bar(ui, |ui| {
             ui.label(RichText::new("SSH Remote").size(14.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                open_settings = icon(ui, ic::GEAR, "Settings", false).clicked();
-                let (glyph, tip) = if dark { (ic::SUN, "Light theme") } else { (ic::MOON, "Dark theme") };
+                open_settings = icon(ui, ic::GEAR, t!("Settings"), false).clicked();
+                let (glyph, tip) = if dark { (ic::SUN, t!("Light theme")) } else { (ic::MOON, t!("Dark theme")) };
                 if icon(ui, glyph, tip, false).clicked() {
                     set_theme(ui.ctx(), !dark);
                 }
@@ -80,18 +80,18 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(ic::DOWNLOAD).size(16.0).color(ACCENT));
                     let text = match (&u.done, &u.failed, u.installing.is_some()) {
-                        (Some(_), _, _) => format!("Updated to {}: start it again to use it.", r.version),
-                        (_, Some(e), _) => format!("The update to {} did not go in: {e}", r.version),
-                        (_, _, true) => format!("Getting {}\u{2026}", r.version),
-                        _ => format!("SSH Remote {} is out (this is {ours}).", r.version),
+                        (Some(_), _, _) => t!("Updated to {}: start it again to use it.", r.version),
+                        (_, Some(e), _) => t!("The update to {} did not go in: {}", r.version, crate::lang::tr_msg(e)),
+                        (_, _, true) => t!("Getting {}\u{2026}", r.version),
+                        _ => t!("SSH Remote {} is out (this is {}).", r.version, ours),
                     };
                     ui.add(egui::Label::new(RichText::new(text).color(ui.visuals().strong_text_color())).wrap());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if u.done.is_some() {
-                            restart = ui.add(kit::secondary("Start again")).on_hover_text("Ends this window's connections and opens the new version").clicked();
+                            restart = ui.add(kit::secondary(t!("Start again"))).on_hover_text(t!("Ends this window's connections and opens the new version")).clicked();
                         } else if u.installing.is_none() {
-                            later = ui.add(kit::ghost("Later")).clicked();
-                            update = ui.add(kit::secondary("Update")).on_hover_text("Puts the new version in place of this program, checked against sshremote.dev's signed list").clicked();
+                            later = ui.add(kit::ghost(t!("Later"))).clicked();
+                            update = ui.add(kit::secondary(t!("Update"))).on_hover_text(t!("Puts the new version in place of this program, checked against sshremote.dev's signed list")).clicked();
                         }
                     });
                 });
@@ -127,13 +127,13 @@ impl App {
                     ui.label(RichText::new(ic::WARNING).size(16.0).color(bad()));
                     ui.vertical(|ui| {
                         ui.set_width(ui.available_width() - 30.0);
-                        ui.add(egui::Label::new(RichText::new(&what).color(ui.visuals().strong_text_color())).wrap()).on_hover_text(e.as_str());
+                        ui.add(egui::Label::new(RichText::new(crate::lang::tr_msg(&what)).color(ui.visuals().strong_text_color())).wrap()).on_hover_text(crate::lang::tr_msg(&e));
                         if !hint.is_empty() {
-                            ui.add(egui::Label::new(RichText::new(hint).weak()).wrap());
+                            ui.add(egui::Label::new(RichText::new(crate::lang::tr(hint)).weak()).wrap());
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text("Dismiss").clicked();
+                        close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text(t!("Dismiss")).clicked();
                     });
                 });
             });
@@ -153,7 +153,7 @@ impl App {
         let start = PaneStart { panel: self.start_panels.0, chat: self.start_panels.1, fullscreen: self.start_fullscreen };
         let launch = if local {
             let capture = if self.form.capture == "auto" { "synthetic".to_string() } else { self.form.capture.clone() };
-            Launch::Agent { target: Target::Local { capture }, label: "Test desktop".into(), ssh_cmd: None, mode }
+            Launch::Agent { target: Target::Local { capture }, label: t!("Test desktop").into(), ssh_cmd: None, mode }
         } else {
             let host = self.form.host.clone();
             let port = self.form.port.clone();
@@ -205,7 +205,7 @@ impl App {
     pub(super) fn system_terminal(&mut self, host: &str, port: &str) {
         let (_, cmd) = ssh_command(host, port);
         if let Err(e) = crate::termwin::spawn_system(&cmd) {
-            self.error = Some(format!("Cannot open the system terminal: {e}"));
+            self.error = Some(t!("Cannot open the system terminal: {}", e));
         }
     }
 
@@ -214,11 +214,11 @@ impl App {
     pub(super) fn admin_badge(&mut self, ui: &mut egui::Ui) {
         if crate::admin::elevated() {
             ui.label(RichText::new(ic::SHIELD_CHECK).size(15.0).color(ui.visuals().weak_text_color()))
-                .on_hover_text(format!("Running as administrator.\n\n{}", crate::admin::ADDS));
+                .on_hover_text(t!("Running as administrator.\n\n{}", crate::lang::tr(crate::admin::ADDS)));
             return;
         }
-        let b = egui::Button::new(RichText::new(format!("{}  Standard user", ic::SHIELD)).size(12.5).color(ui.visuals().weak_text_color())).frame(false);
-        let tip = format!("Click to restart with administrator rights.\n\n{}", crate::admin::ADDS);
+        let b = egui::Button::new(RichText::new(format!("{}  {}", ic::SHIELD, t!("Standard user"))).size(12.5).color(ui.visuals().weak_text_color())).frame(false);
+        let tip = t!("Click to restart with administrator rights.\n\n{}", crate::lang::tr(crate::admin::ADDS));
         if ui.add(b).on_hover_text(tip).clicked() {
             self.restart_elevated(ui.ctx());
         }
@@ -231,8 +231,8 @@ impl App {
         let args: Vec<String> = if self.keep_session(main) { vec![crate::admin::AGAIN.into()] } else { Vec::new() };
         match crate::admin::relaunch(&args) {
             Ok(true) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Ok(false) => self.error = Some("Administrator rights were not given; sshremote goes on without them.".into()),
-            Err(e) => self.error = Some(format!("Cannot ask for administrator rights: {e}")),
+            Ok(false) => self.error = Some(t!("Administrator rights were not given; sshremote goes on without them.").into()),
+            Err(e) => self.error = Some(t!("Cannot ask for administrator rights: {}", crate::lang::tr_msg(&e))),
         }
     }
 
@@ -257,7 +257,7 @@ impl App {
                 ssh_cmd: None,
             },
             How::This(mode) => {
-                Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode }
+                Launch::Agent { target: Target::Local { capture: "auto".into() }, label: t!("This computer").into(), ssh_cmd: None, mode }
             }
             How::Web(url, label) => Launch::Agent {
                 label: if label.is_empty() { crate::computers::get(&url).filter(|c| !c.name.is_empty()).map_or_else(|| web_label(&url), |c| c.name) } else { label },
@@ -273,7 +273,7 @@ impl App {
             },
             How::TestDesktop => Launch::Agent {
                 target: Target::Local { capture: "synthetic".into() },
-                label: "Test desktop".into(),
+                label: t!("Test desktop").into(),
                 ssh_cmd: None,
                 mode: PaneMode::Screen,
             },
@@ -333,12 +333,12 @@ impl App {
                     None
                 }
             },
-            Item::Here { mode } => Some(Launch::Agent { target: Target::Local { capture: "auto".into() }, label: "This computer".into(), ssh_cmd: None, mode: *mode }),
+            Item::Here { mode } => Some(Launch::Agent { target: Target::Local { capture: "auto".into() }, label: t!("This computer").into(), ssh_cmd: None, mode: *mode }),
             Item::Shell { profile } => {
                 let profiles = crate::termwin::local_profiles();
                 // A shell this computer has no more (or an extension's command): said, not swapped for another.
                 let Some(p) = profiles.iter().find(|p| p.name == *profile).cloned() else {
-                    self.error = Some(format!("This computer has no shell named {profile}: that pane was left out"));
+                    self.error = Some(t!("This computer has no shell named {}: that pane was left out", profile));
                     return None;
                 };
                 Some(Launch::Shell { label: p.name.clone(), profile: p, target: Target::Local { capture: "auto".into() }, ssh_cmd: None })
@@ -375,7 +375,7 @@ impl App {
     fn host_launch_as(&mut self, host: &str, port: &str, mode: PaneMode, ask: bool) -> Result<Launch, String> {
         let host = host.trim().to_string();
         if host.is_empty() {
-            return Err("Enter a computer: an alias, user@host, an IP or an ID".into());
+            return Err(t!("Enter a computer: an alias, user@host, an IP or an ID").into());
         }
         let typed = if self.in_field(&host) { std::mem::take(&mut self.form.password) } else { String::new() };
         // Kept once the connection works (a terminal signs in inside itself: kept at once).
@@ -384,7 +384,7 @@ impl App {
             if by_agent {
                 self.pending_passwords.insert(host.clone(), typed.clone());
             } else if let Err(e) = crate::vault::set(&host, &typed) {
-                self.error = Some(format!("The password was not saved: {e}"));
+                self.error = Some(t!("The password was not saved: {}", crate::lang::tr_msg(&e)));
             }
         }
         // A password typed now wins over a saved one.
@@ -392,14 +392,14 @@ impl App {
         #[cfg(feature = "remote")]
         if let Some(addr) = crate::net::Address::parse(&host) {
             if mode == PaneMode::Terminal {
-                return Err("A computer reached by its ID shows its screen and files, not a terminal.".into());
+                return Err(t!("A computer reached by its ID shows its screen and files, not a terminal.").into());
             }
             // Without a password it asks to be let in; a computer that takes no such requests says
             // so, and the password is asked for then.
             let password = if ask { String::new() } else { password.unwrap_or_default() };
             // In the list once reached, as other computers are.
             self.pending_ports.insert(host.clone(), String::new());
-            let label = crate::computers::get(&host).map_or_else(|| format!("ID {}", crate::computers::spaced(&addr.id)), |c| c.label());
+            let label = crate::computers::get(&host).map_or_else(|| t!("ID {}", crate::computers::spaced(&addr.id)), |c| c.label());
             let target = Target::Direct { addr, password };
             return Ok(Launch::Agent { target, label, ssh_cmd: None, mode });
         }
@@ -474,8 +474,8 @@ pub(super) type Choice = (String, String, How);
 /// with sites of its own), programs with Programs (or an extension with programs of its own).
 fn needs_extension(how: &How) -> Option<String> {
     match how {
-        How::Web(..) if !crate::ext::sites_enabled() => Some(WEB_NEEDS.into()),
-        How::App(..) if !crate::ext::program_panes_enabled() => Some(PROGRAMS_NEED.into()),
+        How::Web(..) if !crate::ext::sites_enabled() => Some(crate::lang::tr(WEB_NEEDS).into()),
+        How::App(..) if !crate::ext::program_panes_enabled() => Some(crate::lang::tr(PROGRAMS_NEED).into()),
         _ => None,
     }
 }
@@ -484,14 +484,14 @@ fn needs_extension(how: &How) -> Option<String> {
 fn extension_missing(item: &crate::gui::project::Item) -> Option<String> {
     use crate::gui::project::Item;
     match item {
-        Item::Web { url, .. } if !crate::ext::sites_enabled() => Some(format!("{url}: {WEB_NEEDS}")),
-        Item::App { label, .. } if !crate::ext::program_panes_enabled() => Some(format!("{label}: {PROGRAMS_NEED}")),
+        Item::Web { url, .. } if !crate::ext::sites_enabled() => Some(format!("{url}: {}", crate::lang::tr(WEB_NEEDS))),
+        Item::App { label, .. } if !crate::ext::program_panes_enabled() => Some(format!("{label}: {}", crate::lang::tr(PROGRAMS_NEED))),
         _ => None,
     }
 }
 
-const WEB_NEEDS: &str = "web pages open in a pane with the Web apps extension (Settings, Extensions)";
-const PROGRAMS_NEED: &str = "programs open in a pane with the Programs extension (Settings, Extensions)";
+const WEB_NEEDS: &str = n!("web pages open in a pane with the Web apps extension (Settings, Extensions)");
+const PROGRAMS_NEED: &str = n!("programs open in a pane with the Programs extension (Settings, Extensions)");
 
 pub(super) fn web_label(url: &str) -> String {
     let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or(url);

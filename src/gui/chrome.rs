@@ -174,8 +174,8 @@ fn caption_buttons(ui: &mut egui::Ui, rect: Rect) -> (bool, bool) {
     let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     let mut leave = false;
     let mut close = false;
-    let middle = if full { "Leave full screen (F11; Ctrl+Alt+Enter in a shared screen)" } else if max { "Restore Down" } else { "Maximize" };
-    for (k, tip) in ["Minimize", middle, "Close"].into_iter().enumerate() {
+    let middle = if full { t!("Leave full screen (F11; Ctrl+Alt+Enter in a shared screen)") } else if max { t!("Restore Down") } else { t!("Maximize") };
+    for (k, tip) in [t!("Minimize"), middle, t!("Close")].into_iter().enumerate() {
         let r = Rect::from_min_size(Pos2::new(rect.left() + k as f32 * BUTTON, rect.top()), Vec2::new(BUTTON, HEIGHT));
         let resp = ui.interact(r, ui.scope_id().with(("caption", k)), Sense::click()).on_hover_text(tip);
         let hot = resp.hovered();

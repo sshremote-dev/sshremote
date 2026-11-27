@@ -247,7 +247,7 @@ impl Dock {
                 });
                 // The whole tab is the button, and the handle.
                 let r = ui.interact(inner.response.rect, ui.scope_id().with("tab"), egui::Sense::click_and_drag());
-                let r = r.on_hover_text(format!("{}\n\nClick for the toolbar (Ctrl+Alt+Home); drag to move it along the edge.\nCtrl+Alt+PgUp/PgDn: the tab before or after; with Shift, the pane", status.details));
+                let r = r.on_hover_text(t!("{}\n\nClick for the toolbar (Ctrl+Alt+Home); drag to move it along the edge.\nCtrl+Alt+PgUp/PgDn: the tab before or after; with Shift, the pane", status.details));
                 if r.dragged() {
                     self.x = (self.x + r.drag_delta().x / screen.width().max(1.0)).clamp(0.0, 1.0);
                     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -294,7 +294,7 @@ impl Dock {
                         });
                         self.pin(ui);
                         let fold = egui::Button::new(RichText::new(ic::CARET_UP).size(14.0)).frame_when_inactive(false).min_size(Vec2::splat(26.0));
-                        if ui.add(fold).on_hover_text("Fold the toolbar into the tab (Ctrl+Alt+Home)").clicked() {
+                        if ui.add(fold).on_hover_text(t!("Fold the toolbar into the tab (Ctrl+Alt+Home)")).clicked() {
                             self.toggle(now);
                         }
                     });
@@ -313,9 +313,9 @@ impl Dock {
     /// Pinned: the band stays down. The pin is filled while on.
     fn pin(&mut self, ui: &mut egui::Ui) {
         let (text, tip) = if self.pinned {
-            (RichText::new(ic::PUSH_PIN).size(15.0).family(super::theme::filled()), "Pinned: the toolbar stays down. Click to let it fold up by itself")
+            (RichText::new(ic::PUSH_PIN).size(15.0).family(super::theme::filled()), t!("Pinned: the toolbar stays down. Click to let it fold up by itself"))
         } else {
-            (RichText::new(ic::PUSH_PIN).size(15.0).color(ui.visuals().weak_text_color()), "Pin: keep the toolbar down")
+            (RichText::new(ic::PUSH_PIN).size(15.0).color(ui.visuals().weak_text_color()), t!("Pin: keep the toolbar down"))
         };
         let b = egui::Button::new(text).frame_when_inactive(self.pinned).selected(self.pinned).min_size(Vec2::splat(26.0));
         if ui.add(b).on_hover_text(tip).clicked() {
@@ -355,7 +355,7 @@ fn status_chip(ui: &mut egui::Ui, s: &Status) {
         ui.add(egui::Label::new(RichText::new(&s.name).size(TAB_TEXT)).truncate().selectable(false));
     });
     if let Some(rtt) = s.rtt {
-        let text = if rtt >= 999.5 { "999+ ms".to_string() } else { format!("{rtt:.0} ms") };
+        let text = if rtt >= 999.5 { t!("{} ms", "999+") } else { t!("{} ms", format!("{rtt:.0}")) };
         // A fixed width, so the tab does not jitter as the round trip changes.
         ui.add_sized([38.0, 12.0], egui::Label::new(RichText::new(text).size(TAB_TEXT - 1.0).weak()).selectable(false));
     }

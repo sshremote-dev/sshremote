@@ -113,7 +113,7 @@ pub fn run_elevated(file: &str, args: &[String], hidden: bool) -> Result<bool, S
 
 #[cfg(not(windows))]
 pub fn relaunch(_args: &[String]) -> Result<bool, String> {
-    Err("run sshremote with sudo for administrator rights".into())
+    Err(n!("run sshremote with sudo for administrator rights").into())
 }
 
 /// Whether the sshremote service (sign-in screen, Ctrl+Alt+Del) is installed on this computer.
@@ -128,12 +128,12 @@ pub fn service_installed() -> bool {
 }
 
 /// What administrator rights add, for the tooltip of the badge.
-pub const ADDS: &str = "With administrator rights:\n\
+pub const ADDS: &str = n!("With administrator rights:\n\
     - local terminal tabs run as administrator\n\
     - the sshremote service can be installed here, so this computer can be reached at the sign-in \
     screen and receive Ctrl+Alt+Del\n\
     - windows of elevated programs can be controlled through mcp --here\n\
-    Files cannot be dragged in from Explorer while elevated; use the file window instead.";
+    Files cannot be dragged in from Explorer while elevated; use the file window instead.");
 
 #[cfg(test)]
 mod tests {

@@ -534,7 +534,7 @@ mod imp {
             let key = catch::wait(before.iter().map(|id| *id as isize).collect());
             let (name, said) = match crate::apps::launch_minimized(kind, text) {
                 Ok(n) => (n, None),
-                Err(e) => (String::new(), Some(format!("It could not be started: {e}."))),
+                Err(e) => (String::new(), Some(t!("It could not be started: {}.", crate::lang::tr_msg(&e)))),
             };
             if said.is_some() {
                 catch::forget(key);
@@ -610,15 +610,15 @@ mod imp {
                         if let Some(c) = self.key.take().and_then(catch::forget) {
                             let_go(c.hwnd as HWND, c.style);
                         }
-                        self.said = Some(format!("{} opened no window of its own to show here.", self.what));
+                        self.said = Some(t!("{} opened no window of its own to show here.", self.what));
                     }
                     None => {}
                 }
             }
             let text = match (&self.win, &self.said) {
-                (Some(_), _) => format!("{} is here", self.what),
+                (Some(_), _) => t!("{} is here", self.what),
                 (None, Some(s)) => s.clone(),
-                (None, None) => format!("Starting {}\u{2026}", self.what),
+                (None, None) => t!("Starting {}\u{2026}", self.what),
             };
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), ui.visuals().weak_text_color());
             // Its state is followed (moved, closed) while nothing else wakes the window.
@@ -642,7 +642,7 @@ mod imp {
                 self.win = None;
                 later(move || let_go(h as HWND, style));
                 unsafe { ShowWindowAsync(h as HWND, SW_SHOWNOACTIVATE) };
-                self.said = Some(format!("{} runs with more rights than this app, so it stays a window of its own.", self.what));
+                self.said = Some(t!("{} runs with more rights than this app, so it stays a window of its own.", self.what));
             }
         }
 

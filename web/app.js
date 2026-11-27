@@ -52,6 +52,7 @@ const ICONS = {
   lock: "M6 11h12v9H6z|M8 11V7.5a4 4 0 0 1 8 0V11",
   shield: "M12 3l7.5 3v5.5c0 4.6-3.2 8-7.5 9.5-4.3-1.5-7.5-4.9-7.5-9.5V6z",
   open: "M5 12h14|M13 6l6 6-6 6",
+  globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z|M3 12h18|M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9|M12 3c-2.4 2.5-3.6 5.5-3.6 9s1.2 6.5 3.6 9",
 };
 const SVG = "http://www.w3.org/2000/svg";
 function icon(name) {
@@ -98,14 +99,14 @@ function size(n) {
 }
 function ago(ms) {
   const s = (Date.now() - ms) / 1000;
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.floor(s / 60) + " min ago";
-  if (s < 86400) return Math.floor(s / 3600) + " h ago";
-  if (s < 172800) return "yesterday";
-  return Math.floor(s / 86400) + " days ago";
+  if (s < 60) return T("just now");
+  if (s < 3600) return T("{} min ago", Math.floor(s / 60));
+  if (s < 86400) return T("{} h ago", Math.floor(s / 3600));
+  if (s < 172800) return T("yesterday");
+  return T("{} days ago", Math.floor(s / 86400));
 }
 const spaced = id => id.replace(/(\d{3})(?=\d)/g, "$1 ");
-const when = t => t ? new Date(t * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+const when = t => t ? new Date(t * 1000).toLocaleString(dateLang, { dateStyle: "medium", timeStyle: "short" }) : "";
 
 function toast(text, opts = {}) {
   const t = h("div", { class: "toast" + (opts.bad ? " bad" : ""), role: "status" }, h("span", { text }));
@@ -131,7 +132,7 @@ function menu(items, at) {
     if (typeof it === "string") { m.append(h("div", { class: "lab", text: it })); continue; }
     const [label, act, o = {}] = it;
     const b = h("button", { type: "button", role: "menuitem", class: o.on ? "on" : "", disabled: o.disabled },
-      o.icon ? icon(o.icon) : null, h("span", { text: label }), o.kbd ? h("kbd", { text: o.kbd }) : null);
+      o.icon ? icon(o.icon) : null, h("span", { text: label, lang: o.lang }), o.kbd ? h("kbd", { text: o.kbd }) : null);
     b.onclick = () => { closeMenu(); act(); };
     m.append(b);
   }
@@ -150,7 +151,7 @@ addEventListener("keydown", e => { if (e.key === "Escape" && openMenu) { e.preve
 
 // A dialog: a title, a line of text, an optional field, and its buttons; resolves with the
 // field's text (or true), or null when cancelled.
-function ask({ title, text, field, area, value, select, ok = "OK", danger }) {
+function ask({ title, text, field, area, value, select, ok = T("OK"), danger }) {
   return new Promise(done => {
     const box = $("modal").firstElementChild;
     box.textContent = "";
@@ -164,7 +165,7 @@ function ask({ title, text, field, area, value, select, ok = "OK", danger }) {
       if (e.key === "Enter" && !area) { e.preventDefault(); yes.click(); }
     };
     box.append(...[h("h2", { text: title }), text ? h("p", { text }) : null, input,
-      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: () => finish(null) }), yes)].filter(Boolean));
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: T("Cancel"), onclick: () => finish(null) }), yes)].filter(Boolean));
     $("modal").hidden = false;
     addEventListener("keydown", keys, true);
     if (input) { input.focus(); if (select) input.setSelectionRange(...select(input.value)); } else yes.focus();
@@ -179,6 +180,139 @@ const store = {
 };
 // The theme chosen here (light or dark) wins over the system's, from the first paint on.
 { const t = store.get("theme", ""); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; }
+
+// ----- The visitor's language ------------------------------------------------------------------------
+
+// The languages the page speaks, each by its own name, as src/lang/mod.rs lists them (the names
+// written as escapes, so this file stays ASCII).
+const LANGS = [
+  ["en", "English"], ["ar", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"], ["az", "Az\u0259rbaycan dili"],
+  ["be", "\u0411\u0435\u043b\u0430\u0440\u0443\u0441\u043a\u0430\u044f"],
+  ["bg", "\u0411\u044a\u043b\u0433\u0430\u0440\u0441\u043a\u0438"], ["ca", "Catal\u00e0"],
+  ["cs", "\u010ce\u0161tina"], ["da", "Dansk"], ["de", "Deutsch"],
+  ["el", "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac"], ["eo", "Esperanto"], ["es", "Espa\u00f1ol"],
+  ["et", "Eesti"], ["eu", "Euskara"], ["fa", "\u0641\u0627\u0631\u0633\u06cc"], ["fi", "Suomi"],
+  ["fr", "Fran\u00e7ais"], ["gl", "Galego"], ["gu", "\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0"],
+  ["he", "\u05e2\u05d1\u05e8\u05d9\u05ea"], ["hi", "\u0939\u093f\u0928\u094d\u0926\u0940"], ["hr", "Hrvatski"],
+  ["hu", "Magyar"], ["id", "Bahasa Indonesia"], ["it", "Italiano"], ["ja", "\u65e5\u672c\u8a9e"],
+  ["ka", "\u10e5\u10d0\u10e0\u10d7\u10e3\u10da\u10d8"],
+  ["kk", "\u049a\u0430\u0437\u0430\u049b \u0442\u0456\u043b\u0456"], ["ko", "\ud55c\uad6d\uc5b4"],
+  ["lt", "Lietuvi\u0173"], ["lv", "Latvie\u0161u"], ["ml", "\u0d2e\u0d32\u0d2f\u0d3e\u0d33\u0d02"],
+  ["nb", "Norsk bokm\u00e5l"], ["nl", "Nederlands"], ["pl", "Polski"], ["pt-BR", "Portugu\u00eas (Brasil)"],
+  ["pt-PT", "Portugu\u00eas (Portugal)"], ["ro", "Rom\u00e2n\u0103"],
+  ["ru", "\u0420\u0443\u0441\u0441\u043a\u0438\u0439"], ["sc", "Sardu"], ["sk", "Sloven\u010dina"],
+  ["sl", "Sloven\u0161\u010dina"], ["sq", "Shqip"], ["sr", "Srpski"], ["sv", "Svenska"],
+  ["ta", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd"], ["th", "\u0e44\u0e17\u0e22"], ["tr", "T\u00fcrk\u00e7e"],
+  ["uk", "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430"], ["ur", "\u0627\u0631\u062f\u0648"],
+  ["vi", "Ti\u1ebfng Vi\u1ec7t"], ["zh-CN", "\u7b80\u4f53\u4e2d\u6587"], ["zh-TW", "\u7e41\u9ad4\u4e2d\u6587"]
+];
+const RTL = ["ar", "fa", "he", "ur"];
+// The language's words (English to its own, from lang/<code>.json); those with "{}" also match
+// what the host or the gateway says (`said`).
+let words = new Map(), templates = [], langNow = "en", langAsked = 0;
+
+// A template with its values: "{}" takes them in order, "{0}", "{1}" by place (a language that
+// says them in another order), "{{" and "}}" are braces.
+function fill(s, values) {
+  let next = 0;
+  return s.replace(/\{\{|\}\}|\{(\d*)\}/g, (m, at) => {
+    if (m === "{{") return "{";
+    if (m === "}}") return "}";
+    const i = at === "" ? next++ : +at;
+    return i < values.length ? String(values[i]) : m;
+  });
+}
+// Words shown to the visitor, in the language now: T("Open"), T("Sent {} files", n). Only a
+// literal is collected for translation (scripts/lang.py), so a sentence is one, its values in slots.
+function T(text, ...values) {
+  const s = words.get(text) || text;
+  return values.length ? fill(s, values) : s;
+}
+// What the host or the gateway said, in the language now: its words, or a template's that match.
+function said(text) {
+  if (!text || typeof text !== "string") return text;
+  const w = words.get(text);
+  if (w) return w;
+  for (const [re, to] of templates) {
+    const m = re.exec(text);
+    if (m) return fill(to, m.slice(1));
+  }
+  return text;
+}
+
+// A tag such as "pt-BR", "zh-Hant-TW", "nn" or "ko_KR.UTF-8" as one of LANGS, or null; the same
+// rules as find() in src/lang/mod.rs.
+const ALIASES = new Map([["no", "nb"], ["nn", "nb"], ["iw", "he"], ["in", "id"], ["ge", "ka"], ["kz", "kk"]]);
+function langOf(tag) {
+  const parts = String(tag || "").split(/[.@]/)[0].replace(/_/g, "-").toLowerCase().split("-");
+  const b = parts.shift();
+  const code = b === "zh" ? (parts.some(p => ["hant", "tw", "hk", "mo"].includes(p)) ? "zh-TW" : "zh-CN")
+    : b === "pt" ? (parts.includes("br") ? "pt-BR" : "pt-PT") : ALIASES.get(b) || b;
+  return LANGS.find(l => l[0].toLowerCase() === code.toLowerCase())?.[0] || null;
+}
+// The browser's language, the first it prefers that is one of LANGS; English when none is.
+const browserLang = () => (navigator.languages?.length ? navigator.languages : [navigator.language]).map(langOf).find(Boolean) || "en";
+// The language chosen on this page ("" follows the browser).
+function chosenLang() { const c = store.get("lang", ""); return LANGS.some(l => l[0] === c) ? c : ""; }
+const langName = code => (LANGS.find(l => l[0] === code) || LANGS[0])[1];
+// Dates and times as the language chosen here writes them, else as the browser does.
+let dateLang = [];
+
+// Speaks `code` from now on: its words fetched (English needs none), the page's language and
+// direction set. Resolves once they are in use; a table that does not come leaves English.
+function useLang(code) {
+  const asked = ++langAsked;
+  const use = (c, table) => {
+    if (asked !== langAsked) return;
+    words = new Map(Object.entries(table).filter(([, v]) => typeof v === "string" && v));
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // The longest first, so the most specific matches.
+    templates = [...words].filter(([en]) => en.includes("{}")).sort((a, b) => b[0].length - a[0].length)
+      .map(([en, to]) => [new RegExp("^" + en.split("{}").map(esc).join("(.+?)") + "$", "s"), to]);
+    langNow = c;
+    dateLang = chosenLang() ? [c] : [];
+    document.documentElement.lang = c;
+    if (RTL.includes(c)) document.documentElement.dir = "rtl"; else document.documentElement.removeAttribute("dir");
+  };
+  if (code === "en") { use("en", {}); return Promise.resolve(); }
+  return fetch(base + "lang/" + code + ".json").then(r => r.ok ? r.json() : null).catch(() => null)
+    .then(t => t && typeof t === "object" ? use(code, t) : use("en", {}));
+}
+const langReady = useLang(chosenLang() || browserLang());
+// What waits for the words (a dialog at start): them, or English after a few seconds without.
+const langSoon = Promise.race([langReady, new Promise(ok => setTimeout(ok, 3000))]);
+
+// The page's own texts in the language now: data-t="English" is an element's text (its <b> and
+// <a> keep their place in the sentence: "Pick <b>Terminal</b> at the top"), data-t-title="..."
+// and the like are its attributes.
+const ownKids = new WeakMap();
+function localize() {
+  for (const e of document.querySelectorAll("*")) {
+    for (const a of [...e.attributes]) {
+      if (a.name === "data-t") putText(e, T(a.value));
+      else if (a.name.startsWith("data-t-")) e.setAttribute(a.name.slice(7), T(a.value));
+    }
+  }
+}
+function putText(e, text) {
+  if (!ownKids.has(e)) ownKids.set(e, [...e.children]);
+  const kids = ownKids.get(e);
+  if (!kids.length) { e.textContent = text; return; }
+  // Each <b>...</b> of the sentence is the element's own next <b>, and so on.
+  const out = [], used = new Map(), re = /<([a-z]+)>(.*?)<\/\1>/gs;
+  let at = 0;
+  for (const m of text.matchAll(re)) {
+    out.push(text.slice(at, m.index));
+    const n = used.get(m[1]) || 0;
+    used.set(m[1], n + 1);
+    const k = kids.filter(x => x.localName === m[1])[n];
+    if (k) { k.textContent = m[2]; out.push(k); } else out.push(m[2]);
+    at = m.index + m[0].length;
+  }
+  out.push(text.slice(at));
+  e.replaceChildren(...out.filter(x => x !== ""));
+}
+
 const b64 = u => btoa(String.fromCharCode(...u));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
@@ -229,7 +363,7 @@ const allowed = e => !idOnly || e.kind === "id";
 // Saved connections: { key, kind: "id" | "ssh" | "gw", address, port, name, last, view, pw }.
 const saved = () => store.get("saved", []);
 const keyOf = t => t.kind + ":" + t.address + (t.port ? ":" + t.port : "");
-function title(t) { return t.name || (t.kind === "id" ? "ID " + spaced(t.address) : t.address + (t.port ? ":" + t.port : "")); }
+function title(t) { return t.name || (t.kind === "id" ? T("ID {}", spaced(t.address)) : (t.address === "This computer" ? T("This computer") : t.address) + (t.port ? ":" + t.port : "")); }
 function save(entry) {
   const list = saved().filter(e => e.key !== entry.key);
   list.unshift(entry);
@@ -276,22 +410,22 @@ function refreshForm() {
   $("port").hidden = !ssh;
   $("gatebox").hidden = !locked;
   $("pwlabel").hidden = $("pwrow").hidden = locked;
-  $("go").textContent = locked ? "Sign in to this gateway" : "Connect";
+  $("go").textContent = locked ? T("Sign in to this gateway") : T("Connect");
   const match = p && saved().find(e => e.key === keyOf({ ...p, port: ssh ? $("port").value.trim() : "" }));
-  $("pw").placeholder = match?.pw ? "Saved password (type to change)" : ssh ? "Password (none with SSH keys)" : "Password set on that computer";
+  $("pw").placeholder = match?.pw ? T("Saved password (type to change)") : ssh ? T("Password (none with SSH keys)") : T("Password set on that computer");
   $("keeprow").hidden = !canKeep || locked;
   // What was typed, named; and what the password is for it.
-  $("kind").textContent = !p || (idOnly && p.kind !== "id") ? "" : ssh ? "SSH host" : "ID";
-  $("pwlabel").textContent = ssh ? "SSH password" : "Password";
-  $("hint").textContent = idOnly && p && p.kind !== "id" ? "This page opens computers by their 9-digit ID. For SSH, use the app." : !p || locked ? "" : ssh
-    ? "Signed in to this gateway: SSH leaves from its server."
-    : "A one-time password works too. Without any, leave it empty: the person there is asked to let you in, where that computer allows it.";
+  $("kind").textContent = !p || (idOnly && p.kind !== "id") ? "" : ssh ? T("SSH host") : T("ID");
+  $("pwlabel").textContent = ssh ? T("SSH password") : T("Password");
+  $("hint").textContent = idOnly && p && p.kind !== "id" ? T("This page opens computers by their 9-digit ID. For SSH, use the app.") : !p || locked ? "" : ssh
+    ? T("Signed in to this gateway: SSH leaves from its server.")
+    : T("A one-time password works too. Without any, leave it empty: the person there is asked to let you in, where that computer allows it.");
 }
 
 // The page's theme: the system's, or light or dark as chosen here (kept in this browser).
 function themeButton() {
   const now = store.get("theme", "");
-  const [glyph, title] = { light: ["sun", "Light theme (click: dark)"], dark: ["moon", "Dark theme (click: the system's)"] }[now] || ["auto", "The system's theme (click: light)"];
+  const [glyph, title] = { light: ["sun", T("Light theme (click: dark)")], dark: ["moon", T("Dark theme (click: the system's)")] }[now] || ["auto", T("The system's theme (click: light)")];
   const b = $("theme");
   b.replaceChildren(icon(glyph));
   b.title = title;
@@ -304,14 +438,32 @@ $("theme").onclick = () => {
   else delete document.documentElement.dataset.theme;
   themeButton();
 };
-themeButton();
 $("sitelink").prepend(icon("home"));
 
+// The page's language: the browser's, or one chosen here (kept in this browser), its words
+// fetched and the page said again in them.
+$("lang").append(icon("globe"));
+$("lang").onclick = () => {
+  const chosen = chosenLang();
+  const pick = code => { store.set("lang", code || null); useLang(code || browserLang()).then(relabel); };
+  menu([[T("The system's ({})", langName(browserLang())), () => pick(""), { on: !chosen }], null,
+    ...LANGS.map(([code, name]) => [name, () => pick(code), { on: chosen === code, lang: code }])], $("lang"));
+};
+
+// The words of the open page drawn here rather than in its HTML; again when the language changes.
+function labels() {
+  themeButton();
+  $("lang").title = T("Language");
+  $("lang").setAttribute("aria-label", T("Language"));
+  if (idOnly) {
+    $("addrlabel").textContent = T("Remote access ID");
+    $("addr").placeholder = "123 456 789";
+    $("addr").setAttribute("aria-label", T("Remote access ID"));
+  }
+}
+labels();
 if (idOnly) {
-  $("addrlabel").textContent = "Remote access ID";
-  $("addr").placeholder = "123 456 789";
   $("addr").setAttribute("inputmode", "numeric");
-  $("addr").setAttribute("aria-label", "Remote access ID");
   $("gatelink").hidden = true;
 }
 
@@ -335,29 +487,29 @@ $("form").onsubmit = async e => {
   e.preventDefault();
   fail("");
   const p = parse($("addr").value);
-  if (!p) { fail("Enter a remote access ID, or an SSH host such as user@192.168.1.20."); $("addr").focus(); return; }
-  if (idOnly && p.kind !== "id") { fail("This page opens computers by their 9-digit ID. For SSH, use the app: sshremote.dev."); $("addr").focus(); return; }
-  if (p.kind === "id" && p.address.length !== 9) { fail("An ID is 9 digits."); $("addr").focus(); return; }
+  if (!p) { fail(T("Enter a remote access ID, or an SSH host such as user@192.168.1.20.")); $("addr").focus(); return; }
+  if (idOnly && p.kind !== "id") { fail(T("This page opens computers by their 9-digit ID. For SSH, use the app: sshremote.dev.")); $("addr").focus(); return; }
+  if (p.kind === "id" && p.address.length !== 9) { fail(T("An ID is 9 digits.")); $("addr").focus(); return; }
   const port = p.kind === "ssh" ? ($("port").value.trim() || p.port || "") : "";
-  if (port && !(+port >= 1 && +port <= 65535)) { fail("A port is a number from 1 to 65535."); $("port").focus(); return; }
+  if (port && !(+port >= 1 && +port <= 65535)) { fail(T("A port is a number from 1 to 65535.")); $("port").focus(); return; }
   const t = { kind: p.kind, address: p.address, port, key: keyOf({ ...p, port }) };
   const typed = $("pw").value;
   const known = saved().find(x => x.key === t.key);
   let password = typed;
   if (!typed && known?.pw) {
-    try { password = await unseal(known.pw); } catch { fail("The saved password could not be read on this browser; type it again."); $("pw").focus(); return; }
+    try { password = await unseal(known.pw); } catch { fail(T("The saved password could not be read on this browser; type it again.")); $("pw").focus(); return; }
   }
   // An ID without a password asks the person there to let this page in (where that computer
   // takes such requests; else it says so and the password is asked for).
   // SSH: the gateway's sign-in is its own step; the host's password is asked for after it.
   if (p.kind === "ssh" && !signedIn()) {
     const gp = $("gatepw").value;
-    if (!gp) { fail("The gateway's password, set where it runs."); $("gatepw").focus(); return; }
+    if (!gp) { fail(T("The gateway's password, set where it runs.")); $("gatepw").focus(); return; }
     $("go").disabled = true;
     try { await signIn(gp, $("gatekeep").checked); } catch (err) { $("go").disabled = false; fail(err.message); $("gatepw").focus(); return; }
     $("go").disabled = false;
     $("gatepw").value = "";
-    toast("Signed in to this gateway. Now the SSH host's password, if it asks for one.");
+    toast(T("Signed in to this gateway. Now the SSH host's password, if it asks for one."));
     $("pw").focus();
     return;
   }
@@ -374,29 +526,29 @@ function renderSaved() {
   box.textContent = "";
   $("savedn").textContent = list.length ? list.length : "";
   $("guide").hidden = list.length > 0;
-  if (!list.length) { box.append(h("div", { class: "empty", text: "Computers you open are kept here, to open again with a click." })); return; }
+  if (!list.length) { box.append(h("div", { class: "empty", text: T("Computers you open are kept here, to open again with a click.") })); return; }
   for (const e of list) {
-    const sub = [e.kind === "id" ? "Remote access by ID" : e.kind === "gw" ? "On this gateway" : "SSH" + (e.port ? " · port " + e.port : ""),
-      e.pw ? "password kept" : null, e.last ? ago(e.last) : null].filter(Boolean).join(" · ");
+    const sub = [e.kind === "id" ? T("Remote access by ID") : e.kind === "gw" ? T("On this gateway") : e.port ? T("SSH · port {}", e.port) : "SSH",
+      e.pw ? T("password kept") : null, e.last ? ago(e.last) : null].filter(Boolean).join(" · ");
     const go = () => openSaved(e);
-    const more = button("dots", null, { title: "More", class: "btn icon" });
+    const more = button("dots", null, { title: T("More"), class: "btn icon" });
     more.onclick = ev => {
       ev.stopPropagation();
       menu([
-        ["Connect", go, { icon: "open" }],
-        ["Rename…", async () => {
-          const name = await ask({ title: "Rename", field: title(e), value: title(e), ok: "Rename" });
+        [T("Connect"), go, { icon: "open" }],
+        [T("Rename…"), async () => {
+          const name = await ask({ title: T("Rename"), field: title(e), value: title(e), ok: T("Rename") });
           if (name !== null) { update(e.key, { name: name.trim() || null }); renderSaved(); }
         }, { icon: "rename" }],
-        ["Forget the password", () => { update(e.key, { pw: null }); renderSaved(); refreshForm(); }, { icon: "lock", disabled: !e.pw }],
+        [T("Forget the password"), () => { update(e.key, { pw: null }); renderSaved(); refreshForm(); }, { icon: "lock", disabled: !e.pw }],
         null,
-        ["Remove", () => { store.set("saved", saved().filter(x => x.key !== e.key)); renderSaved(); }, { icon: "trash" }],
+        [T("Remove"), () => { store.set("saved", saved().filter(x => x.key !== e.key)); renderSaved(); }, { icon: "trash" }],
       ], more);
     };
-    const row = h("div", { class: "item", tabindex: "0", title: "Click to fill in, double-click to connect" },
+    const row = h("div", { class: "item", tabindex: "0", title: T("Click to fill in, double-click to connect") },
       h("div", { class: "ico" }, icon(e.kind === "id" || e.address === "This computer" ? "monitor" : e.kind === "gw" ? "server" : "terminal")),
       h("div", { class: "what" }, h("b", { text: title(e) }), h("span", { text: sub })),
-      h("div", { class: "acts" }, button(null, "Connect", { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } }), more));
+      h("div", { class: "acts" }, button(null, T("Connect"), { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } }), more));
     row.onclick = () => {
       for (const r of box.children) r.classList.remove("sel");
       row.classList.add("sel");
@@ -434,7 +586,7 @@ async function openSaved(e) {
 
 function renderGateway() {
   $("gatesec").hidden = !signedIn() || !gateway.hosts;
-  $("gatelink").textContent = signedIn() ? "Signed in to this gateway" : "Sign in to this gateway";
+  $("gatelink").textContent = signedIn() ? T("Signed in to this gateway") : T("Sign in to this gateway");
   const box = $("ghosts");
   box.textContent = "";
   for (const host of gateway.hosts || []) {
@@ -442,8 +594,8 @@ function renderGateway() {
     const go = () => connect({ ...t, ...(saved().find(x => x.key === t.key) || {}), password: "" });
     const row = h("div", { class: "item", tabindex: "0" },
       h("div", { class: "ico" }, icon(host === "This computer" ? "monitor" : "server")),
-      h("div", { class: "what" }, h("b", { text: host }), h("span", { text: host === "This computer" ? "The gateway's own computer" : "From the gateway's ~/.ssh/config" })),
-      h("div", { class: "acts" }, button(null, "Connect", { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } })));
+      h("div", { class: "what" }, h("b", { text: host === "This computer" ? T("This computer") : host }), h("span", { text: host === "This computer" ? T("The gateway's own computer") : T("From the gateway's ~/.ssh/config") })),
+      h("div", { class: "acts" }, button(null, T("Connect"), { class: "btn primary", onclick: ev => { ev.stopPropagation(); go(); } })));
     row.ondblclick = go;
     row.onkeydown = ev => { if (ev.key === "Enter") go(); };
     box.append(row);
@@ -457,11 +609,11 @@ function signIn(password, remember, token) {
     let settled = false;
     const end = (f, v) => { if (!settled) { settled = true; f(v); try { ws.close(); } catch { /* gone */ } } };
     ws.onopen = () => ws.send(JSON.stringify({ gateway: token ? { token } : { password, remember } }));
-    ws.onerror = () => end(no, new Error("The gateway could not be reached."));
-    ws.onclose = () => end(no, new Error("The gateway closed the connection."));
+    ws.onerror = () => end(no, new Error(T("The gateway could not be reached.")));
+    ws.onclose = () => end(no, new Error(T("The gateway closed the connection.")));
     ws.onmessage = m => {
       const v = JSON.parse(m.data);
-      if (v.error) { end(no, Object.assign(new Error(v.error), { signin: !!v.signin })); return; }
+      if (v.error) { end(no, Object.assign(new Error(said(v.error)), { signin: !!v.signin })); return; }
       if (!v.signedIn) return;
       gateway.hosts = v.signedIn.hosts;
       if (v.signedIn.token) {
@@ -486,9 +638,9 @@ $("signout").onclick = signOut;
 $("gatelink").onclick = async e => {
   e.preventDefault();
   if (signedIn()) { signOut(); return; }
-  const pw = await ask({ title: "Sign in to this gateway", text: "Its password lets this browser reach SSH hosts and the gateway's own computers.", field: "Gateway password", ok: "Sign in" });
+  const pw = await ask({ title: T("Sign in to this gateway"), text: T("Its password lets this browser reach SSH hosts and the gateway's own computers."), field: T("Gateway password"), ok: T("Sign in") });
   if (pw === null) return;
-  try { await signIn(pw, true); toast("Signed in to this gateway for 30 days."); } catch (err) { toast(err.message, { bad: true }); }
+  try { await signIn(pw, true); toast(T("Signed in to this gateway for 30 days.")); } catch (err) { toast(err.message, { bad: true }); }
 };
 
 // ----- A connection ---------------------------------------------------------------------------------
@@ -690,7 +842,7 @@ class Client {
     $("banner").hidden = true;
     $("name").textContent = $("tabname").textContent = title(t);
     document.title = title(t) + " - SSH Remote Web";
-    this.state("Connecting…");
+    this.state(T("Connecting…"));
     this.chrome();
     this.terminal();
     this.screen();
@@ -731,24 +883,24 @@ class Client {
     if (this.ended || this.lost) return;
     // A try at coming back that did not get through: the next one, a while later.
     if (!this.ready && this.t.retry) { this.lost = true; this.retry(why, this.t.retry); return; }
-    if (!this.ready) { this.leave(why || "The connection could not be made."); return; }
+    if (!this.ready) { this.leave(why || T("The connection could not be made.")); return; }
     this.lost = true;
     this.ready = false;
-    this.state("Connection lost", "down");
+    this.state(T("Connection lost"), "down");
     this.releaseKeys?.();
     this.retry(why, 0);
   }
   // Comes back by itself, as the app does: after 2, 4, 8... seconds (30 at most), eight times;
   // the banner counts down, and Reconnect tries at once.
   retry(why, done) {
-    const text = why || "The connection was lost.";
+    const text = why ? said(why) : T("The connection was lost.");
     $("banner").hidden = false;
     clearInterval(this.retryTimer);
     if (done >= 8) { $("bannertext").textContent = text; $("again").focus(); return; }
     let left = Math.min(30, 2 ** (done + 1));
     const tick = () => {
       if (current !== this) { clearInterval(this.retryTimer); return; }
-      $("bannertext").textContent = text + " Trying again in " + left + " s…";
+      $("bannertext").textContent = T("{} Trying again in {} s…", text, left);
       if (left-- <= 0) { clearInterval(this.retryTimer); connect({ ...this.t, view: this.view, retry: done + 1 }); }
     };
     tick();
@@ -768,7 +920,7 @@ class Client {
       $("port").value = t.port || "";
       refreshForm();
     }
-    fail(error || "");
+    fail(error ? said(error) : "");
     // A computer with two-step sign-in took the password and wants the app's code.
     const code = /authenticator|wrong code/.test(error || "");
     $("code").hidden = !code;
@@ -807,7 +959,7 @@ class Client {
       else if (b[0] === 7) this.callPlayer?.packet(b.subarray(1));
       else if (b[0] === 5) {
         saveBlob(new Blob([b.subarray(1)], { type: "image/png" }), "screen-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
-        toast("A lossless picture of the screen was saved.");
+        toast(T("A lossless picture of the screen was saved."));
       }
       else if (b[0] === 3) this.chunk(new DataView(m.data).getUint32(1, true), b.slice(5));
       // A picture copied on the host; none (too large to come over) still says the host's clipboard is newer.
@@ -816,7 +968,7 @@ class Client {
       return;
     }
     const v = JSON.parse(m.data);
-    if (v.status) this.state(v.status);
+    if (v.status) this.state(said(v.status));
     if (v.error && !this.ready) {
       // Signed out: the gateway forgot this browser.
       if (v.signin) signOut();
@@ -828,7 +980,7 @@ class Client {
       this.ready = true;
       this.setBackend(v.ready.backend);
       for (const q of this.queued?.splice(0) || []) this.send(q);
-      this.state(v.ready.screen ? v.ready.screen[0] + "×" + v.ready.screen[1] : "Connected", "up");
+      this.state(v.ready.screen ? v.ready.screen[0] + "×" + v.ready.screen[1] : T("Connected"), "up");
       if (v.ready.screen) this.agentUp(v.ready.screen);
       // An ID is in once ready; an SSH host once its shell stays up or its agent answers.
       if (this.t.kind === "id") this.remember();
@@ -843,14 +995,14 @@ class Client {
     if (v.hostPointer !== undefined) { this.hostPtrAt = v.hostPointer; this.pointerLook(); }
     if (v.exit !== undefined) {
       this.shellEnded = true;
-      this.term.write("\r\n\x1b[2m[" + (v.exit || "the shell ended") + " — press a key for a new one]\x1b[0m\r\n");
+      this.term.write("\r\n\x1b[2m[" + T("{} — press a key for a new one", v.exit ? said(v.exit) : T("the shell ended")) + "]\x1b[0m\r\n");
       // ssh refused the sign-in: said plainly, with the way back to the password.
       if (this.t.kind !== "id" && !this.kept && /permission denied|authentication failed|too many authentication/i.test(this.tail || "")) {
         clearTimeout(this.keepTimer);
         this.lost = true;
-        $("bannertext").textContent = "The SSH host refused the sign-in: check the user name and the password.";
-        $("again").textContent = "Change the password";
-        $("again").onclick = () => this.leave("The SSH host refused the sign-in: check the user name and the password.", true);
+        $("bannertext").textContent = T("The SSH host refused the sign-in: check the user name and the password.");
+        $("again").textContent = T("Change the password");
+        $("again").onclick = () => this.leave(T("The SSH host refused the sign-in: check the user name and the password."), true);
         $("banner").hidden = false;
       }
     }
@@ -864,7 +1016,7 @@ class Client {
     if (v.clipboard !== undefined) this.clipboardIn(v.clipboard);
     if (v.chat !== undefined) this.chatIn(v.chat);
     if (v.windows) this.windowPick(v.windows);
-    if (v.sharing) { this.sharing = v.sharing; toast("Sharing " + v.sharing.text + "."); this.screenTools(); }
+    if (v.sharing) { this.sharing = v.sharing; toast(T("Sharing {}.", said(v.sharing.text))); this.screenTools(); }
     if (v.monitors) { this.monitors = v.monitors; this.screenTools(); }
     if (v.modes) { this.modes = v.modes; this.screenTools(); }
     if (v.qualities) {
@@ -876,7 +1028,7 @@ class Client {
     if (v.quality) { this.quality = v.quality; this.figures(); }
     if (v.stats) { this.stats = v.stats; this.figures(); }
     if (v.allowed) this.allowedIn(v.allowed);
-    if (v.notice) toast(v.notice, { bad: /fail|error|cannot|denied|does not let/i.test(v.notice) });
+    if (v.notice) toast(said(v.notice), { bad: /fail|error|cannot|denied|does not let/i.test(v.notice) });
     if (v.host) {
       this.host = v.host;
       const at = this.hostWait;
@@ -886,7 +1038,7 @@ class Client {
     if (typeof v.call === "number") this.callState(v.call);
     if (v.end || v.error) {
       const why = v.end || v.error;
-      this.term.write("\r\n\x1b[31m[" + why + "]\x1b[0m\r\n");
+      this.term.write("\r\n\x1b[31m[" + said(why) + "]\x1b[0m\r\n");
       this.closed(why);
     }
   }
@@ -902,7 +1054,7 @@ class Client {
     $("gatepw").value = "";
     const entry = { key: t.key || keyOf(t), kind: t.kind, address: t.address, port: t.port || "", name: t.name || null, last: Date.now(), view: this.view, pw: t.kept || null };
     if (t.keep && t.password) {
-      try { entry.pw = await seal(t.password); } catch { toast("This browser cannot keep the password safely; it was not saved.", { bad: true }); }
+      try { entry.pw = await seal(t.password); } catch { toast(T("This browser cannot keep the password safely; it was not saved."), { bad: true }); }
     }
     save(entry);
   }
@@ -911,7 +1063,7 @@ class Client {
   chrome() {
     setButton($("full"), "full");
     setButton($("fold"), "caretup");
-    setButton($("bye"), "logout", "Close");
+    setButton($("bye"), "logout", T("Close"));
     setButton($("limits"), "shield");
     $("limits").hidden = true;
     for (const b of document.querySelectorAll("#bar [data-view]")) {
@@ -927,7 +1079,7 @@ class Client {
     const fs = () => {
       const on = !!document.fullscreenElement;
       setButton($("full"), on ? "unfull" : "full");
-      $("full").title = on ? "Leave full screen" : "Full screen";
+      $("full").title = on ? T("Leave full screen") : T("Full screen");
       fold(on);
       // Esc, Win and Alt+Tab go to the host while its screen fills this one.
       if (on && this.view === "screen") navigator.keyboard?.lock?.().catch(() => {});
@@ -951,7 +1103,7 @@ class Client {
     };
     $("chat").hidden = true;
     this.chatRender();
-    $("again").textContent = "Reconnect";
+    $("again").textContent = T("Reconnect");
     $("again").onclick = () => { clearInterval(this.retryTimer); connect({ ...this.t, view: this.view, retry: 0 }); };
     $("home2").onclick = () => this.leave();
     const resize = () => this.relayout();
@@ -966,7 +1118,7 @@ class Client {
     const b = $("limits");
     b.hidden = a.all;
     if (a.all) return;
-    const text = "The person at that computer lets you use: " + a.words + ".";
+    const text = T("The person at that computer lets you use: {}.", said(a.words));
     b.title = text;
     b.onclick = () => toast(text);
   }
@@ -1035,7 +1187,7 @@ class Client {
   agentDown(why) {
     this.agent = "failed";
     this.agentWhy = why;
-    if (this.ready) this.state("Terminal only", "up");
+    if (this.ready) this.state(T("Terminal only"), "up");
     this.screenWait();
     this.filesWait();
   }
@@ -1055,7 +1207,7 @@ class Client {
     term.attachCustomKeyEventHandler(e => {
       if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
       if (e.code === "KeyC") { const s = term.getSelection(); if (s) navigator.clipboard?.writeText(s).catch(() => {}); return false; }
-      if (e.code === "KeyV") { navigator.clipboard?.readText().then(t => t && term.paste(t), () => toast("This browser did not let the page read the clipboard: use Ctrl+V.", { bad: true })); return false; }
+      if (e.code === "KeyV") { navigator.clipboard?.readText().then(t => t && term.paste(t), () => toast(T("This browser did not let the page read the clipboard: use Ctrl+V."), { bad: true })); return false; }
       return true;
     });
     term.onData(d => {
@@ -1090,9 +1242,9 @@ class Client {
     if (this.pictured) { w.hidden = true; return; }
     w.hidden = false;
     if (this.agent === "failed") {
-      w.append(h("div", {}, h("div", { class: "bad", text: "The screen could not be reached." }), h("div", { text: this.agentWhy || "" })));
+      w.append(h("div", {}, h("div", { class: "bad", text: T("The screen could not be reached.") }), h("div", { text: said(this.agentWhy || "") })));
     } else {
-      w.append(h("div", {}, h("div", { class: "spin" }), h("div", { text: this.agent === "up" ? "Waiting for the picture…" : "Connecting for the screen…" })));
+      w.append(h("div", {}, h("div", { class: "spin" }), h("div", { text: this.agent === "up" ? T("Waiting for the picture…") : T("Connecting for the screen…") })));
     }
   }
   screen() {
@@ -1319,7 +1471,7 @@ class Client {
       e.preventDefault();
       if (this.viewOnly) return;
       const list = await dropped(e.dataTransfer);
-      if (list.length) { this.queueUploads(list, ""); toast("Sending to the host's Downloads folder; the Files view shows how far it is."); }
+      if (list.length) { this.queueUploads(list, ""); toast(T("Sending to the host's Downloads folder; the Files view shows how far it is.")); }
     };
     // The tools as buttons or as one menu, by the window's width.
     const narrow = matchMedia("(max-width: 760px)");
@@ -1352,7 +1504,7 @@ class Client {
     if (swap !== !!this.swapCmd) { this.releaseKeys?.(); this.swapCmd = swap; }
   }
   combo(keys) {
-    if (this.viewOnly) { toast("View only: nothing is sent to the host."); return; }
+    if (this.viewOnly) { toast(T("View only: nothing is sent to the host.")); return; }
     for (const k of keys) this.send({ key: [k, 1] });
     for (const k of [...keys].reverse()) this.send({ key: [k, 0] });
     this.keyboard();
@@ -1366,10 +1518,10 @@ class Client {
   // size and one picture a second, the least traffic, to full colour at full size and 60.
   customQuality() {
     const Q = this.quality || { mode: "true", scale: 100, fps: 30 };
-    const MODES = [["mono", "Black and white"], ["gray4", "4 greys"], ["gray16", "16 greys"], ["16c", "16 colours"], ["256c", "256 colours"], ["true", "Full colour"]];
+    const MODES = [["mono", T("Black and white")], ["gray4", T("4 greys")], ["gray16", T("16 greys")], ["16c", T("16 colours")], ["256c", T("256 colours")], ["true", T("Full colour")]];
     const box = $("modal").firstElementChild;
     box.textContent = "";
-    const mode = h("select", { "aria-label": "Colours" }, ...MODES.map(([v, t]) => h("option", { value: v, text: t, selected: v === Q.mode })));
+    const mode = h("select", { "aria-label": T("Colours") }, ...MODES.map(([v, t]) => h("option", { value: v, text: t, selected: v === Q.mode })));
     const slider = (label, min, max, step, value, unit) => {
       const out = h("output", { text: value + unit });
       const r = h("input", { type: "range", min, max, step, value, "aria-label": label });
@@ -1377,19 +1529,19 @@ class Client {
       return [h("label", { class: "range" }, h("span", { text: label }), r, out), r];
     };
     // The picture sent, not the screen: its resolution is set in the quality menu.
-    const [scaleRow, scale] = slider("Picture size", 10, 100, 5, Q.scale || 100, "%");
-    const [fpsRow, fps] = slider("Frame rate", 1, 120, 1, Q.fps || 30, " fps");
+    const [scaleRow, scale] = slider(T("Picture size"), 10, 100, 5, Q.scale || 100, "%");
+    const [fpsRow, fps] = slider(T("Frame rate"), 1, 120, 1, Q.fps || 30, " fps");
     const finish = ok => {
       $("modal").hidden = true;
       removeEventListener("keydown", keys, true);
       if (ok) this.setQuality({ quality: "custom", mode: mode.value, scale: +scale.value, fps: +fps.value });
     };
     const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(false); } };
-    const yes = h("button", { type: "button", class: "btn primary", text: "Use it", onclick: () => finish(true) });
-    box.append(h("h2", { text: "Picture quality of your own" }),
-      h("p", { text: "Fewer colours, a smaller picture and fewer pictures a second send less: black and white at a tenth of the size and 1 fps is the least." }),
-      h("label", { class: "range" }, h("span", { text: "Colours" }), mode), scaleRow, fpsRow,
-      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: () => finish(false) }), yes));
+    const yes = h("button", { type: "button", class: "btn primary", text: T("Use it"), onclick: () => finish(true) });
+    box.append(h("h2", { text: T("Picture quality of your own") }),
+      h("p", { text: T("Fewer colours, a smaller picture and fewer pictures a second send less: black and white at a tenth of the size and 1 fps is the least.") }),
+      h("label", { class: "range" }, h("span", { text: T("Colours") }), mode), scaleRow, fpsRow,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: T("Cancel"), onclick: () => finish(false) }), yes));
     $("modal").hidden = false;
     addEventListener("keydown", keys, true);
     mode.focus();
@@ -1398,7 +1550,7 @@ class Client {
   figures() {
     const parts = [];
     if (this.desk) parts.push(this.desk[0] + "×" + this.desk[1]);
-    if (this.quality && this.view === "screen") parts.push(this.quality.text);
+    if (this.quality && this.view === "screen") parts.push(said(this.quality.text));
     if (this.stats && this.view === "screen") parts.push(this.stats.kbps.toFixed(this.stats.kbps < 10 ? 1 : 0) + " KB/s", Math.round(this.stats.rtt) + " ms");
     this.state(parts.join(" · "), "up");
   }
@@ -1414,10 +1566,10 @@ class Client {
       const s = screens?.[i];
       const features = s ? `left=${s.availLeft},top=${s.availTop},width=${s.availWidth},height=${s.availHeight}` : `left=${80 + 40 * k},top=${80 + 40 * k},width=1100,height=720`;
       const win = window.open(location.pathname + "#screen=" + i, "_blank", features);
-      if (!win) { toast("The browser kept the new window from opening: allow pop-ups for this page.", { bad: true }); return; }
+      if (!win) { toast(T("The browser kept the new window from opening: allow pop-ups for this page."), { bad: true }); return; }
       spreads.set(win, { t: { ...this.t, view: "screen", monitor: i, retry: 0 }, gateway: gatewayAuth() });
     }
-    if (screens && screens.length > 1) toast("Press the full-screen button in each window to fill its monitor.");
+    if (screens && screens.length > 1) toast(T("Press the full-screen button in each window to fill its monitor."));
   }
   // The terminal below the screen, as the app shows it, while the screen is the view.
   splitView() {
@@ -1435,16 +1587,16 @@ class Client {
     const finish = () => { $("modal").hidden = true; removeEventListener("keydown", keys, true); };
     const keys = e => { if (e.key === "Escape") { e.preventDefault(); finish(); } };
     const list = h("div", { class: "picklist" });
-    if (w.error) list.append(h("p", { class: "bad", text: w.error }));
+    if (w.error) list.append(h("p", { class: "bad", text: said(w.error) }));
     for (const win of w.list || []) {
-      const one = h("button", { type: "button", class: "btn", text: "This window", onclick: () => { finish(); this.send({ share: { kind: "window", id: win.id } }); } });
-      const all = h("button", { type: "button", class: "btn", text: "All of " + (win.app || "its program"), onclick: () => { finish(); this.send({ share: { kind: "app", id: win.id } }); } });
-      list.append(h("div", { class: "pick" }, h("div", { class: "grow" }, h("b", { text: win.title || "(no title)" }), h("small", { text: (win.app ? win.app + " · " : "") + win.w + "×" + win.h })), one, all));
+      const one = h("button", { type: "button", class: "btn", text: T("This window"), onclick: () => { finish(); this.send({ share: { kind: "window", id: win.id } }); } });
+      const all = h("button", { type: "button", class: "btn", text: T("All of {}", win.app || T("its program")), onclick: () => { finish(); this.send({ share: { kind: "app", id: win.id } }); } });
+      list.append(h("div", { class: "pick" }, h("div", { class: "grow" }, h("b", { text: win.title || T("(no title)") }), h("small", { text: (win.app ? win.app + " · " : "") + win.w + "×" + win.h })), one, all));
     }
-    if (!w.error && !(w.list || []).length) list.append(h("p", { text: "No window to share on its own." }));
-    box.append(h("h2", { text: "Share one window or program" }),
-      h("p", { text: "Its menus and dialogs show with it; clicks outside it stay here." }), list,
-      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: "Cancel", onclick: finish })));
+    if (!w.error && !(w.list || []).length) list.append(h("p", { text: T("No window to share on its own.") }));
+    box.append(h("h2", { text: T("Share one window or program") }),
+      h("p", { text: T("Its menus and dialogs show with it; clicks outside it stay here.") }), list,
+      h("div", { class: "acts" }, h("button", { type: "button", class: "btn solid", text: T("Cancel"), onclick: finish })));
     $("modal").hidden = false;
     addEventListener("keydown", keys, true);
   }
@@ -1453,7 +1605,7 @@ class Client {
     this.chatLines.push({ you: false, text, at: new Date() });
     if ($("chat").hidden) {
       this.unread++;
-      toast("Message from the host: " + text);
+      toast(T("Message from the host: {}", text));
       this.screenTools();
     }
     this.chatRender();
@@ -1470,24 +1622,24 @@ class Client {
     if (state === 2) {
       this.callPlayer = soundPlayer();
       this.voice = await voiceSender(p => { if (this.ws?.readyState === 1) this.ws.send(new Uint8Array([7, ...p])); });
-      toast(this.voice ? "In a call with the person at that computer." : "In a call: this browser cannot send your voice, but you hear them.");
+      toast(this.voice ? T("In a call with the person at that computer.") : T("In a call: this browser cannot send your voice, but you hear them."));
     } else if (state === 0 || state === 3) {
       this.voice?.close(); this.callPlayer?.close();
       this.voice = this.callPlayer = null;
-      if (state === 3) toast("They did not answer the call.");
-      else if (was === 2) toast("The call ended.");
+      if (state === 3) toast(T("They did not answer the call."));
+      else if (was === 2) toast(T("The call ended."));
     }
     this.screenTools();
   }
   toggleCall() {
     if (this.call === 1 || this.call === 2) { this.send({ call: false }); this.callState(0); }
-    else { this.call = 1; this.send({ call: true }); toast("Calling the person at that computer…"); this.screenTools(); }
+    else { this.call = 1; this.send({ call: true }); toast(T("Calling the person at that computer…")); this.screenTools(); }
   }
   // Records the screen as it shows here, into a video file the browser saves.
   toggleRecord() {
     if (this.recorder) { this.recorder.stop(); return; }
     const canvas = $("canvas");
-    if (!canvas.captureStream || !window.MediaRecorder) { toast("This browser cannot record the screen.", { bad: true }); return; }
+    if (!canvas.captureStream || !window.MediaRecorder) { toast(T("This browser cannot record the screen."), { bad: true }); return; }
     const type = ["video/webm;codecs=vp9", "video/webm", "video/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || "";
     const rec = new MediaRecorder(canvas.captureStream(15), type ? { mimeType: type } : {});
     const parts = [];
@@ -1501,21 +1653,22 @@ class Client {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-      toast("The recording is saved.");
+      toast(T("The recording is saved."));
       this.screenTools();
     };
     rec.start(1000);
     this.recorder = rec;
-    toast("Recording the screen; the button again stops it and saves the video.");
+    toast(T("Recording the screen; the button again stops it and saves the video."));
     this.screenTools();
   }
   chatRender() {
     const log = $("chatlog");
     log.textContent = "";
-    if (!this.chatLines.length) log.append(h("div", { class: "empty", text: "Messages go to a chat window on the host's screen, and its answers come here." }));
+    if (!this.chatLines.length) log.append(h("div", { class: "empty", text: T("Messages go to a chat window on the host's screen, and its answers come here.") }));
     for (const m of this.chatLines) {
       const line = h("div", { class: "msg" + (m.you ? " you" : ""), text: m.text });
-      line.append(h("small", { text: (m.you ? "You" : "Host") + ", " + m.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }));
+      const at = m.at.toLocaleTimeString(dateLang, { hour: "2-digit", minute: "2-digit" });
+      line.append(h("small", { text: m.you ? T("You, {}", at) : T("Host, {}", at) }));
       log.append(line);
     }
     log.scrollTop = log.scrollHeight;
@@ -1531,98 +1684,98 @@ class Client {
     // The menus, each opened under `at`.
     // Between a Mac and another computer: each side's shortcuts with its own keys (as it is when
     // the menu opens).
-    const trade = mac => mac !== HERE_MAC ? [null, [mac ? "Ctrl here is Cmd there" : "Cmd here is Ctrl there", () => {
+    const trade = mac => mac !== HERE_MAC ? [null, [mac ? T("Ctrl here is Cmd there") : T("Cmd here is Ctrl there"), () => {
       this.releaseKeys?.();
       this.swapCmd = !this.swapCmd;
-      toast(this.swapCmd ? (mac ? "Ctrl+C, Ctrl+V and the rest work there as here; Win is Ctrl there." : "Cmd+C, Cmd+V and the rest work there as here; Ctrl is Win there.") : "The keys go there as they are.");
+      toast(this.swapCmd ? (mac ? T("Ctrl+C, Ctrl+V and the rest work there as here; Win is Ctrl there.") : T("Cmd+C, Cmd+V and the rest work there as here; Ctrl is Win there.")) : T("The keys go there as they are."));
       this.keyboard();
     }, { on: !!this.swapCmd }]] : [];
     // A Mac's own shortcuts, named as macOS names them.
     const keysMenu = at => this.backend === "mac" ? menu([
-      ["Lock the screen", () => this.combo([K.ctrl, K.win, 0x71]), { kbd: "Ctrl+Cmd+Q" }],
-      ["Spotlight", () => this.combo([K.win, 0x20]), { kbd: "Cmd+Space" }],
-      ["Cmd + the next key", () => { this.winNext = true; toast("Press the key to go with Cmd."); this.keyboard(); }],
-      ["Switch applications", () => this.combo([K.win, K.tab]), { kbd: "Cmd+Tab" }],
-      ["Mission Control", () => this.combo([K.ctrl, 0xff52]), { kbd: "Ctrl+Up" }],
-      ["Force Quit", () => this.combo([K.alt, K.win, K.esc]), { kbd: "Option+Cmd+Esc" }],
-      ["Screenshot", () => this.combo([K.shift, K.win, 0x35]), { kbd: "Shift+Cmd+5" }],
-      ["Close the window", () => this.combo([K.win, 0x77]), { kbd: "Cmd+W" }],
-      ["Quit the application", () => this.combo([K.win, 0x71]), { kbd: "Cmd+Q" }],
+      [T("Lock the screen"), () => this.combo([K.ctrl, K.win, 0x71]), { kbd: "Ctrl+Cmd+Q" }],
+      [T("Spotlight"), () => this.combo([K.win, 0x20]), { kbd: "Cmd+Space" }],
+      [T("Cmd + the next key"), () => { this.winNext = true; toast(T("Press the key to go with Cmd.")); this.keyboard(); }],
+      [T("Switch applications"), () => this.combo([K.win, K.tab]), { kbd: "Cmd+Tab" }],
+      [T("Mission Control"), () => this.combo([K.ctrl, 0xff52]), { kbd: "Ctrl+Up" }],
+      [T("Force Quit"), () => this.combo([K.alt, K.win, K.esc]), { kbd: "Option+Cmd+Esc" }],
+      [T("Screenshot"), () => this.combo([K.shift, K.win, 0x35]), { kbd: "Shift+Cmd+5" }],
+      [T("Close the window"), () => this.combo([K.win, 0x77]), { kbd: "Cmd+W" }],
+      [T("Quit the application"), () => this.combo([K.win, 0x71]), { kbd: "Cmd+Q" }],
       ...trade(true),
     ], at) : menu([
       ["Ctrl+Alt+Del", () => { if (!this.viewOnly) this.send({ sas: 1 }); }],
-      ["Lock the screen", () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
-      ["Start menu", () => this.combo([K.win]), { kbd: "Win" }],
-      ["Show the desktop", () => this.combo([K.win, 0x64]), { kbd: "Win+D" }],
-      ["Win + the next key", () => { this.winNext = true; toast("Press the key to go with Win."); this.keyboard(); }],
-      ["Switch windows", () => this.combo([K.alt, K.tab]), { kbd: "Alt+Tab" }],
-      ["Close the window", () => this.combo([K.alt, K.f4]), { kbd: "Alt+F4" }],
-      ["Task Manager", () => this.combo([K.ctrl, K.shift, K.esc]), { kbd: "Ctrl+Shift+Esc" }],
-      ["Run", () => this.combo([K.win, 0x72]), { kbd: "Win+R" }],
-      ["File Explorer", () => this.combo([K.win, 0x65]), { kbd: "Win+E" }],
-      ["Print Screen", () => this.combo([K.prt]), { kbd: "PrtSc" }],
+      [T("Lock the screen"), () => this.combo([K.win, 0x6c]), { kbd: "Win+L" }],
+      [T("Start menu"), () => this.combo([K.win]), { kbd: "Win" }],
+      [T("Show the desktop"), () => this.combo([K.win, 0x64]), { kbd: "Win+D" }],
+      [T("Win + the next key"), () => { this.winNext = true; toast(T("Press the key to go with Win.")); this.keyboard(); }],
+      [T("Switch windows"), () => this.combo([K.alt, K.tab]), { kbd: "Alt+Tab" }],
+      [T("Close the window"), () => this.combo([K.alt, K.f4]), { kbd: "Alt+F4" }],
+      [T("Task Manager"), () => this.combo([K.ctrl, K.shift, K.esc]), { kbd: "Ctrl+Shift+Esc" }],
+      [T("Run"), () => this.combo([K.win, 0x72]), { kbd: "Win+R" }],
+      [T("File Explorer"), () => this.combo([K.win, 0x65]), { kbd: "Win+E" }],
+      [T("Print Screen"), () => this.combo([K.prt]), { kbd: "PrtSc" }],
       ...trade(false),
     ], at);
     const clipMenu = at => menu([
-      ["Paste my clipboard into the host", () => this.pasteHere()],
-      ["Paste files there…", () => this.pasteFiles(), { disabled: this.viewOnly }],
-      ["Type or paste text for the host…", async () => {
-        const text = await ask({ title: "Send text to the host", text: "It goes on the host's clipboard; paste it there.", area: "Text", ok: "Send" });
-        if (text) { this.send({ clipboard: text }); toast("On the host's clipboard."); }
+      [T("Paste my clipboard into the host"), () => this.pasteHere()],
+      [T("Paste files there…"), () => this.pasteFiles(), { disabled: this.viewOnly }],
+      [T("Type or paste text for the host…"), async () => {
+        const text = await ask({ title: T("Send text to the host"), text: T("It goes on the host's clipboard; paste it there."), area: T("Text"), ok: T("Send") });
+        if (text) { this.send({ clipboard: text }); toast(T("On the host's clipboard.")); }
       }],
       null,
-      ["Copy the host's clipboard here", () => this.copyHostClip(), { disabled: this.hostClip === null }],
-      ["Copy the host's picture here", () => this.copyHostImage(), { disabled: !this.hostImage }],
+      [T("Copy the host's clipboard here"), () => this.copyHostClip(), { disabled: this.hostClip === null }],
+      [T("Copy the host's picture here"), () => this.copyHostImage(), { disabled: !this.hostImage }],
     ], at);
     // The screen's own resolution (its display mode), set back when this connection ends.
-    const modesMenu = at => { const M = this.modes, same = (a, b) => a[0] === b[0] && a[1] === b[1]; menu(["Resolution of its screen",
-      ...M.list.map(m => [m.join("×") + (same(m, M.own) ? " (its own)" : ""), () => this.send({ mode: m }), { on: same(m, M.current) }]),
-      ...(same(M.current, M.own) ? [] : [null, ["Back to its own, " + M.own.join("×"), () => this.send({ mode: [0, 0] })]]),
+    const modesMenu = at => { const M = this.modes, same = (a, b) => a[0] === b[0] && a[1] === b[1]; menu([T("Resolution of its screen"),
+      ...M.list.map(m => [same(m, M.own) ? T("{} (its own)", m.join("×")) : m.join("×"), () => this.send({ mode: m }), { on: same(m, M.current) }]),
+      ...(same(M.current, M.own) ? [] : [null, [T("Back to its own, {}", M.own.join("×")), () => this.send({ mode: [0, 0] })]]),
     ], at); };
     // Read when opened: the quality changes after the bar is made (auto, the host's answer).
-    const qualityMenu = at => { const Q = this.quality || {}; menu(["Picture quality",
-      ["Auto (adapts to the connection)", () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
-      ...(this.qualities || []).map((p, i) => [p.text, () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
-      ["Custom: colours, picture size, frame rate…", () => this.customQuality(), { on: Q.preset === "custom" }],
-      ...(this.modes?.list.length ? [null, ["Resolution of its screen: " + this.modes.current.join("×") + "…", () => modesMenu(at)]] : []),
+    const qualityMenu = at => { const Q = this.quality || {}; menu([T("Picture quality"),
+      [T("Auto (adapts to the connection)"), () => this.setQuality({ quality: "auto" }), { on: !!Q.auto }],
+      ...(this.qualities || []).map((p, i) => [said(p.text), () => this.setQuality({ quality: "preset", level: i }), { on: !Q.auto && Q.preset === p.name }]),
+      [T("Custom: colours, picture size, frame rate…"), () => this.customQuality(), { on: Q.preset === "custom" }],
+      ...(this.modes?.list.length ? [null, [T("Resolution of its screen: {}…", this.modes.current.join("×")), () => modesMenu(at)]] : []),
       null,
-      "View",
-      ["Fit to the window", () => this.setFit("fit"), { on: this.viewFit === "fit" }],
-      ["Stretch to fill", () => this.setFit("stretch"), { on: this.viewFit === "stretch" }],
-      ...[0.5, 0.75, 1, 1.5, 2].map(z => [z * 100 + "%" + (z === 1 ? " (the host's own size)" : ""), () => this.setFit(z), { on: this.viewFit === z }]),
+      T("View"),
+      [T("Fit to the window"), () => this.setFit("fit"), { on: this.viewFit === "fit" }],
+      [T("Stretch to fill"), () => this.setFit("stretch"), { on: this.viewFit === "stretch" }],
+      ...[0.5, 0.75, 1, 1.5, 2].map(z => [z === 1 ? T("{}% (the host's own size)", z * 100) : z * 100 + "%", () => this.setFit(z), { on: this.viewFit === z }]),
       null,
-      ["Repaint the whole screen", () => this.send({ refresh: 1 })],
+      [T("Repaint the whole screen"), () => this.send({ refresh: 1 })],
     ], at); };
     const several = this.monitors && this.monitors.list.length > 1;
     // What of the host is shared: all of the screen, or one window or program, with its menus.
     const kind = this.sharing?.kind || 0;
-    const shareMenu = at => menu(["Share",
-      ["The whole screen", () => this.send({ share: { kind: "screen" } }), { on: kind === 0 }],
-      ["The window in front", () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
-      ["The program in front, all its windows", () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
-      ["One window or program…", () => this.send({ windows: 1 })],
+    const shareMenu = at => menu([T("Share"),
+      [T("The whole screen"), () => this.send({ share: { kind: "screen" } }), { on: kind === 0 }],
+      [T("The window in front"), () => this.send({ share: { kind: "activeWindow" } }), { on: kind === 1 || kind === 3 }],
+      [T("The program in front, all its windows"), () => this.send({ share: { kind: "activeApp" } }), { on: kind === 2 || kind === 4 }],
+      [T("One window or program…"), () => this.send({ windows: 1 })],
     ], at);
     const camera = m => m.name.startsWith("Camera: ");
     const monitorMenu = at => menu([...this.monitors.list.map((m, i) =>
-      [camera(m) ? m.name : (i + 1) + "  " + m.name + " (" + m.w + "×" + m.h + (m.primary ? ", primary" : "") + ")", () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
-      ...(this.monitors.list.filter(m => !camera(m)).length > 1 ? [null, ["All its screens, a window each", () => this.spread()]] : [])], at);
+      [camera(m) ? said(m.name) : (i + 1) + "  " + (m.primary ? T("{} ({}×{}, primary)", m.name, m.w, m.h) : m.name + " (" + m.w + "×" + m.h + ")"), () => this.send({ monitor: i }), { on: i === this.monitors.current }]),
+      ...(this.monitors.list.filter(m => !camera(m)).length > 1 ? [null, [T("All its screens, a window each"), () => this.spread()]] : [])], at);
     // The computer itself: asked what it can do the first time, then opened where it was asked for.
     const computerMenu = this.computerMenu = at => {
       const H = this.host;
       if (!H) { this.hostWait = at; this.send({ host: { act: 0 } }); return; }
-      if (!H.can) return menu(["The person at that computer does not let you do these."], at);
+      if (!H.can) return menu([T("The person at that computer does not let you do these.")], at);
       const can = a => (H.can & (1 << a)) !== 0, on = a => (H.on & (1 << a)) !== 0;
       const only = a => !can(a) ? { disabled: true } : {};
-      menu(["This computer",
-        ["Lock it", () => this.send({ host: { act: 2, on: true } }), { icon: "lock", ...only(2) }],
-        ["Restart it…", async () => {
-          if (await ask({ title: "Restart the computer?", text: "Programs there close; unsaved work may be lost. The connection comes back when it is up, if remote access starts with it.", ok: "Restart now", danger: true }))
+      menu([T("This computer"),
+        [T("Lock it"), () => this.send({ host: { act: 2, on: true } }), { icon: "lock", ...only(2) }],
+        [T("Restart it…"), async () => {
+          if (await ask({ title: T("Restart the computer?"), text: T("Programs there close; unsaved work may be lost. The connection comes back when it is up, if remote access starts with it."), ok: T("Restart now"), danger: true }))
             this.send({ host: { act: 1, on: true } });
         }, { icon: "reload", ...only(1) }],
         null,
-        ["Keep its keyboard and mouse out", () => this.send({ host: { act: 3, on: !on(3) } }), { on: on(3), ...only(3) }],
-        ["Hide its screen", () => this.send({ host: { act: 4, on: !on(4) } }), { on: on(4), ...only(4) }],
-        ["Lock it when I leave", () => this.send({ host: { act: 5, on: !on(5) } }), { on: on(5), ...only(5) }],
+        [T("Keep its keyboard and mouse out"), () => this.send({ host: { act: 3, on: !on(3) } }), { on: on(3), ...only(3) }],
+        [T("Hide its screen"), () => this.send({ host: { act: 4, on: !on(4) } }), { on: on(4), ...only(4) }],
+        [T("Lock it when I leave"), () => this.send({ host: { act: 5, on: !on(5) } }), { on: on(5), ...only(5) }],
       ], at);
     };
     const viewOnly = () => {
@@ -1630,7 +1783,7 @@ class Client {
       if (this.viewOnly) this.releaseKeys();
       $("vscreen").classList.toggle("viewonly", this.viewOnly);
       this.pointerLook();
-      toast(this.viewOnly ? "View only: keys and clicks stay here." : "Keys and clicks reach the host again.");
+      toast(this.viewOnly ? T("View only: keys and clicks stay here.") : T("Keys and clicks reach the host again."));
       this.screenTools();
     };
     // The host's own pixels, lossless, whatever the quality shown here.
@@ -1638,7 +1791,7 @@ class Client {
     const pause = () => {
       this.paused = !this.paused;
       this.send({ pause: this.paused });
-      toast(this.paused ? "Paused: no picture comes until you go on or fetch one." : "The picture goes on.");
+      toast(this.paused ? T("Paused: no picture comes until you go on or fetch one.") : T("The picture goes on."));
       this.screenTools();
     };
     // A narrow screen (a phone): one button for all of it, so the bar keeps its right end.
@@ -1647,83 +1800,83 @@ class Client {
       if (this.sound) { this.sound.close(); this.sound = null; this.send({ sound: false }); }
       else {
         this.sound = soundPlayer();
-        if (!this.sound) { toast("This browser cannot play the host's sound (it needs WebCodecs: Chrome, Edge or Firefox).", { bad: true }); return; }
+        if (!this.sound) { toast(T("This browser cannot play the host's sound (it needs WebCodecs: Chrome, Edge or Firefox)."), { bad: true }); return; }
         this.send({ sound: true });
       }
       this.screenTools();
     };
     const below = () => { this.split = !this.split; store.set("split", this.split); this.splitView(); this.screenTools(); };
     if (matchMedia("(max-width: 760px)").matches) {
-      const more = button("dots", null, { title: "The screen's tools" });
+      const more = button("dots", null, { title: T("The screen's tools") });
       more.classList.toggle("on", this.viewOnly);
       more.onclick = () => {
         const items = [
-          ["Keyboard", () => this.keyboard(), { icon: "keyboard" }],
-          [this.unread ? "Chat (" + this.unread + " new)" : "Chat", () => this.chatShow($("chat").hidden), { icon: "chat", on: !$("chat").hidden }],
-          ["Keys…", () => keysMenu(more), { icon: "keyboard" }],
-          ["This computer…", () => computerMenu(more), { icon: "lock" }],
-          ["Clipboard…", () => clipMenu(more), { icon: "clipboard" }],
-          ["Picture quality…", () => qualityMenu(more), { icon: "sliders" }],
-          ["Share…", () => shareMenu(more), { icon: "window", on: kind !== 0 }],
-          ["Sound", sound, { icon: "sound", on: !!this.sound }],
-          [this.call === 2 ? "Hang up" : "Call the person there", () => this.toggleCall(), { icon: "phone", on: this.call === 1 || this.call === 2 }],
-          [this.recorder ? "Stop recording" : "Record the screen", () => this.toggleRecord(), { icon: "record", on: !!this.recorder }],
-          ["The terminal below", below, { icon: "below", on: !!this.split }],
+          [T("Keyboard"), () => this.keyboard(), { icon: "keyboard" }],
+          [this.unread ? T("Chat ({} new)", this.unread) : T("Chat"), () => this.chatShow($("chat").hidden), { icon: "chat", on: !$("chat").hidden }],
+          [T("Keys…"), () => keysMenu(more), { icon: "keyboard" }],
+          [T("This computer…"), () => computerMenu(more), { icon: "lock" }],
+          [T("Clipboard…"), () => clipMenu(more), { icon: "clipboard" }],
+          [T("Picture quality…"), () => qualityMenu(more), { icon: "sliders" }],
+          [T("Share…"), () => shareMenu(more), { icon: "window", on: kind !== 0 }],
+          [T("Sound"), sound, { icon: "sound", on: !!this.sound }],
+          [this.call === 2 ? T("Hang up") : T("Call the person there"), () => this.toggleCall(), { icon: "phone", on: this.call === 1 || this.call === 2 }],
+          [this.recorder ? T("Stop recording") : T("Record the screen"), () => this.toggleRecord(), { icon: "record", on: !!this.recorder }],
+          [T("The terminal below"), below, { icon: "below", on: !!this.split }],
         ];
-        if (several) items.push(["Which screen…", () => monitorMenu(more), { icon: "screens" }]);
-        items.push(null, [this.paused ? "Go on" : "Pause the picture", pause, { icon: this.paused ? "play" : "pause", on: this.paused }]);
-        if (this.paused) items.push(["Fetch one picture", () => this.send({ refresh: 1 }), { icon: "reload" }]);
-        items.push(["View only", viewOnly, { icon: "eye", on: this.viewOnly }], ["Save a picture of the screen", shot, { icon: "camera" }]);
+        if (several) items.push([T("Which screen…"), () => monitorMenu(more), { icon: "screens" }]);
+        items.push(null, [this.paused ? T("Go on") : T("Pause the picture"), pause, { icon: this.paused ? "play" : "pause", on: this.paused }]);
+        if (this.paused) items.push([T("Fetch one picture"), () => this.send({ refresh: 1 }), { icon: "reload" }]);
+        items.push([T("View only"), viewOnly, { icon: "eye", on: this.viewOnly }], [T("Save a picture of the screen"), shot, { icon: "camera" }]);
         menu(items, more);
       };
       bar.append(more);
       return;
     }
-    const keys = button("keyboard", "Keys", { title: "Keys this browser keeps for itself" });
+    const keys = button("keyboard", T("Keys"), { title: T("Keys this browser keeps for itself") });
     keys.onclick = () => keysMenu(keys);
-    const computer = button("lock", null, { title: "This computer: lock, restart, keep its keyboard out, hide its screen" });
+    const computer = button("lock", null, { title: T("This computer: lock, restart, keep its keyboard out, hide its screen") });
     computer.onclick = () => computerMenu(computer);
-    const clip = button("clipboard", "Clipboard", { title: "Copy and paste between this computer and the host" });
+    const clip = button("clipboard", T("Clipboard"), { title: T("Copy and paste between this computer and the host") });
     clip.onclick = () => clipMenu(clip);
     // Its screen's own resolution is set from here too, when it can be.
-    const quality = button("sliders", null, { title: this.modes?.list.length ? "Picture quality and the resolution of its screen" : "Picture quality" });
+    const quality = button("sliders", null, { title: this.modes?.list.length ? T("Picture quality and the resolution of its screen") : T("Picture quality") });
     quality.onclick = () => qualityMenu(quality);
-    const chat = button("chat", null, { title: "Chat with the person at the host" });
+    const chat = button("chat", null, { title: T("Chat with the person at the host") });
     chat.classList.toggle("on", !$("chat").hidden);
     if (this.unread) chat.append(h("span", { class: "count", text: String(this.unread) }));
     chat.onclick = () => this.chatShow($("chat").hidden);
-    const hear = button("sound", null, { title: this.sound ? "Stop the host's sound" : "Hear the host's sound" });
+    const hear = button("sound", null, { title: this.sound ? T("Stop the host's sound") : T("Hear the host's sound") });
     hear.classList.toggle("on", !!this.sound);
     hear.onclick = sound;
-    const term = button("below", null, { title: this.split ? "The screen alone" : "The terminal below the screen" });
+    const term = button("below", null, { title: this.split ? T("The screen alone") : T("The terminal below the screen") });
     term.classList.toggle("on", !!this.split);
     term.onclick = below;
-    const share = button("window", null, { title: "Share the whole screen, one window or one program" });
+    const share = button("window", null, { title: T("Share the whole screen, one window or one program") });
     share.classList.toggle("on", kind !== 0);
     share.onclick = () => shareMenu(share);
-    const phone = button("phone", null, { title: this.call === 2 ? "Hang up" : this.call === 1 ? "Calling… (click to call off)" : "Call the person at that computer: talk through the microphones" });
+    const phone = button("phone", null, { title: this.call === 2 ? T("Hang up") : this.call === 1 ? T("Calling… (click to call off)") : T("Call the person at that computer: talk through the microphones") });
     phone.classList.toggle("on", this.call === 1 || this.call === 2);
     phone.onclick = () => this.toggleCall();
-    const rec = button("record", null, { title: this.recorder ? "Stop recording and save the video" : "Record the screen to a video file" });
+    const rec = button("record", null, { title: this.recorder ? T("Stop recording and save the video") : T("Record the screen to a video file") });
     rec.classList.toggle("on", !!this.recorder);
     rec.onclick = () => this.toggleRecord();
     bar.append(keys, computer, clip, quality, share, chat, hear, phone, rec, term);
     if (several) {
-      const mon = button("screens", null, { title: "Which of the host's screens" });
+      const mon = button("screens", null, { title: T("Which of the host's screens") });
       mon.onclick = () => monitorMenu(mon);
       bar.append(mon);
     }
-    const eye = button("eye", null, { title: "View only: watch without sending keys or clicks" });
+    const eye = button("eye", null, { title: T("View only: watch without sending keys or clicks") });
     eye.classList.toggle("on", this.viewOnly);
     eye.onclick = viewOnly;
-    const cam = button("camera", null, { title: "Save a lossless picture of the screen" });
+    const cam = button("camera", null, { title: T("Save a lossless picture of the screen") });
     cam.onclick = shot;
-    const hold = button(this.paused ? "play" : "pause", null, { title: this.paused ? "Go on with the picture" : "Pause the picture, to save traffic" });
+    const hold = button(this.paused ? "play" : "pause", null, { title: this.paused ? T("Go on with the picture") : T("Pause the picture, to save traffic") });
     hold.classList.toggle("on", !!this.paused);
     hold.onclick = pause;
     bar.append(eye, hold);
     if (this.paused) {
-      const one = button("reload", null, { title: "Fetch one picture" });
+      const one = button("reload", null, { title: T("Fetch one picture") });
       one.onclick = () => this.send({ refresh: 1 });
       bar.append(one);
     }
@@ -1739,15 +1892,15 @@ class Client {
         }
       } catch { /* text, below */ }
     }
-    if (!navigator.clipboard?.readText) { toast("This browser does not let the page read the clipboard; use “Type or paste text”.", { bad: true }); return; }
+    if (!navigator.clipboard?.readText) { toast(T("This browser does not let the page read the clipboard; use “Type or paste text”."), { bad: true }); return; }
     try {
       const text = await navigator.clipboard.readText();
-      if (!text) { toast("The clipboard has no text."); return; }
+      if (!text) { toast(T("The clipboard has no text.")); return; }
       this.sentClip = text;
       this.send({ clipboard: text });
       // Then Ctrl+V there, once the text is on its clipboard.
       setTimeout(() => this.combo([K.ctrl, 0x76]), 150);
-    } catch { toast("The page was not allowed to read the clipboard.", { bad: true }); }
+    } catch { toast(T("The page was not allowed to read the clipboard."), { bad: true }); }
   }
   // What a paste in the screen brought: a picture onto the host's clipboard, files as files, or
   // text; then `paste` (Ctrl+V there).
@@ -1802,20 +1955,20 @@ class Client {
       }
       this.send({ clipImageEnd: true });
       setTimeout(paste, 250);
-    } catch { settle(); toast("The picture could not be read.", { bad: true }); }
+    } catch { settle(); toast(T("The picture could not be read."), { bad: true }); }
   }
   // A picture copied on the host: onto this computer's clipboard when the browser allows it, or
   // a button to do it (or to save it, where pictures cannot be copied).
   clipImageIn(blob) {
     this.hostImage = blob;
-    const offer = () => toast("A picture was copied on the host.", window.ClipboardItem ? { action: ["Copy here", () => this.copyHostImage()] } : { action: ["Save", () => this.saveHostImage()] });
+    const offer = () => toast(T("A picture was copied on the host."), window.ClipboardItem ? { action: [T("Copy here"), () => this.copyHostImage()] } : { action: [T("Save"), () => this.saveHostImage()] });
     if (!window.ClipboardItem || !navigator.clipboard?.write) { offer(); return; }
     navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(() => {}, offer);
   }
   copyHostImage() {
     if (!this.hostImage) return;
     if (!window.ClipboardItem || !navigator.clipboard?.write) { this.saveHostImage(); return; }
-    navigator.clipboard.write([new ClipboardItem({ "image/png": this.hostImage })]).then(() => toast("Copied here."), () => toast("This browser did not allow copying a picture.", { bad: true, action: ["Save", () => this.saveHostImage()] }));
+    navigator.clipboard.write([new ClipboardItem({ "image/png": this.hostImage })]).then(() => toast(T("Copied here.")), () => toast(T("This browser did not allow copying a picture."), { bad: true, action: [T("Save"), () => this.saveHostImage()] }));
   }
   saveHostImage() {
     if (this.hostImage) saveBlob(this.hostImage, "picture-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png");
@@ -1824,19 +1977,19 @@ class Client {
     this.hostTurn = true;
     this.hostAt = Date.now();
     this.hostClip = text;
-    navigator.clipboard?.writeText(text).then(() => {}, () => toast("Copied on the host.", { action: ["Copy here", () => this.copyHostClip()] }));
+    navigator.clipboard?.writeText(text).then(() => {}, () => toast(T("Copied on the host."), { action: [T("Copy here"), () => this.copyHostClip()] }));
   }
   copyHostClip() {
     if (this.hostClip === null) return;
-    navigator.clipboard?.writeText(this.hostClip).then(() => toast("Copied here."), () => toast("This browser did not allow copying.", { bad: true }));
+    navigator.clipboard?.writeText(this.hostClip).then(() => toast(T("Copied here.")), () => toast(T("This browser did not allow copying."), { bad: true }));
   }
 
   // ----- Files
   filesView() {
     setButton($("fup"), "up"); setButton($("fhome"), "home"); setButton($("freload"), "reload");
-    setButton($("fnew"), "newfolder", "New folder"); setButton($("fsend"), "upload", "Upload");
+    setButton($("fnew"), "newfolder", T("New folder")); setButton($("fsend"), "upload", T("Upload"));
     setButton($("fhidden"), "eye");
-    const hiddenState = () => { const on = store.get("hidden", false); $("fhidden").classList.toggle("on", on); $("fhidden").title = on ? "Hide hidden files" : "Show hidden files (names starting with a dot)"; };
+    const hiddenState = () => { const on = store.get("hidden", false); $("fhidden").classList.toggle("on", on); $("fhidden").title = on ? T("Hide hidden files") : T("Show hidden files (names starting with a dot)"); };
     hiddenState();
     $("fhidden").onclick = () => { store.set("hidden", !store.get("hidden", false)); hiddenState(); this.renderFiles(); };
     const f = this.files;
@@ -1846,7 +1999,7 @@ class Client {
     $("path").onkeydown = e => { if (e.key === "Enter") { this.list($("path").value.trim()); $("ftable").focus(); } if (e.key === "Escape") { $("path").value = f.cwd === "::" ? "" : f.cwd || ""; $("ftable").focus(); } };
     $("path").onfocus = () => $("path").select();
     $("fnew").onclick = () => this.newFolder();
-    $("fsend").onclick = () => menu([["Files…", () => $("fpick").click(), { icon: "file" }], ["A folder…", () => $("fpickdir").click(), { icon: "folder" }]], $("fsend"));
+    $("fsend").onclick = () => menu([[T("Files…"), () => $("fpick").click(), { icon: "file" }], [T("A folder…"), () => $("fpickdir").click(), { icon: "folder" }]], $("fsend"));
     $("fpick").onchange = () => { this.queueUploads([...$("fpick").files].map(file => ({ file, name: file.name }))); $("fpick").value = ""; };
     $("fpickdir").onchange = () => { this.queueUploads([...$("fpickdir").files].map(file => ({ file, name: file.webkitRelativePath || file.name }))); $("fpickdir").value = ""; };
     const drop = $("vfiles");
@@ -1867,7 +2020,7 @@ class Client {
     if (this.agent === "failed" && !this.files.entries.length) {
       const t = $("ftable");
       t.textContent = "";
-      t.append(h("div", { class: "msg bad", text: "The files could not be reached: " + (this.agentWhy || "") }));
+      t.append(h("div", { class: "msg bad", text: T("The files could not be reached: {}", said(this.agentWhy || "")) }));
     }
   }
   sep(p) { return p.includes("\\") || /^[A-Za-z]:/.test(p) ? "\\" : "/"; }
@@ -1876,7 +2029,7 @@ class Client {
     if (this.files.cwd === null && this.agent !== "up") {
       const t = $("ftable");
       t.textContent = "";
-      t.append(h("div", { class: "msg" }, h("div", { class: "spin" }), "Connecting for the files…"));
+      t.append(h("div", { class: "msg" }, h("div", { class: "spin" }), T("Connecting for the files…")));
     }
     this.send({ list: p });
   }
@@ -1910,13 +2063,13 @@ class Client {
     t.textContent = "";
     const [key, dir] = f.sort;
     const head = h("div", { class: "head" });
-    for (const [k, label, cls] of [["name", "Name"], ["size", "Size", "r"], ["mtime", "Modified", "when"]]) {
+    for (const [k, label, cls] of [["name", T("Name")], ["size", T("Size"), "r"], ["mtime", T("Modified"), "when"]]) {
       head.append(h("span", { class: cls, text: label + (key === k ? (dir > 0 ? " ▲" : " ▼") : ""), onclick: () => { f.sort = [k, key === k ? -dir : 1]; this.renderFiles(); } }));
     }
     t.append(head);
-    if (f.error) { t.append(h("div", { class: "msg bad", text: f.error })); this.renderSel(); return; }
+    if (f.error) { t.append(h("div", { class: "msg bad", text: said(f.error) })); this.renderSel(); return; }
     const rows = this.sorted();
-    if (!rows.length) t.append(h("div", { class: "msg", text: f.entries.length ? "Only hidden files here." : "This folder is empty." }));
+    if (!rows.length) t.append(h("div", { class: "msg", text: f.entries.length ? T("Only hidden files here.") : T("This folder is empty.") }));
     for (const e of rows) {
       const row = h("div", { class: "f" + (e.dir ? " dir" : "") + (f.sel.has(e.name) ? " sel" : ""), title: e.name },
         h("div", { class: "n" }, icon(e.dir ? "folder" : "file"), h("span", { text: e.name })),
@@ -1957,12 +2110,12 @@ class Client {
   actions() {
     const s = this.selected(), one = s.length === 1 ? s[0] : null;
     const items = [];
-    if (one?.dir) items.push(["Open", () => this.activate(one), { icon: "open", kbd: "Enter" }]);
+    if (one?.dir) items.push([T("Open"), () => this.activate(one), { icon: "open", kbd: "Enter" }]);
     items.push(
-      ["Download" + (s.length > 1 || one?.dir ? " as ZIP" : ""), () => this.download(s), { icon: "download", disabled: !s.length }],
-      ["Rename…", () => this.rename(one), { icon: "rename", kbd: "F2", disabled: !one }],
+      [s.length > 1 || one?.dir ? T("Download as ZIP") : T("Download"), () => this.download(s), { icon: "download", disabled: !s.length }],
+      [T("Rename…"), () => this.rename(one), { icon: "rename", kbd: "F2", disabled: !one }],
       null,
-      ["Delete…", () => this.remove(s), { icon: "trash", kbd: "Del", disabled: !s.length }]);
+      [T("Delete…"), () => this.remove(s), { icon: "trash", kbd: "Del", disabled: !s.length }]);
     return items;
   }
   renderSel() {
@@ -1971,26 +2124,28 @@ class Client {
     const what = h("div", { class: "what" });
     if (!s.length) {
       const n = this.sorted().length, hid = this.files.entries.length - n;
-      what.textContent = this.files.cwd === null ? "" : n + (n === 1 ? " item" : " items") + (hid ? " (" + hid + " hidden)" : "") + " · click to select, double-click to open";
+      const count = n === 1 ? (hid ? T("{} item ({} hidden)", n, hid) : T("{} item", n)) : hid ? T("{} items ({} hidden)", n, hid) : T("{} items", n);
+      what.textContent = this.files.cwd === null ? "" : count + " · " + T("click to select, double-click to open");
       bar.append(what);
       return;
     }
     if (s.length === 1) {
       const e = s[0];
-      what.append(h("b", { text: e.name }), " · " + (e.dir ? "folder" : size(e.size)) + (e.mtime ? " · modified " + when(e.mtime) : ""));
+      what.append(h("b", { text: e.name }), " · " + (e.dir ? T("folder") : size(e.size)) + (e.mtime ? " · " + T("modified {}", when(e.mtime)) : ""));
     } else {
       const files = s.filter(e => !e.dir), dirs = s.length - files.length;
-      what.append(h("b", { text: s.length + " selected" }),
-        " · " + [files.length ? files.length + (files.length === 1 ? " file, " : " files, ") + size(files.reduce((n, e) => n + e.size, 0)) : null,
-          dirs ? dirs + (dirs === 1 ? " folder" : " folders") : null].filter(Boolean).join(" and "));
+      const sz = size(files.reduce((n, e) => n + e.size, 0));
+      const of = [files.length ? (files.length === 1 ? T("{} file, {}", 1, sz) : T("{} files, {}", files.length, sz)) : null,
+        dirs ? (dirs === 1 ? T("{} folder", dirs) : T("{} folders", dirs)) : null].filter(Boolean);
+      what.append(h("b", { text: T("{} selected", s.length) }), " · " + (of.length === 2 ? T("{} and {}", ...of) : of[0]));
     }
     const one = s.length === 1 ? s[0] : null;
     bar.append(what);
-    if (one?.dir) bar.append(button("open", "Open", { class: "btn solid", onclick: () => this.activate(one) }));
+    if (one?.dir) bar.append(button("open", T("Open"), { class: "btn solid", onclick: () => this.activate(one) }));
     bar.append(
-      button("download", s.length > 1 || one?.dir ? "Download ZIP" : "Download", { class: "btn primary", onclick: () => this.download(s) }),
-      button("rename", "Rename", { class: "btn solid", disabled: !one, onclick: () => this.rename(one) }),
-      button("trash", "Delete", { class: "btn solid danger", onclick: () => this.remove(s) }));
+      button("download", s.length > 1 || one?.dir ? T("Download ZIP") : T("Download"), { class: "btn primary", onclick: () => this.download(s) }),
+      button("rename", T("Rename"), { class: "btn solid", disabled: !one, onclick: () => this.rename(one) }),
+      button("trash", T("Delete"), { class: "btn solid danger", onclick: () => this.remove(s) }));
   }
   fileKeys(e) {
     const f = this.files, rows = this.sorted();
@@ -2011,8 +2166,8 @@ class Client {
     else if (e.key === "Escape") { f.sel.clear(); this.renderFiles(); }
   }
   async newFolder() {
-    if (this.files.cwd === null || this.files.cwd === "::") { toast("Open a folder first."); return; }
-    const name = await ask({ title: "New folder", field: "Name", value: "New folder", select: v => [0, v.length], ok: "Create" });
+    if (this.files.cwd === null || this.files.cwd === "::") { toast(T("Open a folder first.")); return; }
+    const name = await ask({ title: T("New folder"), field: T("Name"), value: T("New folder"), select: v => [0, v.length], ok: T("Create") });
     if (!name?.trim()) return;
     this.ops = 1;
     this.send({ op: ["mkdir", this.join(this.files.cwd, name.trim()), ""] });
@@ -2020,7 +2175,7 @@ class Client {
   async rename(e) {
     if (!e) return;
     const stem = e.dir ? e.name.length : (e.name.lastIndexOf(".") > 0 ? e.name.lastIndexOf(".") : e.name.length);
-    const name = await ask({ title: "Rename", field: "New name", value: e.name, select: () => [0, stem], ok: "Rename" });
+    const name = await ask({ title: T("Rename"), field: T("New name"), value: e.name, select: () => [0, stem], ok: T("Rename") });
     if (!name?.trim() || name.trim() === e.name) return;
     this.ops = 1;
     this.files.sel = new Set([name.trim()]);
@@ -2028,17 +2183,16 @@ class Client {
   }
   async remove(s) {
     if (!s.length) return;
-    const what = s.length === 1 ? "“" + s[0].name + "”" : s.length + " items";
-    const ok = await ask({ title: "Delete " + what + "?", text: "Folders go with everything in them. This cannot be undone.", ok: "Delete", danger: true });
+    const ok = await ask({ title: s.length === 1 ? T("Delete “{}”?", s[0].name) : T("Delete {} items?", s.length), text: T("Folders go with everything in them. This cannot be undone."), ok: T("Delete"), danger: true });
     if (!ok) return;
     this.ops = s.length;
     this.opErrors = [];
     for (const e of s) this.send({ op: ["delete", this.join(this.files.cwd, e.name), ""] });
   }
   opDone(d) {
-    if (!d.ok) (this.opErrors ||= []).push(d.text);
+    if (!d.ok) (this.opErrors ||= []).push(said(d.text));
     if (--this.ops > 0) return;
-    if (this.opErrors?.length) toast(this.opErrors.length === 1 ? this.opErrors[0] : this.opErrors.length + " could not be done: " + this.opErrors[0], { bad: true });
+    if (this.opErrors?.length) toast(this.opErrors.length === 1 ? this.opErrors[0] : T("{} could not be done: {}", this.opErrors.length, this.opErrors[0]), { bad: true });
     this.opErrors = [];
     this.list(this.files.cwd);
   }
@@ -2047,7 +2201,7 @@ class Client {
   download(items) {
     if (!items.length) return;
     const single = items.length === 1 && !items[0].dir ? items[0] : null;
-    if (single && single.size > MAX_TRANSFER) { toast("Larger than 2 GB: too large for a browser download.", { bad: true }); return; }
+    if (single && single.size > MAX_TRANSFER) { toast(T("Larger than 2 GB: too large for a browser download."), { bad: true }); return; }
     const cwdName = (this.files.cwd || "").split(/[\\/]/).filter(Boolean).pop() || "files";
     const name = single ? single.name : (items.length === 1 ? items[0].name : cwdName) + ".zip";
     const job = { name, zip: !single, tags: new Set(), done: new Set(), entries: [], open: 0, failed: [], bytes: 0, last: Date.now(), cancelled: false };
@@ -2068,8 +2222,8 @@ class Client {
     this.byId.set(f.id, { job, entry });
     job.open++;
     job.last = Date.now();
-    if (job.bytes + f.size > MAX_TRANSFER) { this.cancelJob(job, "More than 2 GB in all: too large for a browser download."); return; }
-    job.ui.label(job.zip ? job.name + " · " + (job.entries.length + 1) + " files" : job.name);
+    if (job.bytes + f.size > MAX_TRANSFER) { this.cancelJob(job, T("More than 2 GB in all: too large for a browser download.")); return; }
+    job.ui.label(job.zip ? job.name + " · " + T("{} files", job.entries.length + 1) : job.name);
   }
   chunk(id, bytes) {
     const d = this.byId.get(id);
@@ -2086,8 +2240,8 @@ class Client {
     if (!d) {
       // Could not even be opened there.
       const job = this.jobs.get((f.tag ?? 0) >>> 0);
-      if (job) { job.failed.push(f.text || f.name); job.last = Date.now(); }
-      else if (!f.ok && f.text && f.text !== "cancelled") toast(f.text, { bad: true });
+      if (job) { job.failed.push(f.text ? said(f.text) : f.name); job.last = Date.now(); }
+      else if (!f.ok && f.text && f.text !== "cancelled") toast(said(f.text), { bad: true });
       return;
     }
     this.byId.delete(f.id);
@@ -2095,7 +2249,7 @@ class Client {
     job.open--;
     job.last = Date.now();
     if (job.cancelled) return;
-    if (f.ok) job.entries.push(entry); else job.failed.push(entry.name + ": " + (f.text || "failed"));
+    if (f.ok) job.entries.push(entry); else job.failed.push(entry.name + ": " + (f.text ? said(f.text) : T("failed")));
     if (!job.zip) this.finishJob(job);
   }
   fetchDone(tag) {
@@ -2110,19 +2264,19 @@ class Client {
     clearInterval(job.timer);
     for (const t of job.tags) this.jobs.delete(t);
     if (job.cancelled) return;
-    if (!job.entries.length) { job.ui.done(false, job.failed[0] || "Nothing to download"); return; }
+    if (!job.entries.length) { job.ui.done(false, job.failed[0] || T("Nothing to download")); return; }
     const blob = job.zip ? zipBlob(job.entries) : new Blob(job.entries[0].parts);
     saveBlob(blob, job.zip ? job.name : job.entries[0].name.split(/[\\/]/).pop());
-    const failed = job.failed.length ? " · " + job.failed.length + " could not be read" : "";
-    job.ui.done(true, (job.zip ? job.entries.length + " files, " : "") + size(blob.size) + failed);
-    if (job.failed.length) toast(job.failed.length + " could not be downloaded: " + job.failed[0], { bad: true });
+    const failed = job.failed.length ? " · " + T("{} could not be read", job.failed.length) : "";
+    job.ui.done(true, (job.zip ? T("{} files, {}", job.entries.length, size(blob.size)) : size(blob.size)) + failed);
+    if (job.failed.length) toast(T("{} could not be downloaded: {}", job.failed.length, job.failed[0]), { bad: true });
   }
   cancelJob(job, why) {
     if (job.finished) return;
     job.cancelled = true;
     for (const tag of job.tags) this.send({ cancel: 0, tag });
     for (const [id, d] of this.byId) if (d.job === job) { this.send({ cancel: id }); this.byId.delete(id); }
-    job.ui.done(false, why || "Cancelled");
+    job.ui.done(false, why || T("Cancelled"));
     this.finishJob(job);
   }
 
@@ -2143,18 +2297,18 @@ class Client {
     if (!files.length || this.viewOnly) return;
     const batch = "web-" + Date.now();
     this.queueUploads(files.map(file => ({ file, name: file.name })), "\u0000clipboard/" + batch, () => this.send({ pasteFiles: { batch, names: files.map(f => f.name) } }));
-    toast("Pasting " + files.length + (files.length === 1 ? " file" : " files") + " there…");
+    toast(files.length === 1 ? T("Pasting {} file there…", 1) : T("Pasting {} files there…", files.length));
   }
   queueUploads(list, dir = this.files.cwd, done = null) {
     if (!list.length) return;
-    if (dir === null || dir === "::") { toast("Open a folder first."); return; }
+    if (dir === null || dir === "::") { toast(T("Open a folder first.")); return; }
     const big = list.filter(u => u.file.size > MAX_TRANSFER);
-    if (big.length) toast(big.length + " larger than 2 GB left out: too large to send from a browser.", { bad: true });
+    if (big.length) toast(T("{} larger than 2 GB left out: too large to send from a browser.", big.length), { bad: true });
     const items = list.filter(u => u.file.size <= MAX_TRANSFER);
     if (!items.length) return;
     const total = items.reduce((n, u) => n + u.file.size, 0);
     const batch = { dir, count: items.length, sent: 0, bytes: 0, total, failed: [], cancelled: false, done };
-    batch.ui = this.xferRow("upload", items.length === 1 ? items[0].name : items.length + " files", total, () => { batch.cancelled = true; });
+    batch.ui = this.xferRow("upload", items.length === 1 ? items[0].name : T("{} files", items.length), total, () => { batch.cancelled = true; });
     for (const u of items) this.uploads.push({ ...u, batch });
     this.pump();
   }
@@ -2190,17 +2344,17 @@ class Client {
     this.sending = null;
     s.wake?.();
     const b = s.u.batch;
-    if (!d.ok && !b.cancelled) b.failed.push(s.u.name + ": " + d.text);
+    if (!d.ok && !b.cancelled) b.failed.push(s.u.name + ": " + said(d.text));
     b.bytes += s.u.file.size;
     this.batchStep(b);
     this.pump();
   }
   batchStep(b) {
     b.sent++;
-    if (b.sent < b.count) { b.ui.label(b.count + " files · " + b.sent + " of " + b.count); return; }
-    if (b.cancelled) b.ui.done(false, "Cancelled");
-    else if (b.failed.length) { b.ui.done(false, b.failed.length + " failed: " + b.failed[0]); }
-    else { b.ui.done(true, size(b.total) + " sent"); b.done?.(); }
+    if (b.sent < b.count) { b.ui.label(T("{} files", b.count) + " · " + T("{} of {}", b.sent, b.count)); return; }
+    if (b.cancelled) b.ui.done(false, T("Cancelled"));
+    else if (b.failed.length) { b.ui.done(false, T("{} failed: {}", b.failed.length, b.failed[0])); }
+    else { b.ui.done(true, T("{} sent", size(b.total))); b.done?.(); }
     if (this.files.cwd === b.dir) this.list(b.dir);
   }
 
@@ -2209,16 +2363,16 @@ class Client {
     const name = h("span", { class: "name", text: label });
     const state = h("span", { class: "state" });
     const bar = h("progress", { max: Math.max(total, 1), value: 0 });
-    const x = button("x", null, { title: "Cancel", class: "btn icon" });
+    const x = button("x", null, { title: T("Cancel"), class: "btn icon" });
     const row = h("div", { class: "xfer" }, icon(kind), name, state, x, bar);
     x.onclick = () => cancel();
     $("xfers").prepend(row);
     const ui = {
       label(t) { name.textContent = t; },
-      set(n, of) { if (of) { bar.max = of; bar.value = n; state.textContent = size(n) + " of " + size(of); } else { bar.removeAttribute("value"); state.textContent = size(n); } },
+      set(n, of) { if (of) { bar.max = of; bar.value = n; state.textContent = T("{} of {}", size(n), size(of)); } else { bar.removeAttribute("value"); state.textContent = size(n); } },
       done(ok, text) {
         bar.max = 1; bar.value = 1; row.classList.add(ok ? "ok" : "bad"); state.textContent = text;
-        x.onclick = () => row.remove(); x.title = "Dismiss";
+        x.onclick = () => row.remove(); x.title = T("Dismiss");
         setTimeout(() => row.remove(), ok ? 6000 : 20000);
       },
     };
@@ -2270,7 +2424,8 @@ addEventListener("message", e => {
     connect(t);
   }
 });
-if ((/^#screen=\d+$/.test(location.hash) || location.hash === "#program") && window.opener) window.opener.postMessage("spread-ready", location.origin);
+// Asked for once this window speaks the visitor's language, so the connection is drawn in it.
+if ((/^#screen=\d+$/.test(location.hash) || location.hash === "#program") && window.opener) langSoon.then(() => window.opener.postMessage("spread-ready", location.origin));
 
 // The page moved here from another address (sshremote.dev/web to web.sshremote.dev): the
 // computers that browser kept there come along once the person says so; their passwords stay
@@ -2293,8 +2448,13 @@ let linked = location.hash;
       });
     const fresh = list.filter(e => !saved().some(x => x.key === e.key));
     if (fresh.length) {
-      const from = text(got.from, 80) || "its old address";
-      ask({ title: "Bring your computers along?", text: `This page moved here from ${from}. This browser kept ${fresh.length === 1 ? "one computer" : fresh.length + " computers"} there: ${fresh.map(title).join(", ")}. Their passwords stay behind: type each once more.`, ok: "Add them" })
+      // Asked once the page speaks the visitor's language.
+      langSoon.then(() => {
+        const from = text(got.from, 80) || T("its old address"), names = fresh.map(title).join(", ");
+        return ask({ title: T("Bring your computers along?"), ok: T("Add them"), text: fresh.length === 1
+          ? T("This page moved here from {}. This browser kept one computer there: {}. Their passwords stay behind: type each once more.", from, names)
+          : T("This page moved here from {}. This browser kept {} computers there: {}. Their passwords stay behind: type each once more.", from, fresh.length, names) });
+      })
         .then(yes => { if (yes) { store.set("saved", [...saved(), ...fresh].slice(0, 40)); renderSaved(); } });
     }
     if ((got?.theme === "light" || got?.theme === "dark") && !store.get("theme", "")) {
@@ -2312,5 +2472,14 @@ let linked = location.hash;
 renderSaved();
 refreshForm();
 renderGateway();
+// Everything said again once the words of a language other than English are in.
+function relabel() {
+  localize();
+  labels();
+  renderSaved();
+  refreshForm();
+  renderGateway();
+}
+langReady.then(() => { if (langNow !== "en") relabel(); });
 // A remembered sign-in: checked, and the gateway's hosts listed.
 if (gateway.token && !idOnly) signIn(null, false, gateway.token).catch(e => { if (e.signin) signOut(); });

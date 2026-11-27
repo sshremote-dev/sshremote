@@ -2,6 +2,12 @@
 #![cfg_attr(not(all(feature = "gui", feature = "remote", feature = "web", feature = "mcp")), allow(dead_code))]
 // Tuples named where they are used (a D-Bus reply, a cache, a few results) read better than aliases.
 #![allow(clippy::type_complexity)]
+#[macro_use]
+mod lang;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod console;
+#[cfg(all(target_os = "linux", feature = "remote"))]
+mod loginscreen;
 #[cfg(feature = "remote")]
 mod access;
 mod admin;
@@ -558,12 +564,12 @@ fn run(args: &[String]) -> Result<(), String> {
         #[cfg(feature = "web")]
         "web" => modules::need("web").and_then(|()| web::run(&args[1..])),
         #[cfg(not(feature = "web"))]
-        "web" => Err(not_built("the web gateway")),
+        "web" => Err("this sshremote was built without the web gateway".into()),
         // stdout carries JSON-RPC only; everything else goes to stderr.
         #[cfg(feature = "mcp")]
         "mcp" => modules::need("mcp").and_then(|()| parse_client(&args[1..])).and_then(|o| mcp::run(&o)),
         #[cfg(not(feature = "mcp"))]
-        "mcp" => Err(not_built("the MCP server")),
+        "mcp" => Err("this sshremote was built without the MCP server".into()),
         // The viewer starts the agent as `REMOTE` with options after it; options a newer viewer
         // adds are passed over, so the two versions still meet.
         #[cfg(feature = "remote")]
@@ -594,16 +600,9 @@ fn run(args: &[String]) -> Result<(), String> {
         #[cfg(not(feature = "remote"))]
         _ => match parse_client(args) {
             Ok(opt) if opt.gui && opt.host.is_none() && !opt.local => open_window(opt),
-            _ => Err(not_built("screens, files and the agent")),
+            _ => Err("this sshremote was built without screens, files and the agent".into()),
         },
     }
-}
-
-/// What a build made without a part says when the part is asked for (`cargo build` with fewer
-/// features, for a smaller program).
-#[cfg_attr(all(feature = "remote", feature = "web", feature = "mcp"), allow(dead_code))]
-fn not_built(what: &str) -> String {
-    format!("this sshremote was built without {what}")
 }
 
 /// What a build without windows says when one is asked for.

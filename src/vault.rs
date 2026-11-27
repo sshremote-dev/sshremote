@@ -131,7 +131,7 @@ mod sys {
             UserName: user.as_mut_ptr(),
         };
         if unsafe { CredWriteW(&cred, 0) } == 0 {
-            return Err(format!("Credential Manager: {}", std::io::Error::last_os_error()));
+            return Err(crate::lang::fill(n!("Credential Manager: {}"), &[&std::io::Error::last_os_error()]));
         }
         Ok(())
     }
@@ -139,7 +139,7 @@ mod sys {
     pub fn delete(host: &str) -> Result<(), String> {
         let target = wide(&format!("{PREFIX}{host}"));
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
-            return Err(format!("Credential Manager: {}", std::io::Error::last_os_error()));
+            return Err(crate::lang::fill(n!("Credential Manager: {}"), &[&std::io::Error::last_os_error()]));
         }
         Ok(())
     }
@@ -283,7 +283,7 @@ pub fn one_time_shape(p: &str) -> bool {
 }
 
 pub fn set(host: &str, secret: &str) -> Result<(), String> {
-    backend().ok_or("no password store on this system (install secret-tool)")?;
+    backend().ok_or(n!("no password store on this system (install secret-tool)"))?;
     forget_list();
     sys::set(host, secret)
 }

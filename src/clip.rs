@@ -128,7 +128,18 @@ pub fn image_here() -> Option<PathBuf> {
 
 /// Puts files on this computer's clipboard, for its file manager to paste.
 pub fn put_files_here(paths: &[PathBuf]) -> Result<(), String> {
-    arboard::Clipboard::new().and_then(|mut b| b.set().file_list(paths)).map_err(|e| e.to_string())
+    arboard::Clipboard::new().and_then(|mut b| b.set().file_list(paths)).map_err(said)
+}
+
+/// A clipboard error in arboard's own words, marked so the viewer can translate them.
+fn said(e: arboard::Error) -> String {
+    match e {
+        arboard::Error::ContentNotAvailable => n!("The clipboard contents were not available in the requested format or the clipboard is empty.").into(),
+        arboard::Error::ClipboardNotSupported => n!("The selected clipboard is not supported with the current system configuration.").into(),
+        arboard::Error::ClipboardOccupied => n!("The native clipboard is not accessible due to being held by another party.").into(),
+        arboard::Error::Unknown { description } => crate::lang::fill(n!("Unknown error while interacting with the clipboard: {}"), &[&description]),
+        e => e.to_string(),
+    }
 }
 
 fn mark_files(paths: &[PathBuf]) -> (usize, u64) {

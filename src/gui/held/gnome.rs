@@ -88,10 +88,10 @@ impl Held {
         let token: Option<u32> = call("Catch", &(std::process::id(),));
         let (name, mut said) = match crate::apps::launch(kind, text) {
             Ok(n) => (n, None),
-            Err(e) => (String::new(), Some(format!("It could not be started: {e}."))),
+            Err(e) => (String::new(), Some(t!("It could not be started: {}.", crate::lang::tr_msg(&e)))),
         };
         if token.is_none() && said.is_none() {
-            said = Some("GNOME's sshremote helper does not answer, so this program stays a window of its own.".into());
+            said = Some(t!("GNOME's sshremote helper does not answer, so this program stays a window of its own.").into());
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name.clone() };
         let now = Instant::now();
@@ -128,13 +128,13 @@ impl Held {
             self.looked = Instant::now();
             self.find();
             if self.id == 0 && self.since.elapsed() > GIVE_UP {
-                self.said = Some(format!("{} opened no window of its own to show here.", self.what));
+                self.said = Some(t!("{} opened no window of its own to show here.", self.what));
             }
         }
         let text = match (self.id, &self.said) {
             (0, Some(s)) => s.clone(),
-            (0, None) => format!("Starting {}\u{2026}", self.what),
-            _ => format!("{} is here", self.what),
+            (0, None) => t!("Starting {}\u{2026}", self.what),
+            _ => t!("{} is here", self.what),
         };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), ui.visuals().weak_text_color());
         ctx.request_repaint_after(POLL);

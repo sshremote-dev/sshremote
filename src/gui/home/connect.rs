@@ -164,7 +164,7 @@ impl App {
         let entries = self.entries(&what);
         let r = ui.add(
             egui::TextEdit::singleline(&mut self.form.host)
-                .hint_text(format!("{}  user@host, an alias, an IP or an ID", ic::SEARCH))
+                .hint_text(format!("{}  {}", ic::SEARCH, t!("user@host, an alias, an IP or an ID")))
                 .desired_width(f32::INFINITY)
                 .font(FontId::proportional(15.0))
                 .margin(egui::Margin::symmetric(12, 11)),
@@ -263,11 +263,11 @@ impl App {
         let weak = ui.visuals().weak_text_color();
         let (address, port, by_id) = match what {
             Typed::Empty => {
-                ui.label(RichText::new("Type where to go, or pick a computer below. Enter opens it; the arrow keys pick one in the list.").color(weak).size(12.5));
+                ui.label(RichText::new(t!("Type where to go, or pick a computer below. Enter opens it; the arrow keys pick one in the list.")).color(weak).size(12.5));
                 return;
             }
             Typed::Words => {
-                ui.label(RichText::new(format!("{}  Finding computers by these words.", ic::SEARCH)).color(weak).size(12.5));
+                ui.label(RichText::new(format!("{}  {}", ic::SEARCH, t!("Finding computers by these words."))).color(weak).size(12.5));
                 return;
             }
             Typed::Web { url } => return self.web_typed(ui, url, enter, go),
@@ -280,27 +280,27 @@ impl App {
         let mut open: Option<PaneMode> = None;
         kit::card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let chip = if by_id { "ID" } else { "SSH" };
+                    let chip = if by_id { t!("ID") } else { "SSH" };
                     egui::Frame::new().fill(super::super::brand().gamma_multiply(0.16)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(7, 3)).show(ui, |ui| {
                         ui.label(RichText::new(chip).size(11.0).strong().color(super::super::brand()));
                     });
                     let shown = match what {
                         Typed::Id { id, .. } => crate::computers::spaced(id),
                         _ if port.is_empty() => address.clone(),
-                        _ => format!("{address}  port {port}"),
+                        _ => t!("{}  port {}", address, port),
                     };
                     // The lesser ways first, from the right edge, so a long address is cut before them.
                     let mut right = ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()).layout(egui::Layout::right_to_left(egui::Align::Center)));
                     right.spacing_mut().item_spacing.x = 2.0;
-                    if known.is_none() && icon(&mut right, ic::PLUS, "Add it to the computers, with a name, a key and tunnels", false).clicked() {
+                    if known.is_none() && icon(&mut right, ic::PLUS, t!("Add it to the computers, with a name, a key and tunnels"), false).clicked() {
                         self.sheet = Some(Sheet::new(what));
                     }
                     if !by_id {
-                        let tip = if self.ssh_password { "Sign in with SSH keys" } else { "Sign in with a password instead of SSH keys" };
+                        let tip = if self.ssh_password { t!("Sign in with SSH keys") } else { t!("Sign in with a password instead of SSH keys") };
                         if icon(&mut right, ic::KEY, tip, self.ssh_password).clicked() {
                             self.ssh_password = !self.ssh_password;
                         }
-                        if icon(&mut right, ic::ARROW_SQUARE_OUT, "Open ssh in the system's own terminal", false).clicked() {
+                        if icon(&mut right, ic::ARROW_SQUARE_OUT, t!("Open ssh in the system's own terminal"), false).clicked() {
                             *go = Some((address.clone(), port.clone(), How::System));
                         }
                     }
@@ -317,9 +317,16 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let default = self.default_mode(by_id);
                     for m in PaneMode::ALL.into_iter().filter(|m| m.on() && !(by_id && *m == PaneMode::Terminal)) {
-                        let text = format!("{}  {}", m.glyph(), m.name());
+                        let text = format!("{}  {}", m.glyph(), crate::lang::tr(m.name()));
                         let b = if m == default { theme::primary(text) } else { kit::secondary(text) };
-                        let tip = if m == default { format!("Open {} on it (Enter)", m.name().to_lowercase()) } else { format!("Open {} on it", m.name().to_lowercase()) };
+                        let tip = match (m, m == default) {
+                            (PaneMode::Terminal, true) => t!("Open terminal on it (Enter)"),
+                            (PaneMode::Terminal, false) => t!("Open terminal on it"),
+                            (PaneMode::Screen, true) => t!("Open screen sharing on it (Enter)"),
+                            (PaneMode::Screen, false) => t!("Open screen sharing on it"),
+                            (PaneMode::Files, true) => t!("Open files on it (Enter)"),
+                            (PaneMode::Files, false) => t!("Open files on it"),
+                        };
                         if ui.add(b.min_size(Vec2::new(104.0, kit::CONTROL_H))).on_hover_text(tip).clicked() {
                             open = Some(m);
                         }
@@ -333,29 +340,29 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let hint = match (by_id, saved) {
-                            (true, true) => "Password saved; type another to replace it",
-                            (true, false) => "Password set on that computer",
-                            (false, true) => "Password saved for it",
-                            (false, false) => "Password on that computer",
+                            (true, true) => t!("Password saved; type another to replace it"),
+                            (true, false) => t!("Password set on that computer"),
+                            (false, true) => t!("Password saved for it"),
+                            (false, false) => t!("Password on that computer"),
                         };
                         let r = ui.add(egui::TextEdit::singleline(&mut self.form.password).password(true).hint_text(hint).desired_width(260.0).margin(egui::Margin::symmetric(8, 7)));
                         if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             open = Some(self.default_mode(by_id));
                         }
                         let r = ui
-                            .add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, "Remember"))
-                            .on_hover_text("Keep it in the system's password store, so it is not asked again");
+                            .add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.form.remember, t!("Remember")))
+                            .on_hover_text(t!("Keep it in the system's password store, so it is not asked again"));
                         if r.changed() {
                             crate::hosts::set_setting("remember_password", if self.form.remember { "yes" } else { "no" });
                         }
                     });
                     if by_id && !saved && self.form.password.is_empty() {
                         ui.add_space(4.0);
-                        ui.label(RichText::new("A one-time password works too. Without any, the person there is asked to let you in, where that computer allows it.").small().color(weak));
+                        ui.label(RichText::new(t!("A one-time password works too. Without any, the person there is asked to let you in, where that computer allows it.")).small().color(weak));
                     }
                     if by_id && saved && self.form.password.is_empty() {
                         ui.add_space(4.0);
-                        if ui.add(egui::Button::new(RichText::new(format!("{}  Ask the person there instead", ic::USER)).small()).frame_when_inactive(false)).on_hover_text(ASK_TIP).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(format!("{}  {}", ic::USER, t!("Ask the person there instead"))).small()).frame_when_inactive(false)).on_hover_text(crate::lang::tr(ASK_TIP)).clicked() {
                             *go = Some((address.clone(), port.clone(), How::Ask(self.default_mode(by_id))));
                         }
                     }
@@ -381,9 +388,9 @@ impl App {
             kit::card(ui, |ui| {
                 ui.label(RichText::new(url).strong());
                 ui.add_space(4.0);
-                ui.label(RichText::new("Web pages open in a pane with the Web apps extension.").color(weak));
+                ui.label(RichText::new(t!("Web pages open in a pane with the Web apps extension.")).color(weak));
                 ui.add_space(6.0);
-                if ui.add(kit::secondary(format!("{}  Extensions\u{2026}", ic::PUZZLE_PIECE))).on_hover_text("Settings, Extensions: install Web apps").clicked() {
+                if ui.add(kit::secondary(format!("{}  {}", ic::PUZZLE_PIECE, t!("Extensions\u{2026}")))).on_hover_text(t!("Settings, Extensions: install Web apps")).clicked() {
                     crate::gui::ask_settings("extensions");
                 }
             });
@@ -394,24 +401,24 @@ impl App {
         kit::card(ui, |ui| {
             ui.horizontal(|ui| {
                 egui::Frame::new().fill(super::super::brand().gamma_multiply(0.16)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(7, 3)).show(ui, |ui| {
-                    ui.label(RichText::new("Web").size(11.0).strong().color(super::super::brand()));
+                    ui.label(RichText::new(t!("Web")).size(11.0).strong().color(super::super::brand()));
                 });
                 ui.add(egui::Label::new(RichText::new(url)).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !known && ui.add(kit::ghost(ic::PLUS)).on_hover_text("Keep it in the list, to open again with a click").clicked() {
+                    if !known && ui.add(kit::ghost(ic::PLUS)).on_hover_text(t!("Keep it in the list, to open again with a click")).clicked() {
                         crate::computers::update(url, |c| c.last_used = crate::sys::now_secs());
                         self.computers_at = None;
                     }
                 });
             });
             ui.add_space(8.0);
-            if ui.add(theme::primary(format!("{}  Open in a pane", ic::APP_WINDOW)).min_size(Vec2::new(150.0, kit::CONTROL_H))).on_hover_text("Open it here (Enter)").clicked() {
+            if ui.add(theme::primary(format!("{}  {}", ic::APP_WINDOW, t!("Open in a pane"))).min_size(Vec2::new(150.0, kit::CONTROL_H))).on_hover_text(t!("Open it here (Enter)")).clicked() {
                 open = true;
             }
             ui.add_space(4.0);
             ui.add(
                 egui::Label::new(
-                    RichText::new("A page of Chrome, Edge or Chromium run with no window of its own, beside your other panes; its sign-ins stay in SSH Remote's own profile for this site.")
+                    RichText::new(t!("A page of Chrome, Edge or Chromium run with no window of its own, beside your other panes; its sign-ins stay in SSH Remote's own profile for this site."))
                         .small()
                         .color(weak),
                 )
@@ -451,13 +458,13 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-            if tag_chip(ui, "All", self.tag.is_none()).on_hover_text("Every computer").clicked() {
+            if tag_chip(ui, t!("All"), self.tag.is_none()).on_hover_text(t!("Every computer")).clicked() {
                 self.tag = None;
                 self.picked = None;
             }
             for t in all {
                 let on = self.tag.as_ref().is_some_and(|k| k.eq_ignore_ascii_case(&t));
-                if tag_chip(ui, &t, on).on_hover_text(if on { "Show every computer" } else { "Show only the computers with this tag" }).clicked() {
+                if tag_chip(ui, &t, on).on_hover_text(if on { t!("Show every computer") } else { t!("Show only the computers with this tag") }).clicked() {
                     self.tag = if on { None } else { Some(t) };
                     self.picked = None;
                 }
@@ -491,7 +498,7 @@ impl App {
             self.apps = Some(list);
             self.apps_coming = None;
         }
-        kit::heading(ui, "Tools");
+        kit::heading(ui, t!("Tools"));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             // Three ways, each a button that puts its part in the computers' place (covering
@@ -502,9 +509,9 @@ impl App {
                     let on = self.launcher_for == Some(mode);
                     let button = kit::secondary(mode.button()).min_size(Vec2::new(0.0, kit::CONTROL_H)).selected(on);
                     let tip = match mode {
-                        crate::gui::launcher::Mode::Search => "Find one of this computer's programs by its name, as the Start menu does, and open it in a pane of its own (the Programs extension)",
-                        crate::gui::launcher::Mode::Command => "Run a command line, or open a folder, a file or an address, in a pane of its own (the Programs extension)",
-                        crate::gui::launcher::Mode::File => "Pick a file or a folder of this computer's and open it with its program in a pane of its own (the Programs extension)",
+                        crate::gui::launcher::Mode::Search => t!("Find one of this computer's programs by its name, as the Start menu does, and open it in a pane of its own (the Programs extension)"),
+                        crate::gui::launcher::Mode::Command => t!("Run a command line, or open a folder, a file or an address, in a pane of its own (the Programs extension)"),
+                        crate::gui::launcher::Mode::File => t!("Pick a file or a folder of this computer's and open it with its program in a pane of its own (the Programs extension)"),
                     };
                     if ui.add(button).on_hover_text(tip).clicked() {
                         if on {
@@ -535,7 +542,7 @@ impl App {
                         let list = self.apps.get_or_insert_with(crate::apps::list);
                         match names.iter().find_map(|n| list.iter().find(|a| a.name.eq_ignore_ascii_case(n) || a.id == *n)) {
                             Some(a) => *go = Some((String::new(), String::new(), How::App(crate::apps::APP, a.id.clone(), t.title.clone()))),
-                            None => self.error = Some(format!("{} is not installed on this computer (looked for {})", t.title, names.join(", "))),
+                            None => self.error = Some(t!("{} is not installed on this computer (looked for {})", t.title, names.join(", "))),
                         }
                     }
                     Some((k, names)) => {
@@ -554,9 +561,9 @@ impl App {
     /// computers with Close, Esc, or the way's button again.
     fn programs_part(&mut self, ui: &mut egui::Ui, go: &mut Option<Choice>) {
         ui.horizontal(|ui| {
-            kit::heading(ui, "Programs");
+            kit::heading(ui, t!("Programs"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(kit::ghost(format!("{}  Close", ic::X))).on_hover_text("Back to the computers (Esc)").clicked() {
+                if ui.add(kit::ghost(format!("{}  {}", ic::X, t!("Close")))).on_hover_text(t!("Back to the computers (Esc)")).clicked() {
                     self.launcher_for = None;
                 }
             });
@@ -598,25 +605,32 @@ impl App {
         if all.is_empty() {
             return;
         }
-        kit::heading(ui, "Projects");
+        kit::heading(ui, t!("Projects"));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
             for p in all {
                 let last = p.name == crate::gui::project::LAST;
                 let panes: usize = p.tabs.iter().map(crate::gui::project::Tree::panes).sum();
-                let tip = format!("{} tab{}, {panes} pane{}, kept {}", p.tabs.len(), if p.tabs.len() == 1 { "" } else { "s" }, if panes == 1 { "" } else { "s" }, crate::hosts::ago(p.saved));
+                let (tabs, kept) = (p.tabs.len(), crate::lang::tr_msg(&crate::hosts::ago(p.saved)).into_owned());
+                let tip = match (tabs == 1, panes == 1) {
+                    (true, true) => t!("{} tab, {} pane, kept {}", tabs, panes, kept),
+                    (true, false) => t!("{} tab, {} panes, kept {}", tabs, panes, kept),
+                    (false, true) => t!("{} tabs, {} pane, kept {}", tabs, panes, kept),
+                    (false, false) => t!("{} tabs, {} panes, kept {}", tabs, panes, kept),
+                };
                 let glyph = if last { ic::CLOCK_COUNTER_CLOCKWISE } else { ic::ARCHIVE };
-                let r = ui.add(kit::secondary(format!("{glyph}  {}", p.name)).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip);
+                let name = if last { crate::lang::tr(crate::gui::project::LAST) } else { p.name.as_str() };
+                let r = ui.add(kit::secondary(format!("{glyph}  {name}")).min_size(Vec2::new(0.0, kit::CONTROL_H))).on_hover_text(tip);
                 if r.clicked() {
                     self.open_project(&p);
                 }
                 r.context_menu(|ui| {
                     crate::gui::menu_look(ui);
-                    if ui.button(format!("{}  Open", ic::ARROW_SQUARE_OUT)).clicked() {
+                    if ui.button(format!("{}  {}", ic::ARROW_SQUARE_OUT, t!("Open"))).clicked() {
                         self.open_project(&p);
                         ui.close();
                     }
-                    if ui.button(format!("{}  Remove", ic::TRASH)).clicked() {
+                    if ui.button(format!("{}  {}", ic::TRASH, t!("Remove"))).clicked() {
                         if let Err(e) = crate::gui::project::remove(&p.name) {
                             self.error = Some(e);
                         }
@@ -635,18 +649,18 @@ impl App {
         let mut look = false;
         let busy = self.lan.coming.is_some();
         let buttons = |ui: &mut egui::Ui, add: &mut bool, look: &mut bool| {
-            *add |= ui.add(kit::ghost(format!("{}  Add a computer", ic::PLUS))).on_hover_text("By SSH or by its ID, with a name, a key, a password and tunnels").clicked();
-            *look |= ui.add_enabled(!busy, kit::ghost(format!("{}  On this network", ic::SEARCH))).on_hover_text("Computers nearby with remote access on, found without typing their ID").clicked();
+            *add |= ui.add(kit::ghost(format!("{}  {}", ic::PLUS, t!("Add a computer")))).on_hover_text(t!("By SSH or by its ID, with a name, a key, a password and tunnels")).clicked();
+            *look |= ui.add_enabled(!busy, kit::ghost(format!("{}  {}", ic::SEARCH, t!("On this network")))).on_hover_text(t!("Computers nearby with remote access on, found without typing their ID")).clicked();
         };
         // The heading with its buttons on the right; in a narrow window the buttons under it, not
         // over it.
         if ui.available_width() >= 470.0 {
             ui.horizontal(|ui| {
-                kit::heading(ui, &format!("Computers  {count}"));
+                kit::heading(ui, &t!("Computers  {}", count));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| buttons(ui, &mut add, &mut look));
             });
         } else {
-            kit::heading(ui, &format!("Computers  {count}"));
+            kit::heading(ui, &t!("Computers  {}", count));
             ui.horizontal(|ui| buttons(ui, &mut add, &mut look));
         }
         if add {
@@ -678,9 +692,9 @@ impl App {
                 }
             }
             let note = if self.computers.is_empty() && !searching {
-                "The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first."
+                t!("The computers you open show here, with the aliases of ~/.ssh/config. Star the ones you use most to keep them first.")
             } else if searching && entries.iter().all(|e| matches!(e, Entry::Here)) {
-                if self.tag.is_some() { "No computer with this tag matches." } else { "No computer in the list matches." }
+                if self.tag.is_some() { t!("No computer with this tag matches.") } else { t!("No computer in the list matches.") }
             } else {
                 ""
             };
@@ -715,12 +729,12 @@ impl App {
             }
             RowAct::ForgetPassword => {
                 if let Err(e) = crate::vault::delete(&c.address) {
-                    self.error = Some(format!("The password was not forgotten: {e}"));
+                    self.error = Some(t!("The password was not forgotten: {}", crate::lang::tr_msg(&e)));
                 }
             }
             RowAct::Wake => match crate::lan::wake(&c.mac) {
-                Ok(()) => self.lan.said = format!("Wake-up sent to {}: it may take a minute to come up.", c.label()),
-                Err(e) => self.error = Some(format!("{} was not woken: {e}", c.label())),
+                Ok(()) => self.lan.said = t!("Wake-up sent to {}: it may take a minute to come up.", crate::lang::tr_msg(&c.label())),
+                Err(e) => self.error = Some(t!("{} was not woken: {}", crate::lang::tr_msg(&c.label()), crate::lang::tr_msg(&e))),
             },
         }
     }
@@ -748,37 +762,37 @@ impl App {
         let mut add = None;
         kit::card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("On this network").strong());
+                ui.label(RichText::new(t!("On this network")).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text("Close").clicked();
+                    close = ui.add(egui::Button::new(RichText::new(ic::X).size(13.0)).frame_when_inactive(false)).on_hover_text(t!("Close")).clicked();
                 });
             });
             if !self.lan.said.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&self.lan.said).color(super::super::brand())).wrap());
             }
             if self.lan.coming.is_some() {
-                kit::loading(ui, "Asking the computers nearby\u{2026}");
+                kit::loading(ui, t!("Asking the computers nearby\u{2026}"));
                 return;
             }
             if !self.lan.looked {
                 return;
             }
             if self.lan.found.is_empty() {
-                ui.add(egui::Label::new(RichText::new("No computer answered. Those with remote access on, and finding allowed in its settings, answer here; a firewall may keep the question out.").weak().size(12.5)).wrap());
+                ui.add(egui::Label::new(RichText::new(t!("No computer answered. Those with remote access on, and finding allowed in its settings, answer here; a firewall may keep the question out.")).weak().size(12.5)).wrap());
                 return;
             }
             for f in &self.lan.found {
                 ui.horizontal(|ui| {
                     kit::mark(ui, ic::GLOBE, super::super::brand());
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(if f.name.is_empty() { "A computer" } else { &f.name }).strong());
-                        ui.label(RichText::new(format!("ID {}  ·  {}", crate::computers::spaced(&f.id), f.ip)).weak().size(12.0));
+                        ui.label(RichText::new(if f.name.is_empty() { t!("A computer") } else { &f.name }).strong());
+                        ui.label(RichText::new(format!("{}  ·  {}", t!("ID {}", crate::computers::spaced(&f.id)), f.ip)).weak().size(12.0));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let known = self.computers.iter().any(|c| c.id() == Some(f.id.as_str()));
                         if known {
-                            ui.label(RichText::new("In the list").weak().size(12.5));
-                        } else if ui.add(kit::secondary("Add")).clicked() {
+                            ui.label(RichText::new(t!("In the list")).weak().size(12.5));
+                        } else if ui.add(kit::secondary(t!("Add"))).clicked() {
                             add = Some(f.clone());
                         }
                     });
@@ -793,7 +807,7 @@ impl App {
                 c.direct = f.direct();
             });
             self.computers_at = None;
-            self.lan.said = format!("{} was added: open it with its password.", if f.name.is_empty() { "The computer" } else { &f.name });
+            self.lan.said = if f.name.is_empty() { t!("The computer was added: open it with its password.").to_string() } else { t!("{} was added: open it with its password.", f.name) };
         }
         if close {
             self.lan = Lan::default();
@@ -844,24 +858,24 @@ impl App {
                     crate::gui::menu_look(ui);
                     ui.set_min_width(200.0);
                     for p in &profiles {
-                        if ui.button(format!("{}  {}", p.icon, p.name)).clicked() {
+                        if ui.button(format!("{}  {}", p.icon, crate::lang::tr_msg(&p.name))).clicked() {
                             act = Some(RowAct::Open(How::Local(p.clone())));
                         }
                     }
-                    if cfg!(feature = "test-desktop") && ui.button(format!("{}  Test desktop", ic::APP_WINDOW)).clicked() {
+                    if cfg!(feature = "test-desktop") && ui.button(format!("{}  {}", ic::APP_WINDOW, t!("Test desktop"))).clicked() {
                         act = Some(RowAct::Open(How::TestDesktop));
                     }
                 });
                 self.menu_open("", open.is_some());
             }
-            if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, "This computer's files", false).clicked() {
+            if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, t!("This computer's files"), false).clicked() {
                 act = Some(RowAct::Open(How::This(PaneMode::Files)));
             }
-            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, "This computer's screen", false).clicked() {
+            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, t!("This computer's screen"), false).clicked() {
                 act = Some(RowAct::Open(How::This(PaneMode::Screen)));
             }
             if let Some(p) = profiles.first()
-                && icon(&mut right, ic::TERMINAL, &format!("A terminal here ({})", p.name), false).clicked()
+                && icon(&mut right, ic::TERMINAL, &t!("A terminal here ({})", crate::lang::tr_msg(&p.name)), false).clicked()
             {
                 act = Some(RowAct::Open(How::Local(p.clone())));
             }
@@ -870,8 +884,8 @@ impl App {
         row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.add_space(ROW_TEXT_TOP);
             ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
-            ui.add(egui::Label::new(RichText::new("This computer").strong()).truncate());
-            ui.add(egui::Label::new(RichText::new("Its own terminals, screen and files").small().weak()).truncate());
+            ui.add(egui::Label::new(RichText::new(t!("This computer")).strong()).truncate());
+            ui.add(egui::Label::new(RichText::new(t!("Its own terminals, screen and files")).small().weak()).truncate());
         });
         if act.is_none() {
             if r.double_clicked() {
@@ -898,29 +912,30 @@ impl App {
             let (_, open) = egui::containers::menu::MenuButton::from_button(tool_button(ic::DOTS, false)).ui(&mut right, |ui| {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(220.0);
-                if ui.button(format!("{}  Edit\u{2026}", ic::PENCIL)).clicked() {
+                if ui.button(format!("{}  {}", ic::PENCIL, t!("Edit\u{2026}"))).clicked() {
                     act = Some(RowAct::Edit);
                 }
-                if !by_id && !web && ui.button(format!("{}  System terminal", ic::ARROW_SQUARE_OUT)).clicked() {
+                if !by_id && !web && ui.button(format!("{}  {}", ic::ARROW_SQUARE_OUT, t!("System terminal"))).clicked() {
                     act = Some(RowAct::Open(How::System));
                 }
-                if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
+                if ui.button(format!("{}  {}", ic::COPY, t!("Copy address"))).clicked() {
                     ui.ctx().copy_text(c.id().map_or_else(|| c.address.clone(), str::to_string));
                 }
                 if by_id {
                     for m in [PaneMode::Screen, PaneMode::Files].into_iter().filter(|m| m.on()) {
-                        if ui.button(format!("{}  Ask for its {}", ic::USER, m.name().to_lowercase())).on_hover_text(ASK_TIP).clicked() {
+                        let what = if m == PaneMode::Screen { t!("Ask for its screen sharing") } else { t!("Ask for its files") };
+                        if ui.button(format!("{}  {}", ic::USER, what)).on_hover_text(crate::lang::tr(ASK_TIP)).clicked() {
                             act = Some(RowAct::Open(How::Ask(m)));
                         }
                     }
                 }
-                if crate::vault::has(&c.address) && ui.button(format!("{}  Forget the saved password", ic::LOCK_KEY)).clicked() {
+                if crate::vault::has(&c.address) && ui.button(format!("{}  {}", ic::LOCK_KEY, t!("Forget the saved password"))).clicked() {
                     act = Some(RowAct::ForgetPassword);
                 }
-                if !c.mac.is_empty() && ui.button(format!("{}  Wake it up", ic::LIGHTNING)).on_hover_text(format!("Wake-on-LAN to {}, on this network", c.mac)).clicked() {
+                if !c.mac.is_empty() && ui.button(format!("{}  {}", ic::LIGHTNING, t!("Wake it up"))).on_hover_text(t!("Wake-on-LAN to {}, on this network", c.mac)).clicked() {
                     act = Some(RowAct::Wake);
                 }
-                if !c.in_ssh_config && ui.button(format!("{}  Remove from the list", ic::TRASH)).clicked() {
+                if !c.in_ssh_config && ui.button(format!("{}  {}", ic::TRASH, t!("Remove from the list"))).clicked() {
                     act = Some(RowAct::Remove);
                 }
             });
@@ -929,23 +944,23 @@ impl App {
         if lit || c.favorite {
             let mut star = RichText::new(ic::STAR).size(16.0);
             star = if c.favorite { star.family(filled()).color(warn()) } else { star.color(right.visuals().weak_text_color()) };
-            let tip = if c.favorite { "Remove from favorites" } else { "Add to favorites" };
+            let tip = if c.favorite { t!("Remove from favorites") } else { t!("Add to favorites") };
             if right.add(egui::Button::new(star).frame_when_inactive(false).min_size(Vec2::splat(28.0))).on_hover_text(tip).clicked() {
                 act = Some(RowAct::Star(!c.favorite));
             }
         }
         if lit && web {
-            if icon(&mut right, ic::APP_WINDOW, "Open in a pane", false).clicked() {
+            if icon(&mut right, ic::APP_WINDOW, t!("Open in a pane"), false).clicked() {
                 act = Some(RowAct::Open(How::Web(c.address.clone(), String::new())));
             }
         } else if lit {
-            if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, "Files", false).clicked() {
+            if PaneMode::Files.on() && icon(&mut right, ic::FOLDER, t!("Files"), false).clicked() {
                 act = Some(RowAct::Open(How::Files));
             }
-            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, "Screen", false).clicked() {
+            if PaneMode::Screen.on() && icon(&mut right, ic::MONITOR, t!("Screen"), false).clicked() {
                 act = Some(RowAct::Open(How::Screen));
             }
-            if !by_id && icon(&mut right, ic::TERMINAL, "Terminal", false).clicked() {
+            if !by_id && icon(&mut right, ic::TERMINAL, t!("Terminal"), false).clicked() {
                 act = Some(RowAct::Open(How::Terminal));
             }
         }
@@ -953,24 +968,24 @@ impl App {
         row.allocate_ui_with_layout(Vec2::new(room, ROW_H - 8.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.add_space(ROW_TEXT_TOP);
             ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
-            ui.add(egui::Label::new(RichText::new(c.label()).strong()).truncate());
+            ui.add(egui::Label::new(RichText::new(crate::lang::tr_msg(&c.label())).strong()).truncate());
             let mut sub: Vec<String> = Vec::new();
             if !c.name.is_empty() {
-                sub.push(c.id().map_or_else(|| c.address.clone(), |id| format!("ID {}", crate::computers::spaced(id))));
+                sub.push(c.id().map_or_else(|| c.address.clone(), |id| t!("ID {}", crate::computers::spaced(id))));
             }
             sub.push(match (by_id, c.port) {
-                _ if web => format!("Web app, {}", super::web_label(&c.address)),
+                _ if web => t!("Web app, {}", super::web_label(&c.address)),
                 (true, _) if !c.name.is_empty() => String::new(),
-                (true, _) => "by ID".into(),
-                (false, Some(p)) => format!("SSH, port {p}"),
+                (true, _) => t!("by ID").into(),
+                (false, Some(p)) => t!("SSH, port {}", p),
                 (false, None) if c.in_ssh_config => "SSH, ~/.ssh/config".into(),
                 (false, None) => "SSH".into(),
             });
-            sub.push(if c.last_used > 0 { crate::hosts::ago(c.last_used) } else { "never opened".into() });
+            sub.push(if c.last_used > 0 { crate::lang::tr_msg(&crate::hosts::ago(c.last_used)).into_owned() } else { t!("never opened").into() });
             sub.retain(|s| !s.is_empty());
             let open = crate::tunnels::open_count(&c.address, &c.tunnels);
             if open > 0 {
-                sub.push(format!("{open} tunnel{} open", if open == 1 { "" } else { "s" }));
+                sub.push(if open == 1 { t!("{} tunnel open", open) } else { t!("{} tunnels open", open) });
             }
             // As tall as its text and tags, not as a button: the line keeps the room under it
             // that This computer's has.
@@ -993,13 +1008,13 @@ impl App {
                 act = Some(RowAct::Pick);
             }
         }
-        r.on_hover_text("Double-click to open; the buttons open a terminal, the screen or the files");
+        r.on_hover_text(t!("Double-click to open; the buttons open a terminal, the screen or the files"));
         act
     }
 }
 
 /// What asking to come in does, where it is offered beside a saved password.
-const ASK_TIP: &str = "No password is given, saved or not: the person at that computer is asked to let you in, and both screens show a code to compare. Reconnecting and opening more from it ask again.";
+const ASK_TIP: &str = n!("No password is given, saved or not: the person at that computer is asked to let you in, and both screens show a code to compare. Reconnecting and opening more from it ask again.");
 
 fn how(m: PaneMode) -> How {
     match m {

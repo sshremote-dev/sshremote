@@ -49,7 +49,7 @@ pub fn run(wasm: &[u8], id: &str, input: &str) -> Result<String, String> {
     let mut config = Config::default();
     config.consume_fuel(true);
     let engine = Engine::new(&config);
-    let module = Module::new(&engine, wasm).map_err(|e| format!("the script cannot be read: {e}"))?;
+    let module = Module::new(&engine, wasm).map_err(|e| crate::lang::fill(n!("the script cannot be read: {}"), &[&e]))?;
     let limits = StoreLimitsBuilder::new().memory_size(MEMORY).instances(1).memories(1).tables(4).build();
     let mut store = Store::new(&engine, State { limits, log: String::new() });
     store.limiter(|s| &mut s.limits);
@@ -71,30 +71,30 @@ pub fn run(wasm: &[u8], id: &str, input: &str) -> Result<String, String> {
             }
         })
         .map_err(|e| e.to_string())?;
-    let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("the script did not start: {e}"))?;
-    let memory = instance.get_memory(&store, "memory").ok_or("the script has no memory export")?;
-    let alloc = instance.get_typed_func::<i32, i32>(&store, "alloc").map_err(|_| "the script has no alloc export")?;
+    let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| crate::lang::fill(n!("the script did not start: {}"), &[&e]))?;
+    let memory = instance.get_memory(&store, "memory").ok_or(n!("the script has no memory export"))?;
+    let alloc = instance.get_typed_func::<i32, i32>(&store, "alloc").map_err(|_| n!("the script has no alloc export"))?;
     let func = instance
         .get_typed_func::<(i32, i32), i64>(&store, &format!("run_{id}"))
-        .map_err(|_| format!("the script has no command {id}"))?;
+        .map_err(|_| crate::lang::fill(n!("the script has no command {}"), &[&id]))?;
     let bytes = input.as_bytes();
     let ptr = alloc.call(&mut store, bytes.len() as i32).map_err(|e| trap(e, &store))?;
-    memory.write(&mut store, ptr as u32 as usize, bytes).map_err(|_| "the script's alloc gave a bad place")?;
+    memory.write(&mut store, ptr as u32 as usize, bytes).map_err(|_| n!("the script's alloc gave a bad place"))?;
     let packed = func.call(&mut store, (ptr, bytes.len() as i32)).map_err(|e| trap(e, &store))?;
     let (p, n) = ((packed as u64 >> 32) as usize, (packed as u64 & 0xffff_ffff) as usize);
     let data = memory.data(&store);
-    let out = data.get(p..p.saturating_add(n.min(OUTPUT))).ok_or("the script's result is outside its memory")?;
+    let out = data.get(p..p.saturating_add(n.min(OUTPUT))).ok_or(n!("the script's result is outside its memory"))?;
     Ok(String::from_utf8_lossy(out).into_owned())
 }
 
 fn trap(e: wasmi::Error, store: &Store<State>) -> String {
     let log = &store.data().log;
-    let why = if matches!(e.as_trap_code(), Some(wasmi::TrapCode::OutOfFuel)) {
-        "it ran too long and was stopped".to_string()
-    } else {
-        e.to_string()
-    };
-    if log.is_empty() { format!("the script failed: {why}") } else { format!("the script failed: {why}\n{log}") }
+    match (matches!(e.as_trap_code(), Some(wasmi::TrapCode::OutOfFuel)), log.is_empty()) {
+        (true, true) => n!("the script failed: it ran too long and was stopped").to_string(),
+        (true, false) => crate::lang::fill(n!("the script failed: it ran too long and was stopped\n{}"), &[log]),
+        (false, true) => crate::lang::fill(n!("the script failed: {}"), &[&e]),
+        (false, false) => crate::lang::fill(n!("the script failed: {}\n{}"), &[&e, log]),
+    }
 }
 
 /// The commands of installed extensions.
@@ -109,8 +109,8 @@ pub fn commands() -> Vec<Command> {
 /// Runs an installed extension's command with what its permissions let it have; its text, and
 /// whether it may be typed into the terminal.
 pub fn run_command(c: &Command, selection: &str, host: &str) -> Result<(String, bool), String> {
-    let m = crate::ext::installed().into_iter().find(|m| m.id == c.ext).ok_or("the extension is no longer installed")?;
-    let main = m.main.as_deref().ok_or("the extension has no script")?;
+    let m = crate::ext::installed().into_iter().find(|m| m.id == c.ext).ok_or(n!("the extension is no longer installed"))?;
+    let main = m.main.as_deref().ok_or(n!("the extension has no script"))?;
     let wasm = std::fs::read(crate::ext::resolve(&format!("ext:{}/{main}", m.id))).map_err(|e| e.to_string())?;
     let may = |p: &str| m.permissions.iter().any(|x| x == p);
     let input = serde_json::json!({

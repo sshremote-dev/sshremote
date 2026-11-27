@@ -38,13 +38,13 @@ pub fn launch_minimized(kind: u8, text: &str) -> Result<String, String> {
 fn launch_as(kind: u8, text: &str, min: bool) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
-        return Err("nothing to start".into());
+        return Err(n!("nothing to start").into());
     }
     match kind {
         APP => imp::start_app(text, min),
         COMMAND => imp::run(text, min).map(|_| program_of(text)),
         OPEN => imp::open(text, min).map(|_| String::new()),
-        _ => Err("unknown way to start a program".into()),
+        _ => Err(n!("unknown way to start a program").into()),
     }
 }
 
@@ -54,13 +54,13 @@ fn launch_as(kind: u8, text: &str, min: bool) -> Result<String, String> {
 pub fn shell_line(kind: u8, text: &str) -> Result<(String, String), String> {
     let text = text.trim();
     if text.is_empty() {
-        return Err("nothing to start".into());
+        return Err(n!("nothing to start").into());
     }
     match kind {
         APP => imp::app_line(text),
         COMMAND => Ok((text.to_string(), program_of(text))),
         OPEN => imp::open_line(text).map(|l| (l, String::new())),
-        _ => Err("unknown way to start a program".into()),
+        _ => Err(n!("unknown way to start a program").into()),
     }
 }
 
@@ -197,7 +197,7 @@ mod imp {
     }
 
     pub fn start_app(id: &str, _min: bool) -> Result<String, String> {
-        let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| format!("{id} is not installed here"))?;
+        let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| crate::lang::fill(n!("{} is not installed here"), &[&id]))?;
         let e = entry(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?);
         let name = e.get("Name").cloned().unwrap_or_default();
         // The desktop's own launcher where there is one (it knows D-Bus activation and the rest).
@@ -206,7 +206,7 @@ mod imp {
             cmd.arg("launch").arg(&path);
             detached(cmd)?;
         } else {
-            let line = exec_line(e.get("Exec").ok_or("it has no command")?);
+            let line = exec_line(e.get("Exec").ok_or(n!("it has no command"))?);
             let mut cmd = Command::new("sh");
             cmd.args(["-c", &line]);
             detached(cmd)?;
@@ -228,7 +228,7 @@ mod imp {
         };
         let looks_like_address = what.contains("://");
         if !looks_like_address && !Path::new(&what).exists() {
-            return Err(format!("{what} is not there"));
+            return Err(crate::lang::fill(n!("{} is not there"), &[&what]));
         }
         Ok(what)
     }
@@ -254,7 +254,7 @@ mod imp {
     /// that way opens its window as a child of the line), or the desktop's launcher for one that
     /// runs in a terminal.
     pub(super) fn app_line(id: &str) -> Result<(String, String), String> {
-        let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| format!("{id} is not installed here"))?;
+        let (_, path) = files().into_iter().find(|(i, _)| i == id).ok_or_else(|| crate::lang::fill(n!("{} is not installed here"), &[&id]))?;
         let e = entry(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?);
         let name = e.get("Name").cloned().unwrap_or_default();
         let exec = e.get("Exec").filter(|x| !x.is_empty());
@@ -267,7 +267,7 @@ mod imp {
                 }
             }
             _ if on_path("gio") => format!("gio launch {}", quoted(&path.display().to_string())),
-            _ => return Err("it has no command".into()),
+            _ => return Err(n!("it has no command").into()),
         };
         Ok((line, name))
     }
@@ -408,12 +408,12 @@ mod imp {
     pub fn start_app(id: &str, min: bool) -> Result<String, String> {
         // What the Start menu lists (Get-StartApps), started as Explorer starts it.
         if id.starts_with("shell:AppsFolder\\") {
-            let name = start_apps().into_iter().find(|a| a.id == id).map(|a| a.name).ok_or_else(|| format!("{id} is not in the Start menu"))?;
+            let name = start_apps().into_iter().find(|a| a.id == id).map(|a| a.name).ok_or_else(|| crate::lang::fill(n!("{} is not in the Start menu"), &[&id]))?;
             start(&quoted(id), min)?;
             return Ok(name);
         }
         // Only a shortcut the list gave: a viewer cannot name any file this way.
-        let (_, p) = shortcuts().into_iter().find(|(_, p)| p.display().to_string() == id).ok_or_else(|| format!("{id} is not in the Start menu"))?;
+        let (_, p) = shortcuts().into_iter().find(|(_, p)| p.display().to_string() == id).ok_or_else(|| crate::lang::fill(n!("{} is not in the Start menu"), &[&id]))?;
         start(&quoted(&p.display().to_string()), min)?;
         Ok(p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
     }
@@ -424,7 +424,7 @@ mod imp {
 
     pub fn open(what: &str, min: bool) -> Result<(), String> {
         if !what.contains("://") && !Path::new(what).exists() {
-            return Err(format!("{what} is not there"));
+            return Err(crate::lang::fill(n!("{} is not there"), &[&what]));
         }
         start(&quoted(what), min)
     }
@@ -437,13 +437,13 @@ mod imp {
         Vec::new()
     }
     pub fn start_app(_: &str, _: bool) -> Result<String, String> {
-        Err("programs are not started here on this system".into())
+        Err(n!("programs are not started here on this system").into())
     }
     pub fn run(_: &str, _: bool) -> Result<(), String> {
-        Err("programs are not started here on this system".into())
+        Err(n!("programs are not started here on this system").into())
     }
     pub fn open(_: &str, _: bool) -> Result<(), String> {
-        Err("programs are not started here on this system".into())
+        Err(n!("programs are not started here on this system").into())
     }
 }
 

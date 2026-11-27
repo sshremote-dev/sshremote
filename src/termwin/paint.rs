@@ -368,7 +368,7 @@ pub(super) fn screen(
             .show(&mut child, |ui| {
                 ui.horizontal(|ui| {
                     let edit =
-                        ui.add(egui::TextEdit::singleline(&mut search.query).hint_text("Find").desired_width(170.0));
+                        ui.add(egui::TextEdit::singleline(&mut search.query).hint_text(t!("Find")).desired_width(170.0));
                     if !edit.has_focus() && search.found.is_none() && !search.missing {
                         edit.request_focus();
                     }
@@ -385,14 +385,14 @@ pub(super) fn screen(
                             alacritty_terminal::index::Direction::Left
                         });
                     }
-                    if ui.small_button(ic::CARET_UP).on_hover_text("Previous (Enter)").clicked() {
+                    if ui.small_button(ic::CARET_UP).on_hover_text(t!("Previous (Enter)")).clicked() {
                         search_step = Some(alacritty_terminal::index::Direction::Left);
                     }
-                    if ui.small_button(ic::CARET_DOWN).on_hover_text("Next (Shift+Enter)").clicked() {
+                    if ui.small_button(ic::CARET_DOWN).on_hover_text(t!("Next (Shift+Enter)")).clicked() {
                         search_step = Some(alacritty_terminal::index::Direction::Right);
                     }
                     if search.missing {
-                        ui.label(RichText::new("none").small().color(crate::gui::bad()));
+                        ui.label(RichText::new(t!("none")).small().color(crate::gui::bad()));
                     }
                     if ui.small_button(ic::X).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         close_search = true;
@@ -452,46 +452,46 @@ pub(super) fn screen(
     if !app_mouse || resp.context_menu_opened() {
         resp.context_menu(|ui| {
             crate::gui::menu_look(ui);
-            if ui.add(egui::Button::new("Copy").shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
+            if ui.add(egui::Button::new(t!("Copy")).shortcut_text("Ctrl+Shift+C, Ctrl+Insert")).clicked() {
                 copy_now = true;
                 ui.close();
             }
-            if ui.add(egui::Button::new("Paste").shortcut_text("Ctrl+Shift+V, Shift+Insert")).clicked() {
+            if ui.add(egui::Button::new(t!("Paste")).shortcut_text("Ctrl+Shift+V, Shift+Insert")).clicked() {
                 paste_now = true;
                 ui.close();
             }
-            if ui.button("Select all").clicked() {
+            if ui.button(t!("Select all")).clicked() {
                 select_all = true;
                 ui.close();
             }
             ui.separator();
-            if ui.add(egui::Button::new("Find").shortcut_text("Ctrl+Shift+F")).clicked() {
+            if ui.add(egui::Button::new(t!("Find")).shortcut_text("Ctrl+Shift+F")).clicked() {
                 find = true;
                 ui.close();
             }
-            if ui.button("Read as text").clicked() {
+            if ui.button(t!("Read as text")).clicked() {
                 view = Some(View::Text);
                 ui.close();
             }
-            if ui.button("Read as Markdown").clicked() {
+            if ui.button(t!("Read as Markdown")).clicked() {
                 view = Some(View::Markdown);
                 ui.close();
             }
             ui.separator();
-            if ui.add(egui::Button::new("Split right").shortcut_text("Alt+Shift+=")).clicked() {
+            if ui.add(egui::Button::new(t!("Split right")).shortcut_text("Alt+Shift+=")).clicked() {
                 ask.split = Some(true);
                 ui.close();
             }
-            if ui.add(egui::Button::new("Split down").shortcut_text("Alt+Shift+-")).clicked() {
+            if ui.add(egui::Button::new(t!("Split down")).shortcut_text("Alt+Shift+-")).clicked() {
                 ask.split = Some(false);
                 ui.close();
             }
-            if ui.add(egui::Button::new("Close pane").shortcut_text("Ctrl+Shift+W")).clicked() {
+            if ui.add(egui::Button::new(t!("Close pane")).shortcut_text("Ctrl+Shift+W")).clicked() {
                 ask.close = true;
                 ui.close();
             }
             ui.separator();
-            if ui.button("Clear scrollback").clicked() {
+            if ui.button(t!("Clear scrollback")).clicked() {
                 clear = true;
                 ui.close();
             }
@@ -499,7 +499,7 @@ pub(super) fn screen(
             let commands = crate::script::commands();
             if !commands.is_empty() {
                 ui.separator();
-                ui.menu_button("Extensions", |ui| {
+                ui.menu_button(t!("Extensions"), |ui| {
                     for c in commands {
                         if ui.button(&c.label).clicked() {
                             script = Some(c);
@@ -575,7 +575,7 @@ pub(super) fn screen(
         painter.text(
             r.left_center() + Vec2::new(10.0, 0.0),
             Align2::LEFT_CENTER,
-            format!("{text}. Close the tab or open a new one."),
+            t!("{}. Close the tab or open a new one.", crate::lang::tr_msg(text)),
             FontId::proportional(13.0),
             scheme_fg(),
         );

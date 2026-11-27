@@ -53,12 +53,12 @@ impl Mode {
     /// The colour depth in words, for menus.
     pub fn label(self) -> &'static str {
         match self {
-            Mode::Mono => "Black and white",
-            Mode::Gray4 => "4 greys",
-            Mode::Gray16 => "16 greys",
-            Mode::Color16 => "16 colours",
-            Mode::Color256 => "256 colours",
-            Mode::True => "Full colour",
+            Mode::Mono => n!("Black and white"),
+            Mode::Gray4 => n!("4 greys"),
+            Mode::Gray16 => n!("16 greys"),
+            Mode::Color16 => n!("16 colours"),
+            Mode::Color256 => n!("256 colours"),
+            Mode::True => n!("Full colour"),
         }
     }
 

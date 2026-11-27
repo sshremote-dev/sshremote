@@ -150,9 +150,9 @@ fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
 #[cfg(unix)]
 fn print_lp(path: &Path, title: &str) -> Result<String, String> {
     let default = run("lpstat", &["-d"]).ok().and_then(|s| s.split_once(':').map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty() && !p.contains(' '));
-    let Some(printer) = default else { return Err("this computer has no default printer".into()) };
+    let Some(printer) = default else { return Err(n!("this computer has no default printer").into()) };
     run("lp", &["-d", &printer, "-t", title, "--", &path.to_string_lossy()])?;
-    Ok(format!("printed on {printer}"))
+    Ok(crate::lang::fill(n!("printed on {}"), &[&printer]))
 }
 
 #[cfg(target_os = "linux")]
@@ -307,7 +307,7 @@ mod os {
     }
 
     pub fn print(_: &std::path::Path, _: &str) -> Result<String, String> {
-        Err("this system cannot print here".into())
+        Err(n!("this system cannot print here").into())
     }
 }
 

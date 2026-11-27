@@ -49,6 +49,79 @@ fn system_fonts() -> (FontFiles, FontFiles) {
     }
 }
 
+/// Fonts for the script of the language spoken now, kept behind the interface's Latin one: a
+/// script it lacks, or the Han letters as that language draws them.
+fn script_fonts(code: &str) -> Vec<(String, u32)> {
+    let own = |v: &[(&str, u32)]| v.iter().map(|(p, i)| (p.to_string(), *i)).collect::<Vec<_>>();
+    if cfg!(windows) {
+        let w = |f: &str| format!(r"C:\Windows\Fonts\{f}");
+        let files: &[&str] = match code {
+            "hi" | "gu" | "ml" | "ta" => &["Nirmala.ttc", "Nirmala.ttf"],
+            "th" => &["LeelawUI.ttf", "tahoma.ttf"],
+            "ka" => &["sylfaen.ttf"],
+            "ur" => &["UrdType.ttf"],
+            "ja" => &["YuGothM.ttc", "meiryo.ttc", "msgothic.ttc"],
+            "zh-CN" => &["msyh.ttc", "simsun.ttc"],
+            "zh-TW" => &["msjh.ttc", "mingliu.ttc"],
+            _ => &[],
+        };
+        files.iter().map(|f| (w(f), 0)).collect()
+    } else if cfg!(target_os = "macos") {
+        let files: &[(&str, u32)] = match code {
+            "ar" | "fa" | "ur" => &[("/System/Library/Fonts/SFArabic.ttf", 0), ("/System/Library/Fonts/GeezaPro.ttc", 0)],
+            "he" => &[("/System/Library/Fonts/SFHebrew.ttf", 0), ("/System/Library/Fonts/ArialHB.ttc", 0)],
+            "hi" => &[("/System/Library/Fonts/Kohinoor.ttc", 0), ("/System/Library/Fonts/Supplemental/ITFDevanagari.ttc", 0)],
+            "gu" => &[("/System/Library/Fonts/KohinoorGujarati.ttc", 0), ("/System/Library/Fonts/Supplemental/GujaratiMT.ttc", 0)],
+            "ml" => &[("/System/Library/Fonts/Supplemental/Malayalam Sangam MN.ttc", 0), ("/System/Library/Fonts/Supplemental/Malayalam MN.ttc", 0)],
+            "ta" => &[("/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc", 0), ("/System/Library/Fonts/Supplemental/Tamil MN.ttc", 0)],
+            "th" => &[("/System/Library/Fonts/ThonburiUI.ttc", 0), ("/System/Library/Fonts/Supplemental/Thonburi.ttc", 0)],
+            "ka" => &[("/System/Library/Fonts/SFGeorgian.ttf", 0)],
+            "ja" => &[("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0)],
+            "zh-CN" => &[("/System/Library/Fonts/Hiragino Sans GB.ttc", 0), ("/System/Library/Fonts/STHeiti Light.ttc", 1)],
+            "zh-TW" => &[("/System/Library/Fonts/STHeiti Light.ttc", 0)],
+            _ => &[],
+        };
+        own(files)
+    } else {
+        let cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+        let index = match code {
+            "ja" => Some(0),
+            "zh-CN" => Some(2),
+            "zh-TW" => Some(3),
+            _ => None,
+        };
+        if let Some(i) = index {
+            return vec![(cjk.to_string(), i)];
+        }
+        let fc = match code {
+            "ar" => "ar",
+            "fa" => "fa",
+            "ur" => "ur",
+            "he" => "he",
+            "hi" => "hi",
+            "gu" => "gu",
+            "ml" => "ml",
+            "ta" => "ta",
+            "th" => "th",
+            "ka" => "ka",
+            _ => return Vec::new(),
+        };
+        // fontconfig knows which installed fonts write the language; a plain sans face first.
+        let out = std::process::Command::new("fc-list").arg(format!(":lang={fc}")).arg("file").arg("family").arg("style").output();
+        let Ok(out) = out else { return Vec::new() };
+        let mut found: Vec<(u8, String)> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (file, rest) = l.split_once(": ")?;
+                let rank = u8::from(!rest.contains("Sans")) + u8::from(!rest.contains("Regular")) * 2 + u8::from(rest.contains("Looped") || rest.contains("Kufi") || rest.contains("Rashi")) * 4;
+                Some((rank, file.trim_end_matches(':').to_string()))
+            })
+            .collect();
+        found.sort();
+        found.into_iter().take(1).map(|(_, f)| (f, 0)).collect()
+    }
+}
+
 /// A font for Korean, Japanese and Chinese, kept as a fallback behind a Latin one.
 fn is_cjk(path: &str) -> bool {
     path.contains("malgun") || path.contains("CJK") || path.contains("Gothic")
@@ -80,16 +153,24 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
                 picked.push((path, index));
             }
         }
+        // The language's own script right behind the Latin face.
+        let script: Vec<(&'static str, u32)> = if family == FontFamily::Proportional {
+            script_fonts(crate::lang::current()).into_iter().filter(|(p, _)| std::path::Path::new(p).is_file()).take(1).map(|(p, i)| (leak(p), i)).collect()
+        } else {
+            Vec::new()
+        };
+        let at = usize::from(!picked.is_empty() && !is_cjk(picked[0].0));
+        picked.splice(at..at, script.iter().copied());
         for (path, index) in picked.into_iter().rev() {
             let Ok(bytes) = std::fs::read(path) else { continue };
             let mut data = egui::FontData::from_owned(bytes);
             data.index = index;
             let mut families = vec![InsertFontFamily { family: family.clone(), priority: FontPriority::Highest }];
             // Korean, Japanese and Chinese in terminals and code too, behind the code fonts.
-            if family == FontFamily::Proportional && is_cjk(path) {
+            if family == FontFamily::Proportional && (is_cjk(path) || script.iter().any(|s| s.0 == path)) {
                 families.push(InsertFontFamily { family: FontFamily::Monospace, priority: FontPriority::Lowest });
             }
-            ctx.add_font(FontInsert { name: format!("system:{path}"), data, families });
+            ctx.add_font(FontInsert { name: format!("system:{path}:{index}"), data, families });
         }
     }
     let regular = egui::FontData::from_static(include_bytes!("../../assets/fonts/Phosphor.ttf"));
@@ -130,6 +211,7 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
 
 /// Fonts, sizes, spacing and the remembered theme, for any window of the program.
 pub fn style(ctx: &egui::Context) {
+    crate::lang::start();
     install_fonts(ctx);
     // Ctrl+plus and Ctrl+minus belong to the remote host and the terminal, not to zooming this window.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);

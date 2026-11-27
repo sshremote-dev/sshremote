@@ -57,7 +57,7 @@ impl Remote {
         let head = Rect::from_min_size(area.min, Vec2::new(area.width(), 28.0));
         let mut what = None;
         let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(head.shrink2(Vec2::new(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        bar.label(RichText::new("TERMINAL").small().strong());
+        bar.label(RichText::new(t!("TERMINAL")).small().strong());
         bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
@@ -65,13 +65,13 @@ impl Remote {
                     .on_hover_text(tip)
                     .clicked()
             };
-            if small(ui, ic::CARET_DOWN, "Hide the panel (the shells keep running)") {
+            if small(ui, ic::CARET_DOWN, t!("Hide the panel (the shells keep running)")) {
                 what = Some('h');
             }
-            if small(ui, ic::ARROW_SQUARE_OUT, "Move the terminal to a window of its own") {
+            if small(ui, ic::ARROW_SQUARE_OUT, t!("Move the terminal to a window of its own")) {
                 what = Some('w');
             }
-            if small(ui, ic::CORNERS_OUT, "Fill the window with the terminal (the remote screen waits behind it)") {
+            if small(ui, ic::CORNERS_OUT, t!("Fill the window with the terminal (the remote screen waits behind it)")) {
                 what = Some('f');
             }
         });
@@ -119,7 +119,7 @@ impl Remote {
         ui.painter().vline(area.left(), area.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
         let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink2(Vec2::new(12.0, 8.0))).id_salt("chat-panel"));
         panel.horizontal(|ui| {
-            ui.label(RichText::new(format!("{}  Chat", ic::CHAT)).strong());
+            ui.label(RichText::new(format!("{}  {}", ic::CHAT, t!("Chat"))).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let small = |ui: &mut egui::Ui, glyph: &str, tip: &str| {
@@ -127,18 +127,18 @@ impl Remote {
                         .on_hover_text(tip)
                         .clicked()
                 };
-                close = small(ui, ic::X, "Close the chat (the conversation is kept)");
-                clear = earlier + lines.len() > 0 && small(ui, ic::TRASH, "Clear the history kept with this host");
+                close = small(ui, ic::X, t!("Close the chat (the conversation is kept)"));
+                clear = earlier + lines.len() > 0 && small(ui, ic::TRASH, t!("Clear the history kept with this host"));
             });
         });
-        panel.label(RichText::new("With the person at the SSH host's screen; a window opens there.").small().weak());
+        panel.label(RichText::new(t!("With the person at the SSH host's screen; a window opens there.")).small().weak());
         let h = (panel.available_height() - 52.0).max(80.0);
         egui::ScrollArea::vertical()
             .id_salt("chat-lines")
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .max_height(h)
-            .show(&mut panel, |ui| crate::chat::show_lines_since(ui, lines, earlier, &peer, "You"));
+            .show(&mut panel, |ui| crate::chat::show_lines_since(ui, lines, earlier, &peer, t!("You")));
         panel.add_space(4.0);
         sent = crate::chat::input_row(&mut panel, input, true).or(sent);
         if clear {

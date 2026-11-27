@@ -338,10 +338,10 @@ impl Held {
         let catching = inbox().map(|name| (format!("sshremote-catch-{pid}-{token}"), name)).filter(|(script, name)| run(script, &catcher(token, name))).map(|(s, _)| s);
         let (name, mut said) = match crate::apps::launch(kind, text) {
             Ok(n) => (n, None),
-            Err(e) => (String::new(), Some(format!("It could not be started: {e}."))),
+            Err(e) => (String::new(), Some(t!("It could not be started: {}.", crate::lang::tr_msg(&e)))),
         };
         if catching.is_none() && said.is_none() {
-            said = Some("KWin does not run this app's scripts, so this program stays a window of its own.".into());
+            said = Some(t!("KWin does not run this app's scripts, so this program stays a window of its own.").into());
         }
         let what = if name.is_empty() { text.trim().trim_end_matches('/').rsplit('/').next().unwrap_or(text).to_string() } else { name };
         let now = Instant::now();
@@ -372,13 +372,13 @@ impl Held {
                 if let Some(s) = self.catching.take() {
                     unload(&s);
                 }
-                self.said = Some(format!("{} opened no window of its own to show here.", self.what));
+                self.said = Some(t!("{} opened no window of its own to show here.", self.what));
             }
         }
         let text = match (&self.id, &self.said) {
             (None, Some(s)) => s.clone(),
-            (None, None) => format!("Starting {}\u{2026}", self.what),
-            _ => format!("{} is here", self.what),
+            (None, None) => t!("Starting {}\u{2026}", self.what),
+            _ => t!("{} is here", self.what),
         };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), ui.visuals().weak_text_color());
         ctx.request_repaint_after(LOOK.max(Duration::from_millis(200)));

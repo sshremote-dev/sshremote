@@ -55,7 +55,7 @@ impl Computer {
             return self.name.clone();
         }
         match self.id() {
-            Some(id) => format!("ID {}", spaced(id)),
+            Some(id) => crate::lang::fill(n!("ID {}"), &[&spaced(id)]),
             None => self.address.clone(),
         }
     }

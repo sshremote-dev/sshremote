@@ -281,7 +281,7 @@ fn connect_in_background(target: Target, ctx: &egui::Context) -> Pending {
         #[cfg(not(feature = "remote"))]
         let r = {
             let _ = (target, said);
-            Err(crate::not_built("screens and files"))
+            Err(n!("this sshremote was built without screens and files").to_string())
         };
         let _ = tx.send(r);
         ctx.request_repaint();
@@ -309,8 +309,8 @@ enum Fit {
 impl Fit {
     fn label(self) -> String {
         match self {
-            Fit::Window => "Fit".into(),
-            Fit::Stretch => "Stretch".into(),
+            Fit::Window => t!("Fit").into(),
+            Fit::Stretch => t!("Stretch").into(),
             Fit::Fixed(p) => format!("{p}%"),
         }
     }
@@ -462,7 +462,7 @@ pub fn run(opt: &Options) -> Result<(), String> {
         std::thread::spawn(|| drop(crate::lan::refresh_known(std::time::Duration::from_millis(1500))));
         let refused = crate::tunnels::start_with_app();
         if !refused.is_empty() {
-            app.error = Some(format!("Tunnels not opened: {}", refused.join("; ")));
+            app.error = Some(t!("Tunnels not opened: {}", refused.join("; ")));
         }
         if auto_start {
             app.connect(local);
@@ -703,49 +703,49 @@ fn menu_open(ctx: &egui::Context) -> bool {
 
 /// A preset's real settings, e.g. "256 colours, 100%, 30 fps".
 fn preset_text(p: &crate::proto::Preset) -> String {
-    format!("{}, {}% size, {} fps", p.mode.label(), p.scale, p.fps)
+    t!("{}, {}% size, {} fps", crate::lang::tr(p.mode.label()), p.scale, p.fps)
 }
 
 /// The cause of a failed connection in plain words, with what to try.
 fn friendly(e: &str) -> (String, &'static str) {
-    let first = e.lines().find(|l| !l.trim().is_empty()).unwrap_or(e).trim().to_string();
+    let first = crate::lang::tr_msg(e.lines().find(|l| !l.trim().is_empty()).unwrap_or(e).trim()).into_owned();
     let l = e.to_lowercase();
     let hint = if l.contains("without its password") {
-        "Ask the person at that computer for its password, or for them to let you ask (Remote access settings, Who comes in)."
+        t!("Ask the person at that computer for its password, or for them to let you ask (Remote access settings, Who comes in).")
     } else if l.contains("only from some addresses") {
-        "Its remote access settings list the addresses viewers may come from (Who comes in): ask the person there to add yours."
+        t!("Its remote access settings list the addresses viewers may come from (Who comes in): ask the person there to add yours.")
     } else if l.contains("answering someone else") {
-        "Someone else is asking that computer just now. Try again in a few seconds."
+        t!("Someone else is asking that computer just now. Try again in a few seconds.")
     } else if l.contains("straight path") {
-        "The straight connection through the routers stopped working (a network that cuts UDP, say); it connects through the relay instead."
+        t!("The straight connection through the routers stopped working (a network that cuts UDP, say); it connects through the relay instead.")
     } else if l.contains("permission denied") {
-        "The host refused the login. Enter the password, or install your key on the host with ssh-copy-id."
+        t!("The host refused the login. Enter the password, or install your key on the host with ssh-copy-id.")
     } else if l.contains("could not resolve") || l.contains("name or service not known") || l.contains("no such host") {
-        "The host name is unknown. Check the spelling, or use the IP address."
+        t!("The host name is unknown. Check the spelling, or use the IP address.")
     } else if l.contains("connection refused") || l.contains("actively refused") {
-        "Nothing answered on that port. Is the SSH server running there?"
+        t!("Nothing answered on that port. Is the SSH server running there?")
     } else if l.contains("timed out") || l.contains("no route") || l.contains("unreachable") {
-        "The host did not answer. Check the address, the network and any firewall."
+        t!("The host did not answer. Check the address, the network and any firewall.")
     } else if l.contains("command not found") || l.contains("not recognized") || l.contains("no such file") {
-        "sshremote is not installed on the host. Copy it to ~/.local/bin/sshremote (Windows: anywhere on PATH)."
+        t!("sshremote is not installed on the host. Copy it to ~/.local/bin/sshremote (Windows: anywhere on PATH).")
     } else if l.contains("host key verification failed") {
-        "The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts."
+        t!("The host's key changed since the last visit. If that is expected, remove its line from ~/.ssh/known_hosts.")
     } else if l.contains("authenticator") || l.contains("wrong code") {
-        "That computer has two-step sign-in: give the code its authenticator app shows now, with the password."
+        t!("That computer has two-step sign-in: give the code its authenticator app shows now, with the password.")
     } else if l.contains("wrong password") {
-        "The password does not match the one set on that computer (Remote access by ID, on the left of its window)."
+        t!("The password does not match the one set on that computer (Remote access by ID, on the left of its window).")
     } else if l.contains("no agent with that id") || l.contains("relay: offline") {
-        "That ID is not at the relay now: the computer is off, offline, or has remote access turned off."
+        t!("That ID is not at the relay now: the computer is off, offline, or has remote access turned off.")
     } else if l.contains("relay: the computer did not answer") {
-        "The computer is at the relay but did not answer. Try again in a moment."
+        t!("The computer is at the relay but did not answer. Try again in a moment.")
     } else if l.contains("too many attempts") {
-        "Too many tries from here in a minute. Wait a minute, then try again."
+        t!("Too many tries from here in a minute. Wait a minute, then try again.")
     } else if l.contains(":7071") {
-        "The relay could not be reached. Check the network; a firewall may block port 7071."
+        t!("The relay could not be reached. Check the network; a firewall may block port 7071.")
     } else if l.contains("no frame") || l.contains("no interactive desktop") || l.contains("logged") {
-        "Nobody is signed in to the SSH host's desktop, or it is locked."
+        t!("Nobody is signed in to the SSH host's desktop, or it is locked.")
     } else if l.contains("did not answer within") {
-        "The remote agent did not start in time. Try again, or check that sshremote runs on the host."
+        t!("The remote agent did not start in time. Try again, or check that sshremote runs on the host.")
     } else {
         ""
     };
@@ -1184,7 +1184,7 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 tray::hide(main);
                 if !std::mem::replace(&mut self.told_tray, true) {
-                    t.say("SSH Remote goes on here: remote access and tunnels stay up. Right-click the icon for its menu, or Quit.");
+                    t.say(t!("SSH Remote goes on here: remote access and tunnels stay up. Right-click the icon for its menu, or Quit."));
                 }
                 return;
             }
@@ -1215,17 +1215,17 @@ impl App {
         let mut body = Vec::new();
         if others > 0 {
             body.push(match others {
-                1 => "The other window closes, and its connections and shells end.".to_string(),
-                n => format!("The {n} other windows close, and their connections and shells end."),
+                1 => t!("The other window closes, and its connections and shells end.").to_string(),
+                n => t!("The {} other windows close, and their connections and shells end.", n),
             });
         }
         if viewers > 0 {
             body.push(match viewers {
-                1 => "The person connected to this computer by its ID is disconnected.".to_string(),
-                n => format!("The {n} people connected to this computer by its ID are disconnected."),
+                1 => t!("The person connected to this computer by its ID is disconnected.").to_string(),
+                n => t!("The {} people connected to this computer by its ID are disconnected.", n),
             });
         }
-        if let Some(yes) = workspace::ask(ctx, "Close SSH Remote?", &body.join(" "), "Close") {
+        if let Some(yes) = workspace::ask(ctx, t!("Close SSH Remote?"), &body.join(" "), t!("Close")) {
             self.quit_asked = false;
             if yes {
                 self.quit_session();
@@ -1475,7 +1475,7 @@ impl App {
                 && let Err(e) = crate::vault::set(&h, &pw)
                 && let Screen::Work(w) = &mut self.screen
             {
-                w.failed = Some(format!("The password was not saved: {e}"));
+                w.failed = Some(t!("The password was not saved: {}", crate::lang::tr_msg(&e)));
             }
             if let Some(port) = self.pending_ports.remove(&h) {
                 self.remember_host(&h, &port);
@@ -1597,8 +1597,8 @@ fn tab_ghost(ctx: &egui::Context, glyph: &str, name: &str, panes: usize, at: Pos
         p.rect_filled(body, egui::CornerRadius { nw: 0, ne: 0, sw: theme::R_SM, se: theme::R_SM }, v.panel_fill);
         p.text(body.center() - Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, glyph, FontId::proportional(30.0), v.weak_text_color());
         let what = match panes {
-            0 | 1 => "A window of its own here, or onto other tabs".to_string(),
-            n => format!("{n} panes: a window of their own here, or onto other tabs"),
+            0 | 1 => t!("A window of its own here, or onto other tabs").to_string(),
+            n => t!("{} panes: a window of their own here, or onto other tabs", n),
         };
         p.text(body.center() + Vec2::new(0.0, 26.0), Align2::CENTER_CENTER, what, FontId::proportional(11.5), v.weak_text_color());
     });
@@ -1845,7 +1845,7 @@ mod tests {
     }
 
     /// Every state of the home window and what opens over it, to look over:
-    /// SSHREMOTE_REVIEW_DIR=folder cargo test review_pictures
+    /// SSHREMOTE_REVIEW_DIR=folder cargo test review_pictures (SSHREMOTE_TEST_LANG=de: in German)
     #[test]
     fn review_pictures() {
         let Some(dir) = std::env::var_os("SSHREMOTE_REVIEW_DIR").map(std::path::PathBuf::from) else { return };

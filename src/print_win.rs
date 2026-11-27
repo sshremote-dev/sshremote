@@ -252,13 +252,13 @@ pub fn print(path: &Path, title: &str) -> Result<String, String> {
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDCW, DIB_RGB_COLORS, DeleteDC, GetDeviceCaps, HORZRES, SRCCOPY, StretchDIBits, VERTRES,
     };
     use windows_sys::Win32::Storage::Xps::{DOCINFOW, EndDoc, EndPage, StartDocW, StartPage};
-    let printer = default_printer().ok_or("this computer has no default printer")?;
+    let printer = default_printer().ok_or(n!("this computer has no default printer"))?;
     let (spool, device) = (wide("WINSPOOL"), wide(&printer));
     // SAFETY: a printer's device context made, drawn on and deleted here.
     unsafe {
         let dc = CreateDCW(spool.as_ptr(), device.as_ptr(), std::ptr::null(), std::ptr::null());
         if dc.is_null() {
-            return Err(format!("{printer} could not be opened"));
+            return Err(crate::lang::fill(n!("{} could not be opened"), &[&printer]));
         }
         let room = (GetDeviceCaps(dc, HORZRES as _).max(1) as u32, GetDeviceCaps(dc, VERTRES as _).max(1) as u32);
         // At most about 40 million pixels a page.
@@ -275,7 +275,7 @@ pub fn print(path: &Path, title: &str) -> Result<String, String> {
         let doc = DOCINFOW { cbSize: std::mem::size_of::<DOCINFOW>() as i32, lpszDocName: name.as_ptr(), lpszOutput: std::ptr::null(), lpszDatatype: std::ptr::null(), fwType: 0 };
         if StartDocW(dc, &doc) <= 0 {
             DeleteDC(dc);
-            return Err(format!("{printer} did not take the job"));
+            return Err(crate::lang::fill(n!("{} did not take the job"), &[&printer]));
         }
         for (px, w, h) in &drawn {
             StartPage(dc);
@@ -289,6 +289,6 @@ pub fn print(path: &Path, title: &str) -> Result<String, String> {
         }
         EndDoc(dc);
         DeleteDC(dc);
-        Ok(format!("{} {} printed on {printer}", drawn.len(), if drawn.len() == 1 { "page" } else { "pages" }))
+        Ok(if drawn.len() == 1 { crate::lang::fill(n!("1 page printed on {}"), &[&printer]) } else { crate::lang::fill(n!("{} pages printed on {}"), &[&drawn.len(), &printer]) })
     }
 }

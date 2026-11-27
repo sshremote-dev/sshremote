@@ -61,7 +61,7 @@ const VOICE_BITRATE: i32 = 24_000;
 pub fn microphone() -> Result<Capture, String> {
     #[cfg(target_os = "linux")]
     crate::capture::ensure_session_env();
-    let device = cpal::default_host().default_input_device().ok_or("no microphone")?;
+    let device = cpal::default_host().default_input_device().ok_or(n!("no microphone"))?;
     let config = device.default_input_config().map_err(|e| e.to_string())?;
     let (rate, ch) = (config.sample_rate(), config.channels() as usize);
     let (tx, rx) = mpsc::channel();
@@ -89,7 +89,7 @@ pub fn microphone() -> Result<Capture, String> {
             err,
             None,
         ),
-        f => return Err(format!("unsupported microphone format {f:?}")),
+        f => return Err(crate::lang::fill(n!("unsupported microphone format {}"), &[&format!("{f:?}")])),
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
@@ -132,10 +132,10 @@ impl Capture {
 /// Windows: loopback recording of the default output device through WASAPI.
 #[cfg(windows)]
 pub fn capture() -> Result<Capture, String> {
-    let device = cpal::default_host().default_output_device().ok_or("no audio output device")?;
+    let device = cpal::default_host().default_output_device().ok_or(n!("no audio output device"))?;
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     if config.sample_format() != cpal::SampleFormat::F32 {
-        return Err(format!("unsupported sample format {:?}", config.sample_format()));
+        return Err(crate::lang::fill(n!("unsupported sample format {}"), &[&format!("{:?}", config.sample_format())]));
     }
     let (tx, rx) = mpsc::channel();
     let mut enc = encoder()?;
@@ -174,12 +174,12 @@ pub fn capture() -> Result<Capture, String> {
          ! appsink name=sink sync=false"
     );
     let p = gst::parse::launch(&desc)
-        .map_err(|e| format!("audio pipeline: {e}"))?
+        .map_err(|e| crate::lang::fill(n!("audio pipeline: {}"), &[&e]))?
         .downcast::<gst::Pipeline>()
-        .map_err(|_| "audio pipeline".to_string())?;
+        .map_err(|_| n!("audio pipeline").to_string())?;
     let sink =
-        p.by_name("sink").and_then(|s| s.downcast::<gstreamer_app::AppSink>().ok()).ok_or("audio sink missing")?;
-    p.set_state(gst::State::Playing).map_err(|e| format!("audio capture did not start: {e}"))?;
+        p.by_name("sink").and_then(|s| s.downcast::<gstreamer_app::AppSink>().ok()).ok_or(n!("audio sink missing"))?;
+    p.set_state(gst::State::Playing).map_err(|e| crate::lang::fill(n!("audio capture did not start: {}"), &[&e]))?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(sample) = sink.pull_sample() {
@@ -232,7 +232,7 @@ pub fn capture() -> Result<Capture, String> {
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn capture() -> Result<Capture, String> {
-    Err("sound capture is not available on this system".into())
+    Err(n!("sound capture is not available on this system").into())
 }
 
 /// Viewer side: decodes packets into a buffer the output device drains.
@@ -247,10 +247,10 @@ pub struct Player {
 
 impl Player {
     pub fn new() -> Result<Player, String> {
-        let device = cpal::default_host().default_output_device().ok_or("no audio output device")?;
+        let device = cpal::default_host().default_output_device().ok_or(n!("no audio output device"))?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         if config.sample_format() != cpal::SampleFormat::F32 {
-            return Err(format!("unsupported sample format {:?}", config.sample_format()));
+            return Err(crate::lang::fill(n!("unsupported sample format {}"), &[&format!("{:?}", config.sample_format())]));
         }
         let (device_rate, device_ch) = (config.sample_rate(), config.channels() as usize);
         let queue: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));

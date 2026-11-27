@@ -70,7 +70,7 @@ const MODS: [(u32, u32); 8] =
     [(0xffe1, 1), (0xffe2, 1), (0xffe3, 4), (0xffe4, 4), (0xffe9, 8), (0xffea, 8), (0xffeb, 64), (0xffec, 64)];
 
 /// A US keyboard: each key's evdev code, its keysym and the one Shift gives (0: the same).
-const US: &[(u32, u32, u32)] = &[
+pub(crate) const US: &[(u32, u32, u32)] = &[
     (1, 0xff1b, 0), (2, b'1' as u32, b'!' as u32), (3, b'2' as u32, b'@' as u32), (4, b'3' as u32, b'#' as u32),
     (5, b'4' as u32, b'$' as u32), (6, b'5' as u32, b'%' as u32), (7, b'6' as u32, b'^' as u32), (8, b'7' as u32, b'&' as u32),
     (9, b'8' as u32, b'*' as u32), (10, b'9' as u32, b'(' as u32), (11, b'0' as u32, b')' as u32), (12, b'-' as u32, b'_' as u32),

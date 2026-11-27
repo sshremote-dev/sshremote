@@ -54,7 +54,7 @@ impl Remote {
     /// onto its clipboard, and are pasted where its keyboard is.
     pub(in crate::gui) fn paste_files(&mut self, paths: Vec<std::path::PathBuf>) -> Result<(), String> {
         if self.view_only || self.mirror || !self.share_clipboard {
-            self.notify("Files are not pasted there while the clipboard is not shared or the view is only for looking");
+            self.notify(t!("Files are not pasted there while the clipboard is not shared or the view is only for looking"));
             return Ok(());
         }
         self.batches += 1;
@@ -67,7 +67,7 @@ impl Remote {
             return Ok(());
         }
         let names = paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
-        self.notify(&format!("Pasting {} {} there\u{2026}", paths.len(), if paths.len() == 1 { "item" } else { "items" }));
+        self.notify(&if paths.len() == 1 { t!("Pasting {} item there\u{2026}", paths.len()) } else { t!("Pasting {} items there\u{2026}", paths.len()) });
         self.pasting = Some((batch, ids, names));
         Ok(())
     }
@@ -81,7 +81,7 @@ impl Remote {
             return Ok(());
         }
         if total > MOST {
-            self.notify(&format!("{} MB copied there: too much to bring over by itself; fetch it in Files", total >> 20));
+            self.notify(&t!("{} MB copied there: too much to bring over by itself; fetch it in Files", total >> 20));
             return Ok(());
         }
         self.batches += 1;
@@ -112,7 +112,7 @@ impl Remote {
         let ids: Vec<u32> = (first..self.next_upload).collect();
         if ids.is_empty() {
             if let Some(t) = self.terms.as_mut() {
-                t.upload_done(tab, Err("nothing could be read".into()));
+                t.upload_done(tab, Err(t!("nothing could be read").into()));
             }
             return Ok(());
         }
@@ -138,7 +138,7 @@ impl Remote {
             }
         }
         if let Some(t) = self.terms.as_mut() {
-            t.upload_done(tab, Err("stopped".into()));
+            t.upload_done(tab, Err(t!("stopped").into()));
         }
         Ok(())
     }
@@ -180,8 +180,8 @@ impl Remote {
             let d = self.term_drops.remove(k);
             let r = match d.failed {
                 // An agent older than drops takes the folder's name for a path, and says so.
-                Some(e) if e.contains('\0') || e.to_lowercase().contains("nul") => Err("the host's SSH Remote is older: update it there".to_string()),
-                Some(e) => Err(e),
+                Some(e) if e.contains('\0') || e.to_lowercase().contains("nul") => Err(t!("the host's SSH Remote is older: update it there").to_string()),
+                Some(e) => Err(crate::lang::tr_msg(&e).into_owned()),
                 None => Ok(d.tops),
             };
             if let Some(t) = self.terms.as_mut() {
@@ -259,7 +259,7 @@ impl Remote {
                     self.send(start)?;
                 }
                 Err(e) => {
-                    let (id, text) = (u.id, format!("{} failed: {e}", u.name));
+                    let (id, text) = (u.id, t!("{} failed: {}", u.name, e));
                     // A terminal's copy hears it too, and goes on with the rest.
                     if !self.term_drop_done(id, false, &text) {
                         self.uploads.remove(i);
@@ -283,7 +283,7 @@ impl Remote {
                 _ => Ok(0),
             };
             let n = match read {
-                Ok(0) if want > 0 => Err("it got shorter while being sent".to_string()),
+                Ok(0) if want > 0 => Err(t!("it got shorter while being sent").to_string()),
                 Ok(n) => Ok(n),
                 Err(e) => Err(e.to_string()),
             };
@@ -351,7 +351,7 @@ impl Remote {
                     let u = &mut self.uploads[i];
                     if u.file.is_none() && !u.ended {
                         // Not started: the host never heard of it.
-                        let text = format!("{}: upload cancelled", u.name);
+                        let text = t!("{}: upload cancelled", u.name);
                         self.uploads.remove(i);
                         self.notify(&text);
                     } else {
@@ -370,7 +370,7 @@ impl Remote {
                     self.resume.done(tag);
                     self.inbox.end(id, false, "cancelled");
                     self.downloads.retain(|d| d.0 != id);
-                    self.notify(&format!("{name}: download cancelled"));
+                    self.notify(&t!("{}: download cancelled", name));
                 }
             }
         }
@@ -386,25 +386,25 @@ impl Remote {
         let mut lines: Vec<String> = sending
             .iter()
             .take(3)
-            .map(|u| format!("Sending {}  {}%", u.name, (u.acked * 100).checked_div(u.size).unwrap_or(100)))
+            .map(|u| t!("Sending {}  {}%", u.name, (u.acked * 100).checked_div(u.size).unwrap_or(100)))
             .collect();
         if sending.len() > 3 {
-            lines.push(format!("and {} more to send", sending.len() - 3));
+            lines.push(t!("and {} more to send", sending.len() - 3));
         }
         let receiving: Vec<String> = self
             .downloads
             .iter()
             .filter_map(|(id, name, _)| {
                 let (got, size) = self.inbox.received(*id)?;
-                Some(format!("Receiving {name}  {}%", (got * 100).checked_div(size).unwrap_or(100)))
+                Some(t!("Receiving {}  {}%", name, (got * 100).checked_div(size).unwrap_or(100)))
             })
             .collect();
         lines.extend(receiving.iter().take(3).cloned());
         if receiving.len() > 3 {
-            lines.push(format!("and {} more being received", receiving.len() - 3));
+            lines.push(t!("and {} more being received", receiving.len() - 3));
         }
         if hovering {
-            lines.push(format!("Drop to send to the Downloads folder on {}", self.host()));
+            lines.push(t!("Drop to send to the Downloads folder on {}", self.host()));
         }
         if lines.is_empty() {
             return;
@@ -460,9 +460,9 @@ impl Remote {
     /// A download begins: into the folder its request chose.
     pub(super) fn fetch_started(&mut self, id: u32, size: u64, tag: u32, name: String) -> Result<(), String> {
         let dir = self.fetch_dirs.get(&tag).cloned().unwrap_or_else(crate::files::downloads);
-        let started = self.sess.fetch_start(&mut self.inbox, id, size, &dir, &name).map_err(|e| format!("connection lost: {e}"))?;
+        let started = self.sess.fetch_start(&mut self.inbox, id, size, &dir, &name).map_err(|e| t!("connection lost: {}", e))?;
         if let Some(crate::files::Note::Done { text, .. }) = started {
-            self.notify(&format!("{name}: {text}"));
+            self.notify(&format!("{name}: {}", crate::lang::tr_msg(&text)));
         } else {
             self.resume.came_to(tag, &name, false);
             self.downloads.push((id, name, tag));
@@ -501,7 +501,7 @@ impl Remote {
                 self.resume.waiting.push((a.tag, a.name.clone(), k));
             }
         }
-        self.notify(&format!("Going on with {n} {} the connection cut off", if n == 1 { "transfer" } else { "transfers" }));
+        self.notify(&if n == 1 { t!("Going on with {} transfer the connection cut off", n) } else { t!("Going on with {} transfers the connection cut off", n) });
         Ok(())
     }
 
@@ -509,7 +509,11 @@ impl Remote {
     pub(super) fn carried_end(&mut self) {
         if let Some(c) = self.resume.carried.take() {
             let n = c.count();
-            self.notify(&format!("{n} {} the connection cut off could not go on: the host's SSH Remote is older; send {} again", if n == 1 { "transfer" } else { "transfers" }, if n == 1 { "it" } else { "them" }));
+            self.notify(&if n == 1 {
+                t!("{} transfer the connection cut off could not go on: the host's SSH Remote is older; send it again", n)
+            } else {
+                t!("{} transfers the connection cut off could not go on: the host's SSH Remote is older; send them again", n)
+            });
         }
     }
 
@@ -521,7 +525,7 @@ impl Remote {
         match u.file.as_mut().map(|f| f.seek(std::io::SeekFrom::Start(from))) {
             Some(Ok(_)) if from <= u.size => (u.sent, u.acked) = (from, from),
             _ => {
-                (u.error, u.ended, u.file) = (Some("it could not go on from where it was cut off".into()), true, None);
+                (u.error, u.ended, u.file) = (Some(t!("it could not go on from where it was cut off").into()), true, None);
                 self.send(ToAgent::FileEnd { id })?;
             }
         }
@@ -549,7 +553,7 @@ impl Remote {
                     k.discard();
                 }
                 self.send(ToAgent::FetchCancel { id, tag: 0 })?;
-                self.notify(&format!("{name} could not go on from where it was cut off"));
+                self.notify(&t!("{} could not go on from where it was cut off", name));
             }
         }
         Ok(())

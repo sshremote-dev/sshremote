@@ -498,7 +498,7 @@ impl Held {
         let mut said = None;
         let started = match (wm(), crate::apps::shell_line(kind, text)) {
             (_, Err(e)) => {
-                said = Some(format!("It could not be started: {e}."));
+                said = Some(t!("It could not be started: {}.", crate::lang::tr_msg(&e)));
                 false
             }
             (None, _) => false,
@@ -545,8 +545,11 @@ impl Held {
         if !started && said.is_none() {
             // Started as any program is: a window of its own.
             said = Some(match crate::apps::launch(kind, text) {
-                Ok(_) => format!("{} did not start it for this app, so this program stays a window of its own.", wm().map_or("The desktop", |w| w.name())),
-                Err(e) => format!("It could not be started: {e}."),
+                Ok(_) => match wm() {
+                    Some(w) => t!("{} did not start it for this app, so this program stays a window of its own.", w.name()),
+                    None => t!("The desktop did not start it for this app, so this program stays a window of its own.").to_string(),
+                },
+                Err(e) => t!("It could not be started: {}.", crate::lang::tr_msg(&e)),
             });
         }
         Held { token, what, said, since: Instant::now(), told: None }
@@ -561,9 +564,9 @@ impl Held {
         let caught = keep().entries.iter().any(|e| e.token == self.token && e.id.is_some());
         let text = match (&self.said, caught) {
             (Some(s), _) => s.clone(),
-            (None, true) => format!("{} is here", self.what),
-            (None, false) if self.since.elapsed() > GIVE_UP => format!("{} opened no window of its own to show here.", self.what),
-            (None, false) => format!("Starting {}\u{2026}", self.what),
+            (None, true) => t!("{} is here", self.what),
+            (None, false) if self.since.elapsed() > GIVE_UP => t!("{} opened no window of its own to show here.", self.what),
+            (None, false) => t!("Starting {}\u{2026}", self.what),
         };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), ui.visuals().weak_text_color());
         ctx.request_repaint_after(Duration::from_millis(250));

@@ -52,11 +52,11 @@ impl SignIn {
             // A computer with two-step sign-in took the password: only the code is missing (or wrong).
             let wants_code = why.contains("code");
             let why = if wants_code {
-                "The password was right; this computer wants the code of its authenticator app too.".to_string()
+                t!("The password was right; this computer wants the code of its authenticator app too.").to_string()
             } else if why.contains("wrong password") {
-                "That password was not accepted.".to_string()
+                t!("That password was not accepted.").to_string()
             } else if why == crate::net::NO_REQUESTS {
-                "That computer lets nobody in without its password.".to_string()
+                t!("That computer lets nobody in without its password.").to_string()
             } else {
                 why
             };
@@ -64,7 +64,7 @@ impl SignIn {
             let password = if wants_code && !known.is_empty() { known } else if wants_code { crate::vault::get(&address).unwrap_or_default() } else { String::new() };
             return Some(SignIn {
                 pane,
-                host: format!("ID {}", crate::computers::spaced(&addr.id)),
+                host: t!("ID {}", crate::computers::spaced(&addr.id)),
                 user: String::new(),
                 port: String::new(),
                 purpose: purpose.to_string(),
@@ -112,7 +112,7 @@ impl SignIn {
         let mut answer = None;
         let r = modal.show(ctx, |ui| {
             ui.set_width(fit.x);
-            ui.label(RichText::new(format!("{}  Sign in to {}", ic::LOCK_KEY, self.host)).size(16.0).strong());
+            ui.label(RichText::new(format!("{}  {}", ic::LOCK_KEY, t!("Sign in to {}", self.host))).size(16.0).strong());
             ui.add_space(6.0);
             egui::Grid::new("sign-in-host").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                 let row = |ui: &mut egui::Ui, k: &str, v: &str| {
@@ -121,35 +121,35 @@ impl SignIn {
                     ui.end_row();
                 };
                 if by_id {
-                    row(ui, "Computer", &self.host);
+                    row(ui, t!("Computer"), &self.host);
                 } else {
-                    row(ui, "Host", &self.host);
+                    row(ui, t!("Host"), &self.host);
                     // A login refused for the wrong user (or a port that is not ssh's) is put
                     // right here.
-                    ui.label(RichText::new("User").weak());
-                    ui.add(egui::TextEdit::singleline(&mut self.user).hint_text("from ~/.ssh/config, or yours here").desired_width(220.0));
+                    ui.label(RichText::new(t!("User")).weak());
+                    ui.add(egui::TextEdit::singleline(&mut self.user).hint_text(t!("from ~/.ssh/config, or yours here")).desired_width(220.0));
                     ui.end_row();
-                    ui.label(RichText::new("Port").weak());
-                    ui.add(egui::TextEdit::singleline(&mut self.port).hint_text("22, or from ~/.ssh/config").desired_width(80.0));
+                    ui.label(RichText::new(t!("Port")).weak());
+                    ui.add(egui::TextEdit::singleline(&mut self.port).hint_text(t!("22, or from ~/.ssh/config")).desired_width(80.0));
                     ui.end_row();
                 }
-                row(ui, "For", &self.purpose);
+                row(ui, t!("For"), &crate::lang::tr_msg(&self.purpose));
             });
             ui.add_space(4.0);
-            ui.label(RichText::new(&self.why).small().weak());
+            ui.label(RichText::new(crate::lang::tr_msg(&self.why)).small().weak());
             ui.add_space(8.0);
-            ui.label(if by_id { "The password set on that computer" } else { "Password, or the key's passphrase" });
+            ui.label(if by_id { t!("The password set on that computer") } else { t!("Password, or the key's passphrase") });
             let pw = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(fit.x));
             let code = self.wants_code.then(|| {
                 ui.add_space(4.0);
-                ui.label("The code your authenticator app shows now");
-                let field = ui.add(egui::TextEdit::singleline(&mut self.code).hint_text("six digits").desired_width(140.0));
+                ui.label(t!("The code your authenticator app shows now"));
+                let field = ui.add(egui::TextEdit::singleline(&mut self.code).hint_text(t!("six digits")).desired_width(140.0));
                 // The token it gives is kept in the password store, so only with one.
                 #[cfg(feature = "remote")]
                 if crate::vault::backend().is_some()
                     && ui
-                        .checkbox(&mut self.trust, format!("Do not ask for the code on this computer for {} days", crate::access::TRUST_DAYS))
-                        .on_hover_text("That computer gives this one a token, kept in the system's password store; its password is still asked. It can forget this computer at any time.")
+                        .checkbox(&mut self.trust, t!("Do not ask for the code on this computer for {} days", crate::access::TRUST_DAYS))
+                        .on_hover_text(t!("That computer gives this one a token, kept in the system's password store; its password is still asked. It can forget this computer at any time."))
                         .changed()
                 {
                     crate::hosts::set_setting("trust_devices", if self.trust { "yes" } else { "no" });
@@ -166,13 +166,13 @@ impl SignIn {
             }
             if !by_id {
             ui.add_space(4.0);
-            ui.label("Key file (optional)");
+            ui.label(t!("Key file (optional)"));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.key).hint_text("~/.ssh/id_ed25519").desired_width(fit.x - 110.0));
-                ui.menu_button("Your keys", |ui| {
+                ui.menu_button(t!("Your keys"), |ui| {
                     let keys = crate::tools::list_keys();
                     if keys.is_empty() {
-                        ui.label(RichText::new("No keys in ~/.ssh").weak());
+                        ui.label(RichText::new(t!("No keys in ~/.ssh")).weak());
                     }
                     for k in keys {
                         if ui.button(&k.name).clicked() {
@@ -184,21 +184,21 @@ impl SignIn {
             });
             }
             ui.add_space(4.0);
-            ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.remember, "Remember the password in the system's password store"))
-                .on_hover_text("So it is not asked again; unticked, it is used for this connection only and never written anywhere");
+            ui.add_enabled(crate::vault::backend().is_some(), egui::Checkbox::new(&mut self.remember, t!("Remember the password in the system's password store")))
+                .on_hover_text(t!("So it is not asked again; unticked, it is used for this connection only and never written anywhere"));
             ui.add_space(8.0);
             // Taken, so it does not also press whatever else is on the screen.
             let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             ui.horizontal(|ui| {
                 let ready = !self.password.is_empty() || !self.key.trim().is_empty();
-                if ui.add_enabled(ready, super::theme::primary(format!("{}  Connect", ic::ARROW_CLOCKWISE))).clicked() || (enter && ready) {
+                if ui.add_enabled(ready, super::theme::primary(format!("{}  {}", ic::ARROW_CLOCKWISE, t!("Connect")))).clicked() || (enter && ready) {
                     answer = Some(Answer::Connect(self.target(target)));
                 }
                 // By ID, someone without the password may ask the person there to let them in.
                 #[cfg(feature = "remote")]
                 if self.by_id.is_some()
                     && !self.wants_code
-                    && ui.button("Ask without the password").on_hover_text("The person at that computer is asked; both screens show a code to compare").clicked()
+                    && ui.button(t!("Ask without the password")).on_hover_text(t!("The person at that computer is asked; both screens show a code to compare")).clicked()
                 {
                     let mut t = target.clone();
                     if let Target::Direct { password, .. } = &mut t {
@@ -206,7 +206,7 @@ impl SignIn {
                     }
                     answer = Some(Answer::Connect(t));
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     answer = Some(Answer::Cancel);
                 }
             });

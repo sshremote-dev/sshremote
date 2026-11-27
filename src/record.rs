@@ -114,8 +114,8 @@ impl Recording {
     /// Ends it: the files written (a new one began wherever the picture changed size).
     pub fn stop(self) -> Result<Vec<PathBuf>, String> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.jobs.send(Job::Stop(tx)).map_err(|_| "the recording ended early".to_string())?;
-        rx.recv().map_err(|_| "the recording ended early".to_string())?
+        self.jobs.send(Job::Stop(tx)).map_err(|_| n!("the recording ended early").to_string())?;
+        rx.recv().map_err(|_| n!("the recording ended early").to_string())?
     }
 }
 
@@ -180,7 +180,7 @@ fn encode(rx: Receiver<Job>, base: PathBuf) {
                 }
                 let _ = reply.send(match failed {
                     Some(e) => Err(e),
-                    None if done.is_empty() => Err("nothing was recorded".into()),
+                    None if done.is_empty() => Err(n!("nothing was recorded").into()),
                     None => Ok(done),
                 });
                 return;
@@ -338,7 +338,7 @@ impl Mp4 {
         self.at += all.len() as u64;
         self.filled += durations.iter().map(|&d| d as u64).sum::<u64>();
         if crate::sys::free_space(&self.path).is_some_and(|f| f < KEEP_FREE) {
-            return Err(format!("the disk is nearly full, so the recording stopped ({})", self.path.display()));
+            return Err(crate::lang::fill(n!("the disk is nearly full, so the recording stopped ({})"), &[&self.path.display()]));
         }
         Ok(())
     }
@@ -348,7 +348,7 @@ impl Mp4 {
         let Some(length_at) = self.length_at else {
             drop(self.out);
             let _ = std::fs::remove_file(&self.path);
-            return Err("nothing was recorded".into());
+            return Err(n!("nothing was recorded").into());
         };
         let end_ms = end.saturating_duration_since(self.begun).as_millis() as u64;
         let last = self.piece.last().map_or(0, |f| f.2 + 1);

@@ -54,12 +54,12 @@ impl Workspace {
             // A shared screen keeps F11 for the remote computer: its key is Ctrl+Alt+Enter.
             let screen = self.index(active).is_some_and(|i| matches!(&self.panes[i].state, State::Live(r) if r.mode() == PaneMode::Screen));
             let (glyph, tip) = match (self.full.on, screen) {
-                (true, false) => (ic::ARROWS_IN, "Leave full screen (F11)"),
-                (true, true) => (ic::ARROWS_IN, "Leave full screen (Ctrl+Alt+Enter; F11 goes to the remote computer)"),
-                (false, false) => (ic::ARROWS_OUT, "Full screen: the window on the whole monitor, as it is (F11)"),
+                (true, false) => (ic::ARROWS_IN, t!("Leave full screen (F11)")),
+                (true, true) => (ic::ARROWS_IN, t!("Leave full screen (Ctrl+Alt+Enter; F11 goes to the remote computer)")),
+                (false, false) => (ic::ARROWS_OUT, t!("Full screen: the window on the whole monitor, as it is (F11)")),
                 (false, true) => (
                     ic::ARROWS_OUT,
-                    "Full screen: the window on the whole monitor, as it is (F11 goes to the remote computer; Ctrl+Alt+Enter fills the screen with this one)",
+                    t!("Full screen: the window on the whole monitor, as it is (F11 goes to the remote computer; Ctrl+Alt+Enter fills the screen with this one)"),
                 ),
             };
             if ui.add(tool_button(glyph, self.full.on)).on_hover_text(tip).clicked() {
@@ -81,7 +81,7 @@ impl Workspace {
                         ui.horizontal_wrapped(|ui| self.layout_buttons(ui, false));
                     }
                 });
-                more.on_hover_text("More");
+                more.on_hover_text(t!("More"));
                 self.mode_menu(ui, active);
             } else {
                 // The mode then its controls, left to right, at the width they took last time.
@@ -99,7 +99,7 @@ impl Workspace {
         let right_left = right.min_rect().left().min(full.right());
         let width = (right_left - ui.cursor().left() - AFTER_TABS_W - 12.0).max(84.0);
         let tab_rects = self.tab_strip(ui, width);
-        if ui.add(tool_button(ic::PLUS, false)).on_hover_text("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)").clicked() {
+        if ui.add(tool_button(ic::PLUS, false)).on_hover_text(t!("Open: a terminal, a screen or files in a new tab (Ctrl+Shift+T)")).clicked() {
             self.picker = Some(Place::Tab);
         }
         self.projects_menu(ui);
@@ -121,7 +121,7 @@ impl Workspace {
             view_w = width - 34.0;
         } else if over {
             let start = ui.cursor().left();
-            if ui.add(tool_button(ic::CARET_LEFT, false)).on_hover_text("Scroll the tabs").clicked() {
+            if ui.add(tool_button(ic::CARET_LEFT, false)).on_hover_text(t!("Scroll the tabs")).clicked() {
                 self.tab_first = self.tab_first.saturating_sub(1);
             }
             // The arrow's width, with its spacing, for it, the other arrow and the list.
@@ -217,7 +217,7 @@ impl Workspace {
             let font = FontId::proportional(13.0);
             job.append(&name, 0.0, egui::TextFormat::simple(font.clone(), fg));
             if let Some(ms) = rtt {
-                job.append(&format!("{:.0} ms", ms.min(999.0)), 8.0, egui::TextFormat::simple(FontId::proportional(11.5), weak));
+                job.append(&t!("{} ms", format!("{:.0}", ms.min(999.0))), 8.0, egui::TextFormat::simple(FontId::proportional(11.5), weak));
             }
             if order_len > 1 {
                 job.append(&format!("{} {}", ic::SQUARES_FOUR, order_len), 8.0, egui::TextFormat::simple(FontId::proportional(11.5), weak));
@@ -244,10 +244,10 @@ impl Workspace {
             }
             let mut tip = name;
             if let Some(ms) = rtt {
-                tip.push_str(&format!("  ·  {:.0} ms", ms));
+                tip.push_str(&format!("  ·  {}", t!("{} ms", format!("{ms:.0}"))));
             }
             if order_len > 1 {
-                tip.push_str(&format!("  ·  {order_len} panes"));
+                tip.push_str(&format!("  ·  {}", t!("{} panes", order_len)));
             }
             shapes.push((r, tip));
         }
@@ -288,7 +288,7 @@ impl Workspace {
         self.strip_screen = on_screen(view);
         self.tabs_screen = rects.iter().map(|r| if r.is_finite() && r.is_positive() { on_screen(*r) } else { Rect::NOTHING }).collect();
         if over {
-            if !cramped && ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text("Scroll the tabs").clicked() {
+            if !cramped && ui.add(tool_button(ic::CARET_RIGHT, false)).on_hover_text(t!("Scroll the tabs")).clicked() {
                 self.tab_first += 1;
             }
             let names: Vec<(String, &'static str)> = (0..n).map(|t| (self.name(self.tabs[t].active).0, self.glyph(self.tabs[t].active).0)).collect();
@@ -304,7 +304,7 @@ impl Workspace {
                         }
                     }
                 });
-                r.on_hover_text(format!("All {n} tabs"));
+                r.on_hover_text(t!("All {} tabs", n));
             });
             if let Some(t) = pick {
                 self.select_tab(t);
@@ -395,7 +395,7 @@ impl Workspace {
         let text = if self.mode_compact {
             format!("{} {}", cur.glyph(), ic::CARET_DOWN)
         } else {
-            format!("{}  {}  {}", cur.glyph(), cur.name(), ic::CARET_DOWN)
+            format!("{}  {}  {}", cur.glyph(), crate::lang::tr(cur.name()), ic::CARET_DOWN)
         };
         let label = RichText::new(text).size(13.0);
         let b = egui::Button::new(label).frame_when_inactive(false).min_size(Vec2::new(0.0, 30.0));
@@ -404,13 +404,13 @@ impl Workspace {
                 crate::gui::menu_look(ui);
                 ui.set_min_width(190.0);
                 for m in PaneMode::ALL.into_iter().filter(|m| m.on() && (cfg!(feature = "remote") || *m == PaneMode::Terminal)) {
-                    if ui.add(egui::Button::selectable(cur == m, format!("{}  {}", m.glyph(), m.name()))).clicked() {
+                    if ui.add(egui::Button::selectable(cur == m, format!("{}  {}", m.glyph(), crate::lang::tr(m.name())))).clicked() {
                         chosen = Some(m);
                         ui.close();
                     }
                 }
             });
-        r.on_hover_text("What this pane shows of its connection; switching does not connect again");
+        r.on_hover_text(t!("What this pane shows of its connection; switching does not connect again"));
         // Laid out left to right here or right to left in the bar: the width either way.
         let w = (ui.cursor().left() - start).abs();
         if w > 20.0 {
@@ -439,11 +439,11 @@ impl Workspace {
         }
         // Close last: the pane closes (and its connection ends), and with the tab's last pane the tab.
         let (glyph, tip) = if self.is_held(id) {
-            (ic::X, "Close: close this program and the pane (Ctrl+Shift+W)")
+            (ic::X, t!("Close: close this program and the pane (Ctrl+Shift+W)"))
         } else if self.is_remote(id) || !self.is_shell(id) {
-            (ic::X, "Close: end this connection and close the pane (Ctrl+Shift+W)")
+            (ic::X, t!("Close: end this connection and close the pane (Ctrl+Shift+W)"))
         } else {
-            (ic::X, "Close this pane (Ctrl+Shift+W)")
+            (ic::X, t!("Close this pane (Ctrl+Shift+W)"))
         };
         if ui.add(tool_button(glyph, false)).on_hover_text(tip).clicked() {
             self.confirm = Some(Confirm::Pane(id));
@@ -457,16 +457,16 @@ impl Workspace {
         let mut buttons: Vec<(&str, &str, u8)> = vec![
             (
                 if zoomed { ic::CORNERS_IN } else { ic::CORNERS_OUT },
-                if zoomed { "Back to the grid: every pane of the tab (Ctrl+Shift+Enter)" } else { "This pane alone: it fills the tab, the others wait (Ctrl+Shift+Enter)" },
+                if zoomed { t!("Back to the grid: every pane of the tab (Ctrl+Shift+Enter)") } else { t!("This pane alone: it fills the tab, the others wait (Ctrl+Shift+Enter)") },
                 0,
             ),
-            (ic::SPLIT_SIDE, "Split: a new pane beside this one (Alt+Shift+=)", 1),
-            (ic::SPLIT_BELOW, "Split: a new pane below this one (Alt+Shift+-)", 2),
-            (ic::CARET_LEFT, "Move this pane left (Alt+arrows go between panes)", 3),
-            (ic::CARET_RIGHT, "Move this pane right", 4),
+            (ic::SPLIT_SIDE, t!("Split: a new pane beside this one (Alt+Shift+=)"), 1),
+            (ic::SPLIT_BELOW, t!("Split: a new pane below this one (Alt+Shift+-)"), 2),
+            (ic::CARET_LEFT, t!("Move this pane left (Alt+arrows go between panes)"), 3),
+            (ic::CARET_RIGHT, t!("Move this pane right"), 4),
         ];
         // The arrangement menu after the splits.
-        buttons.insert(3, (ic::LAYOUT, "Layout: arrange this tab's panes", 5));
+        buttons.insert(3, (ic::LAYOUT, t!("Layout: arrange this tab's panes"), 5));
         // One pane: nothing to zoom, as nothing to arrange; both show, greyed.
         let many = self.order(self.current).len() > 1;
         if rtl {
@@ -481,7 +481,7 @@ impl Workspace {
             // Zoom and moving need another pane; splitting is how one gets there.
             let enabled = matches!(what, 1 | 2) || many || (what == 0 && zoomed);
             let button = ui.add_enabled(enabled, tool_button(glyph, on)).on_hover_text(tip);
-            let button = button.on_disabled_hover_text(format!("{tip}: for a tab of two panes or more"));
+            let button = button.on_disabled_hover_text(t!("{}: for a tab of two panes or more", tip));
             if !button.clicked() {
                 continue;
             }
@@ -504,23 +504,23 @@ impl Workspace {
         ui.add_enabled_ui(many, |ui| {
             icon_menu(ui, glyph, |ui| {
                 for (layout, g, text) in [
-                    (Layout::Even, ic::EQUALS, "Even sizes  (keep the arrangement)"),
-                    (Layout::Side, ic::SPLIT_SIDE, "Side by side"),
-                    (Layout::Stacked, ic::SPLIT_BELOW, "Stacked"),
-                    (Layout::MainLeft, ic::LAYOUT, "Main pane left, the others stacked"),
-                    (Layout::MainTop, ic::ROWS, "Main pane on top, the others side by side"),
-                    (Layout::Grid, ic::SQUARES_FOUR, "Grid"),
+                    (Layout::Even, ic::EQUALS, t!("Even sizes  (keep the arrangement)")),
+                    (Layout::Side, ic::SPLIT_SIDE, t!("Side by side")),
+                    (Layout::Stacked, ic::SPLIT_BELOW, t!("Stacked")),
+                    (Layout::MainLeft, ic::LAYOUT, t!("Main pane left, the others stacked")),
+                    (Layout::MainTop, ic::ROWS, t!("Main pane on top, the others side by side")),
+                    (Layout::Grid, ic::SQUARES_FOUR, t!("Grid")),
                 ] {
                     // Sizes already even: nothing it would change.
                     let item = ui.add_enabled(layout != Layout::Even || !even, egui::Button::new(format!("{g}  {text}")));
-                    if item.on_disabled_hover_text("The panes are already the same size").clicked() {
+                    if item.on_disabled_hover_text(t!("The panes are already the same size")).clicked() {
                         chosen = Some(layout);
                         ui.close();
                     }
                 }
             })
             .on_hover_text(tip)
-            .on_disabled_hover_text("Layout: for a tab of two panes or more");
+            .on_disabled_hover_text(t!("Layout: for a tab of two panes or more"));
         });
         if let Some(layout) = chosen {
             self.arrange(layout);

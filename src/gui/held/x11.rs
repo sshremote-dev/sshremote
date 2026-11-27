@@ -451,7 +451,7 @@ impl Held {
         let key = catch::wait(before.clone());
         let (name, said) = match crate::apps::launch_minimized(kind, text) {
             Ok(n) => (n, None),
-            Err(e) => (String::new(), Some(format!("It could not be started: {e}."))),
+            Err(e) => (String::new(), Some(t!("It could not be started: {}.", crate::lang::tr_msg(&e)))),
         };
         if said.is_some() {
             catch::forget(key);
@@ -526,15 +526,15 @@ impl Held {
                     if let Some(k) = self.key.take() {
                         catch::forget(k);
                     }
-                    self.said = Some(format!("{} opened no window of its own to show here.", self.what));
+                    self.said = Some(t!("{} opened no window of its own to show here.", self.what));
                 }
                 None => {}
             }
         }
         let text = match (&self.win, &self.said) {
-            (Some(_), _) => format!("{} is here", self.what),
+            (Some(_), _) => t!("{} is here", self.what),
             (None, Some(s)) => s.clone(),
-            (None, None) => format!("Starting {}\u{2026}", self.what),
+            (None, None) => t!("Starting {}\u{2026}", self.what),
         };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), ui.visuals().weak_text_color());
         ctx.request_repaint_after(if self.win.is_some() { Duration::from_millis(200) } else { LOOK });
@@ -575,7 +575,7 @@ impl Held {
                 x.own(id, 0);
                 x.unhush(id);
             });
-            self.said = Some(format!("This desktop's window manager places {} itself, so it stays a window of its own.", self.what));
+            self.said = Some(t!("This desktop's window manager places {} itself, so it stays a window of its own.", self.what));
         }
     }
 

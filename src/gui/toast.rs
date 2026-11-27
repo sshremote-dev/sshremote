@@ -19,17 +19,32 @@ pub(super) struct Toasts {
 }
 
 impl Toasts {
-    /// Adds a notice; one that says something failed is marked as a warning.
+    /// Adds a notice. One still in English that says something failed (an error from elsewhere,
+    /// not translated) is marked as a warning; in every language, say so with [`Self::warn`].
     pub(super) fn push(&mut self, text: &str) {
         let l = text.to_lowercase();
         let warn =
             ["fail", "error", "unavailable", "cannot", "could not", "denied", "sound:"].iter().any(|w| l.contains(w));
+        self.add(text, warn);
+    }
+
+    /// Adds a notice that something failed, marked as a warning whatever its language.
+    pub(super) fn warn(&mut self, text: &str) {
+        self.add(text, true);
+    }
+
+    fn add(&mut self, text: &str, warn: bool) {
         // The same notice again only comes back to the front.
         self.list.retain(|t| t.0 != text);
         self.list.push((text.to_string(), warn, Instant::now()));
         if self.list.len() > MOST {
             self.list.remove(0);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn warnings(&self) -> Vec<bool> {
+        self.list.iter().map(|t| t.1).collect()
     }
 
     /// Draws them over `area`, newest at the bottom, at its bottom right; or at another of its
@@ -180,5 +195,16 @@ mod tests {
         frame(&ctx, &mut t, &[whole], Some(bar), vec![egui::Event::PointerMoved(p), button(true)]);
         frame(&ctx, &mut t, &[whole], Some(bar), vec![button(false)]);
         assert!(t.texts().is_empty());
+    }
+
+    /// A failure says so by its colour in any language: by `warn`, whatever its words, or by
+    /// English words in one that came untranslated.
+    #[test]
+    fn failures_are_warnings_in_every_language() {
+        let mut t = Toasts::default();
+        t.push("Connected again");
+        t.warn("The disk is full");
+        t.push("Download failed: disk full");
+        assert_eq!(t.warnings(), [false, true, true]);
     }
 }

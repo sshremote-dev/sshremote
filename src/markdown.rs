@@ -745,7 +745,7 @@ fn hover_copy(ui: &mut egui::Ui, th: &Theme, rect: Rect, id: egui::Id, text: &st
         .fill(th.code_bg)
         .stroke(Stroke::new(1.0, th.rule))
         .corner_radius(crate::gui::theme::R_SM);
-    let tip = if copied { "Copied" } else { "Copy" };
+    let tip = if copied { t!("Copied") } else { t!("Copy") };
     if ui.put(at, b).on_hover_text(tip).clicked() {
         ui.ctx().copy_text(text.to_string());
         ui.ctx().data_mut(|d| d.insert_temp(id, now));
@@ -1091,8 +1091,8 @@ pub fn saved_note(ui: &mut egui::Ui, area: Rect) {
         egui::Frame::new().fill(v.window_fill).stroke(Stroke::new(1.0, v.window_stroke.color)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                ui.label(egui::RichText::new(format!("{}  Saved to Downloads: {name}", crate::gui::ic::CHECK)).size(12.5));
-                if ui.small_button(format!("{}  Show", crate::gui::ic::FOLDER_OPEN)).on_hover_text(path.display().to_string()).clicked() {
+                ui.label(egui::RichText::new(format!("{}  {}", crate::gui::ic::CHECK, t!("Saved to Downloads: {}", name))).size(12.5));
+                if ui.small_button(format!("{}  {}", crate::gui::ic::FOLDER_OPEN, t!("Show"))).on_hover_text(path.display().to_string()).clicked() {
                     crate::tools::open_path(path.parent().unwrap_or(&path));
                 }
             });
@@ -1113,7 +1113,7 @@ fn hover_save(ui: &mut egui::Ui, th: &Theme, rect: Rect, id: egui::Id, lang: &st
         .fill(th.code_bg)
         .stroke(Stroke::new(1.0, th.rule))
         .corner_radius(crate::gui::theme::R_SM);
-    let tip = if saved { "Saved to Downloads".to_string() } else { format!("Download as a .{} file", ext_of(lang)) };
+    let tip = if saved { t!("Saved to Downloads").to_string() } else { t!("Download as a .{} file", ext_of(lang)) };
     if ui.put(at, b).on_hover_text(tip).clicked() {
         let ext = ext_of(lang);
         let name = if ext == "Dockerfile" { "Dockerfile".to_string() } else { stamped("code", ext) };

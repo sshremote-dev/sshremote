@@ -233,9 +233,9 @@ impl Passwords {
 
     pub fn label(self) -> &'static str {
         match self {
-            Passwords::Lasting => "Lasting",
-            Passwords::OneTime => "One-time",
-            Passwords::Both => "Both",
+            Passwords::Lasting => n!("Lasting"),
+            Passwords::OneTime => n!("One-time"),
+            Passwords::Both => n!("Both"),
         }
     }
 
@@ -357,15 +357,15 @@ mod machine {
             return Ok(None);
         }
         if r == 5 {
-            return Err("only administrators can see them (they hold the password)".into());
+            return Err(n!("only administrators can see them (they hold the password)").into());
         }
         if r != 0 {
-            return Err(format!("the remote access settings could not be read (error {r})"));
+            return Err(crate::lang::fill(n!("the remote access settings could not be read (error {})"), &[&r]));
         }
         let mut buf = vec![0u16; len as usize / 2 + 1];
         let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as _, &mut len) };
         if r != 0 {
-            return Err(format!("the remote access settings could not be read (error {r})"));
+            return Err(crate::lang::fill(n!("the remote access settings could not be read (error {})"), &[&r]));
         }
         let n = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
         Ok(Some(String::from_utf16_lossy(&buf[..n])))
@@ -382,7 +382,7 @@ mod machine {
         let sddl = wide("D:P(A;OICI;KA;;;BA)(A;OICI;KA;;;SY)");
         let mut sd = std::ptr::null_mut();
         if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) } == 0 {
-            return Err("the settings' permissions could not be made".into());
+            return Err(n!("the settings' permissions could not be made").into());
         }
         let mut h: HKEY = std::ptr::null_mut();
         let r = unsafe {
@@ -399,8 +399,8 @@ mod machine {
         };
         unsafe { LocalFree(sd as _) };
         result.map_err(|e| match e {
-            5 => "Changing remote access needs administrator rights".to_string(),
-            e => format!("the remote access settings could not be saved (error {e})"),
+            5 => n!("Changing remote access needs administrator rights").to_string(),
+            e => crate::lang::fill(n!("the remote access settings could not be saved (error {})"), &[&e]),
         })
     }
 }
@@ -415,8 +415,8 @@ pub fn stored() -> Result<Option<Config>, String> {
         _ => None,
     };
     let Some(text) = text else { return Ok(None) };
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("the remote access settings are damaged: {e}"))?;
-    Config::from_json(&v).filter(|c| valid_id(&c.id)).map(Some).ok_or_else(|| "the remote access settings are damaged".into())
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| crate::lang::fill(n!("the remote access settings are damaged: {}"), &[&e]))?;
+    Config::from_json(&v).filter(|c| valid_id(&c.id)).map(Some).ok_or_else(|| n!("the remote access settings are damaged").into())
 }
 
 /// When [`recent`] last read the settings, from where, and what it found.
@@ -486,7 +486,7 @@ pub fn relay() -> String {
 /// the person who set it up) writes is handed to that person, who could not read or change it
 /// otherwise.
 fn hand_back(p: &std::path::Path) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         // SAFETY: geteuid cannot fail.
@@ -504,7 +504,7 @@ fn hand_back(p: &std::path::Path) {
 
 pub fn save(c: &Config) -> Result<(), String> {
     if c.password.trim().chars().count() < 8 {
-        return Err("The password needs at least 8 characters".into());
+        return Err(n!("The password needs at least 8 characters").into());
     }
     let text = serde_json::to_string_pretty(&c.to_json()).map_err(|e| e.to_string())?;
     let done = write_settings(&text);
@@ -518,7 +518,7 @@ fn write_settings(text: &str) -> Result<(), String> {
     return machine::write(text);
     #[cfg(any(not(windows), test))]
     {
-        let f = file().ok_or("no settings folder")?;
+        let f = file().ok_or(n!("no settings folder"))?;
         if let Some(d) = f.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
@@ -669,11 +669,11 @@ pub struct Viewer {
 impl Viewer {
     /// "connected 5 min ago, through the relay", or "..., straight from 203.0.113.7".
     pub fn describe(&self) -> String {
-        let how = match &self.straight {
-            Some(a) => format!("straight from {}", a.rsplit_once(':').map_or(a.as_str(), |(h, _)| h).trim_matches(['[', ']'])),
-            None => "through the relay".to_string(),
-        };
-        format!("connected {}, {how}", crate::hosts::ago(self.since))
+        let ago = crate::hosts::ago(self.since);
+        match &self.straight {
+            Some(a) => t!("connected {}, straight from {}", ago, a.rsplit_once(':').map_or(a.as_str(), |(h, _)| h).trim_matches(['[', ']'])),
+            None => t!("connected {}, through the relay", ago),
+        }
     }
 
     fn json(&self) -> serde_json::Value {
@@ -759,17 +759,20 @@ pub struct Visit {
 impl Visit {
     /// "12 min ago from 203.0.113.7: let in with the lasting password, straight, for 4 min".
     pub fn describe(&self) -> String {
-        let from = self.from.as_deref().map(|f| format!(" from {f}")).unwrap_or_default();
-        if !self.let_in {
-            return format!("{}{from}: turned away, {}", crate::hosts::ago(self.at), self.how);
+        // The record keeps English words; the window shows them in the reader's language.
+        let (ago, how, path) = (crate::hosts::ago(self.at), crate::lang::tr_msg(&self.how), crate::lang::tr_msg(&self.path));
+        match (&self.from, self.let_in, self.secs) {
+            (Some(f), false, _) => t!("{} from {}: turned away, {}", ago, f, how),
+            (None, false, _) => t!("{}: turned away, {}", ago, how),
+            (Some(f), true, Some(s)) if s < 60 => t!("{} from {}: let in {}, {}, for {} s", ago, f, how, path, s),
+            (None, true, Some(s)) if s < 60 => t!("{}: let in {}, {}, for {} s", ago, how, path, s),
+            (Some(f), true, Some(s)) if s < 3600 => t!("{} from {}: let in {}, {}, for {} min", ago, f, how, path, s / 60),
+            (None, true, Some(s)) if s < 3600 => t!("{}: let in {}, {}, for {} min", ago, how, path, s / 60),
+            (Some(f), true, Some(s)) => t!("{} from {}: let in {}, {}, for {} h {} min", ago, f, how, path, s / 3600, s % 3600 / 60),
+            (None, true, Some(s)) => t!("{}: let in {}, {}, for {} h {} min", ago, how, path, s / 3600, s % 3600 / 60),
+            (Some(f), true, None) => t!("{} from {}: let in {}, {}, still here or cut off", ago, f, how, path),
+            (None, true, None) => t!("{}: let in {}, {}, still here or cut off", ago, how, path),
         }
-        let stay = match self.secs {
-            Some(s) if s < 60 => format!(", for {s} s"),
-            Some(s) if s < 3600 => format!(", for {} min", s / 60),
-            Some(s) => format!(", for {} h {} min", s / 3600, s % 3600 / 60),
-            None => ", still here or cut off".into(),
-        };
-        format!("{}{from}: let in {}, {}{stay}", crate::hosts::ago(self.at), self.how, self.path)
     }
 }
 
@@ -813,7 +816,7 @@ fn end_file() -> Option<PathBuf> {
 
 /// Asks the service to end viewer `n`'s connection (within a second or two).
 pub fn ask_to_end(n: u64) -> Result<(), String> {
-    let f = end_file().ok_or("no folder for the request")?;
+    let f = end_file().ok_or(n!("no folder for the request"))?;
     let failed = |e: io::Error| format!("{}: {e}", f.display());
     // Windows: the service made the file, and lets anyone add to it and do nothing else; while
     // it takes what is there, the file is its alone for a moment.
@@ -828,7 +831,7 @@ pub fn ask_to_end(n: u64) -> Result<(), String> {
                 Err(e) => return Err(failed(e)),
             }
         }
-        Err(format!("{}: in use", f.display()))
+        Err(crate::lang::fill(n!("{}: in use"), &[&f.display()]))
     }
     #[cfg(not(windows))]
     {
@@ -1111,7 +1114,7 @@ pub fn dial(relay: &str) -> io::Result<TcpStream> {
         // The headers end with an empty line.
         while !line(&mut s)?.is_empty() {}
         if !status.contains(" 101") {
-            return Err(io::Error::other(format!("{host}:80 did not pass the relay through: {status}")));
+            return Err(io::Error::other(crate::lang::fill(n!("{}:80 did not pass the relay through: {}"), &[&host, &status])));
         }
         s.set_read_timeout(None)?;
         Ok(s)
@@ -1132,7 +1135,7 @@ pub fn dial(relay: &str) -> io::Result<TcpStream> {
             Err(e) => err = e,
         }
     }
-    Err(io::Error::new(err.kind(), format!("the relay {host} (port {port}, and 80): {err}")))
+    Err(io::Error::new(err.kind(), crate::lang::fill(n!("the relay {} (port {}, and 80): {}"), &[&host, &port, &err])))
 }
 
 /// Whether an ID is waiting at a relay now.
@@ -1319,6 +1322,72 @@ impl Drop for CallSlot {
     }
 }
 
+/// Linux, with remote access at the login screen set up: which of its two services this is.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Role {
+    /// The only one.
+    Plain,
+    /// Root's, at the login screen and on a locked screen, around the desktop of `owner`.
+    LoginScreen(u32),
+    /// The person's own, while their desktop is open on the screen.
+    Owner(u32),
+}
+
+#[cfg(target_os = "linux")]
+static ROLE: std::sync::OnceLock<Role> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn role() -> Role {
+    match *ROLE.get().unwrap_or(&Role::Plain) {
+        // The person's own service learns of root's as soon as it is set up (after it, often).
+        Role::Owner(_) if !crate::loginscreen::installed() => Role::Plain,
+        r => r,
+    }
+}
+
+/// This process is root's remote access at the login screen.
+fn at_login_screen() -> bool {
+    #[cfg(target_os = "linux")]
+    return matches!(role(), Role::LoginScreen(_));
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Whether the other of the two services answers for this computer now (Linux, with remote
+/// access at the login screen): root's while the person's desktop is not open on the screen,
+/// theirs while it is. Root's also waits while the person wants to let each viewer in, as
+/// nobody at a login screen can.
+fn standby() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::console::Console;
+        static SEEN: Mutex<Option<(std::time::Instant, Option<Console>)>> = Mutex::new(None);
+        let r = role();
+        if r == Role::Plain {
+            return false;
+        }
+        let console = {
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            match *seen {
+                Some((at, c)) if at.elapsed() < Duration::from_millis(900) => c,
+                _ => {
+                    let c = crate::console::now();
+                    *seen = Some((std::time::Instant::now(), c));
+                    c
+                }
+            }
+        };
+        return match r {
+            Role::LoginScreen(owner) => console.is_none_or(|c| c.open_for(owner)) || recent().is_some_and(|c| c.ask),
+            Role::Owner(uid) => console.is_some_and(|c| !c.open_for(uid)),
+            Role::Plain => false,
+        };
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
 /// Keeps this computer reachable by its ID until `keep` says to stop: a line to the relay, a new
 /// connection for each viewer, and the agent run as a process of its own for each.
 pub fn run(keep: impl Fn() -> Option<Config>) {
@@ -1333,6 +1402,12 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
     let mut wait = 2;
     let mut password = None;
     while let Some(mut cfg) = keep() {
+        // The other service answers meanwhile; for the person's own the computer is reachable.
+        if standby() {
+            set_state(if at_login_screen() { State::Connecting } else { State::Online });
+            sleep_while(&keep, 1);
+            continue;
+        }
         if password.as_ref().is_some_and(|p| *p != cfg.password) {
             guard.reset();
         }
@@ -1355,11 +1430,11 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 cfg.id = new_id();
                 match save(&cfg) {
                     Ok(()) => continue,
-                    Err(e) => Some(format!("The ID is taken and a new one could not be kept: {e}")),
+                    Err(e) => Some(crate::lang::fill(n!("The ID is taken and a new one could not be kept: {}"), &[&e])),
                 }
             }
-            Ok(other) => Some(format!("The relay refused: {other}")),
-            Err(e) => Some(format!("The relay did not answer: {e}")),
+            Ok(other) => Some(crate::lang::fill(n!("The relay refused: {}"), &[&other])),
+            Err(e) => Some(crate::lang::fill(n!("The relay did not answer: {}"), &[&e])),
         };
         if let Some(why) = refused {
             set_state(State::Failed(why));
@@ -1387,6 +1462,19 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 cfg.from.clone_from(&k.from);
                 // Those the new settings would not let in go now.
                 end_sessions_but(Some(k));
+            }
+            // At the login screen nobody can let a viewer in on request.
+            if at_login_screen() {
+                cfg.requests = false;
+            }
+            if standby() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+                // The desktop opened: the login screen's viewers go on to the person's own service
+                // (they connect again by themselves); the person's own keep theirs.
+                if at_login_screen() {
+                    end_sessions_but(None);
+                }
+                break;
             }
             if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -1465,7 +1553,7 @@ fn known_key(cfg: &Config) -> Option<[u8; 32]> {
 fn sealed_line(cfg: &mut Config) -> Result<crate::relaylink::Link, String> {
     use crate::relaylink::{Link, Outcome};
     let reach = |relay: &str| -> Result<TcpStream, String> {
-        let s = dial(relay).map_err(|e| format!("Could not reach {e}"))?;
+        let s = dial(relay).map_err(|e| crate::lang::fill(n!("Could not reach {}"), &[&e]))?;
         let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
         Ok(s)
     };
@@ -1479,8 +1567,8 @@ fn sealed_line(cfg: &mut Config) -> Result<crate::relaylink::Link, String> {
             Ok(link)
         }
         Ok(Outcome::Older) if known.is_none() => Ok(Link::plain(reach(&cfg.relay)?)),
-        Ok(Outcome::Older) => Err("The relay did not seal the line as it always has: someone between may be in the way".into()),
-        Err(e) => Err(format!("The relay could not be trusted: {e}")),
+        Ok(Outcome::Older) => Err(n!("The relay did not seal the line as it always has: someone between may be in the way").into()),
+        Err(e) => Err(crate::lang::fill(n!("The relay could not be trusted: {}"), &[&e])),
     }
 }
 
@@ -1521,6 +1609,11 @@ fn listen_direct(guard: Arc<Guard>) {
 /// One viewer: a connection of its own through the relay at once (the relay waits only so
 /// long), then the password checked in turn, then the agent.
 fn answer_call(cfg: &Config, nonce: &str, guard: &Guard, from: Option<std::net::IpAddr>) {
+    // The other service answers now (the screen just locked, or the desktop just opened): the
+    // viewer tries again in a moment and reaches it.
+    if standby() {
+        return;
+    }
     let Ok(mut s) = dial(&cfg.relay) else { return };
     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
     if writeln!(s, "accept {} {nonce}", cfg.id).is_err() || !line(&mut s).is_ok_and(|l| l == "ok") {
@@ -1535,7 +1628,7 @@ fn answer_call(cfg: &Config, nonce: &str, guard: &Guard, from: Option<std::net::
 fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from: Option<std::net::IpAddr>) {
     let from_text = from.map(|a| a.to_canonical().to_string());
     if !comes_from(&cfg.from, from) {
-        note_visit(serde_json::json!({ "refused": "its address is not on the list", "at": crate::sys::now_secs(), "from": from_text }));
+        note_visit(serde_json::json!({ "refused": n!("its address is not on the list"), "at": crate::sys::now_secs(), "from": from_text }));
         crate::net::turn_away_address(&mut s);
         return;
     }
@@ -1546,7 +1639,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let checks = std::cell::Cell::new(0);
     let at = place(from);
     let judge = |check: &mut dyn FnMut() -> bool| -> io::Result<bool> {
-        let what = if checks.replace(checks.get() + 1) == 0 { "a wrong password" } else { "a wrong two-step code" };
+        let what = if checks.replace(checks.get() + 1) == 0 { n!("a wrong password") } else { n!("a wrong two-step code") };
         if guard.locked(&at) {
             return Err(io::Error::other("no passwords taken now"));
         }
@@ -1620,7 +1713,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         };
         if let Err(why) = verdict {
             let spaced = crate::computers::spaced(id);
-            let what = if why == crate::net::IdRefused::OtherDevice { format!("ID {spaced} from another device than before") } else { format!("ID {spaced}, not on the list") };
+            let what = crate::lang::fill(if why == crate::net::IdRefused::OtherDevice { n!("ID {} from another device than before") } else { n!("ID {}, not on the list") }, &[&spaced]);
             note_visit(serde_json::json!({ "refused": what, "at": crate::sys::now_secs(), "from": from_text }));
         }
         verdict
@@ -1648,19 +1741,15 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let grant = if code.is_some() { cfg.grant() | crate::grant::ASK } else { cfg.grant() };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let how = match &came {
-        crate::net::Came::Lasting => "with the lasting password",
-        crate::net::Came::OneTime => "with a one-time password",
-        crate::net::Came::Request(_) => "by asking, at the screen",
-    };
     let by_device = by_device.into_inner();
-    let how = match &by_device {
-        _ if cfg.totp.is_empty() => how.to_string(),
+    // 0: no two-step code asked, 1: a trusted device instead of it, 2: with it.
+    let step = match &by_device {
+        _ if cfg.totp.is_empty() => 0,
         Some(token) => {
             trusted_came(token);
-            format!("{how}, from a trusted device")
+            1
         }
-        None => format!("{how} and the two-step code"),
+        None => 2,
     };
     // One who gave the code may ask to be trusted for next time: the agent has a token to give.
     let token = (!cfg.totp.is_empty() && by_device.is_none() && code.is_none()).then(|| crate::sys::hex(&crate::sys::random(32)));
@@ -1668,20 +1757,17 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let by_device = by_device.filter(|_| !cfg.totp.is_empty());
     let (at, ender) = (crate::sys::now_secs(), w.ender());
     let who = who.into_inner();
-    let how = match &who {
-        Some((id, _)) => format!("{how}, as ID {}", crate::computers::spaced(id)),
-        None => how,
-    };
-    note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { "through the relay" } else { "on this network" } }));
+    let how = came_how(&came, step, who.as_ref().map(|(id, _)| crate::computers::spaced(id)));
+    note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { n!("through the relay") } else { n!("on this network") } }));
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from, by_device, who), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle, trust_offer);
     VIEWERS.fetch_sub(1, Ordering::Relaxed);
     let path = match ender.straight() {
-        Some(a) => format!("straight from {}", a.ip()),
-        None if relayed => "through the relay".into(),
-        None => "on this network".into(),
+        Some(a) => crate::lang::fill(n!("straight from {}"), &[&a.ip()]),
+        None if relayed => n!("through the relay").into(),
+        None => n!("on this network").into(),
     };
     note_visit(serde_json::json!({ "out": n, "at": at, "secs": crate::sys::now_secs().saturating_sub(at), "path": path }));
     if once {
@@ -1689,6 +1775,33 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     }
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _, _)| *k != n);
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| *k != n);
+}
+
+/// How a viewer came in, for the record: whole phrases, so the window can show each in the
+/// reader's language. `step` as in `serve_call`; `id` when only some IDs may come in.
+fn came_how(came: &crate::net::Came, step: u8, id: Option<String>) -> String {
+    use crate::net::Came;
+    let phrase = match (came, step, id.is_some()) {
+        (Came::Lasting, 0, false) => n!("with the lasting password"),
+        (Came::Lasting, 0, true) => n!("with the lasting password, as ID {}"),
+        (Came::Lasting, 1, false) => n!("with the lasting password, from a trusted device"),
+        (Came::Lasting, 1, true) => n!("with the lasting password, from a trusted device, as ID {}"),
+        (Came::Lasting, _, false) => n!("with the lasting password and the two-step code"),
+        (Came::Lasting, _, true) => n!("with the lasting password and the two-step code, as ID {}"),
+        (Came::OneTime, 0, false) => n!("with a one-time password"),
+        (Came::OneTime, 0, true) => n!("with a one-time password, as ID {}"),
+        (Came::OneTime, 1, false) => n!("with a one-time password, from a trusted device"),
+        (Came::OneTime, 1, true) => n!("with a one-time password, from a trusted device, as ID {}"),
+        (Came::OneTime, _, false) => n!("with a one-time password and the two-step code"),
+        (Came::OneTime, _, true) => n!("with a one-time password and the two-step code, as ID {}"),
+        (Came::Request(_), 0, false) => n!("by asking, at the screen"),
+        (Came::Request(_), 0, true) => n!("by asking, at the screen, as ID {}"),
+        (Came::Request(_), 1, false) => n!("by asking, at the screen, from a trusted device"),
+        (Came::Request(_), 1, true) => n!("by asking, at the screen, from a trusted device, as ID {}"),
+        (Came::Request(_), _, false) => n!("by asking, at the screen and the two-step code"),
+        (Came::Request(_), _, true) => n!("by asking, at the screen and the two-step code, as ID {}"),
+    };
+    crate::lang::fill(phrase, &[&id.unwrap_or_default()])
 }
 
 /// One address or range of `Config::from`: the address and how many of its first bits count.
@@ -1949,7 +2062,10 @@ fn serve_viewer(
     ender.set_idle_limit(Duration::from_secs(120));
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
-    cmd.args(["--agent", "--capture", "auto", "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Root's at the login screen: the screen as the display hardware shows it, and nothing but
+    // keyboard and mouse (no terminal, files or clipboard as root).
+    let (capture, grant) = if at_login_screen() { ("kms", grant & crate::grant::CONTROL) } else { ("auto", grant) };
+    cmd.args(["--agent", "--capture", capture, "--by-id", "--grant", &grant.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(c) = code {
         cmd.args(["--code", c]);
     }
@@ -2213,7 +2329,7 @@ pub fn login_window(on: bool) -> Result<(), String> {
         let tmp = std::env::temp_dir().join(format!("dev.sshremote.loginwindow-{}.plist", std::process::id()));
         // It goes into a shell line between single quotes (and that into AppleScript's quotes).
         if tmp.display().to_string().contains(['\'', '"', '\\', '\n']) {
-            return Err(format!("{}: no place for the setting that can be passed on safely", tmp.display()));
+            return Err(crate::lang::fill(n!("{}: no place for the setting that can be passed on safely"), &[&tmp.display()]));
         }
         std::fs::write(&tmp, plist).map_err(|e| format!("{}: {e}", tmp.display()))?;
         format!("/usr/bin/install -o root -g wheel -m 644 '{}' '{}'", tmp.display(), f.display())
@@ -2237,7 +2353,7 @@ pub fn login_window(on: bool) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("the login window was not set up: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        Err(crate::lang::fill(n!("the login window was not set up: {}"), &[&String::from_utf8_lossy(&out.stderr).trim()]))
     }
 }
 
@@ -2255,9 +2371,9 @@ pub fn install_service() -> Result<(), String> {
     return crate::service::install();
     #[cfg(target_os = "macos")]
     {
-        let f = unit_file().ok_or("no home folder")?;
+        let f = unit_file().ok_or(n!("no home folder"))?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(f.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(f.parent().ok_or(n!("bad path"))?).map_err(|e| e.to_string())?;
         let xml = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
         let plist = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LAUNCHD_LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>remote-access</string><string>run</string><string>--service</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n<key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
@@ -2275,9 +2391,9 @@ pub fn install_service() -> Result<(), String> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let f = unit_file().ok_or("no home folder")?;
+        let f = unit_file().ok_or(n!("no home folder"))?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(f.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(f.parent().ok_or(n!("bad path"))?).map_err(|e| e.to_string())?;
         let unit = format!(
             "[Unit]\nDescription=SSH Remote: remote access by ID\nAfter=network-online.target graphical-session.target\n\n[Service]\nExecStart=\"{}\" remote-access run --service\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
             exe.display()
@@ -2288,9 +2404,15 @@ pub fn install_service() -> Result<(), String> {
         ok(&["--user", "enable", "--now", UNIT])?;
         // Lingering starts the user's units at boot, before anyone signs in; it may need rights.
         let _ = Command::new("loginctl").args(["enable-linger"]).status();
+        // At the login screen and on a locked screen too, where an administrator lets it (the
+        // rest works without).
+        #[cfg(target_os = "linux")]
+        if let Err(e) = crate::loginscreen::set(true) {
+            eprintln!("{e}");
+        }
         // Its icon in the top bar, with every sign-in and now.
         if let Some(a) = autostart_file() {
-            let _ = std::fs::create_dir_all(a.parent().ok_or("bad path")?);
+            let _ = std::fs::create_dir_all(a.parent().ok_or(n!("bad path"))?);
             let entry = format!(
                 "[Desktop Entry]\nType=Application\nName=SSH Remote\nComment=Remote access by ID: its icon in the top bar\nExec=\"{}\" --tray\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",
                 exe.display()
@@ -2302,7 +2424,7 @@ pub fn install_service() -> Result<(), String> {
         return Ok(());
     }
     #[allow(unreachable_code)]
-    Err("not on this system".into())
+    Err(n!("not on this system").into())
 }
 
 /// Starts or stops the service that runs remote access with the computer, without installing or
@@ -2320,13 +2442,13 @@ pub fn service_control(start: bool) -> Result<(), String> {
         }
         return match crate::admin::run_elevated("sc.exe", &args, true)? {
             true => Ok(()),
-            false => Err("administrator rights were not given".into()),
+            false => Err(n!("administrator rights were not given").into()),
         };
     }
     #[cfg(target_os = "macos")]
     {
         let _ = verb;
-        let f = unit_file().ok_or("no home folder")?;
+        let f = unit_file().ok_or(n!("no home folder"))?;
         // Kept alive by launchd while loaded: stopping is unloading it, starting loading it again.
         return if start {
             // SAFETY: getuid cannot fail.
@@ -2341,7 +2463,7 @@ pub fn service_control(start: bool) -> Result<(), String> {
         return if ok.success() { Ok(()) } else { Err(format!("systemctl --user {verb} {UNIT} failed")) };
     }
     #[allow(unreachable_code)]
-    Err("not on this system".into())
+    Err(n!("not on this system").into())
 }
 
 pub fn uninstall_service() -> Result<(), String> {
@@ -2361,6 +2483,12 @@ pub fn uninstall_service() -> Result<(), String> {
         if let Some(f) = unit_file() {
             let _ = std::fs::remove_file(f);
         }
+        #[cfg(target_os = "linux")]
+        if crate::loginscreen::installed()
+            && let Err(e) = crate::loginscreen::set(false)
+        {
+            eprintln!("{e}");
+        }
         // The icon notices the service went and goes too.
         if let Some(a) = autostart_file() {
             let _ = std::fs::remove_file(a);
@@ -2369,7 +2497,7 @@ pub fn uninstall_service() -> Result<(), String> {
         return Ok(());
     }
     #[allow(unreachable_code)]
-    Err("not on this system".into())
+    Err(n!("not on this system").into())
 }
 
 /// `sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | install | uninstall]`
@@ -2649,9 +2777,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             }
             _ => Err("usage: sshremote remote-access printer [on|off]".into()),
         },
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         Some("login-window") => match args.get(1).map(String::as_str) {
+            #[cfg(target_os = "macos")]
             Some(w @ ("on" | "off")) => login_window(w == "on").map(|()| println!("at the login window: {w}")),
+            #[cfg(target_os = "linux")]
+            Some(w @ ("on" | "off")) => crate::loginscreen::set(w == "on").map(|()| println!("at the login screen and on a locked screen: {w}")),
             _ => Err("usage: sshremote remote-access login-window on|off".into()),
         },
         // `--service`: run by the service or unit itself; otherwise it leaves remote access to a
@@ -2669,6 +2800,29 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 return Err("the login window's screen is not up yet".into());
             }
             let parent: Option<u32> = args.iter().position(|a| a == "--parent").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: getuid cannot fail.
+                let uid = unsafe { libc::getuid() };
+                let r = if args.iter().any(|a| a == "--login-screen") {
+                    let owner: u32 = std::env::var(crate::loginscreen::OWNER_VAR).ok().and_then(|u| u.parse().ok()).ok_or("--login-screen: whose desktop it serves around was not said")?;
+                    // Root's copy follows the person's program to newer releases.
+                    thread::spawn(|| {
+                        loop {
+                            if crate::loginscreen::follow() {
+                                std::process::exit(0);
+                            }
+                            thread::sleep(Duration::from_secs(6 * 3600));
+                        }
+                    });
+                    Role::LoginScreen(owner)
+                } else if service && uid != 0 {
+                    Role::Owner(uid)
+                } else {
+                    Role::Plain
+                };
+                let _ = ROLE.set(r);
+            }
             eprintln!("remote access as {} through {}", crate::computers::spaced(&c.id), c.relay);
             // Run by hand: the line to the relay as it changes, so a refusal (the relay full, the
             // ID taken) is not left unsaid while the computer cannot be reached.
@@ -2689,8 +2843,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                     }
                 });
             }
-            // The service says how it stands, for the icon in the notification area.
-            if service {
+            // The service says how it stands, for the icon in the notification area (root's at the
+            // login screen leaves that to the person's own).
+            if service && !at_login_screen() {
                 thread::spawn(|| {
                     let mut said = String::new();
                     loop {
@@ -2716,7 +2871,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 let _ = keep();
             }
         }
-        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | printer [on|off] | login-window on|off (macOS) | service start|stop]".into()),
+        _ => Err("usage: sshremote remote-access [status | log | idle MINUTES|off | trusted [forget] | proxy URL|off | record on|off | on | off | run | id | password [NEW] | relay HOST | ask on|off | allow RIGHTS | straight|lan|direct|requests on|off | viewers | end N | passwords lasting|one-time|both | one-time | install | uninstall | printer [on|off] | login-window on|off (macOS, Linux) | service start|stop]".into()),
     }
 }
 

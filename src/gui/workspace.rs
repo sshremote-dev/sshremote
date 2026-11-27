@@ -52,9 +52,9 @@ impl PaneMode {
 
     pub(crate) fn name(self) -> &'static str {
         match self {
-            PaneMode::Terminal => "Terminal",
-            PaneMode::Screen => "Screen sharing",
-            PaneMode::Files => "Files",
+            PaneMode::Terminal => n!("Terminal"),
+            PaneMode::Screen => n!("Screen sharing"),
+            PaneMode::Files => n!("Files"),
         }
     }
 }
@@ -491,7 +491,7 @@ impl Workspace {
         let Some(t) = self.tab_of(id) else { return };
         let mut ids = vec![(shown, id)];
         for (m, p) in others {
-            let launch = Launch::Agent { target: target.clone(), label: format!("{label} \u{00b7} screen {}", m + 1), ssh_cmd: ssh_cmd.clone(), mode: PaneMode::Screen };
+            let launch = Launch::Agent { target: target.clone(), label: t!("{} \u{00b7} screen {}", label, m + 1), ssh_cmd: ssh_cmd.clone(), mode: PaneMode::Screen };
             let Some(new) = self.new_pane(launch, PaneStart::default()) else { return };
             if let Some(i) = self.index(new) {
                 self.panes[i].prefs = Some(p);
@@ -622,24 +622,25 @@ impl Workspace {
             super::menu_look(ui);
             let all = super::project::list();
             ui.set_min_width(260.0);
-            if ui.button(format!("{}  Keep these tabs as a project\u{2026}", ic::PLUS)).on_hover_text("Each pane's computer and what it shows, and how the panes divide each tab; never a password").clicked() {
+            if ui.button(format!("{}  {}", ic::PLUS, t!("Keep these tabs as a project\u{2026}"))).on_hover_text(t!("Each pane's computer and what it shows, and how the panes divide each tab; never a password")).clicked() {
                 self.naming = Some(String::new());
                 ui.close();
             }
             if !all.is_empty() {
                 ui.separator();
-                ui.label(RichText::new("Open in new tabs").weak().size(12.0));
+                ui.label(RichText::new(t!("Open in new tabs")).weak().size(12.0));
             }
             for p in &all {
                 let tabs = p.tabs.len();
-                let text = format!("{}  {}  ({tabs} tab{})", if p.name == super::project::LAST { ic::CLOCK_COUNTER_CLOCKWISE } else { ic::ARCHIVE }, p.name, if tabs == 1 { "" } else { "s" });
+                let last = p.name == super::project::LAST;
+                let text = format!("{}  {}  ({})", if last { ic::CLOCK_COUNTER_CLOCKWISE } else { ic::ARCHIVE }, if last { crate::lang::tr(super::project::LAST) } else { p.name.as_str() }, if tabs == 1 { t!("{} tab", tabs) } else { t!("{} tabs", tabs) });
                 if ui.button(text).clicked() {
                     self.open_project = Some(p.name.clone());
                     ui.close();
                 }
             }
         });
-        r.on_hover_text("Projects: keep these tabs, or open kept ones");
+        r.on_hover_text(t!("Projects: keep these tabs, or open kept ones"));
     }
 
     /// Asks the name to keep these tabs under, while asked.
@@ -649,19 +650,19 @@ impl Workspace {
         let mut done = None;
         modal.show(ctx, |ui| {
             ui.set_width(fit.x);
-            ui.label(RichText::new("Keep these tabs as a project").size(16.0).strong());
+            ui.label(RichText::new(t!("Keep these tabs as a project")).size(16.0).strong());
             ui.add_space(4.0);
             let panes: usize = self.snapshot().iter().map(super::project::Tree::panes).sum();
-            ui.label(RichText::new(format!("{} tabs, {panes} panes: each one's computer and what it shows. Passwords are not kept; they are asked again when needed.", self.tabs.len())).weak());
+            ui.label(RichText::new(t!("{} tabs, {} panes: each one's computer and what it shows. Passwords are not kept; they are asked again when needed.", self.tabs.len(), panes)).weak());
             ui.add_space(10.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Its name, as Release or Support").desired_width(f32::INFINITY));
+            let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(t!("Its name, as Release or Support")).desired_width(f32::INFINITY));
             r.request_focus();
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(RichText::new("Keep").strong()).min_size(Vec2::new(0.0, 32.0))).clicked() {
+                if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(RichText::new(t!("Keep")).strong()).min_size(Vec2::new(0.0, 32.0))).clicked() {
                     done = Some(true);
                 }
-                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
+                if ui.add(egui::Button::new(t!("Cancel")).min_size(Vec2::new(0.0, 32.0))).clicked() {
                     done = Some(false);
                 }
             });
@@ -669,8 +670,8 @@ impl Workspace {
         let (enter, escape) = ctx.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Enter), i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)));
         match done.or(if escape { Some(false) } else if enter && !name.trim().is_empty() { Some(true) } else { None }) {
             Some(true) => match super::project::save(&name, self.snapshot()) {
-                Ok(()) => self.toasts.push(&format!("Kept as \"{}\": open it from Projects, here or on the home", name.trim())),
-                Err(e) => self.toasts.push(&e),
+                Ok(()) => self.toasts.push(&t!("Kept as \"{}\": open it from Projects, here or on the home", name.trim())),
+                Err(e) => self.toasts.warn(&crate::lang::tr_msg(&e)),
             },
             Some(false) => {}
             None => self.naming = Some(name),
@@ -682,7 +683,7 @@ impl Workspace {
         // A build without screens and files says so.
         #[cfg(not(feature = "remote"))]
         if let Launch::Agent { .. } = &launch {
-            self.failed = Some(crate::not_built("screens and files"));
+            self.failed = Some(n!("this sshremote was built without screens and files").into());
             return None;
         }
         let id = NEXT_PANE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -758,7 +759,8 @@ impl Workspace {
             State::Live(r) if !r.is_web() => Some(r.rtt()),
             _ => None,
         };
-        (p.label.clone(), rtt)
+        // A label kept in English as data (a shell profile's name) is shown in the language now.
+        (crate::lang::tr_msg(&p.label).into_owned(), rtt)
     }
 
     fn close_pane(&mut self, id: u64) {
@@ -907,8 +909,8 @@ impl Workspace {
         let mut l = Vec::new();
         t.root.leaves(&mut l);
         l.iter().filter_map(|id| self.index(*id)).map(|i| &self.panes[i]).find_map(|p| match &p.state {
-            State::Held(_) => super::held::full_hides().then(|| "Sway shows no program over a full screen window.".to_string()),
-            _ => matches!(&p.target, Target::Local { capture } if capture.starts_with("app:")).then(|| format!("it would hide {}'s own window.", p.label)),
+            State::Held(_) => super::held::full_hides().then(|| t!("Sway shows no program over a full screen window.").to_string()),
+            _ => matches!(&p.target, Target::Local { capture } if capture.starts_with("app:")).then(|| t!("it would hide {}'s own window.", p.label)),
         })
     }
 
@@ -974,7 +976,7 @@ impl Workspace {
             let window = std::mem::take(&mut self.window_waits);
             for id in late {
                 let name = self.name(id).0;
-                self.toasts.push(&if window { format!("{name} did not close, so this window stays open.") } else { format!("{name} did not close.") });
+                self.toasts.push(&if window { t!("{} did not close, so this window stays open.", name) } else { t!("{} did not close.", name) });
             }
         }
         if self.window_waits && self.asked.is_empty() {
@@ -1037,7 +1039,7 @@ impl Workspace {
             match d.rx.as_ref().map(|p| p.rx.try_recv()) {
                 Some(Ok(Ok(s))) => live = Some(s),
                 Some(Ok(Err(e))) => d.failed(e),
-                Some(Err(mpsc::TryRecvError::Disconnected)) => d.failed("the connection attempt ended".into()),
+                Some(Err(mpsc::TryRecvError::Disconnected)) => d.failed(n!("the connection attempt ended").into()),
                 Some(Err(mpsc::TryRecvError::Empty)) => waiting = true,
                 None if !d.given_up && now >= d.next => {
                     d.rx = Some(connect_in_background(connect_target(target, d.again), ctx));
@@ -1147,7 +1149,7 @@ impl Workspace {
                     && super::signin::refused(&d.why)
                 {
                     d.asked = true;
-                    self.signin = super::signin::SignIn::new(p.id, &p.target, p.mode.name(), &d.why);
+                    self.signin = super::signin::SignIn::new(p.id, &p.target, crate::lang::tr(p.mode.name()), &d.why);
                     break;
                 }
             }
@@ -1216,14 +1218,14 @@ impl Workspace {
             result = result.and_then(|_| r.ask_trust(address));
         }
         if again {
-            r.notify("Connected again");
+            r.notify(t!("Connected again"));
         }
         // The password typed to sign in worked: kept now, so it is not asked again.
         if let Some((name, password)) = p.keep.take()
             && crate::vault::worth_keeping(&name, &password)
             && let Err(e) = crate::vault::set(&name, &password)
         {
-            r.notify(&format!("The password was not saved: {e}"));
+            r.notify(&t!("The password was not saved: {}", crate::lang::tr_msg(&e)));
         }
         let PaneStart { panel, chat, fullscreen: full } = std::mem::take(&mut p.start);
         r.open_panels(false, chat);
@@ -1325,7 +1327,7 @@ impl Workspace {
     fn set_full(&mut self, ctx: &egui::Context, on: bool) {
         if on && let Some(why) = self.full_hides_shown() {
             // Short, so it fits on the title bar.
-            self.toasts.push(&format!("Not full screen: {why}"));
+            self.toasts.push(&t!("Not full screen: {}", why));
             return;
         }
         if on && !self.full.on && self.spread_instead() {
@@ -1444,7 +1446,7 @@ impl Workspace {
                 self.spread_layout = r.screen_places();
                 self.spread_source = Some(SpreadSource { pane: p.id, target: p.target.clone(), label: p.label.clone(), ssh_cmd: p.ssh_cmd.clone(), places: r.screen_places(), sizes: r.screen_sizes() });
                 for m in (0..n).filter(|m| *m != shown) {
-                    let launch = Launch::Agent { target: p.target.clone(), label: format!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
+                    let launch = Launch::Agent { target: p.target.clone(), label: t!("{} \u{00b7} screen {}", p.label, m + 1), ssh_cmd: p.ssh_cmd.clone(), mode: PaneMode::Screen };
                     self.spread.push(Spread { launch, prefs: r.prefs_on(m as u8), screen: m });
                 }
                 self.spread_from = Some(shown);
@@ -1481,7 +1483,7 @@ impl Workspace {
         if self.full.on
             && let Some(why) = self.full_hides_shown()
         {
-            self.toasts.push(&format!("Out of full screen: {why}"));
+            self.toasts.push(&t!("Out of full screen: {}", why));
             self.set_full(&ctx, false);
         }
         // In a window, the title bar; in full screen the dock stands in for it, drawn over the panes.
@@ -1595,7 +1597,7 @@ impl Workspace {
                             d.rx = None;
                             d.given_up = true;
                             if d.why.is_empty() {
-                                d.why = "Cancelled.".into();
+                                d.why = n!("Cancelled.").into();
                             }
                         }
                         Some(DownAct::Retry) => *d = Down::new(d.again, String::new()),
@@ -1690,7 +1692,7 @@ impl Workspace {
         if !self.tabs.is_empty()
             && let Some(e) = self.failed.take()
         {
-            self.toasts.push(&e);
+            self.toasts.warn(&crate::lang::tr_msg(&e));
         }
         // Not under a program's own window held over its pane, which would hide them.
         let held: Vec<Rect> = rects.iter().filter(|(id, _)| self.is_held(*id)).map(|(_, r)| *r).collect();
@@ -1845,12 +1847,13 @@ impl Workspace {
         if what == Confirm::Window {
             let panes = self.panes.len();
             let tabs = self.tabs.len();
-            let body = format!(
-                "{} and {} close, and their connections and shells end.",
-                if tabs == 1 { "Its tab".to_string() } else { format!("Its {tabs} tabs") },
-                if panes == 1 { "its pane".to_string() } else { format!("{panes} panes") }
-            );
-            if let Some(yes) = ask(ctx, "Close this window?", &body, "Close window") {
+            let body = match (tabs == 1, panes == 1) {
+                (true, true) => t!("Its tab and its pane close, and their connections and shells end.").to_string(),
+                (true, false) => t!("Its tab and {} panes close, and their connections and shells end.", panes),
+                (false, true) => t!("Its {} tabs and its pane close, and their connections and shells end.", tabs),
+                (false, false) => t!("Its {} tabs and {} panes close, and their connections and shells end.", tabs, panes),
+            };
+            if let Some(yes) = ask(ctx, t!("Close this window?"), &body, t!("Close window")) {
                 self.confirm = None;
                 if yes {
                     self.last_tabs = Some(self.snapshot());
@@ -1878,30 +1881,30 @@ impl Workspace {
                 let n = self.order(t).len();
                 let name = self.name(self.tabs[t].active).0;
                 let body = if n > 1 {
-                    format!("Its {n} panes close, and their connections, shells and programs end.")
+                    t!("Its {} panes close, and their connections, shells and programs end.", n)
                 } else if self.is_held(id) {
-                    format!("{name} closes with the tab (it may ask to save first).")
+                    t!("{} closes with the tab (it may ask to save first).", name)
                 } else if self.is_remote(id) || !self.is_shell(id) {
-                    "The connection ends and the tab closes.".to_string()
+                    t!("The connection ends and the tab closes.").to_string()
                 } else {
-                    "The shell ends and the tab closes.".to_string()
+                    t!("The shell ends and the tab closes.").to_string()
                 };
-                (format!("Close the tab {name}?"), body, "Close tab")
+                (t!("Close the tab {}?", name), body, t!("Close tab"))
             }
             None if self.is_held(id) => (
-                format!("Close {name}?"),
-                format!("{name} closes with the pane (it may ask to save first); with the tab's last pane, the tab closes too."),
-                "Close",
+                t!("Close {}?", name),
+                t!("{} closes with the pane (it may ask to save first); with the tab's last pane, the tab closes too.", name),
+                t!("Close"),
             ),
             None if self.is_remote(id) || !self.is_shell(id) => (
-                format!("Close {name}?"),
-                "The connection ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
-                "Close",
+                t!("Close {}?", name),
+                t!("The connection ends and the pane closes; with the tab's last pane, the tab closes too.").to_string(),
+                t!("Close"),
             ),
             None => (
-                format!("Close {name}?"),
-                "The shell ends and the pane closes; with the tab's last pane, the tab closes too.".to_string(),
-                "Close",
+                t!("Close {}?", name),
+                t!("The shell ends and the pane closes; with the tab's last pane, the tab closes too.").to_string(),
+                t!("Close"),
             ),
         };
         let answer = ask(ctx, &title, &body, yes);
@@ -1984,7 +1987,7 @@ pub(super) fn ask(ctx: &egui::Context, title: &str, body: &str, yes: &str) -> Op
             if ui.add(danger).clicked() {
                 answer = Some(true);
             }
-            if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(0.0, 32.0))).clicked() {
+            if ui.add(egui::Button::new(t!("Cancel")).min_size(Vec2::new(0.0, 32.0))).clicked() {
                 answer = Some(false);
             }
         });
@@ -2033,50 +2036,46 @@ fn down_view(ui: &mut egui::Ui, rect: Rect, d: &Down, label: &str, carried: usiz
     if !d.given_up {
         c.add(egui::Spinner::new().size(28.0));
         c.add_space(6.0);
-        let what = if d.again { format!("Connection to {label} lost; connecting again") } else { format!("Connecting to {label}") };
+        let what = if d.again { t!("Connection to {} lost; connecting again", label) } else { t!("Connecting to {}", label) };
         c.label(RichText::new(what).strong());
         let secs = d.since.elapsed().as_secs();
-        let sub = if d.attempt > 0 { format!("Attempt {}  ·  {secs} s", d.attempt + 1) } else { format!("{secs} s") };
+        let sub = if d.attempt > 0 { t!("Attempt {}  ·  {} s", d.attempt + 1, secs) } else { t!("{} s", secs) };
         c.label(RichText::new(sub).small().weak());
         if carried > 0 {
-            c.label(RichText::new(format!("{carried} {} on from where {} once connected", transfers(carried), if carried == 1 { "it was" } else { "they were" })).small());
+            c.label(RichText::new(if carried == 1 { t!("{} transfer goes on from where it was once connected", carried) } else { t!("{} transfers go on from where they were once connected", carried) }).small());
         }
         // What the computer said while it was reached: that someone there is asked, say.
         let note = d.rx.as_ref().map(|p| p.note.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
         if !note.is_empty() {
             c.add_space(4.0);
-            c.label(RichText::new(note).color(super::brand()));
+            c.label(RichText::new(crate::lang::tr_msg(&note)).color(super::brand()));
         }
         c.add_space(8.0);
-        if c.button("Cancel").clicked() {
+        if c.button(t!("Cancel")).clicked() {
             act = Some(DownAct::Cancel);
         }
     } else {
-        let title = if d.again { format!("The connection to {label} was lost") } else { format!("Could not connect to {label}") };
+        let title = if d.again { t!("The connection to {} was lost", label) } else { t!("Could not connect to {}", label) };
         c.label(RichText::new(title).strong());
         let (what, hint) = friendly(&d.why);
-        c.label(RichText::new(what).weak()).on_hover_text(d.why.as_str());
+        c.label(RichText::new(what).weak()).on_hover_text(crate::lang::tr_msg(&d.why).into_owned());
         if !hint.is_empty() {
             c.label(RichText::new(hint).small().weak());
         }
         if carried > 0 {
-            c.label(RichText::new(format!("Reconnect and {carried} {} on from where {}", transfers(carried), if carried == 1 { "it was" } else { "they were" })).small());
+            c.label(RichText::new(if carried == 1 { t!("Reconnect and {} transfer goes on from where it was", carried) } else { t!("Reconnect and {} transfers go on from where they were", carried) }).small());
         }
         c.add_space(8.0);
         c.horizontal(|ui| {
-            if ui.add(theme::primary(format!("{}  Reconnect", ic::ARROW_CLOCKWISE))).clicked() {
+            if ui.add(theme::primary(format!("{}  {}", ic::ARROW_CLOCKWISE, t!("Reconnect")))).clicked() {
                 act = Some(DownAct::Retry);
             }
-            if ui.button("Close").clicked() {
+            if ui.button(t!("Close")).clicked() {
                 act = Some(DownAct::Close);
             }
         });
     }
     act
-}
-
-fn transfers(n: usize) -> &'static str {
-    if n == 1 { "transfer goes" } else { "transfers go" }
 }
 
 /// The workspace driven as a user would, against the built-in test desktop and a local shell:

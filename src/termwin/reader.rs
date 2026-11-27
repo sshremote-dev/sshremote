@@ -150,10 +150,10 @@ fn markdown_view(ui: &mut egui::Ui, t: &mut Tab, font_size: f32, keys: bool, out
         crate::markdown::show_in_view(ui, doc, doc_key, doc_id, &th, &mut heights, view, pad, column, 14.0);
         if doc.blocks.is_empty() {
             let msg = if alt {
-                "Nothing gathered yet: what the program shows is added here once it settles, and \
-                 scrolling it adds more."
+                t!("Nothing gathered yet: what the program shows is added here once it settles, and \
+                 scrolling it adds more.")
             } else {
-                "Nothing to show yet."
+                t!("Nothing to show yet.")
             };
             ui.put(
                 Rect::from_min_size(origin + Vec2::new(pad, 14.0), Vec2::new(column, 40.0)),
@@ -252,17 +252,17 @@ fn find_bar(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, keys: bool) {
     let ui = &mut child;
     ui.painter().rect_filled(rect, CornerRadius::ZERO, ui.visuals().faint_bg_color);
     ui.label(RichText::new(ic::SEARCH).size(15.0));
-    let edit = ui.add(egui::TextEdit::singleline(&mut f.query).hint_text("Search the record").desired_width(260.0));
+    let edit = ui.add(egui::TextEdit::singleline(&mut f.query).hint_text(t!("Search the record")).desired_width(260.0));
     if f.focus {
         edit.request_focus();
         f.focus = false;
     }
     let (enter, shift, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.modifiers.shift, i.key_pressed(Key::Escape)));
     let n = f.hits.len();
-    ui.label(if f.query.is_empty() { String::new() } else if n == 0 { "No results".into() } else { format!("{} of {n}", f.at + 1) });
-    let prev = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_UP, false)).on_hover_text("Previous (Shift+Enter)").clicked();
-    let next = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_DOWN, false)).on_hover_text("Next (Enter)").clicked();
-    if ui.add(crate::gui::tool_button(ic::X, false)).on_hover_text("Close (Escape)").clicked() {
+    ui.label(if f.query.is_empty() { String::new() } else if n == 0 { t!("No results").into() } else { t!("{} of {}", f.at + 1, n) });
+    let prev = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_UP, false)).on_hover_text(t!("Previous (Shift+Enter)")).clicked();
+    let next = ui.add_enabled(n > 1, crate::gui::tool_button(ic::CARET_DOWN, false)).on_hover_text(t!("Next (Enter)")).clicked();
+    if ui.add(crate::gui::tool_button(ic::X, false)).on_hover_text(t!("Close (Escape)")).clicked() {
         close = true;
     }
     let typed_enter = enter && (edit.lost_focus() || edit.has_focus());
@@ -290,17 +290,17 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
     let back = scheme_bg().gamma_multiply(0.92);
     ui.painter().rect_filled(tools.expand(3.0), CornerRadius::same(8), back);
     let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(tools).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    if bar.add(crate::gui::tool_button(ic::ERASER, false)).on_hover_text("Clear: start the record again from here").clicked() {
+    if bar.add(crate::gui::tool_button(ic::ERASER, false)).on_hover_text(t!("Clear: start the record again from here")).clicked() {
         act = Some(MdAct::Clear);
     }
-    if bar.add(crate::gui::tool_button(ic::SEARCH, t.find.is_some())).on_hover_text("Search (Ctrl+F)").clicked() {
+    if bar.add(crate::gui::tool_button(ic::SEARCH, t.find.is_some())).on_hover_text(t!("Search (Ctrl+F)")).clicked() {
         act = Some(MdAct::FindToggle);
     }
     // As a chat's answer is kept: copied whole, or saved as a Markdown file.
-    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::DOWNLOAD, false)).on_hover_text("Download as Markdown (.md)").clicked() {
+    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::DOWNLOAD, false)).on_hover_text(t!("Download as Markdown (.md)")).clicked() {
         act = Some(MdAct::SaveMd);
     }
-    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::COPY, false)).on_hover_text("Copy all as Markdown").clicked() {
+    if bar.add_enabled(!markdown.is_empty(), crate::gui::tool_button(ic::COPY, false)).on_hover_text(t!("Copy all as Markdown")).clicked() {
         act = Some(MdAct::CopyMd);
     }
     let menu_id = egui::Id::unique(("md-menu", t.id));
@@ -314,13 +314,13 @@ fn md_tools(ui: &mut egui::Ui, t: &mut Tab, rect: Rect, markdown: &str) {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
                 crate::gui::menu(ui, |ui| {
                     for (a, text, on) in [
-                        (MdAct::Copy, format!("{}  Copy (Ctrl+C)", ic::COPY), selected),
-                        (MdAct::CopyMd, format!("{}  Copy all as Markdown", ic::ARTICLE), !markdown.is_empty()),
-                        (MdAct::CopyText, format!("{}  Copy all as text", ic::TEXT_T), !markdown.is_empty()),
-                        (MdAct::SaveMd, format!("{}  Download as Markdown (.md)", ic::DOWNLOAD), !markdown.is_empty()),
-                        (MdAct::SaveText, format!("{}  Download as text (.txt)", ic::DOWNLOAD), !markdown.is_empty()),
-                        (MdAct::Find, format!("{}  Search  (Ctrl+F)", ic::SEARCH), true),
-                        (MdAct::Clear, format!("{}  Clear", ic::ERASER), true),
+                        (MdAct::Copy, format!("{}  {}", ic::COPY, t!("Copy (Ctrl+C)")), selected),
+                        (MdAct::CopyMd, format!("{}  {}", ic::ARTICLE, t!("Copy all as Markdown")), !markdown.is_empty()),
+                        (MdAct::CopyText, format!("{}  {}", ic::TEXT_T, t!("Copy all as text")), !markdown.is_empty()),
+                        (MdAct::SaveMd, format!("{}  {}", ic::DOWNLOAD, t!("Download as Markdown (.md)")), !markdown.is_empty()),
+                        (MdAct::SaveText, format!("{}  {}", ic::DOWNLOAD, t!("Download as text (.txt)")), !markdown.is_empty()),
+                        (MdAct::Find, format!("{}  {}", ic::SEARCH, t!("Search  (Ctrl+F)")), true),
+                        (MdAct::Clear, format!("{}  {}", ic::ERASER, t!("Clear")), true),
                     ] {
                         if matches!(a, MdAct::Clear | MdAct::SaveMd | MdAct::Find) {
                             ui.separator();
@@ -627,11 +627,11 @@ pub(super) fn text_editor(
             }
             edit.response.context_menu(|ui| {
                 crate::gui::menu_look(ui);
-                if ui.button(format!("{}  Copy all", ic::COPY)).clicked() {
+                if ui.button(format!("{}  {}", ic::COPY, t!("Copy all"))).clicked() {
                     ui.ctx().copy_text(text.clone());
                     ui.close();
                 }
-                if ui.button("Paste").clicked() {
+                if ui.button(t!("Paste")).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                     ui.ctx().memory_mut(|m| m.request_focus(id));
                     ui.close();

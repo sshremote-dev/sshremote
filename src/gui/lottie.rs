@@ -26,15 +26,15 @@ pub(crate) struct BuiltIn {
 }
 
 macro_rules! built_in {
-    ($id:literal, $label:literal, $still:literal, $fps:literal, $file:literal) => {
+    ($id:literal, $label:expr, $still:literal, $fps:literal, $file:literal) => {
         BuiltIn { id: concat!("builtin:", $id), label: $label, still: $still, fps: $fps, bytes: include_bytes!(concat!("../../assets/", $file)) }
     };
 }
 
 pub(crate) const BUILT_INS: &[BuiltIn] = &[
-    built_in!("brand", "SSH REMOTE in 3D", false, 15.0, "brand_motion.json"),
-    built_in!("night-motion", "Night lake: shooting stars", false, 24.0, "night_motion.json"),
-    built_in!("night-still", "Night lake: Milky Way, mountains, pines", true, 1.0, "night_still.json"),
+    built_in!("brand", n!("SSH REMOTE in 3D"), false, 15.0, "brand_motion.json"),
+    built_in!("night-motion", n!("Night lake: shooting stars"), false, 24.0, "night_motion.json"),
+    built_in!("night-still", n!("Night lake: Milky Way, mountains, pines"), true, 1.0, "night_still.json"),
 ];
 
 /// Styles that were built in and are now the registry's style packs: where an old setting's layer went.
@@ -186,7 +186,7 @@ fn unpack(bytes: &[u8]) -> Result<String, String> {
     let json = id
         .and_then(|id| read(&format!("animations/{id}.json")).or_else(|| read(&format!("a/{id}.json"))))
         .or_else(|| names.iter().find(|n| n.ends_with(".json") && !n.ends_with("manifest.json")).and_then(|n| read(n)))
-        .ok_or("no animation in the package")?;
+        .ok_or(n!("no animation in the package"))?;
     let mut v: serde_json::Value = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
     use base64::Engine;
     if let Some(assets) = v.get_mut("assets").and_then(|a| a.as_array_mut()) {
