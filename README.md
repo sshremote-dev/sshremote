@@ -256,6 +256,11 @@ What is opened goes into the workspace:
 - **Markdown view**: a terminal's output read as Markdown (its results gathered, live lines left
   out), copied whole or downloaded as a `.md` or `.txt` file, and each code block copied or saved
   as a file of its language.
+- **53 languages**, the same as RustDesk's: the system's by default, or one picked in Settings >
+  Appearance > Language (Arabic, Persian, Urdu and Hebrew are laid out right to left, also when
+  mixed with Latin words and over several lines; the web viewer follows the browser's language).
+  Translations are `assets/lang/<code>.json`, English text to the language's; `scripts/lang.py
+  check` tells what each lacks.
 - Every window draws its own title bar and keeps the system's behaviour: drag and snap,
   double-click, system menu (icon, right click, Alt+Space), resizing edges.
 - **Screen sharing**: quality (auto, five presets from black and white at 30 fps to
@@ -450,8 +455,20 @@ For a PC on Wi-Fi or behind NAT with no fixed address: turn on **Remote access b
 of the home window. It shows a lasting 9-digit ID and a password (show, copy, a new one); its
 settings sheet sets your own password, the relay, a new ID and **Start with the computer**, which
 installs the service (Windows, also at the sign-in screen), a launch agent (macOS, also at the
-login window once an administrator allows it) or a systemd user unit (Linux). On the other side,
-type the ID in the address field, give the password and open the screen or files.
+login window once an administrator allows it) or a systemd user unit (Linux, also at the login
+screen and on a locked screen once an administrator allows it). On the other side, type the ID in
+the address field, give the password and open the screen or files.
+
+On Linux the login screen and a locked screen are served by a system service that runs a copy of
+the program as root (`/usr/local/lib/sshremote`, which only root can change), with the same ID,
+password and settings. It reads the screen from the display hardware (DRM/KMS: linear buffers
+directly, tiled or compressed ones through the GPU with EGL; the pointer from its own plane) and
+types and clicks through virtual input devices (uinput) on the system's keyboard layout, so it
+works with any greeter or compositor: GDM, greetd, SDDM, LightDM, GNOME's or KDE's lock screen.
+Viewers there get the keyboard and mouse only. Once the desktop is unlocked or someone signs in,
+the viewer moves on to the person's own remote access (with terminals, files and the clipboard),
+and back to the lock screen when it locks; the copy follows the person's updates, downloaded and
+checked against the release signature like any update.
 
 ```sh
 sshremote remote-access            # this computer's ID, password and state
@@ -460,7 +477,7 @@ sshremote remote-access ask on|off               # the person here lets each vie
 sshremote remote-access allow keyboard files ... # what viewers may use (all, none)
 sshremote remote-access straight|lan|direct on|off  # past the relay; found nearby; straight in nearby
 sshremote remote-access service start|stop       # the service, without removing it
-sshremote remote-access login-window on|off      # macOS: reachable before anyone signs in
+sshremote remote-access login-window on|off      # macOS, Linux: also before sign-in and when locked
 sshremote remote-access viewers | end N          # who is connected now; end one
 sshremote remote-access passwords lasting|one-time|both  # which passwords viewers may give
 sshremote remote-access one-time                 # a new one-time password now

@@ -53,6 +53,8 @@ Port forwarding is SSH's own and is built in, per computer.
 | Layer | Modules | |
 |---|---|---|
 | Engine | `proto`, `net`, `udp`, `transport`, `session`, `agent`, `capture/*`, `video`, `audio`, `files`, `clip`, `chat`, `pty`, `conpty`, `keys`, `xk`, `keygrab`, `access`, `relay`, `service`, `admin`, `console_user` | kept |
+| Login screen (Linux) | `capture/kms` (the screen from DRM/KMS, EGL for tiled buffers, uinput for input), `console` (logind: login screen, locked, open), `loginscreen` (root's service and its copy) | new |
+| Languages | `lang` (`t!`/`n!`, the tables in `assets/lang/*.json`, deflated by `build.rs`), `vendor/epaint` (egui's text layout with right-to-left runs in reading order) | new |
 | Coming in | `grant` (rights), `hostctl` (the computer itself), `porttunnel` (tunnels by ID), `lan` (found nearby, Wake-on-LAN), `totp` (two-step codes), `record` (MP4) | new |
 | Data | `computers` (the one list), `tunnels`, `vault`, `hosts` (settings and `~/.ssh/config`), `backup` | `computers` and `tunnels` new |
 | Servers | `web`, `mcp` | kept |
