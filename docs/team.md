@@ -95,6 +95,12 @@ Errors: HTTP 4xx/5xx with `{"error": "words"}`.
   with `#handoff=CODE`, where one click goes on to the app's loopback address (`#error=WORDS` on
   the sign-in page when it failed).
 - `POST /api/logout` ends the session.
+- `POST /api/reset` `{"name"}` (a name or an email address) -> `{"sent": true}` whatever the case:
+  when the team has a mail server and that account a password and an email address, a link to set
+  a new password goes to it (an hour; three asks per account and the usual tries per address in
+  15 minutes). `GET /api/link?token=T` -> `{"user", "reset"}` while a link works;
+  `POST /api/link` `{"token", "password"}` sets the password, uses the link up and ends the
+  person's sessions. The console opens links sent as `URL/#link=TOKEN`.
 - `GET /api/me` -> `{"user": USER, "team": TEAM}`.
 - `GET /api/devices` -> `{"devices": [{"id", "name", "os", "group", "online": bool, "rights", "ask"}]}`:
   the devices the person may reach (online: seen in the last 3 minutes).
@@ -120,8 +126,11 @@ TEAM = `{"name", "logo": DATA_URL or "", "relay": "HOST[:PORT]" or "", "url"}`.
 - `POST /api/device/leave` (signed) -> `{}`.
 
 POLICY = `{"password": bool, "ask": bool|null, "rights": u8, "record": bool|null, "idle": minutes|null,
-"direct": bool|null, "lan": bool|null}`: `password` false lets in team tickets only; `rights` caps
-what anyone may do (bits as in `src/grant.rs`); null leaves the computer's own setting.
+"direct": bool|null, "lan": bool|null, "incoming_only": bool}`: `password` false lets in team
+tickets only; `rights` caps what anyone may do (bits as in `src/grant.rs`); null leaves the
+computer's own setting; `incoming_only` shows this computer alone in its app (its ID, for the
+people who are helped, with no computers of their own to open). The app shows what a policy sets
+as set by the team, and does not let it be changed there.
 
 EVENT = `{"time", "kind": "in"|"out"|"refused"|"file", "how": "team"|"password"|"one-time"|"request",
 "user"?, "from"?, "rights"?, "secs"?, "words"?}`; a file event's words say what was done in English
@@ -146,8 +155,16 @@ EVENT = `{"time", "kind": "in"|"out"|"refused"|"file", "how": "team"|"password"|
 - `GET /api/admin/audit?from&to&device&user&kind&limit` -> `{"events": [EVENT + "device"]}`;
   `GET /api/admin/audit.csv` the same as CSV.
 - `GET|PUT /api/admin/settings` (`{"name", "logo", "relay", "oidc": {"issuer", "client_id",
-  "client_secret", "domains": [..], "make_users": bool} | null, "ldap": {"url", "user_dn": "uid={},ou=people,dc=example,dc=com",
-  "make_users": bool} | null}`; the client secret is never sent back).
+  "client_secret", "domains": [..], "make_users": bool, "trust_email": bool} | null, "ldap": {"url",
+  "user_dn": "uid={},ou=people,dc=example,dc=com", "make_users": bool, "ca_file": PATH} | null,
+  "smtp": {"url": "smtps://HOST[:PORT]" | "smtp://HOST:587", "user", "password", "from"} | null}`;
+  secrets are never sent back, only `client_secret_set` and `password_set`). A directory sign-in
+  binds as the person and reads their own entry for the name and email of an account it makes
+  (`ca_file`: the authority of a directory certificate the system does not know); `smtp://` uses
+  STARTTLS except to a mail server on the same computer.
+- `POST /api/admin/invite` `{"name"}`: an email to that person with a link to set their password
+  (a week). `POST /api/admin/mail-test` `{"to"?}`: a test email (to the administrator's own address
+  when none is given).
 
 ### Installers
 

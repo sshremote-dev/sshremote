@@ -61,11 +61,18 @@ brew install --cask sshremote-dev/tap/sshremote       # macOS with Homebrew (the
 brew install sshremote-dev/tap/sshremote              # Linux with Homebrew
 ```
 
+```powershell
+scoop bucket add sshremote https://github.com/sshremote-dev/scoop-bucket; scoop install sshremote
+```
+
 Each takes the current version from [GitHub Releases](https://github.com/sshremote-dev/sshremote/releases),
 checks its SHA-256 against the list on sshremote.dev and puts it in place: `~/.local/bin/sshremote`
-on Linux, the app in Applications on a Mac, and on Windows `%LOCALAPPDATA%\Programs\SSH Remote`
-with a Start menu entry and the folder on `PATH`. Or download a file from
-[GitHub Releases](https://github.com/sshremote-dev/sshremote/releases/latest), or build it:
+on Linux (in the applications menu once the window has opened), the app in Applications on a Mac,
+and on Windows `%LOCALAPPDATA%\Programs\SSH Remote` with a Start menu entry and the folder on
+`PATH`. A copy a package manager keeps is updated by it (the program says which command does it).
+Or download a file from [GitHub Releases](https://github.com/sshremote-dev/sshremote/releases/latest):
+the Linux program also comes as a `.deb` (Debian 13, Ubuntu 24.04 and later) and an `.rpm`
+(Fedora, RHEL 10, openSUSE), x86_64 and Arm64. Or build it:
 
 ```sh
 cargo build --release
