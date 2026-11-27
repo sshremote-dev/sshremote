@@ -550,6 +550,29 @@ the computer in its remote access settings, the viewer in Settings, Connections.
 passwords cost more time each, and attempts per address are limited. See
 [docs/architecture.md](docs/architecture.md) for how this, SSH and the extensions fit together.
 
+## Teams
+
+For an organization: a team server of its own (`sshremote team serve`, behind its HTTPS) keeps
+its computers and its people. Computers join with an enrollment token (or the team's installer,
+which joins by itself); people sign in with a password and an authenticator code, through OpenID
+Connect, or against LDAP. A web console sets who may reach which computers and with what rights,
+the policy each group of computers keeps (team members only or passwords too, asking, rights,
+recording, idle end, straight connections), enrollment tokens and installers, the team's name,
+logo and relay, and shows the audit log of every session (CSV too).
+
+A signed-in person opens a team computer with no password: the server gives a ticket for five
+minutes, bound to the person's own device, and the computer checks it with a key only it and the
+server hold (the relay sees nothing it can use). Their own list of computers can be kept on the
+server, sealed on the device with a passphrase the server never sees. See [docs/team.md](docs/team.md).
+
+```sh
+sshremote team serve --listen 127.0.0.1:8023 --data /var/lib/sshremote-team --url https://team.example.com
+sshremote team admin NAME --data /var/lib/sshremote-team   # the first administrator
+sshremote team join https://team.example.com TOKEN       # this computer into the team
+sshremote team login https://team.example.com             # a person, in the browser
+sshremote sshremote://123456789 --team                    # a team computer, with a ticket
+```
+
 ## Credits
 
 Icons: [Phosphor Icons](https://phosphoricons.com) (MIT) via egui-phosphor, see

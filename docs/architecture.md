@@ -133,6 +133,20 @@ or stops sealing once it did, is refused. Nobody in between can then read the to
 the ID, or write the address a viewer is seen from. The viewers' connections and the computer's
 answering ones carry only what both ends already seal themselves.
 
+## Teams
+
+A computer in a team (`docs/team.md`) takes one more kind of viewer: the top bit 0x2000 of the
+first length says a team ticket follows, the ticket's JSON as sent by the team server, and the
+SPAKE2 exchange runs with the ticket's tag (HMAC-SHA256 under the team key only the computer and
+its team server hold) as the password. The computer makes the tag itself from what it was sent,
+so a ticket for another computer, an old one or a forged one fails as a wrong password would,
+and then asks for the viewer's device key (the `WHO` step) and takes only the one the ticket
+names. The rights are the ticket's within the team's policy for that computer; a policy can turn
+passwords and requests off, and then a viewer that gives one is answered 0xfffd and told to sign
+in to the team. The team is kept in the remote access settings (machine-wide on Windows), where
+only who may change remote access can join or leave, and the service reads its policy every
+minute, with the audit log's events.
+
 ## Straight paths by ID (NAT hole punching)
 
 A session by ID starts on the relay. After the password check an agent that may go straight
