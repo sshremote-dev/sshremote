@@ -99,9 +99,27 @@ pub fn managed_by(exe: &Path) -> Option<&'static str> {
     } else if p.starts_with("/usr/bin/") {
         // The .deb or .rpm, which the system's package manager keeps.
         Some("the newer .deb or .rpm from https://sshremote.dev")
+    } else if cfg!(windows) && p.ends_with("/ssh remote/sshremote.exe") && from_msi() && !crate::admin::elevated() {
+        // The MSI's copy in Program Files, which only an administrator changes (the service
+        // updates it by itself).
+        Some("the newer .msi from https://sshremote.dev")
     } else {
         None
     }
+}
+
+/// Whether the MSI package installed this computer's copy (its value in the registry).
+fn from_msi() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+        let (key, value) = (crate::sys::wide(r"Software\SSH Remote"), crate::sys::wide("msi"));
+        let mut len = 0u32;
+        // SAFETY: the size alone is asked for.
+        return unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut len) } == 0;
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 /// Remote access run as a service, with nobody at the computer to click: a newer release put in

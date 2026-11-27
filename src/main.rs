@@ -509,7 +509,7 @@ fn main() {
     #[cfg(windows)]
     if !no_console
         && !args.iter().any(|a| ["--gui", "--service", "--tray", "--chat-window", "--agent", "--stats"].contains(&a.as_str()))
-        && args[0] != "terminal"
+        && !["terminal", "--msi", "--start-service-again"].contains(&args[0].as_str())
     {
         attach_console();
     }
@@ -533,6 +533,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--service" => service::dispatch(),
         #[cfg(all(windows, feature = "remote"))]
         "--start-service-again" => service::start_when_stopped(),
+        #[cfg(all(windows, feature = "remote"))]
+        "--msi" => service::msi(&args[1..]),
         #[cfg(feature = "gui")]
         "--tray" => gui::run_tray(),
         #[cfg(feature = "remote")]

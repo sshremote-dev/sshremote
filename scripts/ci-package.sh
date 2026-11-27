@@ -2,11 +2,18 @@
 # ci-package.sh KIND BINARY FILE ARCH: the Linux program BINARY as a package FILE of KIND (deb or
 # rpm) for ARCH (x86_64 or aarch64): the program in /usr/bin, its desktop entry (as
 # src/desktop_entry.rs writes it, but for /usr/bin) and its icon, the license and notices.
+# KIND msi: the Windows program BINARY (x86_64) as an MSI, by release/sshremote.wxs and wixl.
 set -eu
 # What it installs: for its owner to change, for everyone to read.
 umask 022
 KIND=$1 BIN=$2 FILE=$3 ARCH=$4
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+if [ "$KIND" = msi ]; then
+  [ "$ARCH" = x86_64 ] || { echo "ci-package.sh: an MSI is made for x86_64 only" >&2; exit 1; }
+  wixl -a x64 -D Version="$VERSION" -D Exe="$BIN" -o "$FILE" release/sshremote.wxs
+  sha256sum "$FILE"
+  exit 0
+fi
 WORK=$(mktemp -d)
 ROOT="$WORK/root"
 install -Dm755 "$BIN" "$ROOT/usr/bin/sshremote"
@@ -80,7 +87,7 @@ EOF
   cp "$WORK/top/RPMS/$ARCH/sshremote-$VERSION-1.$ARCH.rpm" "$FILE"
   ;;
 *)
-  echo "ci-package.sh: deb or rpm, not $KIND" >&2
+  echo "ci-package.sh: deb, rpm or msi, not $KIND" >&2
   exit 1
   ;;
 esac

@@ -234,7 +234,9 @@ A script manages the team with a token an administrator made in the console (API
 
 `GET /install.sh?token=T` and `GET /install.ps1?token=T`: the official one-line installers from
 sshremote.dev, then `sshremote team join URL T` and remote access turned on with the service: a
-computer that runs one is in the team.
+computer that runs one is in the team. For many Windows computers, the MSI does the same silently
+(Group Policy, Intune): `msiexec /i sshremote-windows-x86_64.msi /qn SERVICE=1 TEAM_URL=URL
+TEAM_TOKEN=T`.
 
 ### Ticket
 

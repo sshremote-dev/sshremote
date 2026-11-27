@@ -20,6 +20,16 @@
       "check": "windows-11-arm"
     },
     {
+      "file": "sshremote-windows-x86_64.msi",
+      "os": "windows",
+      "arch": "x86_64",
+      "package": "msi",
+      "label": "Windows installer (MSI)",
+      "detail": "x86_64 · .msi for all users, also silent: SERVICE=1, TEAM_URL, TEAM_TOKEN",
+      "build": { "by": "ci", "runner": "ubuntu-24.04", "from": "sshremote-windows-x86_64.exe" },
+      "check": null
+    },
+    {
       "file": "sshremote-linux-x86_64",
       "os": "linux",
       "arch": "x86_64",

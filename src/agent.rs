@@ -220,9 +220,9 @@ pub fn set_who_hex(hf: &str) {
 /// Why `m` goes the way this computer does not let things go, if it does.
 fn against_way(m: &ToAgent, clip: u8, files: u8) -> Option<&'static str> {
     match m {
-        ToAgent::FileStart { .. } | ToAgent::FileResume { .. } | ToAgent::FileOp { .. } if files == WAY_OUT => Some(n!("This computer gives its files but takes none.")),
-        ToAgent::Fetch { .. } | ToAgent::FetchFrom { .. } if files == WAY_IN => Some(n!("This computer takes files but gives none of its own.")),
-        ToAgent::Clipboard(_) | ToAgent::ClipImage(_) | ToAgent::PasteFiles { .. } if clip == WAY_OUT => Some(n!("This computer gives what is copied there but takes nothing onto its clipboard.")),
+        ToAgent::FileStart { .. } | ToAgent::FileResume { .. } | ToAgent::FileOp { .. } if files == WAY_OUT => Some(n!("That computer gives its files but takes none.")),
+        ToAgent::Fetch { .. } | ToAgent::FetchFrom { .. } if files == WAY_IN => Some(n!("That computer takes files but gives none of its own.")),
+        ToAgent::Clipboard(_) | ToAgent::ClipImage(_) | ToAgent::PasteFiles { .. } if clip == WAY_OUT => Some(n!("That computer gives what is copied on it but takes nothing onto its clipboard.")),
         _ => None,
     }
 }

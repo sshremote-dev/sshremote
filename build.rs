@@ -37,8 +37,15 @@ fn main() {
     let rc = out.join("sshremote.rc");
     let manifest = ico.with_file_name("sshremote.manifest");
     let path = |p: &Path| p.display().to_string().replace('\\', "/");
-    // The icon, and the manifest that keeps a double click from opening a console window.
-    std::fs::write(&rc, format!("1 ICON \"{}\"\n1 24 \"{}\"\n", path(&ico), path(&manifest))).unwrap();
+    // The icon, the manifest that keeps a double click from opening a console window, and the
+    // version (what Explorer shows, and what an MSI upgrade compares).
+    let v: Vec<u16> = env!("CARGO_PKG_VERSION").split(['.', '-']).take(3).map(|n| n.parse().unwrap_or(0)).collect();
+    let (a, b, c) = (v[0], v.get(1).copied().unwrap_or(0), v.get(2).copied().unwrap_or(0));
+    let text = env!("CARGO_PKG_VERSION");
+    let version = format!(
+        "1 VERSIONINFO\nFILEVERSION {a},{b},{c},0\nPRODUCTVERSION {a},{b},{c},0\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904b0\"\n  BEGIN\n   VALUE \"CompanyName\", \"SSH Remote\"\n   VALUE \"FileDescription\", \"SSH Remote\"\n   VALUE \"FileVersion\", \"{text}\"\n   VALUE \"InternalName\", \"sshremote\"\n   VALUE \"LegalCopyright\", \"MIT License\"\n   VALUE \"OriginalFilename\", \"sshremote.exe\"\n   VALUE \"ProductName\", \"SSH Remote\"\n   VALUE \"ProductVersion\", \"{text}\"\n  END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x409, 1200\n END\nEND\n"
+    );
+    std::fs::write(&rc, format!("1 ICON \"{}\"\n1 24 \"{}\"\n{version}", path(&ico), path(&manifest))).unwrap();
     let compiled = if msvc { out.join("sshremote.res") } else { out.join("sshremote-icon.o") };
     let run = |cmd: &mut std::process::Command| cmd.status().is_ok_and(|s| s.success());
     let built = if msvc {

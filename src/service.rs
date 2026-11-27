@@ -297,6 +297,41 @@ pub fn start_again() {
     report(SERVICE_STOPPED);
 }
 
+/// What the MSI package runs once its files are in place (`--msi installed SERVICE AUTOUPDATE`,
+/// each "1", "0" or empty as its properties are), and before it takes them away (`--msi
+/// removing`): the service installed, or started again on the new program if it was there.
+pub fn msi(args: &[String]) -> Result<(), String> {
+    let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+    match arg(0) {
+        "installed" => {
+            if let w @ ("0" | "1") = arg(2) {
+                crate::access::cli(&["auto-update".into(), if w == "1" { "on" } else { "off" }.into()])?;
+            }
+            let r = if arg(1) == "1" {
+                crate::access::cli(&["install".into()])
+            } else if crate::admin::service_installed() {
+                let _ = run("sc.exe", &["stop", NAME]);
+                start_when_stopped()
+            } else {
+                Ok(())
+            };
+            // Copies the package moved aside, once nothing runs them.
+            if let Some(dir) = installed_exe().as_deref().and_then(std::path::Path::parent) {
+                for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    if name.starts_with("sshremote") && name.ends_with(".old.exe") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+            r
+        }
+        "removing" if crate::admin::service_installed() => uninstall(),
+        "removing" => Ok(()),
+        _ => Err("usage: sshremote --msi installed SERVICE AUTOUPDATE | removing".into()),
+    }
+}
+
 /// `--start-service-again`: waits for the service to stop, then starts it (on the new program).
 pub fn start_when_stopped() -> Result<(), String> {
     for _ in 0..60 {

@@ -164,7 +164,7 @@ def homebrew(version, platforms, out):
 def scoop_manifest(version, platforms):
     arch, auto = {}, {}
     for p in platforms:
-        if p["os"] != "windows" or p["arch"] not in SCOOP_ARCH:
+        if p["os"] != "windows" or p["arch"] not in SCOOP_ARCH or p.get("package"):
             continue
         a = SCOOP_ARCH[p["arch"]]
         # Saved as sshremote.exe, whichever processor's file it is.
@@ -203,7 +203,7 @@ def winget_manifests(version, platforms, folder):
     installers = "".join(
         f"- Architecture: {WINGET_ARCH[p['arch']]}\n  InstallerUrl: {p['url']}\n  InstallerSha256: {p['sha256'].upper()}\n"
         for p in platforms
-        if p["os"] == "windows"
+        if p["os"] == "windows" and not p.get("package")
     )
     files = {
         f"{WINGET_ID}.yaml": schema.format("version") + head + "DefaultLocale: en-US\nManifestType: version\n" + tail,

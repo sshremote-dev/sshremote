@@ -72,7 +72,18 @@ and on Windows `%LOCALAPPDATA%\Programs\SSH Remote` with a Start menu entry and 
 `PATH`. A copy a package manager keeps is updated by it (the program says which command does it).
 Or download a file from [GitHub Releases](https://github.com/sshremote-dev/sshremote/releases/latest):
 the Linux program also comes as a `.deb` (Debian 13, Ubuntu 24.04 and later) and an `.rpm`
-(Fedora, RHEL 10, openSUSE), x86_64 and Arm64. Or build it:
+(Fedora, RHEL 10, openSUSE), x86_64 and Arm64, and the Windows program as an `.msi` for all users
+of a computer, in Program Files, which also installs silently for many computers at once (Group
+Policy, Intune):
+
+```powershell
+msiexec /i sshremote-windows-x86_64.msi /qn SERVICE=1 TEAM_URL=https://team.example.com TEAM_TOKEN=T AUTOUPDATE=1
+```
+
+`SERVICE=1` turns on remote access as a service, `TEAM_URL` and `TEAM_TOKEN` join a team (an
+enrollment token, see [docs/team.md](docs/team.md)) and `AUTOUPDATE=0` keeps the service from
+updating itself; each is optional. An upgrade or a repair needs no restart, and `msiexec /x`
+takes it all away again, the service too. Or build it:
 
 ```sh
 cargo build --release

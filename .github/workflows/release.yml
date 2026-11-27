@@ -81,8 +81,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # The Linux program as a .deb and an .rpm (scripts/ci-package.sh), each made on its own processor
-  # from the program built above, installed there where the runner's system takes it, attested.
+  # The Linux program as a .deb and an .rpm, and the Windows one as an .msi (scripts/ci-package.sh),
+  # each made from the program built above, installed there where the runner's system takes it,
+  # attested.
   package:
     needs: [plan, build]
     if: needs.plan.outputs.packages != '[]'
@@ -110,6 +111,9 @@ jobs:
       - name: rpmbuild
         if: matrix.package == 'rpm'
         run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: wixl
+        if: matrix.package == 'msi'
+        run: sudo apt-get update && sudo apt-get install -y wixl
       - name: Package
         run: scripts/ci-package.sh "${{ matrix.package }}" "./${{ matrix.build.from }}" "${{ matrix.file }}" "${{ matrix.arch }}"
       - name: Install here

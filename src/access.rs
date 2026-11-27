@@ -2715,7 +2715,7 @@ pub fn uninstall_service() -> Result<(), String> {
     Err(n!("not on this system").into())
 }
 
-/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | password [NEW] | relay HOST | install | uninstall]`
+/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | auto-update on|off | password [NEW] | relay HOST | install | uninstall]`
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
@@ -2907,7 +2907,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Switches, each `on` or `off`.
-        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record" | "wallpaper")) => {
+        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record" | "wallpaper" | "auto-update")) => {
             let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
@@ -2920,6 +2920,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 "cameras" => c.cameras = on,
                 "record" => c.record = on,
                 "wallpaper" => c.plain_wallpaper = !on,
+                "auto-update" => c.auto_update = on,
                 _ => c.direct = on,
             }
             save(&c)?;

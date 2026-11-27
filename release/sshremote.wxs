@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SSH Remote for Windows as an MSI (scripts/ci-package.sh msi, built with wixl), for all users,
+     in Program Files where the remote access service runs it from. Properties for a silent
+     install (msiexec /i sshremote.msi /qn ...): SERVICE=1 turns on remote access as a service;
+     TEAM_URL and TEAM_TOKEN join a team; AUTOUPDATE=0 (or 1) sets whether the service updates
+     itself. The UpgradeCode and the components' GUIDs never change. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="SSH Remote" Language="1033" Version="$(var.Version)" Manufacturer="SSH Remote" UpgradeCode="2673D802-E278-4D90-BF98-053A49511075">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Description="SSH Remote $(var.Version)" Comments="Remote desktop and SSH workspace" Manufacturer="SSH Remote"/>
+    <Media Id="1" Cabinet="sshremote.cab" EmbedCab="yes"/>
+    <Icon Id="sshremote.ico" SourceFile="assets/sshremote.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="sshremote.ico"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://sshremote.dev"/>
+    <Property Id="ARPHELPLINK" Value="https://sshremote.dev/docs.html"/>
+    <Property Id="SERVICE" Secure="yes"/>
+    <Property Id="AUTOUPDATE" Secure="yes"/>
+    <Property Id="TEAM_URL" Secure="yes"/>
+    <Property Id="TEAM_TOKEN" Secure="yes"/>
+    <Property Id="MsiHiddenProperties" Value="TEAM_TOKEN"/>
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable"/>
+    <!-- Its files always go in (a repair, or a build of the same version): the one there is moved
+         aside first (MoveAside), never left to a comparison of versions. -->
+    <Property Id="REINSTALLMODE" Value="amus"/>
+    <Upgrade Id="2673D802-E278-4D90-BF98-053A49511075">
+      <UpgradeVersion Minimum="0.0.0" IncludeMinimum="yes" Maximum="$(var.Version)" IncludeMaximum="no" Property="OLDER_FOUND"/>
+      <UpgradeVersion Minimum="$(var.Version)" IncludeMinimum="no" OnlyDetect="yes" Property="NEWER_FOUND"/>
+    </Upgrade>
+    <Condition Message="A newer version of SSH Remote is installed already.">NOT NEWER_FOUND</Condition>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="SSH Remote">
+          <Component Id="Program" Guid="B01174D2-7054-4E9D-BFF0-C823AC191571" Win64="yes">
+            <File Id="sshremote.exe" Name="sshremote.exe" Source="$(var.Exe)" KeyPath="yes"/>
+            <File Id="LICENSE.txt" Name="LICENSE.txt" Source="LICENSE"/>
+            <File Id="NOTICES.txt" Name="THIRD-PARTY-NOTICES.txt" Source="THIRD-PARTY-NOTICES.txt"/>
+            <RegistryValue Root="HKLM" Key="Software\Classes\sshremote" Type="string" Value="URL:SSH Remote"/>
+            <RegistryValue Root="HKLM" Key="Software\Classes\sshremote" Name="URL Protocol" Type="string" Value=""/>
+            <RegistryValue Root="HKLM" Key="Software\Classes\sshremote\DefaultIcon" Type="string" Value="&quot;[INSTALLDIR]sshremote.exe&quot;,0"/>
+            <RegistryValue Root="HKLM" Key="Software\Classes\sshremote\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]sshremote.exe&quot; &quot;%1&quot;"/>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Component Id="StartMenu" Guid="CA0940F9-0033-4346-9786-DFEB6D731491" Win64="yes">
+          <Shortcut Id="StartMenuShortcut" Name="SSH Remote" Description="Remote desktop and SSH workspace" Target="[INSTALLDIR]sshremote.exe" WorkingDirectory="INSTALLDIR"/>
+          <RegistryValue Root="HKLM" Key="Software\SSH Remote" Name="msi" Type="string" Value="$(var.Version)" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Title="SSH Remote" Level="1">
+      <ComponentRef Id="Program"/>
+      <ComponentRef Id="StartMenu"/>
+    </Feature>
+    <!-- A running copy (the service, an icon in the notification area) is moved aside, as the
+         program's own update does, so the new one goes in without a restart; the next install
+         or start removes it, and an uninstall after its files. -->
+    <CustomAction Id="SetCmd" Property="CMDEXE" Value="[System64Folder]cmd.exe"/>
+    <CustomAction Id="MoveAside" Property="CMDEXE" ExeCommand="/c if exist &quot;[INSTALLDIR]sshremote.exe&quot; move /y &quot;[INSTALLDIR]sshremote.exe&quot; &quot;[INSTALLDIR]sshremote-%RANDOM%.old.exe&quot;" Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="MoveAsideToRemove" Property="CMDEXE" ExeCommand="/c if exist &quot;[INSTALLDIR]sshremote.exe&quot; move /y &quot;[INSTALLDIR]sshremote.exe&quot; &quot;[INSTALLDIR]sshremote-%RANDOM%.old.exe&quot;" Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="CleanUp" Property="CMDEXE" ExeCommand="/c ping -n 6 127.0.0.1 &gt;nul &amp; del /f /q &quot;[INSTALLDIR]sshremote*.old.exe&quot; &amp; rmdir &quot;[INSTALLDIR]&quot;" Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="AfterInstall" FileKey="sshremote.exe" ExeCommand="--msi installed &quot;[SERVICE]&quot; &quot;[AUTOUPDATE]&quot;" Execute="deferred" Impersonate="no" Return="check"/>
+    <CustomAction Id="JoinTeam" FileKey="sshremote.exe" ExeCommand="team join &quot;[TEAM_URL]&quot; &quot;[TEAM_TOKEN]&quot;" Execute="deferred" Impersonate="no" Return="check"/>
+    <CustomAction Id="BeforeRemove" FileKey="sshremote.exe" ExeCommand="--msi removing" Execute="deferred" Impersonate="no" Return="ignore"/>
+    <!-- Numbered, as wixl places them: InstallInitialize is 1500, RemoveFiles 3500, InstallFiles
+         4000, InstallFinalize 6600. -->
+    <InstallExecuteSequence>
+      <Custom Action="SetCmd" Sequence="1499"/>
+      <Custom Action="MoveAside" Sequence="1501">OLDER_FOUND OR (Installed AND NOT REMOVE)</Custom>
+      <Custom Action="BeforeRemove" Sequence="3490">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="MoveAsideToRemove" Sequence="3491">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="CleanUp" Sequence="3510">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="AfterInstall" Sequence="4001">NOT REMOVE</Custom>
+      <Custom Action="JoinTeam" Sequence="4002">NOT REMOVE AND TEAM_URL AND TEAM_TOKEN</Custom>
+      <!-- The older version goes after this one is in: they share their components, so only what
+           this one no longer has is taken away. -->
+      <RemoveExistingProducts Sequence="6650"/>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
