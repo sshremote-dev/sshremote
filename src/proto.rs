@@ -59,6 +59,8 @@ pub fn with_codec(formats: u8, codec: u8) -> u8 {
 
 /// `ToAgent::TrustMe`'s kind, which remote access looks for in the viewer's stream.
 pub const KIND_TRUST_ME: u8 = 54;
+/// `ToAgent::AskElevation`'s kind, which remote access looks for in the viewer's stream.
+pub const KIND_ASK_ELEVATION: u8 = 61;
 
 /// The agent goes on with a transfer the connection broke off (`ToAgent::FileResume`,
 /// `ToAgent::FetchFrom`), told in `ToClient::Can`.
@@ -216,6 +218,16 @@ pub enum ToAgent {
     /// This viewer would be let in without the two-step code from now on: the agent answers
     /// with `ToClient::Trusted` when it was given a token to hand out for that.
     TrustMe,
+    /// The viewer asks the person there for administrator rights for remote access (Windows, run
+    /// in the app without them): remote access sees it in the stream and asks; the agent does
+    /// nothing with it.
+    AskElevation,
+    /// The sides switched: the person at the host opens the viewer's computer, at `address`
+    /// (`sshremote://ID@RELAY`) with its one-time `password`, in a window of their own.
+    SwitchSides {
+        address: String,
+        password: String,
+    },
     /// What an agent for a session by ID hands out for `TrustMe`, given by the remote access
     /// service as the first message, before the viewer's (later ones are passed over).
     TrustToken(String),
@@ -510,6 +522,10 @@ pub enum ToClient {
     /// The token by which the computer lets this device in without the two-step code (for
     /// `access::TRUST_DAYS`), answering `ToAgent::TrustMe`.
     Trusted(String),
+    /// Remote access there runs without administrator rights (Windows, in the app): windows run
+    /// as administrator and Windows' security prompts are out of reach until its person allows
+    /// them (`ToAgent::AskElevation`).
+    Unelevated,
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
     /// Something printed on the host to SSH Remote's printer, a PDF of `size` bytes at `path`
@@ -859,6 +875,12 @@ impl ToAgent {
             }
             ToAgent::Resumes => 51,
             ToAgent::TrustMe => KIND_TRUST_ME,
+            ToAgent::AskElevation => KIND_ASK_ELEVATION,
+            ToAgent::SwitchSides { address, password } => {
+                put_str(&mut b, address);
+                put_str(&mut b, password);
+                62
+            }
             ToAgent::TrustToken(t) => {
                 b.extend_from_slice(t.as_bytes());
                 55
@@ -1053,6 +1075,8 @@ impl ToAgent {
             50 => ToAgent::End(String::from_utf8_lossy(c.rest()).into_owned()),
             51 => ToAgent::Resumes,
             KIND_TRUST_ME => ToAgent::TrustMe,
+            KIND_ASK_ELEVATION => ToAgent::AskElevation,
+            62 => ToAgent::SwitchSides { address: c.str()?, password: c.str()? },
             55 => ToAgent::TrustToken(String::from_utf8_lossy(c.rest()).into_owned()),
             52 => ToAgent::FileResume {
                 id: c.u32()?,
@@ -1267,6 +1291,7 @@ impl ToClient {
                 b.extend_from_slice(t.as_bytes());
                 144
             }
+            ToClient::Unelevated => 146,
             ToClient::PrintJob { id, size, name, path } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
@@ -1572,6 +1597,7 @@ impl ToClient {
             126 => ToClient::FetchDone { tag: c.u32()? },
             141 => ToClient::Can(c.u32()?),
             144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
+            146 => ToClient::Unelevated,
             145 => ToClient::PrintJob { id: c.u32()?, size: c.u64()?, name: c.str()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
             143 => ToClient::FetchAt {

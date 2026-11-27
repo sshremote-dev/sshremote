@@ -323,6 +323,11 @@ impl Remote {
                     pick(ui, Fit::Fixed(p), &format!("{p}%"));
                 }
             });
+            let mut follow = self.follow;
+            if ui.checkbox(&mut follow, t!("Follow the pointer there")).on_hover_text(t!("At a size larger than this pane, the picture moves with the pointer when the person there or a program moves it")).changed() {
+                self.follow = follow;
+                crate::hosts::set_setting("follow_pointer", if follow { "yes" } else { "no" });
+            }
             ui.separator();
             // Where every new connection starts: Settings, as the quality there is named.
             let default = crate::hosts::setting("preset").and_then(|v| v.parse::<usize>().ok()).and_then(|i| PRESETS.get(i)).map_or(t!("Auto").to_string(), |p| crate::lang::tr_msg(&preset_text(p)).into_owned());
@@ -528,6 +533,22 @@ impl Remote {
                     }));
                     ui.close();
                 }
+            }
+            // A keyboard of another layout than the computer's: what it says on the keys, or
+            // where they are (for games, and the computer's own layout).
+            let mut on = self.labelled;
+            if ui
+                .checkbox(&mut on, t!("Type what my keys say"))
+                .on_hover_text(t!("Characters as this keyboard and its input method make them (another layout, Korean, Japanese, accents). Off: keys by where they are, as the computer's own layout reads them (games)."))
+                .changed()
+            {
+                *action = Some(Box::new(move |r, _| {
+                    r.release_all()?;
+                    r.labelled = on;
+                    crate::hosts::set_setting("type_labelled", if on { "yes" } else { "no" });
+                    Ok(())
+                }));
+                ui.close();
             }
         });
         keys.on_hover_text(t!("Send special keys"));
@@ -785,7 +806,42 @@ impl Remote {
         use crate::hostctl::{BLOCK, HIDE, LOCK, LOCK_ON_LEAVE, QUERY, RESTART, bit};
         let asked = self.host_asked;
         let state = self.host;
+        let (unelevated, elevation_asked) = (self.unelevated, self.elevation_asked);
         let menu = icon_menu(ui, ic::LOCK_KEY, |ui| {
+            // The sides switched: the person there gets a window onto this computer, by its ID
+            // and its one-time password (which changes once used).
+            #[cfg(feature = "remote")]
+            {
+                let here = crate::access::stored().ok().flatten().filter(|c| c.enabled && c.passwords.one_time() && crate::access::valid_id(&c.id));
+                let b = ui
+                    .add_enabled(here.is_some(), egui::Button::new(format!("{}  {}", ic::ARROWS_LEFT_RIGHT, t!("Switch sides"))))
+                    .on_hover_text(t!("A window onto this computer opens there, with its one-time password (which changes once used): the person there sees and uses this computer"))
+                    .on_disabled_hover_text(t!("Needs remote access on here, with one-time passwords (Remote access settings)"));
+                if b.clicked()
+                    && let Some(c) = here
+                {
+                    let (address, password) = (crate::access::address(&c.id, &c.relay), c.one_time.clone());
+                    *action = Some(Box::new(move |r, _| r.send(ToAgent::SwitchSides { address, password })));
+                    ui.close();
+                }
+                ui.separator();
+            }
+            // Its remote access without administrator rights: its person is asked for them.
+            if unelevated {
+                let b = ui
+                    .add_enabled(!elevation_asked, egui::Button::new(format!("{}  {}", ic::SHIELD_CHECK, t!("Ask for administrator rights there"))))
+                    .on_hover_text(t!("For programs run as administrator and Windows' security prompts: the person there is asked, and SSH Remote there opens again as administrator"))
+                    .on_disabled_hover_text(t!("Asked: the person there is asked to allow it"));
+                if b.clicked() {
+                    *action = Some(Box::new(|r, _| {
+                        r.elevation_asked = true;
+                        r.notify(t!("Asked: the person there is asked to allow it. The session goes on by itself after a moment if they do."));
+                        r.send(ToAgent::AskElevation)
+                    }));
+                    ui.close();
+                }
+                ui.separator();
+            }
             if !asked {
                 *action = Some(Box::new(|r, _| {
                     r.host_asked = true;

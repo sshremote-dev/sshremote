@@ -225,12 +225,15 @@ impl Remote {
                     }
                 }
                 Event::Key { key, physical_key, pressed, modifiers, .. } if !local => {
-                    self.sync_mods(modifiers)?;
                     // A computer gets the keys where they are (its own layout makes the
-                    // characters); a web page gets the characters this keyboard makes, as text,
-                    // and with Ctrl, Alt or the command key a key as it is labelled here.
+                    // characters); a web page, or a computer typed to as this keyboard labels
+                    // its keys, gets the characters this keyboard makes, as text, and with Ctrl,
+                    // Alt or the command key a key as it is labelled here.
                     let command = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
-                    let key = if self.web {
+                    // A character typed as text there takes Shift only if it needs it there.
+                    let text = self.labelled && !command && keysym(key).is_some_and(|s| (0x20..0x7f).contains(&s));
+                    self.sync_mods(if text { Modifiers { shift: false, ..modifiers } } else { modifiers })?;
+                    let key = if self.web || self.labelled {
                         if !command && keysym(key).is_some_and(|s| (0x20..0x7f).contains(&s)) {
                             continue;
                         }
@@ -270,9 +273,10 @@ impl Remote {
                     }
                     self.tap(if self.mods.shift && !self.mods.ctrl { xk::INSERT } else { 'v' as u32 })?
                 }
-                Event::Text(text) if !local && self.web => {
+                Event::Text(text) if !local && (self.web || self.labelled) => {
                     for c in text.chars() {
-                        self.send(ToAgent::Key { keysym: xk::unicode(c as u32), mods: 0 })?;
+                        let keysym = if self.web { xk::unicode(c as u32) } else { xk::of_char(c) };
+                        self.send(ToAgent::Key { keysym, mods: 0 })?;
                     }
                 }
                 Event::Ime(egui::ImeEvent::Commit(text)) if !local => {

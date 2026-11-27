@@ -181,6 +181,43 @@ const MAC_NOBODY: &str = n!("Nobody is signed in at that Mac: its terminals, fil
 
 /// The viewer came by this computer's remote access ID (rather than over ssh as its owner).
 static BY_ID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A viewer window onto `address` (`sshremote://ID@RELAY`) for the person at this screen, its
+/// password given on its input (others here may read command lines): as the sides switch.
+fn open_viewer_here(address: &str, password: &str) -> Result<(), String> {
+    use std::io::Write;
+    if crate::net::Address::parse(address).is_none() || address.contains(['"', '\n', '\r']) || password.contains(['\n', '\r']) {
+        return Err(n!("that is not a computer's address").into());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // An agent run as SYSTEM opens it as the person signed in at the screen.
+    #[cfg(windows)]
+    match crate::console_user::acting() {
+        crate::console_user::Acting::User(u) => {
+            let line = format!("\"{}\" \"{address}\" --password-stdin", exe.display());
+            let (_proc, mut stdin, _stdout) = crate::console_user::spawn_piped(&u, &line)?;
+            return writeln!(stdin, "{password}").map_err(|e| e.to_string());
+        }
+        crate::console_user::Acting::Nobody => return Err(n!("nobody is signed in at that computer's screen").into()),
+        crate::console_user::Acting::Myself => {}
+    }
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(address).arg("--password-stdin").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(target_os = "linux")]
+    {
+        crate::capture::ensure_session_env();
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+            cmd.env("WAYLAND_DISPLAY", "wayland-0");
+        }
+        if std::env::var_os("DISPLAY").is_none() {
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+    // A window of its own, there after this session ends.
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no input")?;
+    writeln!(stdin, "{password}").map_err(|e| e.to_string())
+}
+
 /// What such a viewer may do, and whether the person at the screen is asked first (`grant`).
 static GRANT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(crate::grant::ALL);
 
@@ -434,6 +471,12 @@ fn serve_with(
         && let Err(why) = cap.windows()
     {
         send(enc, &ToClient::Notice(crate::lang::fill(n!("This computer's screen cannot be shown: {}. Its terminal and files work."), &[&why]))).map_err(io_err)?;
+    }
+    // Remote access run in the app without administrator rights (Windows): the viewer may ask the
+    // person here for them.
+    #[cfg(windows)]
+    if by_id() && !crate::admin::elevated() {
+        send(enc, &ToClient::Unelevated).map_err(io_err)?;
     }
     // A session by ID recorded, as the computer is set to: its viewer is told.
     let mut rec = SessionRecording(None);
@@ -889,6 +932,20 @@ fn serve_with(
                     }
                 }
                 ToAgent::Resumes => inbox.keep_broken = true,
+                // Remote access asks the person here (`access::Frames`).
+                ToAgent::AskElevation => {}
+                // The sides switch: the person here gets a window onto the viewer's computer.
+                ToAgent::SwitchSides { address, password } => {
+                    let text = if !by_id() || allowed & crate::grant::CONTROL == 0 {
+                        n!("The sides switch only for a session by ID with the keyboard and mouse.").to_string()
+                    } else {
+                        match open_viewer_here(&address, &password) {
+                            Ok(()) => n!("A window onto your computer opened there: the person there sees it and works on it now.").to_string(),
+                            Err(e) => crate::lang::fill(n!("The sides did not switch: {}"), &[&e]),
+                        }
+                    };
+                    send(enc, &ToClient::Notice(text)).map_err(io_err)?;
+                }
                 ToAgent::TrustMe => {
                     if let Some(t) = TRUST.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         send(enc, &ToClient::Trusted(t)).map_err(io_err)?;

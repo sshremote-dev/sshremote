@@ -2125,6 +2125,17 @@ struct Frames {
     files: Vec<Option<crate::proto::ToAgent>>,
 }
 
+/// A viewer asked for administrator rights for remote access run in the app (Windows): the
+/// window asks its person (`take_elevation_ask`).
+#[cfg(windows)]
+static ELEVATION_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a viewer asked for administrator rights since the last look.
+#[cfg(windows)]
+pub fn take_elevation_ask() -> bool {
+    ELEVATION_ASKED.swap(false, Ordering::AcqRel)
+}
+
 /// What of a viewer's messages goes to a team's audit log: uploads (13, 24, and 52 going on
 /// with one), downloads (17, 26, and 53) and folders made, names changed and files deleted (25).
 const NOTED: [u8; 7] = [13, 17, 24, 25, 26, 52, 53];
@@ -2179,6 +2190,10 @@ impl Frames {
                 self.left = u32::from_le_bytes([self.head[1], self.head[2], self.head[3], self.head[4]]) as usize;
                 person |= !AUTOMATIC.contains(&self.head[0]);
                 self.trust_me |= self.head[0] == crate::proto::KIND_TRUST_ME;
+                #[cfg(windows)]
+                if self.head[0] == crate::proto::KIND_ASK_ELEVATION {
+                    ELEVATION_ASKED.store(true, Ordering::Release);
+                }
                 self.body = NOTED.contains(&self.head[0]).then(Vec::new);
                 if self.left == 0 {
                     self.noted();

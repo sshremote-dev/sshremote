@@ -259,6 +259,60 @@ fn ctrl_and_the_command_key_trade_places_between_a_mac_and_another() {
     }
 }
 
+/// At twice its size the picture follows the pointer there when that moves by itself, and stays
+/// where it was panned to when it does not.
+#[test]
+#[ignore]
+fn a_picture_larger_than_the_pane_follows_the_pointer_there() {
+    let mut h = Harness::new(Vec2::new(800.0, 600.0));
+    h.r.fit = super::Fit::Fixed(200);
+    // Where the pointer there is, from the start.
+    h.frame(Vec::new()).unwrap();
+    let first = h.r.pan;
+    let (w, hh) = (h.r.sess.desk.0 as i16, h.r.sess.desk.1 as i16);
+    h.r.host_pointer = Some((w - 5, hh - 5));
+    h.frame(Vec::new()).unwrap();
+    assert!(h.r.pan.x > first.x && h.r.pan.y > first.y, "moved to the corner: {first:?} -> {:?}", h.r.pan);
+    let followed = h.r.pan;
+    h.r.pan = Vec2::ZERO;
+    h.frame(Vec::new()).unwrap();
+    assert_eq!(h.r.pan, Vec2::ZERO, "panned back by hand: the pointer did not move, the picture stays");
+    h.r.follow = false;
+    h.r.host_pointer = Some((w - 6, hh - 6));
+    h.frame(Vec::new()).unwrap();
+    assert_eq!(h.r.pan, Vec2::ZERO, "not followed when turned off");
+    assert!(followed != Vec2::ZERO);
+}
+
+/// A German keyboard's Z (where a US one has Y): by where it is, the host's own Y key; typed as
+/// labelled, the text "z" alone, and Shift held here not left down there for a character.
+#[test]
+#[ignore]
+fn keys_go_where_they_are_or_as_this_keyboard_labels_them() {
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    let z = |pressed, modifiers| Event::Key { key: egui::Key::Z, physical_key: Some(egui::Key::Y), pressed, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    h.frame(vec![z(true, none)]).unwrap();
+    assert!(h.r.held.contains(&('y' as u32)), "where it is: {:?}", h.r.held);
+    h.frame(vec![z(false, none)]).unwrap();
+    assert!(h.r.held.is_empty(), "let go: {:?}", h.r.held);
+    h.r.labelled = true;
+    h.frame(vec![z(true, none), Event::Text("z".into()), z(false, none)]).unwrap();
+    assert!(h.r.held.is_empty(), "typed as text, no key held: {:?}", h.r.held);
+    let shift = egui::Modifiers::SHIFT;
+    h.frame(vec![Event::ModifiersChanged(shift), z(true, shift), Event::Text("Z".into())]).unwrap();
+    assert!(!h.r.held.contains(&SHIFT_L), "a character takes Shift only as it needs it there: {:?}", h.r.held);
+    // A shortcut is the key as labelled here: Ctrl+Z, not Ctrl+Y.
+    let ctrl = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+    h.frame(vec![Event::ModifiersChanged(ctrl), z(true, ctrl)]).unwrap();
+    assert!(h.r.held.contains(&('z' as u32)) && h.r.held.contains(&CONTROL_L), "{:?}", h.r.held);
+    h.frame(vec![z(false, ctrl), Event::ModifiersChanged(none)]).unwrap();
+    // The choice is in the keys menu, and kept for next time.
+    h.tool(ic::KEYBOARD).unwrap();
+    h.click("Type what my keys say").unwrap();
+    assert!(!h.r.labelled && crate::hosts::setting("type_labelled").as_deref() == Some("no"));
+}
+
 /// Tab with the toolbar in sight goes to the host, and so does every key after it: egui would
 /// give Tab to the toolbar's first button and keep the keys in this window. Esc and the arrows
 /// likewise stay the host's.

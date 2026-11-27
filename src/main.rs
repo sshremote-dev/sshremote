@@ -269,6 +269,13 @@ fn parse_client(args: &[String]) -> Result<options::Options, String> {
             "--remote" => o.remote = val()?,
             "--ssh" => o.ssh_args.push(val()?),
             "--password" => o.password = Some(val()?),
+            // The password as the first line of the input (never on the command line, which
+            // others here may see): as a host opens the viewer's computer when the sides switch.
+            "--password-stdin" => {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+                o.password = Some(line.trim_end_matches(['\r', '\n']).to_string());
+            }
             // A computer of the person's team: a ticket from the team server instead of a password.
             #[cfg(feature = "remote")]
             "--team" => o.password = Some(net::TEAM_MARK.to_string()),

@@ -1126,6 +1126,30 @@ mod tests {
         assert!(ways[..2].iter().all(|&(t, k)| t > 200 && k < 50), "the x was not typed and taken back");
     }
 
+    /// The sides switch: the host opens a window onto the address it is given.
+    #[test]
+    #[ignore]
+    fn the_sides_switch() {
+        // SSHR_SWITCH_ADDR, SSHR_SWITCH_PW: the host by ID; SSHR_SWITCH_BACK: the address the host
+        // is to open, with SSHR_SWITCH_BACK_PW. The test asks and reads what the host says; that
+        // the window it opened came in is for the other computer's record to tell.
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let addr = crate::net::Address::parse(&var("SSHR_SWITCH_ADDR")).expect("an address");
+        let (mut sess, _, rx) = Session::open(&Target::Direct { addr, password: var("SSHR_SWITCH_PW") }, true).expect("in");
+        sess.send(ToAgent::SwitchSides { address: var("SSHR_SWITCH_BACK"), password: var("SSHR_SWITCH_BACK_PW") }).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let said = loop {
+            assert!(Instant::now() < until, "nothing said");
+            if let Ok(Ev::Net(ToClient::Notice(t))) = rx.recv_timeout(Duration::from_millis(200))
+                && t.contains("sides") | t.contains("window")
+            {
+                break t;
+            }
+        };
+        assert!(said.starts_with("A window onto your computer opened there"), "{said}");
+        sess.close();
+    }
+
     /// A device that came in by ID with the two-step code and asked to be trusted is given a
     /// token, and comes in by it next time without the code; another token is a wrong code.
     /// Against remote access running by ID: SSHR_TRUST_ADDR=sshremote://ID@RELAY

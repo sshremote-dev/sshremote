@@ -68,6 +68,7 @@ pub(crate) const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
 /// Phosphor icon codepoints (assets/fonts, MIT licensed).
 pub(crate) mod ic {
     pub const ARROWS_OUT: &str = "\u{E0A2}";
+    pub const ARROWS_LEFT_RIGHT: &str = "\u{E0A0}";
     pub const ARROWS_IN: &str = "\u{E09A}";
     pub const SPLIT_SIDE: &str = "\u{E870}";
     pub const SPLIT_BELOW: &str = "\u{E874}";
@@ -976,6 +977,9 @@ impl eframe::App for App {
         (self.unseen, self.drawn) = (0, std::time::Instant::now());
         lottie::note_focus(ui.ctx());
         let ctx = ui.ctx().clone();
+        // A viewer by ID asking for administrator rights here.
+        #[cfg(all(windows, feature = "remote"))]
+        self.elevation_prompt(&ctx);
         // sshremote:// links clicked elsewhere, each in a tab of its own.
         #[cfg(all(target_os = "macos", feature = "remote"))]
         for url in mac_links::take() {

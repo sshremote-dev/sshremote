@@ -255,6 +255,39 @@ impl App {
         }
     }
 
+    /// A viewer by ID asked for administrator rights (remote access run in this window without
+    /// them): its person allows it, and the window opens again as administrator with its tabs
+    /// (the viewer comes back by itself), or not.
+    #[cfg(all(windows, feature = "remote"))]
+    pub(in crate::gui) fn elevation_prompt(&mut self, ctx: &egui::Context) {
+        let asked = egui::Id::unique("elevation-asked");
+        if crate::access::take_elevation_ask() && !crate::admin::elevated() {
+            ctx.data_mut(|d| d.insert_temp(asked, true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        }
+        if !ctx.data(|d| d.get_temp::<bool>(asked)).unwrap_or(false) {
+            return;
+        }
+        let (mut allow, mut no) = (false, false);
+        let (modal, fit) = super::modal(ctx, "elevation-ask", Vec2::new(460.0, 0.0));
+        modal.show(ctx, |ui| {
+            ui.set_width(fit.x);
+            kit::title(ui, t!("The person connected asks for administrator rights"), t!("With them they can use programs run as administrator and Windows' security prompts here."));
+            ui.add(egui::Label::new(RichText::new(t!("SSH Remote opens again as administrator, with its tabs, and the session goes on after a moment. Windows asks you first.")).size(12.5)).wrap());
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                allow = ui.add(theme::primary(format!("{}  {}", ic::SHIELD_CHECK, t!("Allow")))).clicked();
+                no = ui.add(kit::secondary(t!("No"))).clicked();
+            });
+        });
+        if allow || no {
+            ctx.data_mut(|d| d.insert_temp(asked, false));
+        }
+        if allow {
+            self.restart_elevated(ctx);
+        }
+    }
+
     pub(super) fn restart_elevated(&mut self, ctx: &egui::Context) {
         // The tabs open now are kept first, for the new window to open: this one would keep them
         // only as it closes, which may be after the new one has looked.

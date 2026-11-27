@@ -84,6 +84,14 @@ pub(super) struct Remote {
     fill_full: bool,
     /// How far a fixed-size picture is scrolled, in points.
     pan: Vec2,
+    /// A picture larger than the pane follows the pointer there when it moves by itself (the
+    /// person there, or a program, moving it); `followed`: where it was when last looked at.
+    follow: bool,
+    followed: Option<(i16, i16)>,
+    /// Remote access there runs without administrator rights (`ToClient::Unelevated`); and
+    /// whether they were asked for already.
+    unelevated: bool,
+    elevation_asked: bool,
     clip: Clip,
     share_clipboard: bool,
     /// A picture from there being put on this clipboard.
@@ -102,6 +110,9 @@ pub(super) struct Remote {
     /// Mac and another computer: each side's copy, paste and other shortcuts with the key its
     /// people press for them.
     swap_cmd: bool,
+    /// Keys typed as this keyboard labels them (its layout and its input method make the
+    /// characters, sent as text), not where they are on it.
+    labelled: bool,
     pointer: (u16, u16),
     view: (u16, u16),
     view_changed: Option<Instant>,
@@ -371,6 +382,10 @@ impl Remote {
             fit: Fit::Window,
             fill_full: true,
             pan: Vec2::ZERO,
+            follow: crate::hosts::setting("follow_pointer").is_none_or(|v| v != "no"),
+            followed: None,
+            unelevated: false,
+            elevation_asked: false,
             clip: Clip::new(),
             image_in: None,
             stale_picture: Default::default(),
@@ -380,6 +395,7 @@ impl Remote {
             held: BTreeSet::new(),
             mods: Modifiers::NONE,
             swap_cmd,
+            labelled: crate::hosts::setting("type_labelled").is_some_and(|v| v == "yes"),
             pointer: (u16::MAX, u16::MAX),
             view: (0, 0),
             view_changed: None,
@@ -773,6 +789,7 @@ impl Remote {
                     ctx.request_repaint();
                 }
                 Ok(Ev::Net(ToClient::Trusted(token))) => self.trusted(token),
+                Ok(Ev::Net(ToClient::Unelevated)) => self.unelevated = true,
                 Ok(Ev::Net(ToClient::FileFrom { id, from })) => self.file_from(id, from)?,
                 Ok(Ev::Net(ToClient::FetchAt { id, size, tag, from, name })) => self.fetch_at(id, size, tag, from, name)?,
                 Ok(Ev::Net(ToClient::Frame(f))) => {
@@ -1127,6 +1144,24 @@ impl Remote {
             Fit::Fixed(p) => {
                 let full = Vec2::new(self.sess.desk.0 as f32, self.sess.desk.1 as f32) * (p as f32 / 100.0) / ppp;
                 let over = (full - area.size()).max(Vec2::ZERO);
+                // The pointer there, moved by someone or something there (not by this mouse, over
+                // the picture), kept in sight.
+                let ours = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
+                if self.follow
+                    && !ours
+                    && self.host_pointer != self.followed
+                    && let Some((x, y)) = self.host_pointer
+                {
+                    let at = Vec2::new(x as f32, y as f32) * (full.x / self.sess.desk.0.max(1) as f32);
+                    const MARGIN: f32 = 48.0;
+                    if at.x < self.pan.x + MARGIN || at.x > self.pan.x + area.width() - MARGIN {
+                        self.pan.x = at.x - area.width() / 2.0;
+                    }
+                    if at.y < self.pan.y + MARGIN || at.y > self.pan.y + area.height() - MARGIN {
+                        self.pan.y = at.y - area.height() / 2.0;
+                    }
+                }
+                self.followed = self.host_pointer;
                 self.pan = self.pan.clamp(Vec2::ZERO, over);
                 // Centred along an axis where it fits, panned along one where it does not.
                 let min = Pos2::new(
