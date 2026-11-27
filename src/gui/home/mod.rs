@@ -277,13 +277,14 @@ impl App {
                 ssh_cmd: None,
                 mode: PaneMode::Screen,
             },
-            How::Terminal | How::Screen | How::Files => {
+            How::Terminal | How::Screen | How::Files | How::Ask(_) => {
                 let mode = match how {
                     How::Terminal => PaneMode::Terminal,
                     How::Files => PaneMode::Files,
+                    How::Ask(m) => m,
                     _ => PaneMode::Screen,
                 };
-                match self.host_launch(&host, &port, mode) {
+                match self.host_launch_as(&host, &port, mode, matches!(how, How::Ask(_))) {
                     Ok(l) => l,
                     Err(e) => {
                         // Shown over the computers, with the address it was about in the field.
@@ -365,6 +366,13 @@ impl App {
     /// password typed in the address row goes to the computer in the field only, never to another
     /// one opened from the list.
     pub(super) fn host_launch(&mut self, host: &str, port: &str, mode: PaneMode) -> Result<Launch, String> {
+        self.host_launch_as(host, port, mode, false)
+    }
+
+    /// `ask`: a computer by ID is asked to let this one in, its password (saved or typed) not
+    /// given; the pane's reconnections and the screens and files opened from it ask too.
+    #[cfg_attr(not(feature = "remote"), allow(unused_variables))]
+    fn host_launch_as(&mut self, host: &str, port: &str, mode: PaneMode, ask: bool) -> Result<Launch, String> {
         let host = host.trim().to_string();
         if host.is_empty() {
             return Err("Enter a computer: an alias, user@host, an IP or an ID".into());
@@ -388,7 +396,7 @@ impl App {
             }
             // Without a password it asks to be let in; a computer that takes no such requests says
             // so, and the password is asked for then.
-            let password = password.unwrap_or_default();
+            let password = if ask { String::new() } else { password.unwrap_or_default() };
             // In the list once reached, as other computers are.
             self.pending_ports.insert(host.clone(), String::new());
             let label = crate::computers::get(&host).map_or_else(|| format!("ID {}", crate::computers::spaced(&addr.id)), |c| c.label());
@@ -454,6 +462,8 @@ pub(super) enum How {
     /// A program of this computer's started and shown alone in a pane: how it is named (`apps`),
     /// the name, what the pane is called.
     App(u8, String, String),
+    /// A computer by ID, its person asked to let this one in (no password given).
+    Ask(PaneMode),
 }
 
 /// An address, its port, and what to open on it.

@@ -22,7 +22,7 @@ pub fn keypair(secret: [u8; 32]) -> ([u8; 32], [u8; 32]) {
     (secret, MontgomeryPoint::mul_base_clamped(secret).to_bytes())
 }
 
-fn dh(secret: &[u8; 32], public: &[u8; 32]) -> Option<[u8; 32]> {
+pub fn dh(secret: &[u8; 32], public: &[u8; 32]) -> Option<[u8; 32]> {
     let shared = MontgomeryPoint(*public).mul_clamped(*secret).to_bytes();
     // A point of small order makes it known to anyone: refused.
     (shared != [0; 32]).then_some(shared)

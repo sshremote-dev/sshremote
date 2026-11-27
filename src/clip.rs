@@ -425,6 +425,35 @@ mod tests {
         assert!(there <= 2 && told <= 2);
     }
 
+    /// Text one screen's host copied, put on this clipboard by that screen's pane, is told to
+    /// every other pane's watcher (each gives it to its own host as it is worked in) and not back
+    /// to that one: copied in one remote screen, pasted in another. It replaces what is copied:
+    /// SSHREMOTE_CLIP_TEST=1 cargo test -- --ignored text_copied_in_one
+    #[test]
+    #[ignore]
+    fn text_copied_in_one_screen_reaches_the_others() {
+        if std::env::var_os("SSHREMOTE_CLIP_TEST").is_none() {
+            return;
+        }
+        let (mut a, mut b, mut c) = (Clip::new(), Clip::new(), Clip::new());
+        thread::sleep(POLL * 2);
+        let text = format!("copied on host A {}", std::process::id());
+        a.set(text.clone());
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let (mut to_b, mut to_c) = (None, None);
+        while (to_b.is_none() || to_c.is_none()) && std::time::Instant::now() < until {
+            for (clip, got) in [(&mut b, &mut to_b), (&mut c, &mut to_c)] {
+                if let Some(Copied::Text(t)) = clip.poll() {
+                    *got = Some(t);
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!((to_b.as_deref(), to_c.as_deref()), (Some(text.as_str()), Some(text.as_str())));
+        thread::sleep(POLL * 2);
+        assert!(a.poll().is_none(), "not back to host A");
+    }
+
     #[test]
     fn marks_tell_texts_apart() {
         assert_eq!(mark("hello"), mark("hello"));

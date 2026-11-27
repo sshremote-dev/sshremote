@@ -14,6 +14,8 @@ enum Page {
     Extensions,
     Parts,
     About,
+    #[cfg(feature = "remote")]
+    Shortcuts(super::shortcuts::Page),
 }
 
 impl Page {
@@ -27,6 +29,8 @@ impl Page {
             Page::Extensions => 5,
             Page::Parts => 6,
             Page::About => 7,
+            #[cfg(feature = "remote")]
+            Page::Shortcuts(_) => 8,
         }
     }
 
@@ -41,6 +45,8 @@ impl Page {
             Page::Parts => ("Parts", "What this app is made of."),
             Page::Connections => return None,
             Page::About => ("About", ""),
+            #[cfg(feature = "remote")]
+            Page::Shortcuts(_) => ("Shortcuts", "Keys of your own for a screen's actions: full screen, the host's screens, a screenshot, view only and more."),
         })
     }
 
@@ -104,6 +110,8 @@ impl Settings {
             "extensions" => Page::Extensions,
             "parts" => Page::Parts,
             "about" => Page::About,
+            #[cfg(feature = "remote")]
+            "shortcuts" => Page::Shortcuts(Default::default()),
             _ => Page::Appearance,
         };
         Settings { page }
@@ -170,6 +178,8 @@ impl App {
                     Page::Extensions => self.exts.get_or_insert_with(crate::ext::ExtTool::new).ui(ui),
                     Page::Parts => crate::ext::parts_page(ui),
                     Page::About => self.about_page(ui),
+                    #[cfg(feature = "remote")]
+                    Page::Shortcuts(p) => p.ui(ui),
                 }
                 ui.add_space(12.0);
             });
@@ -185,8 +195,13 @@ impl App {
         if changed {
             self.computers_at = None;
         }
-        // Esc goes back from a page's form first; the window closes from the page itself.
-        if r.should_close() && !s.page.back() {
+        // Esc goes back from a page's form first; the window closes from the page itself; a key
+        // being taken for a shortcut is the page's.
+        #[cfg(feature = "remote")]
+        let taking = matches!(&s.page, Page::Shortcuts(p) if p.taking());
+        #[cfg(not(feature = "remote"))]
+        let taking = false;
+        if r.should_close() && !taking && !s.page.back() {
             close = true;
         }
         if !close {
@@ -198,8 +213,11 @@ impl App {
         ui.spacing_mut().item_spacing.y = 2.0;
         let updates = crate::ext::updates_waiting().filter(|n| *n > 0);
         let width = ui.available_width();
-        let mut pages: Vec<(u8, &str, &str)> =
-            vec![(0, ic::PALETTE, "Appearance"), (1, ic::PLUGS, "Connections"), (2, ic::KEY, "SSH keys"), (3, ic::LOCK_KEY, "Passwords")];
+        let mut pages: Vec<(u8, &str, &str)> = vec![(0, ic::PALETTE, "Appearance"), (1, ic::PLUGS, "Connections")];
+        if cfg!(feature = "remote") {
+            pages.push((8, ic::KEYBOARD, "Shortcuts"));
+        }
+        pages.extend([(2, ic::KEY, "SSH keys"), (3, ic::LOCK_KEY, "Passwords")]);
         if crate::modules::on("backup") {
             pages.push((4, ic::ARCHIVE, "Backup"));
         }
@@ -234,6 +252,8 @@ impl App {
                     4 => Page::Backup(BackupTool::new()),
                     5 => Page::Extensions,
                     6 => Page::Parts,
+                    #[cfg(feature = "remote")]
+                    8 => Page::Shortcuts(Default::default()),
                     _ => Page::About,
                 };
             }

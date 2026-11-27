@@ -2,6 +2,8 @@ mod browser;
 pub mod camera;
 #[cfg(windows)]
 mod dxgi;
+#[cfg(any(windows, test))]
+mod hdr;
 #[cfg(target_os = "linux")]
 mod gnome;
 #[cfg(target_os = "linux")]

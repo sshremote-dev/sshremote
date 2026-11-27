@@ -353,6 +353,12 @@ impl App {
                         ui.add_space(4.0);
                         ui.label(RichText::new("A one-time password works too. Without any, the person there is asked to let you in, where that computer allows it.").small().color(weak));
                     }
+                    if by_id && saved && self.form.password.is_empty() {
+                        ui.add_space(4.0);
+                        if ui.add(egui::Button::new(RichText::new(format!("{}  Ask the person there instead", ic::USER)).small()).frame_when_inactive(false)).on_hover_text(ASK_TIP).clicked() {
+                            *go = Some((address.clone(), port.clone(), How::Ask(self.default_mode(by_id))));
+                        }
+                    }
                 }
         });
         if enter {
@@ -901,6 +907,13 @@ impl App {
                 if ui.button(format!("{}  Copy address", ic::COPY)).clicked() {
                     ui.ctx().copy_text(c.id().map_or_else(|| c.address.clone(), str::to_string));
                 }
+                if by_id {
+                    for m in [PaneMode::Screen, PaneMode::Files].into_iter().filter(|m| m.on()) {
+                        if ui.button(format!("{}  Ask for its {}", ic::USER, m.name().to_lowercase())).on_hover_text(ASK_TIP).clicked() {
+                            act = Some(RowAct::Open(How::Ask(m)));
+                        }
+                    }
+                }
                 if crate::vault::has(&c.address) && ui.button(format!("{}  Forget the saved password", ic::LOCK_KEY)).clicked() {
                     act = Some(RowAct::ForgetPassword);
                 }
@@ -984,6 +997,9 @@ impl App {
         act
     }
 }
+
+/// What asking to come in does, where it is offered beside a saved password.
+const ASK_TIP: &str = "No password is given, saved or not: the person at that computer is asked to let you in, and both screens show a code to compare. Reconnecting and opening more from it ask again.";
 
 fn how(m: PaneMode) -> How {
     match m {

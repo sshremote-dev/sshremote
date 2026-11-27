@@ -630,23 +630,14 @@ impl Remote {
 
         // A voice call with the person at that computer: started, called off while it rings, hung up.
         if screen && crate::modules::on("sound") {
-            use crate::chat::{CALL_ENDED, CALL_RINGING, CALL_TALKING};
+            use crate::chat::{CALL_RINGING, CALL_TALKING};
             let (glyph, tip, on) = match self.call {
                 CALL_TALKING => (ic::PHONE_HANG_UP, "Hang up", true),
                 CALL_RINGING => (ic::PHONE, "Calling\u{2026} (click to call off)", true),
                 _ => (ic::PHONE, "Call the person at that computer: talk through the microphones", false),
             };
             if icon(ui, glyph, tip, on).clicked() {
-                let start = self.call == CALL_ENDED || self.call > CALL_TALKING;
-                *action = Some(Box::new(move |r, _| {
-                    if start {
-                        r.call = CALL_RINGING;
-                        r.send(ToAgent::Call(true))
-                    } else {
-                        r.call_now(CALL_ENDED);
-                        r.send(ToAgent::Call(false))
-                    }
-                }));
+                *action = Some(Box::new(|r, _| r.toggle_call()));
             }
         }
         let mut sound = self.sound.is_some();
@@ -703,13 +694,7 @@ impl Remote {
         }
         if chat {
             *action = Some(Box::new(|r, _| {
-                match r.chat.take() {
-                    Some((lines, _)) => r.chat_lines = lines,
-                    None => {
-                        r.chat = Some((std::mem::take(&mut r.chat_lines), String::new()));
-                        r.unread = 0;
-                    }
-                }
+                r.toggle_chat();
                 Ok(())
             }));
         }
@@ -718,27 +703,13 @@ impl Remote {
         }
         if pause {
             let on = !self.paused;
-            (self.paused, self.user_paused) = (on, on);
-            *action = Some(Box::new(move |r, _| r.send(ToAgent::Pause(on))));
+            *action = Some(Box::new(move |r, _| r.set_paused(on)));
         }
         if frame {
             *action = Some(Box::new(|r, _| r.send(ToAgent::Refresh)));
         }
         if sound_clicked {
-            *action = Some(Box::new(move |r, _| {
-                if sound {
-                    match crate::audio::Player::new() {
-                        Ok(p) => r.sound = Some(p),
-                        Err(e) => {
-                            r.notify(&format!("Sound: {e}"));
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    r.sound = None;
-                }
-                r.send(ToAgent::Audio(sound))
-            }));
+            *action = Some(Box::new(move |r, _| r.set_sound(sound)));
         }
     }
 }

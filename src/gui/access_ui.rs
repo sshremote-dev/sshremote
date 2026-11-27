@@ -21,6 +21,9 @@ pub(super) struct AccessUi {
     /// The address list being typed (`Config::from`), kept when Use is pressed.
     #[cfg(feature = "remote")]
     pub(super) from: String,
+    /// The ID list being typed (`Config::ids`), kept when Use is pressed.
+    #[cfg(feature = "remote")]
+    pub(super) ids: String,
     /// Whether the relay sees this ID now (for which ID and relay), looked up in the background
     /// every few seconds, one lookup at a time.
     pub(super) online: Shared<Option<Online>>,

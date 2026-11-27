@@ -70,6 +70,12 @@ pub struct Config {
     /// Whether sessions by ID are recorded here, as their viewers see the screen
     /// (`recordings_dir`); off unless chosen, and each viewer is told.
     pub record: bool,
+    /// Which viewers' IDs come in ("123456789, 98765*"; `tidy_ids`); empty: any. Each shows its
+    /// ID with its device's key, and the first device an ID came from is the only one it may
+    /// come from after (`id_keys`).
+    pub ids: String,
+    /// The device each listed ID first came from: the ID, its key (hex), and when.
+    pub id_keys: Vec<(String, String, u64)>,
 }
 
 /// Where sessions by ID are recorded: on Windows where the service runs them (as SYSTEM), a
@@ -248,7 +254,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>() })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -285,6 +291,16 @@ impl Config {
             proxy: s("proxy").unwrap_or_default(),
             // Off unless chosen.
             record: v.get("record").and_then(|x| x.as_bool()).unwrap_or(false),
+            ids: s("ids").unwrap_or_default(),
+            id_keys: v
+                .get("id_keys")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| Some((k.get("id")?.as_str()?.to_string(), k.get("key")?.as_str()?.to_string(), k.get("at").and_then(|x| x.as_u64()).unwrap_or(0))))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }
@@ -451,6 +467,8 @@ pub fn fresh() -> Config {
         trusted: Vec::new(),
         proxy: String::new(),
         record: false,
+        ids: String::new(),
+        id_keys: Vec::new(),
     }
 }
 
@@ -1003,6 +1021,8 @@ struct Welcome {
     from: Option<std::net::IpAddr>,
     /// The token of the trusted device it came in from, in place of the two-step code.
     token: Option<String>,
+    /// Its ID and its device's key, where only some IDs come in.
+    who: Option<(String, String)>,
 }
 
 enum Came {
@@ -1012,13 +1032,13 @@ enum Came {
 }
 
 impl Welcome {
-    fn new(c: &Config, came: &crate::net::Came, from: Option<std::net::IpAddr>, token: Option<String>) -> Welcome {
+    fn new(c: &Config, came: &crate::net::Came, from: Option<std::net::IpAddr>, token: Option<String>, who: Option<(String, String)>) -> Welcome {
         let came = match came {
             crate::net::Came::Lasting => Came::Lasting(c.password.clone()),
             crate::net::Came::OneTime => Came::OneTime(c.one_time.clone()),
             crate::net::Came::Request(_) => Came::Request,
         };
-        Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from, token }
+        Welcome { id: c.id.clone(), relay: c.relay.clone(), came, from, token, who }
     }
 
     /// Whether the settings `c` would still let it in.
@@ -1030,6 +1050,9 @@ impl Welcome {
             // One in by a trusted device's token goes when it is no longer trusted (two-step
             // sign-in off, nothing to be trusted for, it stays).
             && self.token.as_ref().is_none_or(|t| c.totp.is_empty() || c.trusts(t))
+            // A list of IDs set or changed: one not on it goes, as one from another device than
+            // the one its ID is kept with.
+            && (c.ids.trim().is_empty() || self.who.as_ref().is_some_and(|(id, key)| id_listed(&c.ids, id) && id_key(c, id).is_none_or(|k| k == *key)))
             && match &self.came {
                 Came::Lasting(p) => c.passwords.lasting() && *p == c.password,
                 Came::OneTime(p) => c.passwords.one_time() && *p == c.one_time,
@@ -1579,7 +1602,31 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
         ok
     };
     let requests: Option<&dyn Fn() -> bool> = cfg.requests.then_some(&take_request as &dyn Fn() -> bool);
-    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch) else {
+    // Only some IDs, each from the device it first came from.
+    let who = std::cell::RefCell::new(None::<(String, String)>);
+    let check_id = |id: &str, key: &[u8; 32]| {
+        let key = crate::sys::hex(key);
+        let known = stored().ok().flatten().and_then(|c| id_key(&c, id)).or_else(|| id_key(cfg, id));
+        let verdict = if !id_listed(&cfg.ids, id) {
+            Err(crate::net::IdRefused::NotListed)
+        } else if known.as_ref().is_some_and(|k| *k != key) {
+            Err(crate::net::IdRefused::OtherDevice)
+        } else {
+            if known.is_none() {
+                pin_device(id, &key);
+            }
+            *who.borrow_mut() = Some((id.to_string(), key.clone()));
+            Ok(())
+        };
+        if let Err(why) = verdict {
+            let spaced = crate::computers::spaced(id);
+            let what = if why == crate::net::IdRefused::OtherDevice { format!("ID {spaced} from another device than before") } else { format!("ID {spaced}, not on the list") };
+            note_visit(serde_json::json!({ "refused": what, "at": crate::sys::now_secs(), "from": from_text }));
+        }
+        verdict
+    };
+    let ids = (!cfg.ids.trim().is_empty()).then_some(&check_id as crate::net::Ids);
+    let Ok((r, w, came)) = crate::net::handshake_agent_passwords(s, lasting, one_time, requests, totp, &judge, punch, ids) else {
         // Taken, then lost before the end of the exchange (or stopped short of showing its
         // part): the next request may come, after the same breath.
         request_done(took.get());
@@ -1620,8 +1667,13 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     let trust_offer = token.map(|t| (t, from_text.clone().unwrap_or_default()));
     let by_device = by_device.filter(|_| !cfg.totp.is_empty());
     let (at, ender) = (crate::sys::now_secs(), w.ender());
+    let who = who.into_inner();
+    let how = match &who {
+        Some((id, _)) => format!("{how}, as ID {}", crate::computers::spaced(id)),
+        None => how,
+    };
     note_visit(serde_json::json!({ "in": n, "at": at, "from": from_text, "how": how, "path": if relayed { "through the relay" } else { "on this network" } }));
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from, by_device), w.ender()));
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).push((n, Welcome::new(cfg, &came, from, by_device, who), w.ender()));
     SINCE.lock().unwrap_or_else(|e| e.into_inner()).push((n, at));
     VIEWERS.fetch_add(1, Ordering::Relaxed);
     let _ = serve_viewer(r, w, grant, code.as_deref(), cfg.cameras, cfg.idle, trust_offer);
@@ -1685,6 +1737,108 @@ pub fn comes_from(from: &str, ip: Option<std::net::IpAddr>) -> bool {
         }
         _ => false,
     })
+}
+
+/// The IDs of a list as typed: split at commas, semicolons and new lines, and at spaces too
+/// where the part is no ID with its digits spaced ("123 456 789").
+fn id_words(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in list.split([',', ';', '\n']).map(str::trim).filter(|p| !p.is_empty()) {
+        let joined: String = part.chars().filter(|c| !c.is_whitespace()).collect();
+        if (6..=12).contains(&joined.len()) || joined.contains('*') && !part.contains(char::is_whitespace) {
+            out.push(joined);
+        } else {
+            out.extend(part.split_whitespace().map(str::to_string));
+        }
+    }
+    out
+}
+
+/// An ID of a list: 6 to 12 digits, or some digits and stars standing for any.
+fn id_pattern(w: &str) -> bool {
+    w.bytes().all(|b| b.is_ascii_digit() || b == b'*') && w.bytes().any(|b| b.is_ascii_digit()) && (w.contains('*') || valid_id(w)) && w.len() <= 12
+}
+
+/// What in an ID list is none.
+pub fn bad_ids(list: &str) -> Vec<String> {
+    id_words(list).into_iter().filter(|w| !id_pattern(w)).collect()
+}
+
+/// An ID list as kept: its IDs, a comma between.
+pub fn tidy_ids(list: &str) -> String {
+    id_words(list).join(", ")
+}
+
+/// Whether `id` is on the list (a star standing for any digits).
+pub fn id_listed(list: &str, id: &str) -> bool {
+    fn fits(p: &[u8], s: &[u8]) -> bool {
+        match p.split_first() {
+            None => s.is_empty(),
+            Some((b'*', rest)) => (0..=s.len()).any(|i| fits(rest, &s[i..])),
+            Some((c, rest)) => s.first() == Some(c) && fits(rest, &s[1..]),
+        }
+    }
+    id_words(list).iter().filter(|w| id_pattern(w)).any(|w| fits(w.as_bytes(), id.as_bytes()))
+}
+
+/// This computer's own ID, as a viewer shows it to a computer that lets in only some: its remote
+/// access ID, whether remote access is on or not (as the service has it, on Windows).
+pub fn own_id() -> Option<String> {
+    stored()
+        .ok()
+        .flatten()
+        .map(|c| c.id)
+        .or_else(|| {
+            // (Not in tests: that file is the running app's.)
+            if cfg!(test) {
+                return None;
+            }
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(state_file()?).ok()?).ok()?;
+            v.get("id")?.as_str().map(str::to_string)
+        })
+        .filter(|i| valid_id(i))
+}
+
+/// This device's key (its secret half), made the first time and kept in the user's settings
+/// folder for the user alone.
+pub fn device_key() -> [u8; 32] {
+    static KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+    let mut k = KEY.lock().unwrap_or_else(|e| e.into_inner());
+    *k.get_or_insert_with(|| {
+        let file = crate::hosts::config_dir().map(|d| d.join("device-key"));
+        if let Some(key) = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()) {
+            return key;
+        }
+        let key: [u8; 32] = random(32).try_into().expect("32 bytes");
+        if let Some(f) = &file {
+            let _ = f.parent().map(std::fs::create_dir_all);
+            let _ = crate::sys::write_whole(f, &key, true, true);
+        }
+        key
+    })
+}
+
+/// The device `id` came from first, as these settings know it.
+fn id_key(c: &Config, id: &str) -> Option<String> {
+    c.id_keys.iter().find(|(i, _, _)| i == id).map(|(_, k, _)| k.clone())
+}
+
+/// Keeps `key` as the device `id` comes from (its first).
+fn pin_device(id: &str, key: &str) {
+    if let Ok(Some(mut c)) = stored()
+        && id_key(&c, id).is_none()
+    {
+        c.id_keys.push((id.to_string(), key.to_string(), crate::sys::now_secs()));
+        if let Err(e) = save(&c) {
+            eprintln!("remote access: the device of ID {id} was not kept: {e}");
+        }
+    }
+}
+
+/// The devices of IDs no longer on the list are forgotten with them.
+pub fn keep_listed_devices(c: &mut Config) {
+    let list = c.ids.clone();
+    c.id_keys.retain(|(i, _, _)| id_listed(&list, i));
 }
 
 /// When the request without a password being answered was taken (it holds the turn while the
@@ -2237,6 +2391,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         if !c.from.is_empty() {
             println!("from:     only {}", c.from);
         }
+        if !c.ids.is_empty() {
+            println!("ids:      only {}", c.ids);
+            for (id, key, at) in &c.id_keys {
+                println!("          {} from its device {}.. since {}", crate::computers::spaced(id), &key[..key.len().min(12)], crate::hosts::ago(*at));
+            }
+        }
         println!("asks:     {}", if c.ask { "yes, the person at this computer lets each viewer in" } else { "no, the password is enough" });
         println!("viewers:  may use {}", crate::grant::words(c.allow));
         println!("nearby:   {}", match (c.lan, c.direct) {
@@ -2398,6 +2558,21 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             }
             save(&c)?;
             println!("{}", if c.from.is_empty() { "viewers may come from anywhere".to_string() } else { format!("viewers come in only from {}", c.from) });
+            Ok(())
+        }
+        Some("ids") => {
+            let list = args[1..].join(" ");
+            if list.trim().is_empty() {
+                return Err("usage: sshremote remote-access ids ID ... | anyone   (e.g. ids 123456789, 98765*)".into());
+            }
+            c.ids = if list.trim() == "anyone" { String::new() } else { tidy_ids(&list) };
+            let bad = bad_ids(&c.ids);
+            if !bad.is_empty() {
+                return Err(format!("not an ID: {} (6 to 12 digits, a star standing for any)", bad.join(", ")));
+            }
+            keep_listed_devices(&mut c);
+            save(&c)?;
+            println!("{}", if c.ids.is_empty() { "viewers may come from any ID".to_string() } else { format!("viewers come in only as {}, each from the device it first came from", c.ids) });
             Ok(())
         }
         // Who is connected through the service now, and ending one of them.
@@ -2595,6 +2770,25 @@ mod tests {
         assert_eq!((v[2].secs, v[2].path.as_str()), (None, "on this network"));
         assert!(v[1].describe().ends_with("let in with the lasting password, straight from 203.0.113.7, for 4 min"), "{}", v[1].describe());
         assert!(v[2].describe().contains("still here or cut off"));
+    }
+
+    #[test]
+    fn id_lists_take_spaced_ids_and_stars() {
+        assert_eq!(tidy_ids("123 456 789, 98765*"), "123456789, 98765*");
+        assert_eq!(tidy_ids("123456789 987654321"), "123456789, 987654321", "two IDs a space apart");
+        assert_eq!(tidy_ids("123456789\n111 222 333;"), "123456789, 111222333");
+        assert!(bad_ids("123456789, 98765*").is_empty());
+        assert_eq!(bad_ids("12345, abc, 1234567890123, *"), vec!["12345", "abc", "1234567890123", "*"]);
+        let list = "123456789, 98765*, 4*9";
+        assert!(id_listed(list, "123456789") && id_listed(list, "987650000") && id_listed(list, "409") && id_listed(list, "4123459"));
+        assert!(!id_listed(list, "123456780") && !id_listed(list, "98764") && !id_listed(list, "4123450") && !id_listed("", "123456789"));
+        let mut c = fresh();
+        c.ids = "123456789".into();
+        c.id_keys = vec![("123456789".into(), "aa".into(), 1), ("555555555".into(), "bb".into(), 2)];
+        keep_listed_devices(&mut c);
+        assert_eq!(c.id_keys.len(), 1, "a device goes with its ID off the list");
+        let back = Config::from_json(&c.to_json()).unwrap();
+        assert_eq!((back.ids, back.id_keys), (c.ids, c.id_keys), "kept as they were");
     }
 
     #[test]

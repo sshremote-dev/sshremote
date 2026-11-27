@@ -28,6 +28,8 @@ mod tray;
 mod access_ui;
 #[cfg(feature = "remote")]
 mod remote;
+#[cfg(feature = "remote")]
+mod shortcuts;
 #[cfg(not(feature = "remote"))]
 #[path = "remote_off.rs"]
 mod remote;
@@ -1630,6 +1632,24 @@ mod tests {
         assert!(ctx.memory(|m| m.focused().is_some()), "a field has the keyboard");
     }
 
+    /// Asking a computer by ID to let this one in gives it no password, though one is typed
+    /// (a saved one is passed by the same way); opened plainly, the password goes.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn asking_to_come_in_gives_no_password() {
+        let opt = crate::parse_client(&["--gui".into()]).unwrap();
+        let home::connect::Typed::Id { address, .. } = home::connect::typed("123 456 789") else { panic!("an ID") };
+        for (how, want) in [(home::How::Screen, "s3cret-pass"), (home::How::Ask(PaneMode::Files), "")] {
+            let mut app = App::new(Form::from(&opt), None, "", None);
+            app.form.host = "123 456 789".into();
+            app.form.password = "s3cret-pass".into();
+            app.form.remember = false;
+            app.choose((address.clone(), String::new(), how), Place::Tab);
+            let Some((Launch::Agent { target: Target::Direct { password, .. }, .. }, ..)) = app.queued.first() else { panic!("a launch by ID") };
+            assert_eq!(password, want);
+        }
+    }
+
     /// The open window closes at once when nothing goes with it, and asks first when another
     /// window would.
     #[test]
@@ -1800,7 +1820,7 @@ mod tests {
                 app.here_at = Some(Instant::now());
                 #[cfg(feature = "remote")]
                 {
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: true, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: String::new(), id_keys: Vec::new() };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();
@@ -1831,7 +1851,7 @@ mod tests {
         let Some(dir) = std::env::var_os("SSHREMOTE_REVIEW_DIR").map(std::path::PathBuf::from) else { return };
         let states = [
             "home", "home_off", "home_loading", "typed_ssh", "typed_id", "typed_words", "row_hover", "add_ssh", "add_id", "edit_config",
-            "access_settings", "settings_appearance", "settings_connections", "settings_keys", "settings_passwords", "settings_backup",
+            "access_settings", "settings_appearance", "settings_connections", "settings_shortcuts", "settings_keys", "settings_passwords", "settings_backup",
             "settings_extensions", "settings_parts", "settings_about", "quick", "narrow", "tags", "tag_picked",
         ];
         for dark in [true, false] {
@@ -1855,7 +1875,7 @@ mod tests {
                 #[cfg(feature = "remote")]
                 if name != "home_loading" {
                     let on = name != "home_off";
-                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false };
+                    let cfg = crate::access::Config { id: "482913075".into(), token: String::new(), password: "k7Qp2mZ9".into(), relay: crate::access::DEFAULT_RELAY.into(), enabled: on, ask: false, allow: crate::grant::ALL, lan: true, direct: true, punch: true, totp: String::new(), passwords: crate::access::Passwords::Both, one_time: "k7qp-2mz9".into(), requests: false, from: String::new(), relay_key: String::new(), cameras: false, idle: 0, trusted: Vec::new(), proxy: String::new(), record: false, ids: "718543859, 98765*".into(), id_keys: vec![("718543859".into(), "3ebfa6097815".into(), 0)] };
                     *app.access.online.lock().unwrap() = Some((cfg.id.clone(), cfg.relay.clone(), Ok(true)));
                     *app.access.service.lock().unwrap() = Some(access_ui::Service { known: true, ..Default::default() });
                     app.access.relay = cfg.relay.clone();

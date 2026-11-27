@@ -507,6 +507,99 @@ pub const TRUST_MARK: char = '\u{1e}';
 const TRUST_MOST_LEN: usize = 256;
 /// What a viewer is told when the computer wants a code it was not given.
 pub const CODE_WANTED: &str = "the computer asks for the code of its authenticator app, with the password";
+/// Said in place of CONFIRM by a computer that lets in only some IDs: the viewer shows its own
+/// ID and that it holds its device's key (`who_is_it`); CONFIRM's length, as the answers after.
+const WHO: &[u8] = b"sshremote/1 whoid";
+/// Said then to a viewer whose ID is not on the list (or that showed none, or no key).
+const NOT_LISTED: &[u8] = b"sshremote/1 notid";
+/// Said to one whose ID came from another device before.
+const OTHER_DEVICE: &[u8] = b"sshremote/1 newid";
+/// What a viewer is told then.
+pub const NOT_LISTED_WORDS: &str = "that computer lets in only some IDs, and not this computer's";
+pub const NO_ID_WORDS: &str = "that computer lets in only some IDs, and this computer has none yet: turn on remote access here to have one";
+pub const OTHER_DEVICE_WORDS: &str = "that computer knows this ID from another device: the person there can forget that device (Remote access, Who comes in)";
+/// The most a viewer's answer to WHO holds: its ID's length, the ID, its key and its proof.
+const WHO_MOST: usize = 1 + 12 + 32 + 32;
+
+/// Why a computer that lets in only some IDs turns a viewer away (`Ids`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IdRefused {
+    NotListed,
+    OtherDevice,
+}
+
+/// Whether a viewer's ID, shown with its device's key (the key proven held), comes in.
+pub type Ids<'a> = &'a dyn Fn(&str, &[u8; 32]) -> Result<(), IdRefused>;
+
+/// What proves a device holds its key, in one exchange: made from what its key and the
+/// computer's key for this exchange share, bound to this exchange's keys, its ID and its key.
+fn who_proof(hk: &hkdf::Hkdf<sha2::Sha256>, shared: &[u8; 32], id: &str, key: &[u8; 32]) -> [u8; 32] {
+    let mut bind = [0u8; 32];
+    let _ = hk.expand(b"sshremote who", &mut bind);
+    let mut out = [0u8; 32];
+    let _ = hkdf::Hkdf::<sha2::Sha256>::new(Some(&bind), shared).expand(&[b"sshremote who proof ".as_slice(), id.as_bytes(), b" ", key].concat(), &mut out);
+    out
+}
+
+/// The computer's side: a key for this exchange sent with WHO, the viewer's ID, key and proof
+/// read and checked, and `ids` asked whether it comes in; one that does not is told why.
+fn who_is_it(r: &mut SealedReader, w: &mut SealedWriter, hk: &hkdf::Hkdf<sha2::Sha256>, ids: Ids) -> io::Result<()> {
+    let secret: [u8; 32] = crate::sys::random(32).try_into().map_err(|_| io::Error::other("random"))?;
+    let (secret, public) = crate::relaylink::keypair(secret);
+    w.write_all(WHO)?;
+    w.flush()?;
+    w.write_all(&public)?;
+    w.flush()?;
+    r.limit = WHO_MOST;
+    let mut n = [0u8; 1];
+    r.read_exact(&mut n)?;
+    if n[0] as usize > 12 {
+        return Err(io::Error::other("bad answer to who"));
+    }
+    let mut id = vec![0u8; n[0] as usize];
+    r.read_exact(&mut id)?;
+    let (mut key, mut proof) = ([0u8; 32], [0u8; 32]);
+    r.read_exact(&mut key)?;
+    r.read_exact(&mut proof)?;
+    r.limit = CONFIRM.len();
+    let id = String::from_utf8(id).ok().filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
+    let proven = |id: &str| crate::relaylink::dh(&secret, &key).is_some_and(|s| who_proof(hk, &s, id, &key).iter().zip(&proof).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0);
+    let verdict = match &id {
+        Some(id) if proven(id) => ids(id, &key),
+        _ => Err(IdRefused::NotListed),
+    };
+    match verdict {
+        Ok(()) => Ok(()),
+        Err(why) => {
+            let _ = w.write_all(if why == IdRefused::OtherDevice { OTHER_DEVICE } else { NOT_LISTED }).and_then(|_| w.flush());
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, if why == IdRefused::OtherDevice { "its ID came from another device before" } else { "its ID is not on the list" }))
+        }
+    }
+}
+
+/// The viewer's side: this computer's ID and its device's key shown, with the proof it holds
+/// the key; the computer's answer after.
+fn show_who(r: &mut SealedReader, w: &mut SealedWriter, hk: &hkdf::Hkdf<sha2::Sha256>) -> io::Result<[u8; CONFIRM.len()]> {
+    r.limit = 32;
+    let mut theirs = [0u8; 32];
+    r.read_exact(&mut theirs)?;
+    r.limit = CONFIRM.len();
+    let id = crate::access::own_id().unwrap_or_default();
+    let (secret, key) = crate::relaylink::keypair(crate::access::device_key());
+    let proof = crate::relaylink::dh(&secret, &theirs).map_or([0u8; 32], |s| who_proof(hk, &s, &id, &key));
+    w.write_all(&[&[id.len() as u8], id.as_bytes(), &key, &proof].concat())?;
+    w.flush()?;
+    let mut got = [0u8; CONFIRM.len()];
+    r.read_exact(&mut got).map_err(|e| if e.kind() == io::ErrorKind::UnexpectedEof { io::Error::new(io::ErrorKind::PermissionDenied, NOT_LISTED_WORDS) } else { e })?;
+    if got == NOT_LISTED {
+        let words = if id.is_empty() { NO_ID_WORDS.to_string() } else { format!("{NOT_LISTED_WORDS} ({})", crate::computers::spaced(&id)) };
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, words));
+    }
+    if got == OTHER_DEVICE {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, OTHER_DEVICE_WORDS));
+    }
+    Ok(got)
+}
 
 /// Decides whether the viewer's proof of the password is checked now: given the check, it runs it
 /// in its own time (its turn, a delay) and says whether the password was right; an error turns
@@ -525,7 +618,7 @@ fn handshake(stream: TcpStream, password: &str, viewer: bool, judge: Judge) -> i
 
 /// `punch`: this side looks for a straight path once in (the agent says so to the viewer).
 fn handshake_2fa(stream: TcpStream, password: &str, viewer: bool, judge: Judge, totp: Option<&str>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter)> {
-    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None } };
+    let side = if viewer { Side::Viewer(password) } else { Side::Agent { permanent: Some(password), one_time: None, requests: None, ids: None } };
     let check = |code: &str| totp.is_some_and(|secret| crate::totp::check(secret, code));
     handshake_side(stream, side, judge, totp.map(|_| &check as TwoStep), punch).map(|(r, w, _)| (r, w))
 }
@@ -539,7 +632,8 @@ pub type TwoStep<'a> = &'a dyn Fn(&str) -> bool;
 /// now (`requests` says yes or no to each, once the exchange is made).
 enum Side<'a> {
     Viewer(&'a str),
-    Agent { permanent: Option<&'a str>, one_time: Option<&'a str>, requests: Option<&'a dyn Fn() -> bool> },
+    /// `ids`: only some IDs come in (each shown with its device's key), as it says.
+    Agent { permanent: Option<&'a str>, one_time: Option<&'a str>, requests: Option<&'a dyn Fn() -> bool>, ids: Option<Ids<'a>> },
 }
 
 /// How a viewer came in, as the agent saw it.
@@ -629,6 +723,10 @@ pub fn new_one_time() -> String {
 
 fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoStep>, punch: Option<Punch>) -> io::Result<(SealedReader, SealedWriter, Came)> {
     let viewer = matches!(side, Side::Viewer(_));
+    let ids = match side {
+        Side::Agent { ids, .. } => ids,
+        Side::Viewer(_) => None,
+    };
     // A viewer may be given the two-step code with the password.
     let (password, code) = match side {
         Side::Viewer(p) => match p.split_once(CODE_SEP) {
@@ -725,7 +823,7 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
             };
             (state, msg, theirs, came)
         }
-        Side::Agent { permanent, one_time, requests } => {
+        Side::Agent { permanent, one_time, requests, .. } => {
             let mut len = [0u8; 2];
             s.read_exact(&mut len)?;
             let len = u16::from_le_bytes(len);
@@ -856,6 +954,10 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_TRUSTED));
             }
         }
+        // A computer that lets in only some IDs: this one's shown.
+        if got == WHO {
+            got = show_who(&mut r, &mut w, &hk)?;
+        }
     } else if let Came::Request(_) = &came {
         // No password to check (and no guess to count): the request is taken or not, and the
         // person at the screen decides after.
@@ -864,6 +966,11 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
             return Err(io::Error::other("bad key exchange"));
         }
         let answer = answer.unwrap_or(NEEDS_PASSWORD);
+        if answer == CONFIRM
+            && let Some(ids) = ids
+        {
+            who_is_it(&mut r, &mut w, &hk, ids)?;
+        }
         w.write_all(answer)?;
         w.flush()?;
         if answer != CONFIRM {
@@ -907,6 +1014,9 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
             }
         }
+        if let Some(ids) = ids {
+            who_is_it(&mut r, &mut w, &hk, ids)?;
+        }
         got.copy_from_slice(CONFIRM);
         w.write_all(CONFIRM)?;
         w.flush()?;
@@ -939,6 +1049,8 @@ pub fn handshake_agent_2fa(stream: TcpStream, password: &str, totp: Option<&str>
 /// The agent's side with the passwords it takes: the lasting one, a one-time one, or both (None:
 /// that kind is not taken). Also says whether the viewer came in with the one-time password.
 /// `requests`: a viewer without a password may ask, and is taken when it says yes (one at a time).
+/// `ids`: only some viewers' IDs come in, as it says.
+#[allow(clippy::too_many_arguments)]
 pub fn handshake_agent_passwords(
     stream: TcpStream,
     permanent: Option<&str>,
@@ -947,8 +1059,9 @@ pub fn handshake_agent_passwords(
     two_step: Option<TwoStep>,
     judge: Judge,
     punch: Option<Punch>,
+    ids: Option<Ids>,
 ) -> io::Result<(SealedReader, SealedWriter, Came)> {
-    handshake_side(stream, Side::Agent { permanent, one_time, requests }, judge, two_step, punch)
+    handshake_side(stream, Side::Agent { permanent, one_time, requests, ids }, judge, two_step, punch)
 }
 
 /// A judge that checks at once.
@@ -1184,7 +1297,7 @@ mod tests {
         let agent = thread::spawn(move || {
             let (s, _) = l.accept().unwrap();
             let take = || true;
-            handshake_agent_passwords(s, Some("lasting"), None, Some(&take), None, &now, agent_punch).unwrap()
+            handshake_agent_passwords(s, Some("lasting"), None, Some(&take), None, &now, agent_punch, None).unwrap()
         });
         let (vr, vw) = handshake_2fa(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now, None, p(true)).unwrap();
         let (ar, aw, came) = agent.join().unwrap();
@@ -1455,7 +1568,7 @@ mod tests {
             thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
                 let check = |c: &str| c.strip_prefix(TRUST_MARK).map_or_else(|| crate::totp::check(&secret, c), |t| t == "7e".repeat(32));
-                let _ = handshake_agent_passwords(s, Some("pw for both"), None, None, Some(&check), &now, None);
+                let _ = handshake_agent_passwords(s, Some("pw for both"), None, None, Some(&check), &now, None, None);
             });
             at
         };
@@ -1478,7 +1591,7 @@ mod tests {
             let port = l.local_addr().unwrap().port();
             let agent = thread::spawn(move || {
                 let (s, _) = l.accept().unwrap();
-                handshake_agent_passwords(s, lasting, once, None, None, &now, None).map(|(_, _, came)| came == Came::OneTime)
+                handshake_agent_passwords(s, lasting, once, None, None, &now, None, None).map(|(_, _, came)| came == Came::OneTime)
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ());
             let used = agent.join().unwrap();
@@ -1506,7 +1619,7 @@ mod tests {
                 let (s, _) = l.accept().unwrap();
                 let gate = move || take == Some(true);
                 let requests: Option<&dyn Fn() -> bool> = take.map(|_| &gate as &dyn Fn() -> bool);
-                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None).map(|(_, _, c)| c).map_err(|e| e.to_string())
+                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, None).map(|(_, _, c)| c).map_err(|e| e.to_string())
             });
             let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), "", true, &now).map(|(_, w)| w.ender().code()).map_err(|e| e.to_string());
             (viewer, agent.join().unwrap())
@@ -1518,6 +1631,56 @@ mod tests {
         assert_eq!(ask(Some(false)).0.unwrap_err(), REQUEST_BUSY);
         assert_eq!(ask(None).0.unwrap_err(), NO_REQUESTS);
         assert_eq!((CONFIRM.len(), NEEDS_PASSWORD.len(), BUSY.len()), (17, 17, 17));
+    }
+
+    /// A computer that lets in only some IDs: the viewer shows its own ID and its device's key,
+    /// proven held; a listed one comes in (by password or by asking), one not listed or from
+    /// another device than before is turned away and hears why, and one with no ID is told.
+    #[test]
+    fn only_some_ids_come_in_each_from_its_own_device() {
+        let dir = std::env::temp_dir().join(format!("sshremote-who-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::access::TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut c = crate::access::fresh();
+        c.id = "482913075".into();
+        crate::access::save(&c).unwrap();
+        let my_key = crate::relaylink::keypair(crate::access::device_key()).1;
+        let try_in = |given: &'static str, verdict: Result<(), IdRefused>| -> (Result<(), String>, Result<(String, [u8; 32]), String>) {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let agent = thread::spawn(move || {
+                let (s, _) = l.accept().unwrap();
+                let seen = std::sync::Mutex::new(None);
+                let ids = |id: &str, key: &[u8; 32]| {
+                    *seen.lock().unwrap() = Some((id.to_string(), *key));
+                    verdict
+                };
+                let gate = || true;
+                let requests: Option<&dyn Fn() -> bool> = Some(&gate);
+                handshake_agent_passwords(s, Some("lasting"), None, requests, None, &now, None, Some(&ids)).map_err(|e| e.to_string())?;
+                seen.into_inner().unwrap().ok_or_else(|| "not asked".to_string())
+            });
+            let viewer = handshake(TcpStream::connect(("127.0.0.1", port)).unwrap(), given, true, &now).map(|_| ()).map_err(|e| e.to_string());
+            (viewer, agent.join().unwrap())
+        };
+        let (v, a) = try_in("lasting", Ok(()));
+        assert_eq!(v, Ok(()));
+        assert_eq!(a, Ok(("482913075".to_string(), my_key)), "its ID and its device's key, proven");
+        let (v, a) = try_in("", Ok(()));
+        assert!(v.is_ok() && a.is_ok(), "asking, too: {v:?} {a:?}");
+        let (v, a) = try_in("lasting", Err(IdRefused::NotListed));
+        assert_eq!(v.unwrap_err(), format!("{NOT_LISTED_WORDS} (482 913 075)"));
+        assert!(a.is_err());
+        assert_eq!(try_in("lasting", Err(IdRefused::OtherDevice)).0.unwrap_err(), OTHER_DEVICE_WORDS);
+        assert!(try_in("wrong", Ok(())).0.unwrap_err().contains("wrong password"), "the password first, as ever");
+        // No ID here yet.
+        std::fs::remove_file(dir.join("remote-access.json")).unwrap();
+        let (v, a) = try_in("lasting", Ok(()));
+        assert_eq!(v.unwrap_err(), NO_ID_WORDS);
+        assert!(a.is_err(), "nobody to let in");
+        assert_eq!((WHO.len(), NOT_LISTED.len(), OTHER_DEVICE.len()), (CONFIRM.len(), CONFIRM.len(), CONFIRM.len()));
+        crate::access::TEST_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

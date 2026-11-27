@@ -3,7 +3,8 @@
 //! The picture lands in a buffer of the monitor's size, from which the GDI path scales, crops and
 //! draws the pointer as before. A thread of its own waits for each change and reads it back
 //! (reading back waits most of a frame for the graphics card), so the agent's loop is not held up
-//! and need not look every millisecond.
+//! and need not look every millisecond. An HDR desktop is asked for as it is, in floats, and
+//! turned into what an SDR screen shows (`hdr`).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,10 +17,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
     ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_MODE_ROTATION_IDENTITY;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_MODE_ROTATION_IDENTITY};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
-    IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    IDXGIFactory1, IDXGIOutput1, IDXGIOutput5, IDXGIOutput6, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -168,10 +169,17 @@ struct Dup {
     device: ID3D11Device,
     ctx: ID3D11DeviceContext,
     dup: IDXGIOutputDuplication,
-    staging: Option<(ID3D11Texture2D, u32, u32)>,
+    staging: Option<(ID3D11Texture2D, u32, u32, DXGI_FORMAT)>,
     size: (usize, usize),
     /// When the last change was handed over.
     got: Instant,
+    /// The monitor's name ("\\.\DISPLAY1"), which its SDR white is asked by.
+    name: [u16; 32],
+    /// An HDR desktop's conversion on the graphics card (an error: done on the CPU), its white
+    /// and when that was last looked at (the person may move the slider meanwhile).
+    gpu: Option<Result<super::hdr::Gpu, String>>,
+    cpu: Option<super::hdr::Cpu>,
+    white: Option<(f32, Instant)>,
 }
 
 /// The duplication stopped (desktop switch, mode change, another program took it): open again.
@@ -180,6 +188,11 @@ pub struct Lost;
 impl Dup {
     /// Duplicates the monitor whose top-left corner is at (`left`, `top`) on the virtual desktop.
     fn open(left: i32, top: i32) -> Result<Dup, String> {
+        Dup::open_as(left, top, true)
+    }
+
+    /// `floats`: an HDR desktop is asked for as it is (else Windows clips it to 8 bits).
+    fn open_as(left: i32, top: i32, floats: bool) -> Result<Dup, String> {
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("DXGI: {e}"))?;
             let mut a = 0;
@@ -194,10 +207,18 @@ impl Dup {
                         continue;
                     }
                     let (device, ctx) = device_for(&adapter)?;
-                    let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("DXGI output: {e}"))?;
-                    let dup = output1.DuplicateOutput(&device).map_err(|e| format!("Desktop Duplication: {e}"))?;
+                    // In floats where the desktop is (HDR), as Windows 10 1703 and later can;
+                    // else in 8 bits as before.
+                    let floats = (floats && output.cast::<IDXGIOutput6>().is_ok()).then(|| output.cast::<IDXGIOutput5>().ok()).flatten();
+                    let dup = match floats.and_then(|o| o.DuplicateOutput1(&device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM]).ok()) {
+                        Some(d) => d,
+                        None => {
+                            let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("DXGI output: {e}"))?;
+                            output1.DuplicateOutput(&device).map_err(|e| format!("Desktop Duplication: {e}"))?
+                        }
+                    };
                     let size = ((r.right - r.left) as usize, (r.bottom - r.top) as usize);
-                    return Ok(Dup { device, ctx, dup, staging: None, size, got: Instant::now() });
+                    return Ok(Dup { device, ctx, dup, staging: None, size, got: Instant::now(), name: desc.DeviceName, gpu: None, cpu: None, white: None });
                 }
             }
             Err("no DXGI output at that place".into())
@@ -228,12 +249,42 @@ impl Dup {
         }
     }
 
+    /// Where SDR white sits on an HDR desktop now, looked at again each second.
+    fn white(&mut self) -> f32 {
+        match self.white {
+            Some((w, at)) if at.elapsed() < Duration::from_secs(1) => w,
+            _ => {
+                let w = super::hdr::white(&self.name);
+                self.white = Some((w, Instant::now()));
+                w
+            }
+        }
+    }
+
     unsafe fn copy(&mut self, res: Option<IDXGIResource>, dst: &mut [u8], stride: usize) -> Result<(), String> {
         unsafe {
-            let tex: ID3D11Texture2D = res.ok_or("no frame")?.cast().map_err(|e| e.to_string())?;
+            let mut tex: ID3D11Texture2D = res.ok_or("no frame")?.cast().map_err(|e| e.to_string())?;
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             tex.GetDesc(&mut desc);
-            if self.staging.as_ref().is_none_or(|s| (s.1, s.2) != (desc.Width, desc.Height)) {
+            // An HDR desktop: turned to 8 bits on the graphics card, else read in floats and
+            // turned here.
+            if desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT {
+                let white = self.white();
+                let gpu = self.gpu.get_or_insert_with(|| super::hdr::Gpu::new(&self.device));
+                if let Ok(g) = gpu {
+                    match g.convert(&self.device, &self.ctx, &tex, desc.Width, desc.Height, white) {
+                        Ok(t) => {
+                            tex = t;
+                            tex.GetDesc(&mut desc);
+                        }
+                        Err(e) => *gpu = Err(e),
+                    }
+                }
+                if desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && self.cpu.as_ref().is_none_or(|c| c.white() != white) {
+                    self.cpu = Some(super::hdr::Cpu::new(white));
+                }
+            }
+            if self.staging.as_ref().is_none_or(|s| (s.1, s.2, s.3) != (desc.Width, desc.Height, desc.Format)) {
                 let mut sd = desc;
                 sd.Usage = D3D11_USAGE_STAGING;
                 sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
@@ -243,17 +294,21 @@ impl Dup {
                 sd.ArraySize = 1;
                 let mut t = None;
                 self.device.CreateTexture2D(&sd, None, Some(&mut t)).map_err(|e| e.to_string())?;
-                self.staging = Some((t.ok_or("no staging texture")?, desc.Width, desc.Height));
+                self.staging = Some((t.ok_or("no staging texture")?, desc.Width, desc.Height, desc.Format));
             }
-            let (staging, w, h) = self.staging.as_ref().expect("just made");
+            let (staging, w, h, format) = self.staging.as_ref().expect("just made");
             self.ctx.CopyResource(staging, &tex);
             let mut map = D3D11_MAPPED_SUBRESOURCE::default();
             self.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut map)).map_err(|e| e.to_string())?;
             let (w, h) = ((*w as usize).min(self.size.0), (*h as usize).min(self.size.1));
             let src = map.pData as *const u8;
+            let floats = (*format == DXGI_FORMAT_R16G16B16A16_FLOAT).then_some(self.cpu.as_ref()).flatten();
             for y in 0..h.min(dst.len() / stride.max(1)) {
-                let from = std::slice::from_raw_parts(src.add(y * map.RowPitch as usize), w * 4);
-                dst[y * stride..y * stride + w * 4].copy_from_slice(from);
+                let to = &mut dst[y * stride..y * stride + w * 4];
+                match floats {
+                    Some(cpu) => cpu.row(std::slice::from_raw_parts(src.add(y * map.RowPitch as usize) as *const u16, w * 4), to),
+                    None => to.copy_from_slice(std::slice::from_raw_parts(src.add(y * map.RowPitch as usize), w * 4)),
+                }
             }
             self.ctx.Unmap(staging, 0);
             Ok(())
@@ -277,5 +332,81 @@ unsafe fn device_for(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11Dev
         )
         .map_err(|e| format!("Direct3D 11: {e}"))?;
         Ok((device.ok_or("no Direct3D device")?, ctx.ok_or("no Direct3D context")?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// A window of one colour on the screen at (`x`, `y`), moved a pixel to and fro until
+    /// `stop`, so each look finds a new picture.
+    fn painted(x: i32, y: i32, rgb: [i32; 3], stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+        use windows_sys::Win32::Graphics::Gdi::CreateSolidBrush;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        std::thread::spawn(move || {
+            // SAFETY: a window of this thread's, its messages handled here until it goes.
+            unsafe {
+                let name: Vec<u16> = "sshremote-hdr-test\0".encode_utf16().collect();
+                let class = WNDCLASSW { lpfnWndProc: Some(DefWindowProcW), lpszClassName: name.as_ptr(), hbrBackground: CreateSolidBrush((rgb[0] | rgb[1] << 8 | rgb[2] << 16) as u32), ..std::mem::zeroed() };
+                RegisterClassW(&class);
+                let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, name.as_ptr(), name.as_ptr(), WS_POPUP | WS_VISIBLE, x, y, 400, 300, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null());
+                let mut n = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let mut msg = std::mem::zeroed();
+                    while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    n += 1;
+                    SetWindowPos(hwnd, HWND_TOPMOST, x + n % 2, y, 400, 300, SWP_NOACTIVATE);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                DestroyWindow(hwnd);
+            }
+        })
+    }
+
+    /// On a real HDR desktop (SSHREMOTE_TEST_HDR_AT "X,Y": the monitor's corner), SDR content in
+    /// a colour comes out in that colour, on the graphics card and on the CPU alike; asked for
+    /// the old way, it does not.
+    #[test]
+    #[ignore]
+    fn an_hdr_desktop_comes_out_as_it_looks() {
+        let at: Vec<i32> = std::env::var("SSHREMOTE_TEST_HDR_AT").expect("SSHREMOTE_TEST_HDR_AT").split(',').map(|n| n.trim().parse().unwrap()).collect();
+        let rgb = [128, 64, 32];
+        let middle = |floats: bool, cpu: bool| {
+            let mut dup = Dup::open_as(at[0], at[1], floats).unwrap();
+            if cpu {
+                dup.gpu = Some(Err("on the CPU".into()));
+            }
+            let (w, h) = dup.size;
+            let stop = Arc::new(AtomicBool::new(false));
+            let window = painted(at[0] + w as i32 / 2 - 200, at[1] + h as i32 / 2 - 150, rgb, stop.clone());
+            let mut px = vec![0u8; w * h * 4];
+            let (t, mut pictures, mut seen) = (Instant::now(), 0, [0; 4]);
+            // The last of a second's pictures, the window shown by then.
+            while t.elapsed() < Duration::from_millis(1500) || pictures == 0 {
+                let got = dup.next(100, &mut px, w * 4);
+                seen[match got { Ok(Next::Same) => 0, Ok(Next::Pointer) => 1, Ok(Next::Picture) => 2, Err(Lost) => 3 }] += 1;
+                if matches!(got, Ok(Next::Picture)) && t.elapsed() > Duration::from_millis(500) {
+                    pictures += 1;
+                }
+                assert!(t.elapsed() < Duration::from_secs(10), "no picture: same, pointer, picture, lost {seen:?}");
+            }
+            stop.store(true, Ordering::Relaxed);
+            window.join().unwrap();
+            let i = (h / 2 * w + w / 2) * 4;
+            let got = [px[i + 2], px[i + 1], px[i]];
+            eprintln!("floats {floats} cpu {cpu}: {got:?} after {pictures} pictures; white {:?}, card {}", dup.white.map(|w| w.0), match &dup.gpu { None => "unused".to_string(), Some(Ok(_)) => "used".into(), Some(Err(e)) => e.clone() });
+            (got, dup.white.map(|w| w.0))
+        };
+        let near = |got: [u8; 3]| got.iter().zip(&rgb).all(|(g, w)| (*g as i32 - w).abs() <= 2);
+        let ((gpu, white), (cpu, _), (old, _)) = (middle(true, false), middle(true, true), middle(false, false));
+        assert!(white.is_some_and(|w| w > 1.0), "the desktop came in floats, with its SDR white");
+        assert!(near(gpu), "{gpu:?}, not {rgb:?}");
+        assert!(near(cpu), "{cpu:?}, not {rgb:?}");
+        assert!(!near(old), "the old way clips it: {old:?}");
     }
 }

@@ -229,6 +229,7 @@ impl App {
             // The relay field starts from the one in use; emptied, Use goes back to the default.
             self.access.relay = cfg.relay.clone();
             self.access.from = cfg.from.clone();
+            self.access.ids = cfg.ids.clone();
             self.access_sheet_open = true;
         }
         if changed {
@@ -538,6 +539,45 @@ impl App {
                             )
                             .wrap(),
                         );
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Only these IDs").strong());
+                        let bad = access::bad_ids(&self.access.ids);
+                        let typed = access::tidy_ids(&self.access.ids);
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 70.0).max(120.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.access.ids).hint_text("Any").desired_width(w).margin(egui::Margin::symmetric(8, 6)));
+                            if ui.add_enabled(bad.is_empty() && typed != cfg.ids, kit::secondary("Use")).clicked() {
+                                cfg.ids = typed.clone();
+                                access::keep_listed_devices(&mut cfg);
+                                self.access.ids = typed;
+                                changed = true;
+                            }
+                        });
+                        if !bad.is_empty() {
+                            ui.label(RichText::new(format!("Not an ID: {}", bad.join(", "))).color(super::super::bad()).size(12.0));
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("The IDs of the computers viewers come from, like 123 456 789, or 98765* for all that start so: no other comes in, even with the password. Each ID comes in only from the device it first came from (its key shows it). A viewer's ID is the one its remote access shows, on or off. Empty: any.")
+                                    .weak()
+                                    .size(12.0),
+                            )
+                            .wrap(),
+                        );
+                        let mut forget = None;
+                        for (i, (id, _, at)) in cfg.id_keys.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{}  {}", ic::DESKTOP, crate::computers::spaced(id))).monospace());
+                                ui.label(RichText::new(format!("its device since {}", crate::hosts::ago(*at))).weak().size(12.0));
+                                if ui.add(egui::Button::new(RichText::new("Forget its device").small())).on_hover_text("Its next device that comes in with this ID is kept in its place").clicked() {
+                                    forget = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(i) = forget {
+                            cfg.id_keys.remove(i);
+                            changed = true;
+                        }
                     });
                 });
                 ui.add_space(kit::GAP);

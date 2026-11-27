@@ -49,6 +49,8 @@ pub(super) struct Remote {
     density: Option<u16>,
     /// Ctrl+Alt+Enter was pressed in it: the workspace turns full screen on or off.
     pub(super) full_toggle: bool,
+    /// The key of one of the user's shortcuts, taken as it went down: its going up is taken too.
+    shortcut_held: Option<Key>,
     /// The pane is the whole full-screen window (zoomed, or the window's only pane in full
     /// screen): the picture fills it.
     pub(super) filling: bool,
@@ -338,6 +340,7 @@ impl Remote {
             density: None,
             active: true,
             full_toggle: false,
+            shortcut_held: None,
             filling: false,
             grab_wanted: false,
             pane_closed: false,
@@ -657,6 +660,13 @@ impl Remote {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let ui_rects: Vec<Rect> = chat_rect.into_iter().collect();
+        // The user's own keys for this screen's actions, before the host sees them (in view only
+        // too: one of them turns it off).
+        if self.active && !inline {
+            for a in self.take_shortcuts(&ctx) {
+                self.shortcut(a)?;
+            }
+        }
         let keys = !(self.view_only || self.mirror || inline || !self.active);
         let term_keys = split && self.term_focus;
         self.hold_keys(ui, pic_area, keys && !term_keys && shown.is_some());
@@ -1355,6 +1365,127 @@ impl Remote {
             }
             _ => Ok(()),
         }
+    }
+
+    /// The shortcuts pressed since the last frame, taken out of the input with their keys' going
+    /// up (and their repeats).
+    fn take_shortcuts(&mut self, ctx: &egui::Context) -> Vec<crate::gui::shortcuts::Action> {
+        let keys = crate::gui::shortcuts::current();
+        if !keys.on && self.shortcut_held.is_none() {
+            return Vec::new();
+        }
+        let held = &mut self.shortcut_held;
+        let mut out = Vec::new();
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                let Event::Key { key, physical_key, pressed, repeat, modifiers } = e else { return true };
+                let k = physical_key.unwrap_or(*key);
+                if *held == Some(k) {
+                    if !*pressed {
+                        *held = None;
+                    }
+                    return false;
+                }
+                match keys.find(*modifiers, k) {
+                    Some(a) if *pressed => {
+                        if !*repeat {
+                            out.push(a);
+                        }
+                        *held = Some(k);
+                        false
+                    }
+                    _ => true,
+                }
+            })
+        });
+        out
+    }
+
+    /// Does what a shortcut is for.
+    pub(super) fn shortcut(&mut self, a: crate::gui::shortcuts::Action) -> Result<(), String> {
+        use crate::gui::shortcuts::Action;
+        let screens: Vec<usize> = self.monitors.iter().enumerate().filter(|(_, m)| !m.camera()).map(|(i, _)| i).collect();
+        let step = |on: bool| {
+            let at = screens.iter().position(|&i| i == self.monitor)?;
+            let n = screens.len();
+            screens.get(if on { (at + 1) % n } else { (at + n - 1) % n }).copied()
+        };
+        match a {
+            Action::CtrlAltDel if self.view_only || self.mirror => self.notify("View only: Ctrl+Alt+Del was not sent"),
+            Action::CtrlAltDel if self.sess.backend == "mac" => self.notify("A Mac has no Ctrl+Alt+Del (Option+Cmd+Esc force quits)"),
+            Action::CtrlAltDel => return self.send(ToAgent::SecureAttention),
+            Action::FullScreen => self.full_toggle = true,
+            Action::NextScreen | Action::PrevScreen => match step(a == Action::NextScreen) {
+                Some(i) if i != self.monitor => return self.show_monitor(i),
+                _ => self.notify("That computer shows one screen"),
+            },
+            Action::Screenshot => return self.send(ToAgent::Snapshot),
+            Action::Record => self.toggle_recording(),
+            Action::Chat if crate::modules::on("chat") => self.toggle_chat(),
+            Action::Call if crate::modules::on("sound") => return self.toggle_call(),
+            Action::Sound if crate::modules::on("sound") => return self.set_sound(self.sound.is_none()),
+            Action::Chat | Action::Call | Action::Sound => {}
+            Action::ViewOnly if self.mirror => {}
+            Action::ViewOnly => {
+                self.view_only = !self.view_only;
+                self.notify(if self.view_only { "View only: keys and clicks stay here" } else { "Keys and clicks reach that computer again" });
+            }
+            Action::Pause => return self.set_paused(!self.paused),
+            Action::Repaint => return self.menu('r'),
+            Action::GameMouse if self.mirror || self.web => {}
+            Action::GameMouse => {
+                self.games = !self.games;
+                self.games_held = self.games;
+                self.notify(if self.games { "The mouse is held for the game: Ctrl+Alt lets it go" } else { "The mouse is yours again" });
+            }
+            Action::Lock => return self.send(ToAgent::Host { act: crate::hostctl::LOCK, on: true }),
+        }
+        Ok(())
+    }
+
+    /// The chat with the person there shown, or put away (its lines kept).
+    pub(super) fn toggle_chat(&mut self) {
+        match self.chat.take() {
+            Some((lines, _)) => self.chat_lines = lines,
+            None => {
+                self.chat = Some((std::mem::take(&mut self.chat_lines), String::new()));
+                self.unread = 0;
+            }
+        }
+    }
+
+    /// A call to the person there started, called off while it rings, or hung up.
+    pub(super) fn toggle_call(&mut self) -> Result<(), String> {
+        use crate::chat::{CALL_ENDED, CALL_RINGING, CALL_TALKING};
+        if self.call == CALL_ENDED || self.call > CALL_TALKING {
+            self.call = CALL_RINGING;
+            self.send(ToAgent::Call(true))
+        } else {
+            self.call_now(CALL_ENDED);
+            self.send(ToAgent::Call(false))
+        }
+    }
+
+    /// That computer's sound played here, or not.
+    pub(super) fn set_sound(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            match crate::audio::Player::new() {
+                Ok(p) => self.sound = Some(p),
+                Err(e) => {
+                    self.notify(&format!("Sound: {e}"));
+                    return Ok(());
+                }
+            }
+        } else {
+            self.sound = None;
+        }
+        self.send(ToAgent::Audio(on))
+    }
+
+    /// The picture paused (to save traffic) or going again.
+    pub(super) fn set_paused(&mut self, on: bool) -> Result<(), String> {
+        (self.paused, self.user_paused) = (on, on);
+        self.send(ToAgent::Pause(on))
     }
 
     /// Films in codec `c` (`proto::CODEC_*`) from now on, and in new connections.

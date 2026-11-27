@@ -495,6 +495,46 @@ fn the_codec_is_chosen_from_the_display_menu() {
     assert_eq!(crate::hosts::setting("codec").as_deref(), Some("1"), "kept for new connections");
 }
 
+/// The user's own keys do their action here and none of the keys reaches the host (its going up
+/// neither); turned off, the same keys are the host's again.
+#[test]
+#[ignore]
+fn shortcuts_act_here_and_never_reach_the_host() {
+    use crate::gui::shortcuts::{Action, Combo, Keys, save};
+    let mut h = Harness::new(Vec2::new(1000.0, 700.0));
+    h.frame(Vec::new()).unwrap();
+    let at = h.r.last_shown.expect("the picture").center();
+    h.frame(vec![Event::PointerMoved(at)]).unwrap();
+    let m = egui::Modifiers { ctrl: true, alt: true, shift: true, ..egui::Modifiers::NONE };
+    let key = |k: Key, pressed: bool| Event::Key { key: k, physical_key: Some(k), pressed, repeat: false, modifiers: m };
+    let mut keys = Keys::first();
+    let view = keys.key_of(Action::ViewOnly).expect("a key for view only").key;
+    // Off: the keys are the host's.
+    save(&keys);
+    h.frame(vec![key(view, true)]).unwrap();
+    assert!(!h.r.held.is_empty() && !h.r.view_only, "off, they go to the host");
+    h.frame(vec![key(view, false), Event::ModifiersChanged(egui::Modifiers::NONE)]).unwrap();
+    h.r.release_all().unwrap();
+    // On, with a key of one's own for pausing the picture.
+    keys.on = true;
+    keys.set(Action::Pause, Some(Combo { ctrl: true, alt: true, shift: true, cmd: false, key: Key::U }));
+    save(&keys);
+    h.frame(vec![key(Key::U, true)]).unwrap();
+    assert!(h.r.paused && h.r.held.is_empty(), "paused, nothing down at the host");
+    h.frame(vec![key(Key::U, false)]).unwrap();
+    assert!(h.r.held.is_empty(), "its going up is not the host's either");
+    h.frame(vec![key(Key::U, true)]).unwrap();
+    h.frame(vec![key(Key::U, false)]).unwrap();
+    assert!(!h.r.paused, "and again: going");
+    h.frame(vec![key(view, true)]).unwrap();
+    assert!(h.r.view_only, "view only on");
+    h.frame(vec![key(view, false)]).unwrap();
+    h.frame(vec![key(view, true)]).unwrap();
+    h.frame(vec![key(view, false)]).unwrap();
+    assert!(!h.r.view_only && h.r.held.is_empty(), "and off, from view only too");
+    save(&Keys::first());
+}
+
 /// A job the host printed asks what to do with it; kept as a PDF, it is fetched into Downloads
 /// under its own name (not the host's name for its file) and the question goes.
 #[test]
