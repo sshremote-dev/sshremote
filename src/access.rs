@@ -79,6 +79,10 @@ pub struct Config {
     /// Remote access run as a service puts newer releases in place by itself, between sessions
     /// (`update::unattended`): nobody sits at such a computer to click "Update".
     pub auto_update: bool,
+    /// Which way the clipboard and files go for viewers by ID (`agent::WAY_*`): both ways, from
+    /// this computer only, or to it only.
+    pub clip_way: u8,
+    pub files_way: u8,
     /// The team this computer is in (`team::client::Joined` as JSON), or null: kept with the rest,
     /// so that only who may change remote access can join a team, and the service reads it.
     pub team: serde_json::Value,
@@ -260,7 +264,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -310,6 +314,8 @@ impl Config {
             team: v.get("team").filter(|t| t.is_object()).cloned().unwrap_or_default(),
             // On unless turned off: a computer nobody sits at would stay on an old release.
             auto_update: v.get("auto_update").and_then(|x| x.as_bool()).unwrap_or(true),
+            clip_way: v.get("clip_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
+            files_way: v.get("files_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
         })
     }
 }
@@ -485,6 +491,8 @@ pub fn fresh() -> Config {
         ids: String::new(),
         id_keys: Vec::new(),
         auto_update: true,
+        clip_way: 0,
+        files_way: 0,
         team: serde_json::Value::Null,
     }
 }
@@ -2260,6 +2268,7 @@ fn serve_viewer(
         cmd.args(["--code", c]);
     }
     cmd.args(["--who-how", asking.how, "--who-from", asking.from]);
+    cmd.args(["--clip-way", &cfg.clip_way.to_string(), "--files-way", &cfg.files_way.to_string()]);
     if cameras {
         cmd.arg("--cameras");
     }
@@ -2699,7 +2708,7 @@ pub fn uninstall_service() -> Result<(), String> {
     Err(n!("not on this system").into())
 }
 
-/// `sshremote remote-access [status | on | off | run | id | password [NEW] | relay HOST | install | uninstall]`
+/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | password [NEW] | relay HOST | install | uninstall]`
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
@@ -2745,6 +2754,10 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         if c.record {
             println!("record:   sessions by ID are recorded in {}", recordings_dir().map(|d| d.display().to_string()).unwrap_or_default());
+        }
+        let way = |w: u8| ["both ways", "from this computer only", "to this computer only"][w.min(2) as usize];
+        if c.clip_way != 0 || c.files_way != 0 {
+            println!("one way:  clipboard {}, files {}", way(c.clip_way), way(c.files_way));
         }
         println!("idle:     {}", if c.idle == 0 { "a session goes on however long the viewer does nothing".to_string() } else { format!("a session ends after {} minutes without input from its viewer", c.idle) });
         println!("straight: {}", if c.punch { "yes, viewers by ID move to a straight path through the routers when one is found" } else { "no, always through the relay" });
@@ -2808,6 +2821,23 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 Some(n) => n.parse().ok().filter(|&m| m > 0).ok_or("usage: sshremote remote-access idle MINUTES|off")?,
                 None => return Err("usage: sshremote remote-access idle MINUTES|off".into()),
             };
+            save(&c)?;
+            show(&c);
+            Ok(())
+        }
+        // Which way the clipboard and files go for viewers by ID.
+        Some(what @ ("clipboard" | "files")) => {
+            let way = match args.get(1).map(String::as_str) {
+                Some("both") => 0,
+                Some("out") => 1,
+                Some("in") => 2,
+                _ => return Err(format!("usage: sshremote remote-access {what} both|out|in   (out: from this computer only, in: to it only)")),
+            };
+            if what == "clipboard" {
+                c.clip_way = way;
+            } else {
+                c.files_way = way;
+            }
             save(&c)?;
             show(&c);
             Ok(())

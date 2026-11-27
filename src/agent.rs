@@ -147,6 +147,37 @@ impl Drop for SessionRecording {
     }
 }
 
+/// Which way the clipboard and files go for a viewer by ID, as the computer is set to (remote
+/// access's settings): both ways, from this computer only, or to it only.
+pub const WAY_BOTH: u8 = 0;
+pub const WAY_OUT: u8 = 1;
+pub const WAY_IN: u8 = 2;
+static CLIP_WAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(WAY_BOTH);
+static FILES_WAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(WAY_BOTH);
+
+pub fn set_ways(clip: u8, files: u8) {
+    CLIP_WAY.store(clip, std::sync::atomic::Ordering::Relaxed);
+    FILES_WAY.store(files, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn clip_way() -> u8 {
+    CLIP_WAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn files_way() -> u8 {
+    FILES_WAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Why `m` goes the way this computer does not let things go, if it does.
+fn against_way(m: &ToAgent, clip: u8, files: u8) -> Option<&'static str> {
+    match m {
+        ToAgent::FileStart { .. } | ToAgent::FileResume { .. } | ToAgent::FileOp { .. } if files == WAY_OUT => Some(n!("This computer gives its files but takes none.")),
+        ToAgent::Fetch { .. } | ToAgent::FetchFrom { .. } if files == WAY_IN => Some(n!("This computer takes files but gives none of its own.")),
+        ToAgent::Clipboard(_) | ToAgent::ClipImage(_) | ToAgent::PasteFiles { .. } if clip == WAY_OUT => Some(n!("This computer gives what is copied there but takes nothing onto its clipboard.")),
+        _ => None,
+    }
+}
+
 /// The token this agent may hand a viewer that asks to be trusted (`ToAgent::TrustToken`).
 static TRUST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -718,6 +749,18 @@ fn serve_with(
                 if told_off & need == 0 {
                     told_off |= need;
                     send(enc, &ToClient::Notice(why)).map_err(io_err)?;
+                }
+                continue;
+            }
+            // One way only, as this computer is set to: what would go the other way is refused,
+            // and the viewer told once.
+            if let Some(why) = against_way(&m, clip_way(), files_way()) {
+                for r in refused(&m, why) {
+                    send(enc, &r).map_err(io_err)?;
+                }
+                if matches!(m, ToAgent::Clipboard(_) | ToAgent::ClipImage(_) | ToAgent::PasteFiles { .. }) && told_off & crate::grant::CLIPBOARD == 0 {
+                    told_off |= crate::grant::CLIPBOARD;
+                    send(enc, &ToClient::Notice(why.into())).map_err(io_err)?;
                 }
                 continue;
             }
@@ -1361,15 +1404,17 @@ fn serve_with(
             send(enc, &m).map_err(io_err)?;
         }
         match clip.poll() {
-            Some(crate::clip::Copied::Text(text)) if allowed & crate::grant::CLIPBOARD != 0 => {
+            Some(crate::clip::Copied::Text(text)) if allowed & crate::grant::CLIPBOARD != 0 && clip_way() != WAY_IN => {
                 send(enc, &ToClient::Clipboard(text)).map_err(io_err)?;
             }
             // A picture copied here (a screenshot): onto the viewer's clipboard.
-            Some(crate::clip::Copied::Image(png)) if allowed & crate::grant::CLIPBOARD != 0 => {
+            Some(crate::clip::Copied::Image(png)) if allowed & crate::grant::CLIPBOARD != 0 && clip_way() != WAY_IN => {
                 send(enc, &ToClient::ClipImage(png)).map_err(io_err)?;
             }
             // Files copied here: the viewer may fetch them onto its own clipboard.
-            Some(crate::clip::Copied::Files(paths)) if allowed & (crate::grant::CLIPBOARD | crate::grant::FILES) == crate::grant::CLIPBOARD | crate::grant::FILES => {
+            Some(crate::clip::Copied::Files(paths))
+                if allowed & (crate::grant::CLIPBOARD | crate::grant::FILES) == crate::grant::CLIPBOARD | crate::grant::FILES && clip_way() != WAY_IN && files_way() != WAY_IN =>
+            {
                 send(enc, &ToClient::ClipFiles(paths.iter().map(|p| crate::files::clip_file(p)).collect())).map_err(io_err)?;
             }
             _ => {}
@@ -1793,6 +1838,21 @@ mod tests {
         // A web page takes the size it is shown at, whatever its shape was.
         assert_eq!(target((1280, 800), &view(1178, 696, 100), true), (1178, 696));
         assert_eq!(target((1280, 800), &view(1178, 696, 50), true), (589, 348));
+    }
+
+    /// One way only: what would go the other way is refused, the rest goes as before.
+    #[test]
+    fn one_way_settings_refuse_only_the_other_way() {
+        let up = ToAgent::FileStart { id: 1, size: 1, dir: "/".into(), name: "a".into() };
+        let down = ToAgent::Fetch { path: "a".into(), tag: 0 };
+        let paste = ToAgent::Clipboard("x".into());
+        for m in [&up, &down, &paste] {
+            assert!(against_way(m, WAY_BOTH, WAY_BOTH).is_none());
+        }
+        assert!(against_way(&up, WAY_BOTH, WAY_OUT).is_some() && against_way(&down, WAY_BOTH, WAY_OUT).is_none());
+        assert!(against_way(&down, WAY_BOTH, WAY_IN).is_some() && against_way(&up, WAY_BOTH, WAY_IN).is_none());
+        assert!(against_way(&paste, WAY_OUT, WAY_BOTH).is_some() && against_way(&paste, WAY_IN, WAY_BOTH).is_none());
+        assert!(against_way(&ToAgent::ListDir { path: "/".into() }, WAY_OUT, WAY_IN).is_none(), "folders are listed either way");
     }
 
     /// Small and large messages go in frames of their own levels, and a viewer reads them back

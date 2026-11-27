@@ -458,6 +458,21 @@ impl App {
                         ui.add(
                             egui::Label::new(RichText::new(t!("They always see the screen. The person at the computer can change these for a session in its window.")).weak().size(12.0)).wrap(),
                         );
+                        // Which way copied things and files go, for whatever the rights above let in.
+                        let way = |w: u8| match w {
+                            1 => t!("From this computer only"),
+                            2 => t!("To this computer only"),
+                            _ => t!("Both ways"),
+                        };
+                        for (label, id, value) in [(t!("Clipboard"), "clip-way", &mut cfg.clip_way), (t!("Files"), "files-way", &mut cfg.files_way)] {
+                            kit::row(ui, label, |ui| {
+                                egui::ComboBox::from_id_salt(id).selected_text(way(*value)).show_ui(ui, |ui| {
+                                    for w in 0..=2u8 {
+                                        changed |= ui.selectable_value(value, w, way(w)).changed();
+                                    }
+                                });
+                            });
+                        }
                         ui.add_space(4.0);
                         if ui.checkbox(&mut cfg.cameras, t!("Let viewers look at this computer's cameras")).changed() {
                             changed = true;
