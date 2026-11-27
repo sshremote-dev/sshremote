@@ -6,6 +6,7 @@
   scripts/lang.py sync            drops words no longer in the program from every table
   scripts/lang.py todo CODE [N]   up to N words CODE lacks, tagged: {"3fa9c2d1": "English", ...}
   scripts/lang.py put CODE FILE   takes {"3fa9c2d1": "translation", ...} for those tags into CODE
+  scripts/lang.py pairs CODE [FROM [N]]   N texts from FROM on, to review: {"tag": ["English", "translation"]}
 """
 
 import json
@@ -141,6 +142,14 @@ def main():
         json.dump(dict(list(todo.items())[:most]), sys.stdout, ensure_ascii=False, indent=1)
         print()
         print(f"# {min(most, len(todo))} of {len(todo)} missing", file=sys.stderr)
+    elif cmd == "pairs":
+        code = sys.argv[2]
+        start = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+        most = int(sys.argv[4]) if len(sys.argv) > 4 else len(order)
+        table = json.load(open(os.path.join(LANG, code + ".json"), encoding="utf-8"))
+        json.dump({tag(s): [s, table.get(s, "")] for s in order[start : start + most]}, sys.stdout, ensure_ascii=False, indent=1)
+        print()
+        print(f"# {start}..{min(start + most, len(order))} of {len(order)}", file=sys.stderr)
     elif cmd == "put":
         code, src = sys.argv[2], sys.argv[3]
         path = os.path.join(LANG, code + ".json")
