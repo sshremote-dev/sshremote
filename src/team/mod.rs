@@ -130,17 +130,20 @@ pub struct Policy {
     pub idle: Option<u32>,
     pub direct: Option<bool>,
     pub lan: Option<bool>,
+    /// The app there shows this computer alone (its ID and password), for people who are
+    /// helped, not who help: no computers of their own to open.
+    pub incoming_only: bool,
 }
 
 impl Default for Policy {
     fn default() -> Policy {
-        Policy { password: true, ask: None, rights: 0x7f, record: None, idle: None, direct: None, lan: None }
+        Policy { password: true, ask: None, rights: 0x7f, record: None, idle: None, direct: None, lan: None, incoming_only: false }
     }
 }
 
 impl Policy {
     pub fn json(&self) -> Value {
-        json!({"password": self.password, "ask": self.ask, "rights": self.rights, "record": self.record, "idle": self.idle, "direct": self.direct, "lan": self.lan})
+        json!({"password": self.password, "ask": self.ask, "rights": self.rights, "record": self.record, "idle": self.idle, "direct": self.direct, "lan": self.lan, "incoming_only": self.incoming_only})
     }
 
     pub fn from_json(v: &Value) -> Policy {
@@ -153,6 +156,7 @@ impl Policy {
             idle: v["idle"].as_u64().map(|m| m.min(24 * 60) as u32),
             direct: v["direct"].as_bool(),
             lan: v["lan"].as_bool(),
+            incoming_only: v["incoming_only"].as_bool().unwrap_or(false),
         }
     }
 }

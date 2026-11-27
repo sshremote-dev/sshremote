@@ -35,6 +35,7 @@ const ICONS = {
   check: "M5 12.5l4.5 4.5L19 7.5",
   download: "M12 4v11|M7 10l5 5 5-5|M4 15v5h16v-5",
   image: "M4 5h16v14H4z|M4 16l5-5 4 4 3-3 4 4|M15.5 8.5h.01",
+  mail: "M3 6h18v12H3z|M3.5 6.5 12 13l8.5-6.5",
 };
 const SVG = "http://www.w3.org/2000/svg";
 function icon(name) {
@@ -455,7 +456,7 @@ async function api(method, path, body) {
 const listOf = (v, ...keys) => Array.isArray(v) ? v : (keys.map(k => v?.[k]).find(Array.isArray) || []);
 
 const S = {
-  user: null, team: null, options: { oidc: false, ldap: false },
+  user: null, team: null, options: { oidc: false, ldap: false, mail: false },
   devices: [], users: [], groups: [], dgroups: [], rules: [], rulesSaved: "[]", tokens: [], events: [], settings: null, mine: [],
   view: "", loaded: new Set(), sort: { devices: ["name", 1], users: ["name", 1], mine: ["name", 1], groups: ["name", 1], dgroups: ["name", 1], tokens: ["expires", 1] },
   logo: "", focusAfter: "",
@@ -482,9 +483,12 @@ const load = {
 };
 // What each view shows, fetched each time it opens.
 const NEEDS = {
-  mine: ["mine"], devices: ["devices", "dgroups"], users: ["users", "groups"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
+  mine: ["mine"], devices: ["devices", "dgroups"], users: ["users", "groups", "options"], groups: ["groups", "users"], dgroups: ["dgroups", "devices"],
   rules: ["rules", "users", "groups", "dgroups", "devices"], enroll: ["tokens", "dgroups"], audit: ["devices", "users"], settings: ["settings"], account: ["me"],
 };
+
+// Whether the team sends email (the invitation button), as the sign-in page learns it.
+load.options = () => loadOptions();
 
 // ----- Rights and policies ---------------------------------------------------------------------------
 
@@ -504,7 +508,7 @@ function rightsWords(bits) {
   const names = RIGHTS.filter(([b]) => bits & b).map(([, , w]) => w());
   return names.length ? names.join(", ") : T("nothing but watching");
 }
-const POLICY = { password: true, ask: null, rights: 0x7f, record: null, idle: null, direct: null, lan: null };
+const POLICY = { password: true, ask: null, rights: 0x7f, record: null, idle: null, direct: null, lan: null, incoming_only: false };
 const tri = v => v === true ? "on" : v === false ? "off" : "keep";
 const untri = v => v === "on" ? true : v === "off" ? false : null;
 
@@ -514,6 +518,7 @@ function policyChips(p) {
   const c = [];
   const chip = (text, cls) => c.push(h("span", { class: "badge" + (cls ? " " + cls : ""), text }));
   if (!p.password) chip(T("Team members only"), "blue");
+  if (p.incoming_only) chip(T("Incoming only"), "blue");
   if (p.ask === true) chip(T("Asks first"));
   if (p.ask === false) chip(T("Does not ask"), "warn");
   if ((p.rights & 0x7f) !== 0x7f) chip(T("At most: {}", rightsWords(p.rights)));
@@ -538,6 +543,8 @@ function policyEditor(p) {
   };
   const pw = checkbox(T("Passwords let people in too"), p.password,
     T("Off: only team members with a ticket come in. The computer's passwords, one-time passwords and requests to come in are refused."));
+  const incoming = checkbox(T("Incoming only"), p.incoming_only,
+    T("The app on these computers shows this computer alone, its ID and how people reach it: for people who are helped, not who help."));
   const ask = keepOnOff(T("Ask the person at the screen first"), p.ask);
   const record = keepOnOff(T("Record each session by ID"), p.record, T("Into the computer's Videos folder; the viewer is told."));
   const direct = keepOnOff(T("Let viewers by ID go straight through the routers"), p.direct, T("Off: through the relay only."));
@@ -549,11 +556,13 @@ function policyEditor(p) {
   const rights = h("fieldset", null, h("legend", { text: T("What anyone may do there, at most") }), boxes.map(b => b.node));
   const node = h("div", null,
     pw.node,
+    incoming.node,
     h("div", { class: "grid2" }, ask.node, field(T("End a session left idle"), idle), record.node, direct.node, lan.node),
     rights);
   const value = () => ({
     password: pw.input.checked, ask: untri(ask.s.value), rights: boxes.reduce((r, b) => r | (b.input.checked ? b.bit : 0), 0),
     record: untri(record.s.value), idle: idle.value === "keep" ? null : +idle.value, direct: untri(direct.s.value), lan: untri(lan.s.value),
+    incoming_only: incoming.input.checked,
   });
   return { node, value };
 }
@@ -682,6 +691,7 @@ RENDER.users = () => {
       !u.admin && !u.disabled && !u.totp && u.name !== S.user.name ? dash() : null) },
     { label: T("Actions"), cls: "acts", cell: u => [
       iconButton("rename", T("Edit {}", u.display || u.name), { "data-k": "edit-" + u.name, onclick: () => editUser(u) }),
+      S.options.mail && u.email ? iconButton("mail", T("Invite {} by email", u.display || u.name), { "data-k": "invite-" + u.name, onclick: () => invite(u) }) : null,
       iconButton("trash", T("Remove {}", u.display || u.name), { class: "danger", "data-k": "rm-" + u.name, disabled: u.name === S.user.name, onclick: () => removeUser(u) }),
     ] },
   ], rows, S.users.length ? h("p", { text: T("Nothing matches.") }) : h("p", { text: T("No users yet.") })));
@@ -752,6 +762,13 @@ function showTotp(who, secret, uri, qr) {
     title: T("Two-step sign-in for {}", who), wide: true, ok: T("Done"), cancel: null,
     text: code ? T("It is shown only now. In their authenticator app, they scan this code, or add an account with the key.") : T("It is shown only now. In their authenticator app, they add an account with this key, or open the setup address on their phone."),
     fields: [code, h("div", { class: "cmds" }, line(T("Key"), secret.replace(/(.{4})(?=.)/g, "$1 ")), uri ? line(T("Setup address"), uri) : null)],
+  });
+}
+function invite(u) {
+  dialog({
+    title: T("Invite {} by email?", u.display || u.name), ok: T("Send the invitation"),
+    text: T("An email goes to {} with a link to set a password; the link works for a week.", u.email),
+    submit: async () => { await api("POST", "api/admin/invite", { name: u.name }); toast(T("An invitation went to {}.", u.email)); },
   });
 }
 function removeUser(u) {
@@ -976,6 +993,7 @@ $("addtoken").onclick = newToken;
 const KINDS = {
   in: () => T("Came in"), out: () => T("Left"), refused: () => T("Refused"), file: () => T("Files"), login: () => T("Signed in"),
   ticket: () => T("Ticket"), join: () => T("Joined the team"), leave: () => T("Left the team"), removed: () => T("Removed from the team"),
+  invite: () => T("Invited by email"), reset: () => T("Asked for a new password"), password: () => T("Set a password"),
 };
 const HOWS = {
   team: () => T("team ticket"), password: () => T("password"), "one-time": () => T("one-time password"), request: () => T("asked at the screen"),
@@ -1066,6 +1084,7 @@ function logoPreview() {
 function fillSettings() {
   const s = S.settings || {};
   $("sname").value = s.name || "";
+  $("sbrand").checked = !!s.brand;
   S.logo = typeof s.logo === "string" && s.logo.startsWith("data:image/") ? s.logo : "";
   logoPreview();
   $("srelay").value = s.relay || "";
@@ -1082,6 +1101,15 @@ function fillSettings() {
   $("sldapurl").value = l?.url || "";
   $("sldapdn").value = l?.user_dn || "";
   $("sldapmake").checked = !!l?.make_users;
+  $("sldapca").value = l?.ca_file || "";
+  const m = s.smtp || null;
+  $("smail").checked = !!m;
+  $("smailurl").value = m?.url || "";
+  $("smailuser").value = m?.user || "";
+  $("smailpw").value = "";
+  S.mailPwSet = !!m?.password_set;
+  $("smailfrom").value = m?.from || "";
+  $("smailstatus").textContent = "";
   settingsLabels();
 }
 function settingsLabels() {
@@ -1091,6 +1119,11 @@ function settingsLabels() {
   $("ssecret").required = $("soidc").checked && !S.secretSet;
   for (const id of ["sissuer", "sclient"]) $(id).required = $("soidc").checked;
   for (const id of ["sldapurl", "sldapdn"]) $(id).required = $("sldap").checked;
+  $("smailf").hidden = !$("smail").checked;
+  for (const id of ["smailurl", "smailfrom"]) $(id).required = $("smail").checked;
+  $("smailpw").placeholder = S.mailPwSet ? T("Set. Type a new one to change it.") : "";
+  // A test goes through the settings as saved: none to test before they are.
+  $("smailtest").disabled = !S.settings?.smtp;
   $("sredirect").textContent = S.settings?.redirect_uri || teamUrl() + "/api/oidc/callback";
 }
 RENDER.settings = () => {
@@ -1098,7 +1131,17 @@ RENDER.settings = () => {
   $("settingsform").hidden = false;
   settingsLabels();
 };
-$("soidc").onchange = $("sldap").onchange = settingsLabels;
+$("soidc").onchange = $("sldap").onchange = $("smail").onchange = settingsLabels;
+$("smailtest").onclick = async () => {
+  const st = $("smailstatus"), to = $("smailto").value.trim();
+  st.className = "note";
+  st.textContent = "";
+  $("smailtest").disabled = true;
+  try {
+    await api("POST", "api/admin/mail-test", to ? { to } : {});
+    st.textContent = T("The test email went to {}.", to || S.user.email);
+  } catch (e) { st.className = "error"; st.textContent = e.message; } finally { $("smailtest").disabled = !S.settings?.smtp; }
+};
 $("sredirectcopy").onclick = () => copy($("sredirect").textContent, $("sredirectcopy"));
 $("slogopick").onclick = () => $("slogofile").click();
 $("slogorm").onclick = () => { S.logo = ""; logoPreview(); $("slogopick").focus(); };
@@ -1132,15 +1175,21 @@ $("settingsform").onsubmit = async e => {
     if ($("ssecret").value) oidc.client_secret = $("ssecret").value;
   }
   if ($("sldap").checked) {
-    ldap = { url: $("sldapurl").value.trim(), user_dn: $("sldapdn").value.trim(), make_users: $("sldapmake").checked };
+    ldap = { url: $("sldapurl").value.trim(), user_dn: $("sldapdn").value.trim(), make_users: $("sldapmake").checked, ca_file: $("sldapca").value.trim() };
     if (!/^ldaps?:\/\/\S+$/i.test(ldap.url)) { err.textContent = T("The directory's address starts with ldap:// or ldaps://."); $("sldapurl").focus(); return; }
     if (!ldap.user_dn.includes("{}")) { err.textContent = T("The user DN needs {} where the name goes.", "{}"); $("sldapdn").focus(); return; }
   }
-  const body = { name: $("sname").value.trim(), logo: S.logo, relay: $("srelay").value.trim(), oidc, ldap };
+  let smtp = null;
+  if ($("smail").checked) {
+    smtp = { url: $("smailurl").value.trim(), user: $("smailuser").value.trim(), from: $("smailfrom").value.trim() };
+    // The password is never sent back: left empty, the one set stays.
+    if ($("smailpw").value) smtp.password = $("smailpw").value;
+  }
+  const body = { name: $("sname").value.trim(), logo: S.logo, brand: $("sbrand").checked, relay: $("srelay").value.trim(), oidc, ldap, smtp };
   $("ssave").disabled = true;
   try {
     await api("PUT", "api/admin/settings", body);
-    await Promise.all([load.settings(), load.me()]);
+    await Promise.all([load.settings(), load.me(), loadOptions()]);
     fillSettings();
     brand();
     renderMe();
@@ -1288,6 +1337,7 @@ function signinLabels() {
   $("signtitle").textContent = appNonce ? T("Sign in to the team for SSH Remote") : T("Sign in to the team console");
   $("signsub").textContent = appNonce ? T("The SSH Remote app that opened this page is signed in with you.") : (S.team?.name || "");
   $("ldaphint").hidden = !S.options.ldap;
+  $("forgotrow").hidden = !S.options.mail;
   $("ssobox").hidden = !S.options.oidc || !appNonceOk;
   $("sso").href = base + "api/oidc/start" + (appNonce ? "?app=" + enc(appNonce) + "&port=" + appPort : "");
   // The session that comes back in the address is taken only by the tab that went for it.
@@ -1301,7 +1351,7 @@ function showSignin(note) {
   $("boot").hidden = $("app").hidden = true;
   $("signin").hidden = false;
   $("signform").hidden = false;
-  $("appdone").hidden = $("handoff").hidden = true;
+  $("appdone").hidden = $("handoff").hidden = $("resetbox").hidden = $("linkbox").hidden = true;
   $("signnote").textContent = note || "";
   $("lerror").textContent = "";
   $("coderow").hidden = true;
@@ -1314,6 +1364,61 @@ function showSignin(note) {
   }
   ($("lname").value ? $("lpw") : $("lname")).focus();
 }
+// A forgotten password: the name or email address, and a link goes to the account's email.
+function showReset() {
+  $("signform").hidden = true;
+  $("resetbox").hidden = false;
+  $("resetnote").textContent = $("reseterror").textContent = "";
+  if ($("lname").value && !$("rname").value) $("rname").value = $("lname").value;
+  $("rname").focus();
+}
+$("forgot").onclick = showReset;
+$("resetback").onclick = () => showSignin("");
+$("resetform").onsubmit = async e => {
+  e.preventDefault();
+  $("resetnote").textContent = $("reseterror").textContent = "";
+  $("resetgo").disabled = true;
+  try {
+    await api("POST", "api/reset", { name: $("rname").value.trim() });
+    // The same answer whether there is such an account or not.
+    $("resetnote").textContent = T("If that account has an email address, a link to set a new password is on its way.");
+  } catch (err) { $("reseterror").textContent = err.message; } finally { $("resetgo").disabled = false; }
+};
+// A link from an email: whose it is, then their new password twice.
+let linkToken = "";
+async function showLink(t) {
+  linkToken = t;
+  let got;
+  try { got = await api("GET", "api/link?token=" + enc(t)); } catch (err) { showSignin(err.message); return; }
+  $("boot").hidden = $("app").hidden = true;
+  $("signin").hidden = false;
+  $("signform").hidden = $("appdone").hidden = $("handoff").hidden = $("resetbox").hidden = true;
+  $("linkbox").hidden = false;
+  S.linkUser = got.user || "";
+  S.linkReset = !!got.reset;
+  linkLabels();
+  $("linkname").value = S.linkUser;
+  $("linkerror").textContent = "";
+  $("linkpw").focus();
+}
+function linkLabels() {
+  $("linktitle").textContent = S.linkReset ? T("Set a new password") : T("Set your password");
+  $("linksub").textContent = S.linkUser ? T("For the account {}.", S.linkUser) : "";
+}
+$("linkform").onsubmit = async e => {
+  e.preventDefault();
+  $("linkerror").textContent = "";
+  if ($("linkpw").value !== $("linkpw2").value) { $("linkerror").textContent = T("The two passwords are not the same."); $("linkpw2").focus(); return; }
+  $("linkgo").disabled = true;
+  try {
+    const r = await api("POST", "api/link", { token: linkToken, password: $("linkpw").value });
+    $("linkpw").value = $("linkpw2").value = "";
+    linkToken = "";
+    $("lname").value = r.user || S.linkUser;
+    $("lpw").value = "";
+    showSignin(T("Your password is set. Sign in now."));
+  } catch (err) { $("linkerror").textContent = err.message; } finally { $("linkgo").disabled = false; }
+};
 function showDone() {
   $("boot").hidden = $("app").hidden = true;
   $("signin").hidden = false;
@@ -1408,6 +1513,7 @@ function relabel() {
   labels();
   brand();
   signinLabels();
+  if (!$("linkbox").hidden) linkLabels();
   if (S.user) {
     renderMe();
     if (S.view === "settings" && S.loaded.has("settings")) settingsLabels();
@@ -1418,7 +1524,7 @@ function relabel() {
 // What the sign-in offers: single sign-on, the directory, the team's name and logo.
 function loadOptions() {
   return api("GET", "api/login-options").then(o => {
-    S.options = { oidc: !!o.oidc, ldap: !!o.ldap };
+    S.options = { oidc: !!o.oidc, ldap: !!o.ldap, mail: !!o.mail };
     if (o.team) S.team = o.team;
   }, () => { /* an older server: passwords only */ });
 }
@@ -1428,7 +1534,9 @@ async function boot() {
   let note = "";
   const frag = location.hash;
   const m = /^#session=([^&]+)/.exec(frag), bad = /^#error=(.+)$/.exec(frag), hand = /^#handoff=([A-Za-z0-9]+)$/.exec(frag);
-  if (m || bad || hand) history.replaceState(null, "", location.pathname + location.search);
+  // A link from an email to set a password: "#link=TOKEN".
+  const link = /^#link=([0-9a-f]{64})$/i.exec(frag);
+  if (m || bad || hand || link) history.replaceState(null, "", location.pathname + location.search);
   // Only in the tab that went for it: a link with someone else's session signs nobody in as them.
   let begun = false;
   try { begun = sessionStorage.getItem("sso-begun") === "1"; sessionStorage.removeItem("sso-begun"); } catch { /* none kept */ }
@@ -1440,6 +1548,7 @@ async function boot() {
   brand();
   if (bad) { try { note = said(decodeURIComponent(bad[1])); } catch { note = bad[1]; } }
   if (hand && appNonce && appNonceOk) { showHandoff(hand[1]); return; }
+  if (link && !appNonce) { await showLink(link[1].toLowerCase()); return; }
   if (!appNonce && token) {
     try { await enter(); return; } catch (e) {
       if (e.status === 401 || e.status === 403) setToken("");

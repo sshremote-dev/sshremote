@@ -305,12 +305,63 @@ struct Oidc {
     trust_email: bool,
 }
 
+/// Where the team's email goes out: `smtps://HOST[:PORT]`, or `smtp://HOST[:PORT]` with STARTTLS
+/// (plain only to this computer's own mail server).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Smtp {
+    url: String,
+    user: String,
+    password: String,
+    /// The sender's address.
+    from: String,
+}
+
+/// A link sent by email to set a password: an invitation, or a new password for a forgotten one.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Link {
+    user: String,
+    expires: u64,
+    reset: bool,
+}
+
+/// How long an invitation's link works; a new password's.
+const INVITE_SECS: u64 = 7 * 86_400;
+const RESET_SECS: u64 = 3600;
+
+/// An email address as one goes in a mail's envelope and headers: nothing that could add a line.
+fn mail_ok(a: &str) -> bool {
+    let a = a.trim();
+    a.len() <= 254 && a.split_once('@').is_some_and(|(l, d)| !l.is_empty() && d.contains('.') && !d.starts_with('.')) && a.chars().all(|c| c.is_ascii_graphic() && !"<>()[],;:\\\"".contains(c))
+}
+
+/// A header's words, in UTF-8 as RFC 2047 says.
+fn mail_words(s: &str) -> String {
+    use base64::Engine;
+    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        s.to_string()
+    } else {
+        format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(s))
+    }
+}
+
+/// A time as a mail's Date header has it (RFC 5322), in UTC.
+fn mail_date(secs: u64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let t = utc(secs);
+    let (y, m, d) = (&t[0..4], t[5..7].parse::<usize>().unwrap_or(1), t[8..10].trim_start_matches('0'));
+    format!("{}, {d} {} {y} {} +0000", DAYS[(secs / 86_400 % 7) as usize], MONTHS[m.saturating_sub(1).min(11)], &t[11..])
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Ldap {
     url: String,
     /// The DN a name binds as, `{}` standing for the name.
     user_dn: String,
     make_users: bool,
+    /// The certificate (PEM, on this server) of the authority that signed the directory's own,
+    /// for one the system does not know (an organization's own); empty: the system's.
+    ca_file: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -318,8 +369,14 @@ struct Store {
     name: String,
     logo: String,
     relay: String,
+    /// The team's computers show its name and logo as the app's own (in the window's title and
+    /// the task bar), as an app made for the team would.
+    brand: bool,
     oidc: Option<Oidc>,
     ldap: Option<Ldap>,
+    smtp: Option<Smtp>,
+    /// Links sent by email to set a password, by the hash of their token.
+    links: BTreeMap<String, Link>,
     users: BTreeMap<String, User>,
     groups: BTreeSet<String>,
     device_groups: BTreeMap<String, Policy>,
@@ -338,8 +395,11 @@ impl Store {
             "name": self.name,
             "logo": self.logo,
             "relay": self.relay,
+            "brand": self.brand,
             "oidc": self.oidc.as_ref().map(|o| json!({"issuer": o.issuer, "client_id": o.client_id, "client_secret": o.client_secret, "domains": o.domains, "make_users": o.make_users, "trust_email": o.trust_email})),
-            "ldap": self.ldap.as_ref().map(|l| json!({"url": l.url, "user_dn": l.user_dn, "make_users": l.make_users})),
+            "ldap": self.ldap.as_ref().map(|l| json!({"url": l.url, "user_dn": l.user_dn, "make_users": l.make_users, "ca_file": l.ca_file})),
+            "smtp": self.smtp.as_ref().map(|m| json!({"url": m.url, "user": m.user, "password": m.password, "from": m.from})),
+            "links": self.links.iter().filter(|(_, l)| l.expires > now).map(|(h, l)| json!({"hash": h, "user": l.user, "expires": l.expires, "reset": l.reset})).collect::<Vec<_>>(),
             "users": self.users.values().map(User::stored).collect::<Vec<_>>(),
             "groups": self.groups,
             "device_groups": self.device_groups.iter().map(|(n, p)| json!({"name": n, "policy": p.json()})).collect::<Vec<_>>(),
@@ -356,14 +416,23 @@ impl Store {
             name: v["name"].as_str().unwrap_or("Team").to_string(),
             logo: st(v, "logo"),
             relay: st(v, "relay"),
+            brand: v["brand"].as_bool().unwrap_or(false),
             oidc: v["oidc"].as_object().map(|_| {
                 let o = &v["oidc"];
                 Oidc { issuer: st(o, "issuer"), client_id: st(o, "client_id"), client_secret: st(o, "client_secret"), domains: strings(&o["domains"]), make_users: o["make_users"].as_bool().unwrap_or(false), trust_email: o["trust_email"].as_bool().unwrap_or(false) }
             }),
             ldap: v["ldap"].as_object().map(|_| {
                 let l = &v["ldap"];
-                Ldap { url: st(l, "url"), user_dn: st(l, "user_dn"), make_users: l["make_users"].as_bool().unwrap_or(false) }
+                Ldap { url: st(l, "url"), user_dn: st(l, "user_dn"), make_users: l["make_users"].as_bool().unwrap_or(false), ca_file: st(l, "ca_file") }
             }),
+            smtp: v["smtp"].as_object().map(|_| {
+                let m = &v["smtp"];
+                Smtp { url: st(m, "url"), user: st(m, "user"), password: st(m, "password"), from: st(m, "from") }
+            }),
+            links: list("links")
+                .iter()
+                .filter_map(|l| Some((l["hash"].as_str()?.to_string(), Link { user: st(l, "user"), expires: l["expires"].as_u64()?, reset: l["reset"].as_bool().unwrap_or(false) })))
+                .collect(),
             users: list("users").iter().filter_map(User::read).map(|u| (u.name.clone(), u)).collect(),
             groups: strings(&v["groups"]).into_iter().collect(),
             device_groups: list("device_groups").iter().filter_map(|g| Some((g["name"].as_str()?.to_string(), Policy::from_json(&g["policy"])))).collect(),
@@ -619,11 +688,159 @@ impl Team {
     }
 
     fn team_json(&self, s: &Store) -> Value {
-        json!({"name": s.name, "logo": s.logo, "relay": s.relay, "url": self.url})
+        json!({"name": s.name, "logo": s.logo, "relay": s.relay, "url": self.url, "brand": s.brand})
     }
 
     fn redirect_uri(&self) -> String {
         format!("{}/api/oidc/callback", self.url)
+    }
+
+    /// One email out through the team's mail server (curl's SMTP: its password in the config
+    /// on stdin, the message in a file of this server's own).
+    fn send_mail(&self, m: &Smtp, team: &str, to: &str, subject: &str, body: &str) -> Result<(), String> {
+        if !mail_ok(to) || !mail_ok(&m.from) {
+            return Err("an email address is not one".into());
+        }
+        let host = m.url.split_once("://").map_or("", |(_, r)| r.split([':', '/']).next().unwrap_or(""));
+        let local = host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        let id = format!("<{}@{}>", super::new_secret(), m.from.rsplit_once('@').map_or("team", |(_, d)| d));
+        let message = format!(
+            "From: {} <{}>\r\nTo: <{to}>\r\nSubject: {}\r\nDate: {}\r\nMessage-ID: {id}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}\r\n",
+            mail_words(team),
+            m.from,
+            mail_words(subject),
+            mail_date(now()),
+            body.replace("\r\n", "\n").replace('\n', "\r\n")
+        );
+        let file = self.dir.join(format!("mail-{}.eml", super::new_secret()));
+        crate::sys::write_whole(&file, message.as_bytes(), true, false).map_err(|e| e.to_string())?;
+        let bad = || "a control character in the mail settings".to_string();
+        let mut config = format!(
+            "url = {}\nmail-from = {}\nmail-rcpt = {}\nupload-file = {}\n",
+            curl_text(&m.url).ok_or_else(bad)?,
+            curl_text(&m.from).ok_or_else(bad)?,
+            curl_text(to).ok_or_else(bad)?,
+            curl_text(&file.to_string_lossy()).ok_or_else(bad)?
+        );
+        if !m.user.is_empty() {
+            config.push_str(&format!("user = {}\n", curl_text(&format!("{}:{}", m.user, m.password)).ok_or_else(bad)?));
+        }
+        // STARTTLS on smtp://, but for the mail server on this computer.
+        if m.url.starts_with("smtp://") && !local {
+            config.push_str("ssl-reqd\n");
+        }
+        let out = run_curl(&["-sS", "--max-time", "30", "--proto", "=smtp,smtps"], &config);
+        let _ = std::fs::remove_file(&file);
+        let out = out?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim().to_string())
+        }
+    }
+
+    /// A link to set `user`'s password, made and sent to their email address.
+    fn mail_link(&self, user: &str, reset: bool, by: Option<&str>) -> Result<(), Answer> {
+        let (m, u, team) = {
+            let s = self.store();
+            let Some(m) = s.smtp.clone() else { return Err(fail(400, "the team has no mail server set up (Settings, Email)")) };
+            let Some(u) = s.users.get(user).cloned() else { return Err(fail(404, "there is no such user")) };
+            (m, u, s.name.clone())
+        };
+        if !mail_ok(&u.email) {
+            return Err(fail(400, "this person has no email address"));
+        }
+        let token = super::new_secret();
+        let link = format!("{}/#link={token}", self.url);
+        let (subject, body) = if reset {
+            (
+                format!("A new password for {team}"),
+                format!(
+                    "Hello {},\n\nSomeone asked for a new password for your account {} in {team}. If it was you, set it here (the link works for an hour):\n\n{link}\n\nIf not, there is nothing to do: your password stays as it is.\n",
+                    u.display, u.name
+                ),
+            )
+        } else {
+            (
+                format!("You are invited to {team}"),
+                format!(
+                    "Hello {},\n\n{} invited you to {team}, the team for SSH Remote. Set your password here (the link works for a week):\n\n{link}\n\nThen sign in as {} in SSH Remote: Settings, Team, with the team's address {}.\n",
+                    u.display,
+                    by.unwrap_or("Its administrator"),
+                    u.name,
+                    self.url
+                ),
+            )
+        };
+        {
+            let mut s = self.store();
+            let now = now();
+            s.links.retain(|_, l| l.expires > now && !(l.user == u.name && l.reset == reset));
+            s.links.insert(secret_hash(&token), Link { user: u.name.clone(), expires: now + if reset { RESET_SECS } else { INVITE_SECS }, reset });
+            self.saved(&s)?;
+        }
+        self.send_mail(&m, &team, &u.email, &subject, &body).map_err(|e| {
+            eprintln!("team: mail to {}: {e}", u.email);
+            fail(502, "the mail server did not take the email: see the team server's log")
+        })?;
+        self.audit(&[json!({"time": now(), "kind": if reset { "reset" } else { "invite" }, "user": u.name, "words": by})]);
+        Ok(())
+    }
+
+    /// `POST /api/reset {"name"}` (a name or an email address): a link to set a new password,
+    /// if that account has a password and an email address. The answer is the same either way.
+    fn reset(&self, req: &Req) -> Reply {
+        let v = req.json()?;
+        let asked = v["name"].as_str().unwrap_or("").trim().to_string();
+        let user = {
+            let s = self.store();
+            s.user(&asked).or_else(|| s.users.values().find(|u| !u.email.is_empty() && u.email.eq_ignore_ascii_case(&asked))).filter(|u| !u.password.is_empty() && !u.disabled && s.smtp.is_some()).map(|u| u.name.clone())
+        };
+        // Asks counted apart from sign-ins (a few here do not lock an office out of signing in):
+        // from one address, and at one account however it was named.
+        if !self.try_as(&format!("reset:{}", address_key(req.who)), MOST_TRIES) {
+            return Err(fail(429, "too many tries from this address: try again in 15 minutes"));
+        }
+        let account = format!("mail:{}", user.as_deref().unwrap_or(&asked).to_lowercase());
+        if !self.try_as(&account, 3) {
+            return Err(fail(429, "too many asks for this account: try again in 15 minutes"));
+        }
+        if let Some(name) = user {
+            let _ = self.mail_link(&name, true, None);
+        }
+        Ok(ok(json!({"sent": true})))
+    }
+
+    /// `GET /api/link?token=T`: whose a link is, while it works; `POST /api/link {"token",
+    /// "password"}`: their new password, the link used up.
+    fn link(&self, req: &Req, method: &str) -> Reply {
+        let (token, password) = if method == "POST" {
+            let v = req.json()?;
+            (v["token"].as_str().unwrap_or("").to_string(), Some(v["password"].as_str().unwrap_or("").to_string()))
+        } else {
+            (req.q("token").to_string(), None)
+        };
+        let hash = secret_hash(&token);
+        let now = now();
+        let gone = || fail(404, "this link has run out or was used already: ask for another");
+        let Some(l) = self.store().links.get(&hash).filter(|l| l.expires > now).cloned() else { return Err(gone()) };
+        let Some(password) = password else { return Ok(ok(json!({"user": l.user, "reset": l.reset}))) };
+        if password.chars().count() < 8 {
+            return Err(fail(400, "a password has at least 8 characters"));
+        }
+        let hashed = super::password_hash(&password);
+        let mut s = self.store();
+        if s.links.remove(&hash).is_none() {
+            return Err(gone());
+        }
+        let Some(u) = s.users.get_mut(&l.user) else { return Err(gone()) };
+        u.password = hashed;
+        // Who knew the old one is out.
+        s.sessions.retain(|_, x| x.user != l.user);
+        self.saved(&s)?;
+        drop(s);
+        self.audit(&[json!({"time": now, "kind": "password", "user": l.user, "from": req.who.to_string()})]);
+        Ok(ok(json!({"user": l.user})))
     }
 
     fn book_file(&self, name: &str) -> PathBuf {
@@ -1108,9 +1325,11 @@ fn route(team: &Team, req: &Req) -> Answer {
         // What the sign-in page offers, before anyone is signed in.
         ("GET", "/api/login-options") => {
             let s = team.store();
-            Ok(ok(json!({"oidc": s.oidc.is_some(), "ldap": s.ldap.is_some(), "team": team.team_json(&s)})))
+            Ok(ok(json!({"oidc": s.oidc.is_some(), "ldap": s.ldap.is_some(), "mail": s.smtp.is_some(), "team": team.team_json(&s)})))
         }
         ("POST", "/api/login") => team.login(req),
+        ("POST", "/api/reset") => team.reset(req),
+        ("GET" | "POST", "/api/link") => team.link(req, method),
         ("POST", "/api/logout") => team.person(req).map(|(hash, _)| {
             let mut s = team.store();
             s.sessions.remove(&hash);
@@ -1228,14 +1447,14 @@ impl Team {
                     return Err(Wrong::Guess);
                 };
                 let as_name = found.as_ref().map_or(name, |u| u.name.as_str()).to_string();
-                match ldap_check(&l, &as_name, password) {
-                    Ok(true) => {}
-                    Ok(false) => return Err(Wrong::Guess),
+                let (display, email) = match ldap_check(&l, &as_name, password) {
+                    Ok(Some(said)) => said,
+                    Ok(None) => return Err(Wrong::Guess),
                     Err(e) => {
                         eprintln!("team: LDAP: {e}");
                         return Err(Wrong::Unreachable);
                     }
-                }
+                };
                 match found {
                     Some(u) => (u, "ldap"),
                     None if l.make_users => {
@@ -1243,7 +1462,10 @@ impl Team {
                         let u = match s.user(&as_name) {
                             Some(u) => u.clone(),
                             None => {
-                                let u = User { name: as_name.clone(), display: as_name.clone(), ..User::default() };
+                                // Its name and email as the directory has them.
+                                let display = if display.is_empty() { as_name.clone() } else { display };
+                                let email = if email.contains('@') { email } else { String::new() };
+                                let u = User { name: as_name.clone(), display, email, ..User::default() };
                                 s.users.insert(as_name, u.clone());
                                 self.save(&s).map_err(|_| Wrong::Unreachable)?;
                                 u
@@ -1472,20 +1694,51 @@ fn ldap_escape(name: &str) -> String {
 
 /// Binds to the directory as `name` (and searches its base, as curl does with an LDAP address):
 /// whether it let them in, or an error when it did not answer.
-fn ldap_check(l: &Ldap, name: &str, password: &str) -> Result<bool, String> {
+/// Binds to the directory as `name` with `password`: Some(its display name and email, as far as
+/// its own entry says them) when that works, None when not.
+fn ldap_check(l: &Ldap, name: &str, password: &str) -> Result<Option<(String, String)>, String> {
     // An empty password binds as nobody on many directories, and that would let anyone in.
     if password.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let dn = l.user_dn.replace("{}", &ldap_escape(name));
-    let (Some(url), Some(user)) = (curl_text(&l.url), curl_text(&format!("{dn}:{password}"))) else { return Ok(false) };
-    let out = run_curl(&["-sS", "--max-time", "15", "--proto", "=ldap,ldaps"], &format!("url = {url}\nuser = {user}\n"))?;
-    match out.status.code() {
-        Some(0) => Ok(true),
-        // Not resolved, not connected, timed out, TLS: nothing was said about the password.
-        Some(6 | 7 | 28 | 35 | 60) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        _ => Ok(false),
+    let (Some(url), Some(user)) = (curl_text(&ldap_self_url(&l.url, &dn)), curl_text(&format!("{dn}:{password}"))) else { return Ok(None) };
+    let mut config = format!("url = {url}\nuser = {user}\n");
+    if let Some(ca) = Some(l.ca_file.as_str()).filter(|c| !c.is_empty()).and_then(curl_text) {
+        config.push_str(&format!("cacert = {ca}\n"));
     }
+    let out = run_curl(&["-sS", "--max-time", "15", "--proto", "=ldap,ldaps"], &config)?;
+    match out.status.code() {
+        // Bound as that person, and their own entry read (curl's lines: "\tcn: Ana Lee").
+        Some(0) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let attr = |k: &str| text.lines().find_map(|l| l.trim_start().strip_prefix(k)?.strip_prefix(": ").map(|v| clean(v, 128))).unwrap_or_default();
+            let display = Some(attr("displayName")).filter(|d| !d.is_empty()).unwrap_or_else(|| attr("cn"));
+            Ok(Some((display, attr("mail"))))
+        }
+        // Bound, though not let read even that: many directories let few read, and the bind
+        // alone is the proof.
+        Some(39) => Ok(Some((String::new(), String::new()))),
+        // Not resolved, not connected, timed out, TLS: nothing was said about the password.
+        Some(6 | 7 | 28 | 35 | 60) => Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("").trim().to_string()),
+        // Login denied (67), could not bind (38), and the rest.
+        _ => Ok(None),
+    }
+}
+
+/// The directory's address with the person's own entry as what is looked up, for their names:
+/// what a bound person may read even where the rest of the directory is closed to them.
+fn ldap_self_url(url: &str, dn: &str) -> String {
+    let server = url.split_once("://").map_or(url.len(), |(scheme, rest)| scheme.len() + 3 + rest.find('/').unwrap_or(rest.len()));
+    let mut enc = String::new();
+    for b in dn.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~,=".contains(&b) {
+            enc.push(b as char);
+        } else {
+            enc.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("{}/{enc}?cn,displayName,mail?base", &url[..server])
 }
 
 fn endpoint(d: &Value, k: &str) -> Result<String, String> {
@@ -1495,9 +1748,6 @@ fn endpoint(d: &Value, k: &str) -> Result<String, String> {
         .ok_or_else(|| format!("The identity provider's settings have no {k}."))
 }
 
-/// A person who came through the identity provider: by the subject linked before; else, for an
-/// email (not said to be unverified) in one of the team's domains, the person with that email or
-/// name, now linked, or a new one when the team makes them.
 /// Whether the provider vouches for the email address: `email_verified` true (or "true", as some
 /// send it); with `trust_email`, also when it says nothing of it. Never when it says false.
 fn email_verified(o: &Oidc, info: &Value) -> bool {
@@ -2151,6 +2401,25 @@ impl Team {
             }
             ("GET", "settings", None) => Ok(ok(self.settings(&self.store()))),
             ("PUT", "settings", None) => self.put_settings(req),
+            // An invitation to set a password, by email.
+            ("POST", "invite", None) => {
+                let v = req.json()?;
+                self.mail_link(v["name"].as_str().unwrap_or(""), false, Some(if me.display.is_empty() { &me.name } else { &me.display }))?;
+                Ok(ok(json!({"sent": true})))
+            }
+            ("POST", "mail-test", None) => {
+                let v = req.json()?;
+                let to = v["to"].as_str().filter(|t| !t.is_empty()).unwrap_or(&me.email).trim().to_string();
+                let s = self.store();
+                let (Some(m), team) = (s.smtp.clone(), s.name.clone()) else { return Err(fail(400, "the team has no mail server set up (Settings, Email)")) };
+                drop(s);
+                if !mail_ok(&to) {
+                    return Err(fail(400, "that is not an email address"));
+                }
+                let body = format!("This email came from the team server at {}: its email works.\n", self.url);
+                self.send_mail(&m, &team, &to, &format!("A test email from {team}"), &body).map_err(|e| fail(502, &format!("the mail server did not take the email ({})", clean(&e, 200))))?;
+                Ok(ok(json!({"sent": true})))
+            }
             _ => Err(fail(404, "no such request")),
         }
     }
@@ -2278,10 +2547,12 @@ impl Team {
             "name": s.name,
             "logo": s.logo,
             "relay": s.relay,
+            "brand": s.brand,
             "url": self.url,
             "redirect_uri": self.redirect_uri(),
             "oidc": s.oidc.as_ref().map(|o| json!({"issuer": o.issuer, "client_id": o.client_id, "client_secret_set": !o.client_secret.is_empty(), "domains": o.domains, "make_users": o.make_users, "trust_email": o.trust_email})),
-            "ldap": s.ldap.as_ref().map(|l| json!({"url": l.url, "user_dn": l.user_dn, "make_users": l.make_users})),
+            "ldap": s.ldap.as_ref().map(|l| json!({"url": l.url, "user_dn": l.user_dn, "make_users": l.make_users, "ca_file": l.ca_file})),
+            "smtp": s.smtp.as_ref().map(|m| json!({"url": m.url, "user": m.user, "password_set": !m.password.is_empty(), "from": m.from})),
         })
     }
 
@@ -2310,6 +2581,9 @@ impl Team {
             }
             s.relay = r.to_string();
         }
+        if let Some(b) = v["brand"].as_bool() {
+            s.brand = b;
+        }
         match v.get("oidc") {
             None => {}
             Some(Value::Null) => s.oidc = None,
@@ -2335,6 +2609,28 @@ impl Team {
                 s.oidc = Some(Oidc { issuer, client_id, client_secret, domains, make_users: o["make_users"].as_bool().unwrap_or(false), trust_email: o["trust_email"].as_bool().unwrap_or(false) });
             }
         }
+        match v.get("smtp") {
+            None => {}
+            Some(Value::Null) => s.smtp = None,
+            Some(m) => {
+                let url = st(m, "url").trim().trim_end_matches('/').to_string();
+                if !(url.starts_with("smtps://") || url.starts_with("smtp://")) || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                    return Err(fail(400, "the mail server's address is smtps://HOST or smtp://HOST:587"));
+                }
+                let from = st(m, "from").trim().to_string();
+                if !mail_ok(&from) {
+                    return Err(fail(400, "the sender is an email address, like team@example.com"));
+                }
+                let user = st(m, "user").trim().to_string();
+                // Never sent back: an empty one keeps the one there is.
+                let given = st(m, "password");
+                let password = if given.is_empty() { s.smtp.as_ref().map(|m| m.password.clone()).unwrap_or_default() } else { given };
+                if user.chars().chain(password.chars()).any(char::is_control) {
+                    return Err(fail(400, "the mail server's name or password has a control character"));
+                }
+                s.smtp = Some(Smtp { url, user, password, from });
+            }
+        }
         match v.get("ldap") {
             None => {}
             Some(Value::Null) => s.ldap = None,
@@ -2347,7 +2643,11 @@ impl Team {
                 if !user_dn.contains("{}") || user_dn.contains(':') || user_dn.chars().any(char::is_control) {
                     return Err(fail(400, "the user DN has {} where the name goes, like uid={},ou=people,dc=example,dc=com"));
                 }
-                s.ldap = Some(Ldap { url, user_dn, make_users: l["make_users"].as_bool().unwrap_or(false) });
+                let ca_file = st(l, "ca_file").trim().to_string();
+                if !ca_file.is_empty() && (!Path::new(&ca_file).is_absolute() || ca_file.chars().any(char::is_control) || !Path::new(&ca_file).is_file()) {
+                    return Err(fail(400, "the authority's certificate is a file on the team server: give its full path"));
+                }
+                s.ldap = Some(Ldap { url, user_dn, make_users: l["make_users"].as_bool().unwrap_or(false), ca_file });
             }
         }
         self.saved(&s)?;
@@ -2439,6 +2739,85 @@ mod tests {
     }
 
     /// A team server on a free port of this computer, with one administrator: ana.
+    /// A mail server of the test's own: each mail it takes (its envelope's recipient and its
+    /// text) comes out of the channel.
+    fn mail_server() -> (String, std::sync::mpsc::Receiver<(String, String)>) {
+        use std::io::BufRead;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("smtp://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for conn in l.incoming().flatten() {
+                let mut w = conn.try_clone().unwrap();
+                let mut r = BufReader::new(conn);
+                let _ = w.write_all(b"220 test\r\n");
+                let (mut to, mut line) = (String::new(), String::new());
+                while r.read_line(&mut line).unwrap_or(0) > 0 {
+                    let up = line.to_ascii_uppercase();
+                    let answer: &[u8] = if up.starts_with("EHLO") {
+                        b"250-test\r\n250 OK\r\n"
+                    } else if up.starts_with("RCPT TO:") {
+                        to = line[8..].trim().trim_matches(['<', '>']).to_string();
+                        b"250 OK\r\n"
+                    } else if up.starts_with("DATA") {
+                        let _ = w.write_all(b"354 go on\r\n");
+                        let mut text = String::new();
+                        let mut l2 = String::new();
+                        while r.read_line(&mut l2).unwrap_or(0) > 0 && l2 != ".\r\n" {
+                            text.push_str(&l2);
+                            l2.clear();
+                        }
+                        let _ = tx.send((to.clone(), text));
+                        b"250 taken\r\n"
+                    } else if up.starts_with("QUIT") {
+                        let _ = w.write_all(b"221 bye\r\n");
+                        break;
+                    } else {
+                        b"250 OK\r\n"
+                    };
+                    let _ = w.write_all(answer);
+                    line.clear();
+                }
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn invitations_and_new_passwords_go_by_email() {
+        let (url, team, _gone) = start("mail");
+        let (smtp, mails) = mail_server();
+        let admin = login(&url, "ana", "ana's password");
+        let api = |p: &str| format!("{url}{p}");
+        assert_eq!(call("POST", &api("/api/admin/invite"), Some(&admin), Some(json!({"name": "ana"}))).0, 400, "no mail server yet");
+        let (code, v) = call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"smtp": {"url": smtp, "from": "team@example.com", "user": "", "password": ""}})));
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(call("PUT", &api("/api/admin/settings"), Some(&admin), Some(json!({"smtp": {"url": smtp, "from": "x\r\nBcc: y@z.com"}}))).0, 400);
+        let (code, v) = call("POST", &api("/api/admin/users"), Some(&admin), Some(json!({"name": "mia", "display": "Mia Kova\u{10d}", "email": "mia@example.com"})));
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(call("POST", &api("/api/admin/invite"), Some(&admin), Some(json!({"name": "mia"}))).0, 200);
+        let (to, text) = mails.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(to, "mia@example.com");
+        assert!(text.contains("Subject: You are invited to Team\r\n") && text.contains("From: Team <team@example.com>\r\n") && text.contains("Hello Mia Kova\u{10d},"), "{text}");
+        let token = text.split("#link=").nth(1).unwrap()[..64].to_string();
+        // The link: whose it is, a password set once, and signing in with it.
+        assert_eq!(call("GET", &api(&format!("/api/link?token={token}")), None, None).1["user"], json!("mia"));
+        assert_eq!(call("POST", &api("/api/link"), None, Some(json!({"token": token, "password": "short"}))).0, 400);
+        assert_eq!(call("POST", &api("/api/link"), None, Some(json!({"token": token, "password": "mia's password"}))).0, 200);
+        assert_eq!(call("POST", &api("/api/link"), None, Some(json!({"token": token, "password": "another one"}))).0, 404);
+        login(&url, "mia", "mia's password");
+        // A forgotten one: the same answer for anyone, a mail only for an account that has an email.
+        assert_eq!(call("POST", &api("/api/reset"), None, Some(json!({"name": "nobody"}))).1, json!({"sent": true}));
+        assert_eq!(call("POST", &api("/api/reset"), None, Some(json!({"name": "MIA@example.com"}))).1, json!({"sent": true}));
+        let (to, text) = mails.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(to == "mia@example.com" && text.contains("Subject: A new password for Team\r\n"), "{text}");
+        assert!(mails.try_recv().is_err(), "nothing for nobody");
+        assert_eq!((mail_ok("a@b.co"), mail_ok("a b@c.com"), mail_ok("a@b"), mail_ok("<a@b.co>")), (true, false, false, false));
+        assert_eq!(mail_date(1_700_000_000), "Tue, 14 Nov 2023 22:13:20 +0000");
+        assert_eq!((mail_words("Team"), mail_words("\u{c9}quipe")), ("Team".to_string(), "=?UTF-8?B?w4lxdWlwZQ==?=".to_string()));
+        drop(team);
+    }
+
     fn start(what: &str) -> (String, Arc<Team>, Gone) {
         // Where the client keeps a request's body for curl.
         let _ = std::fs::create_dir_all(crate::hosts::config_dir().unwrap());
@@ -2887,6 +3266,8 @@ mod tests {
         assert_eq!((sso_path("https://team.example.com"), sso_path("https://example.com/team/")), ("/api/oidc/".to_string(), "/team/api/oidc/".to_string()));
         assert!(!url_ok("https://x'; rm -rf ~") && !url_ok("ftp://x") && !url_ok("https://"));
         assert_eq!(ldap_escape(" a,b+c:d#"), "\\ a\\,b\\+c\\3ad#");
+        assert_eq!(ldap_self_url("ldaps://dir.example.com:636/dc=example,dc=com", "uid=o'neil,ou=people,dc=example,dc=com"), "ldaps://dir.example.com:636/uid=o%27neil,ou=people,dc=example,dc=com?cn,displayName,mail?base");
+        assert_eq!(ldap_self_url("ldap://dir", "uid=a\\2cb"), "ldap://dir/uid=a%5C2cb?cn,displayName,mail?base");
         assert_eq!(ldap_escape("#x "), "\\#x\\ ");
     }
 }

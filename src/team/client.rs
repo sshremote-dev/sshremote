@@ -46,8 +46,21 @@ fn file() -> Option<PathBuf> {
 
 static CACHE: Mutex<Option<(std::time::Instant, State)>> = Mutex::new(None);
 
+#[cfg(test)]
+thread_local!(static TEST_STATE: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) });
+
+/// A made-up state in place of what is kept, for tests (the window's pictures): None puts it back.
+#[cfg(test)]
+pub fn set_test_state(s: Option<State>) {
+    TEST_STATE.with(|t| *t.borrow_mut() = s);
+}
+
 /// What is kept, read again at most once a second (the service and the window share it).
 pub fn state() -> State {
+    #[cfg(test)]
+    if let Some(s) = TEST_STATE.with(|t| t.borrow().clone()) {
+        return s;
+    }
     let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, s)) = c.as_ref()
         && at.elapsed() < std::time::Duration::from_secs(1)

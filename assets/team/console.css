@@ -305,3 +305,7 @@ dialog.dlg .acts { display: flex; justify-content: flex-end; flex-wrap: wrap; ga
 
 /* The authenticator's QR code: white around it in either theme, for the phone's camera. */
 img.qr { display: block; width: 192px; height: 192px; margin: 0 auto 12px; background: #fff; border-radius: 8px; image-rendering: pixelated; }
+.forgot { margin: 14px 0 0; text-align: center; }
+.linkish { background: none; border: 0; padding: 2px 4px; color: var(--accent); cursor: pointer; font-size: 13px; border-radius: 4px; }
+.linkish:hover { text-decoration: underline; }
+.linkish:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
