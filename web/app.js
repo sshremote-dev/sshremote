@@ -446,8 +446,11 @@ $("lang").append(icon("globe"));
 $("lang").onclick = () => {
   const chosen = chosenLang();
   const pick = code => { store.set("lang", code || null); useLang(code || browserLang()).then(relabel); };
+  const now = chosen || browserLang();
+  // Machine translated and reviewed twice: those who speak the language put it right.
+  const improve = now && now !== "en" ? [null, [T("Improve this translation"), () => window.open("https://github.com/sshremote-dev/sshremote/issues/new?template=translation.yml&language=" + encodeURIComponent(now), "_blank", "noopener")]] : [];
   menu([[T("The system's ({})", langName(browserLang())), () => pick(""), { on: !chosen }], null,
-    ...LANGS.map(([code, name]) => [name, () => pick(code), { on: chosen === code, lang: code }])], $("lang"));
+    ...LANGS.map(([code, name]) => [name, () => pick(code), { on: chosen === code, lang: code }]), ...improve], $("lang"));
 };
 
 // The words of the open page drawn here rather than in its HTML; again when the language changes.

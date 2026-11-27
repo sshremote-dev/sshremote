@@ -1203,6 +1203,11 @@ fn language_row(ui: &mut egui::Ui) {
                 ui.ctx().request_repaint();
             }
         });
+        // Machine translated and reviewed twice: those who speak the language put it right.
+        if lang::current() != "en" {
+            let url = format!("https://github.com/sshremote-dev/sshremote/issues/new?template=translation.yml&language={}", lang::current());
+            ui.hyperlink_to(t!("Improve this translation"), url);
+        }
     });
 }
 
