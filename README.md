@@ -36,12 +36,17 @@ It needs nothing on the server but the same single file, started over the SSH yo
   sealed end to end (SPAKE2, ChaCha20-Poly1305) through a relay that only copies bytes, straight
   past it when hole punching finds a path. Also from a browser at
   [web.sshremote.dev](https://web.sshremote.dev).
+- **Teams.** A team server of your own: sign-in with a password and an authenticator (with backup
+  codes), OpenID Connect or LDAP; who may reach which computers and with what rights; policies per
+  group of computers; shared address books; an audit log with API tokens for scripts; and silent
+  Windows installs (MSI) that join the team.
 - **The SSH chores.** Keys made, copied and installed, passwords in the system's password store,
   tunnels (local, remote, SOCKS), and a passphrase-protected backup of your computers and `~/.ssh`.
 - **Extensions.** Panels, commands, styles, scripts and programs from a signed registry, each held
   to the permissions it names.
 
-Hosts: Windows, macOS, and Linux with GNOME, KDE Plasma, Sway, Hyprland, COSMIC or any X11 desktop.
+Hosts: Windows (also 32-bit), macOS, and Linux with GNOME, KDE Plasma, Sway, Hyprland, COSMIC or any
+X11 desktop, or none at all (a server with no monitor starts a desktop of its own for the viewer).
 Viewers: the native window (Windows, macOS, Linux), a terminal that shows pictures, or a browser.
 
 ## Install
@@ -576,7 +581,8 @@ which joins by itself); people sign in with a password and an authenticator code
 Connect, or against LDAP. A web console sets who may reach which computers and with what rights,
 the policy each group of computers keeps (team members only or passwords too, asking, rights,
 recording, idle end, straight connections), enrollment tokens and installers, the team's name,
-logo and relay, and shows the audit log of every session (CSV too).
+logo and relay, address books shared with groups or people, API tokens for scripts, and the audit
+log of every session, sign-in and change (CSV too).
 
 A signed-in person opens a team computer with no password: the server gives a ticket for five
 minutes, bound to the person's own device, and the computer checks it with a key only it and the
