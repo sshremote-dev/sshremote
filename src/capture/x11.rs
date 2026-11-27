@@ -471,6 +471,13 @@ impl X11 {
 }
 
 impl Capture for X11 {
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        let id = self.property(self.root, self.atoms._NET_ACTIVE_WINDOW, xproto::AtomEnum::WINDOW.into()).and_then(|p| p.value32().and_then(|mut v| v.next())).filter(|w| *w != 0)?;
+        let g = self.conn.get_geometry(id).ok()?.reply().ok()?;
+        let t = self.conn.translate_coordinates(id, self.root, 0, 0).ok()?.reply().ok()?;
+        Some((id as u64, (t.dst_x as i32 + g.width as i32 / 2, t.dst_y as i32 + g.height as i32 / 2)))
+    }
+
     fn name(&self) -> &'static str {
         "x11"
     }
@@ -718,6 +725,16 @@ impl Capture for X11 {
 
 #[cfg(test)]
 mod tests {
+    /// Run alone on an X display with a window manager (`DISPLAY`): prints the window in front's
+    /// middle, for comparing with `xdotool getactivewindow getwindowgeometry`.
+    #[test]
+    #[ignore]
+    fn the_window_in_front_is_found() {
+        let cap = X11::open().unwrap();
+        let (id, (x, y)) = cap.focused().expect("a window in front");
+        println!("focused 0x{id:x} middle {x},{y}");
+    }
+
     use super::*;
 
     /// A real X server (Xvfb, or the desktop's): its screen read, a pointer moved there and a key

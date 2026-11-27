@@ -695,6 +695,8 @@ fn serve_with(
     // When the viewer was last told its click fell outside the shared window (not before boot:
     // an `Instant` a minute back does not exist on a Windows host up for less than that).
     let mut told_outside: Option<Instant> = None;
+    // The window in front when last looked at (twice a second), for the viewer to follow.
+    let mut focus: (Option<u64>, Instant) = (None, Instant::now());
     // Keys an accessibility action leaves to be typed, handled like the viewer's own.
     let mut queued: Vec<ToAgent> = Vec::new();
     let mut outbox = crate::files::Outbox::default();
@@ -1467,6 +1469,15 @@ fn serve_with(
         }
         for m in ports.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
+        }
+        if focus.1.elapsed() > Duration::from_millis(500) {
+            focus.1 = Instant::now();
+            if let Some((id, (x, y))) = cap.focused()
+                && focus.0 != Some(id)
+            {
+                focus.0 = Some(id);
+                send(enc, &ToClient::FocusAt { x, y }).map_err(io_err)?;
+            }
         }
         match clip.poll() {
             Some(crate::clip::Copied::Text(text)) if allowed & crate::grant::CLIPBOARD != 0 && clip_way() != WAY_IN => {

@@ -93,6 +93,8 @@ pub(super) struct Remote {
     /// and when the monitor last changed (the agent says a moment late where the pointer is).
     pub(in crate::gui) follow_screens: bool,
     pointer_desk: Option<((i32, i32), usize)>,
+    /// The window in front there was heard of (the first time is where it is, not a change).
+    focus_heard: bool,
     screen_changed: Option<std::time::Instant>,
     /// Remote access there runs without administrator rights (`ToClient::Unelevated`); and
     /// whether they were asked for already.
@@ -403,6 +405,7 @@ impl Remote {
             follow: crate::hosts::setting("follow_pointer").is_none_or(|v| v != "no"),
             follow_screens: crate::hosts::setting("follow_screens").is_some_and(|v| v == "yes"),
             pointer_desk: None,
+            focus_heard: false,
             screen_changed: None,
             followed: None,
             unelevated: false,
@@ -579,6 +582,20 @@ impl Remote {
         self.chosen_monitor = Some(i as u8);
         self.screen_changed = Some(std::time::Instant::now());
         self.send(ToAgent::SelectMonitor(i as u8))
+    }
+
+    /// The monitor there of the window that came in front at `at` (the host's desktop), when it
+    /// is another than the one shown and the picture follows.
+    fn focus_followed(&mut self, at: (i32, i32)) -> Option<usize> {
+        let first = !std::mem::replace(&mut self.focus_heard, true);
+        if first || !self.follow_screens || self.spread_asked || self.beside_asked || self.screen_changed.is_some_and(|t| t.elapsed().as_secs_f32() < 1.5) {
+            return None;
+        }
+        let inside = |m: &crate::proto::MonitorInfo| m.at.is_some_and(|(mx, my)| at.0 >= mx && at.1 >= my && at.0 < mx + m.w as i32 && at.1 < my + m.h as i32);
+        if self.monitors.get(self.monitor).is_some_and(inside) {
+            return None;
+        }
+        self.monitors.iter().position(|m| !m.camera() && inside(m))
     }
 
     /// The monitor there that the pointer moved onto, when it moved there by itself (the viewer
@@ -876,6 +893,11 @@ impl Remote {
                         None => self.pointer_tex = Some((ctx.load_texture("remote-pointer", img, TextureOptions::LINEAR), size, hot)),
                     }
                     ctx.request_repaint();
+                }
+                Ok(Ev::Net(ToClient::FocusAt { x, y })) => {
+                    if let Some(i) = self.focus_followed((x, y)) {
+                        self.show_monitor(i)?;
+                    }
                 }
                 Ok(Ev::Net(ToClient::PointerAt(at))) => {
                     self.host_pointer = at;

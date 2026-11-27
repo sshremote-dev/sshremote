@@ -633,6 +633,19 @@ impl Drop for Gdi {
 }
 
 impl Capture for Gdi {
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        let h = super::winlist::foreground();
+        if h.is_null() {
+            return None;
+        }
+        let mut rc: RECT = unsafe { std::mem::zeroed() };
+        // SAFETY: a window handle and a rectangle to fill.
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(h, &mut rc) } == 0 {
+            return None;
+        }
+        Some((h as u64, ((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2)))
+    }
+
     fn name(&self) -> &'static str {
         "windows"
     }

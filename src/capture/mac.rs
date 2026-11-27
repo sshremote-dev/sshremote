@@ -1285,7 +1285,10 @@ impl Capture for Mac {
 
     fn monitors(&self) -> Vec<Monitor> {
         let main = CGMainDisplayID();
-        self.displays.iter().enumerate().map(|(i, d)| Monitor { name: format!("display {}", i + 1), w: d.pixels.0, h: d.pixels.1, primary: d.id == main, at: Some((d.at.0 as i32, d.at.1 as i32)) }).collect()
+        // Where each lies in pixels, as its size and the pointer are (macOS places displays in
+        // points): by each one's own scale, so a Retina display's neighbours do not overlap it.
+        let px = |d: &Display| ((d.at.0 * d.pixels.0 as f64 / d.points.0).round() as i32, (d.at.1 * d.pixels.1 as f64 / d.points.1).round() as i32);
+        self.displays.iter().enumerate().map(|(i, d)| Monitor { name: format!("display {}", i + 1), w: d.pixels.0, h: d.pixels.1, primary: d.id == main, at: Some(px(d)) }).collect()
     }
 
     fn current(&self) -> usize {
@@ -1343,6 +1346,16 @@ impl Capture for Mac {
     fn origin(&self) -> (i32, i32) {
         let a = &self.area;
         ((a.at.0 * a.pixels.0 as f64 / a.points.0) as i32, (a.at.1 * a.pixels.1 as f64 / a.points.1) as i32)
+    }
+
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        let me = std::process::id() as i32;
+        let w = listed(None).into_iter().find(|w| w.layer == 0 && w.pid != me && w.rect.size.width >= 40.0 && w.rect.size.height >= 40.0)?;
+        let mid = (w.rect.origin.x + w.rect.size.width / 2.0, w.rect.origin.y + w.rect.size.height / 2.0);
+        // In pixels by the scale of the display it is on, as `monitors` places them.
+        let d = self.displays.iter().find(|d| mid.0 >= d.at.0 && mid.1 >= d.at.1 && mid.0 < d.at.0 + d.points.0 && mid.1 < d.at.1 + d.points.1)?;
+        let k = (d.pixels.0 as f64 / d.points.0, d.pixels.1 as f64 / d.points.1);
+        Some((w.id as u64, ((mid.0 * k.0).round() as i32, (mid.1 * k.1).round() as i32)))
     }
 
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {

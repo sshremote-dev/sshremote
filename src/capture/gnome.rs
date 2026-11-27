@@ -102,6 +102,8 @@ pub struct Gnome {
     /// The helper's interface, made once without a property cache: it is asked several times a
     /// second while a program is shared.
     helper: std::sync::OnceLock<Proxy<'static>>,
+    /// The helper did not answer when the window in front was asked: not asked again.
+    no_helper: std::sync::atomic::AtomicBool,
     /// What was typed last, text (true) or keys, and when (`settle`).
     last_typed: Option<(bool, std::time::Instant)>,
     /// What the stream read calls as something comes (`Capture::set_waker`).
@@ -577,6 +579,7 @@ impl Gnome {
             checked_alive: std::time::Instant::now(),
             ended: false,
             helper: std::sync::OnceLock::new(),
+            no_helper: std::sync::atomic::AtomicBool::new(false),
             last_typed: None,
             wake: Default::default(),
         })
@@ -979,6 +982,21 @@ fn helper_dir() -> std::path::PathBuf {
 }
 
 impl Capture for Gnome {
+    /// Through the helper extension, where it runs (GNOME tells no other program).
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.no_helper.load(Relaxed) {
+            return None;
+        }
+        match self.helper_list() {
+            Ok(list) => list.iter().find(|w| w.9).map(|w| (w.0, (w.3 + w.5 / 2, w.4 + w.6 / 2))),
+            Err(_) => {
+                self.no_helper.store(true, Relaxed);
+                None
+            }
+        }
+    }
+
     fn name(&self) -> &'static str {
         "gnome"
     }

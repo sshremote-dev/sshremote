@@ -225,6 +225,9 @@ impl Capture for WithCameras {
     fn pointer_apart(&mut self, on: bool) -> bool {
         self.screen.pointer_apart(on)
     }
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        self.screen.focused()
+    }
     fn pointer(&mut self) -> (Option<super::Pointer>, Option<(i32, i32)>) {
         // A camera's picture has no pointer over it.
         if self.cam.is_some() { (None, None) } else { self.screen.pointer() }

@@ -341,8 +341,8 @@ impl Remote {
             }
             let mut screens = self.follow_screens;
             if ui
-                .checkbox(&mut screens, t!("Go to the monitor the pointer goes to"))
-                .on_hover_text(t!("With several monitors there, the picture changes to the one the person there or a program moves the pointer onto"))
+                .checkbox(&mut screens, t!("Follow the pointer and the window in front to their monitor"))
+                .on_hover_text(t!("With several monitors there, the picture changes to the one the person there or a program moves the pointer onto, or brings a window forward on"))
                 .changed()
             {
                 self.follow_screens = screens;

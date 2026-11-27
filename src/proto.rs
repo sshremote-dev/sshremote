@@ -529,6 +529,9 @@ pub enum ToClient {
     /// as administrator and Windows' security prompts are out of reach until its person allows
     /// them (`ToAgent::AskElevation`).
     Unelevated,
+    /// Another window came in front there, its middle at this place on the host's desktop (the
+    /// monitors' coordinates): a viewer that follows it goes to its monitor.
+    FocusAt { x: i32, y: i32 },
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
     /// Something printed on the host to SSH Remote's printer, a PDF of `size` bytes at `path`
@@ -1300,6 +1303,11 @@ impl ToClient {
                 144
             }
             ToClient::Unelevated => 146,
+            ToClient::FocusAt { x, y } => {
+                b.extend_from_slice(&x.to_le_bytes());
+                b.extend_from_slice(&y.to_le_bytes());
+                147
+            }
             ToClient::PrintJob { id, size, name, path } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
@@ -1606,6 +1614,7 @@ impl ToClient {
             141 => ToClient::Can(c.u32()?),
             144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
             146 => ToClient::Unelevated,
+            147 => ToClient::FocusAt { x: c.u32()? as i32, y: c.u32()? as i32 },
             145 => ToClient::PrintJob { id: c.u32()?, size: c.u64()?, name: c.str()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
             143 => ToClient::FetchAt {
@@ -1846,6 +1855,7 @@ mod tests {
             ToClient::PointerShape { w: 2, h: 1, hot_x: 1, hot_y: 0, rgba: vec![1, 2, 3, 4, 5, 6, 7, 8] },
             ToClient::PointerAt(Some((-3, 700))),
             ToClient::PointerAt(None),
+            ToClient::FocusAt { x: -1920, y: 540 },
             ToClient::AppList { list: vec![("calc.desktop".into(), "계산기".into(), "Sums".into())], error: String::new() },
             ToClient::Launched { ok: true, text: "Calculator".into() },
             ToClient::UiTree {

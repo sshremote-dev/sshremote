@@ -778,3 +778,25 @@ fn the_picture_goes_to_the_monitor_the_pointer_moves_onto() {
     h.r.follow_screens = false;
     assert_eq!(h.r.screen_followed(Some((-1700, 100))), None, "not when turned off");
 }
+
+/// A window that comes in front on another monitor there brings the picture to it; the first
+/// word of the window in front (where it is at the start) does not.
+#[test]
+#[ignore]
+fn the_picture_goes_to_the_monitor_a_window_comes_in_front_on() {
+    use crate::proto::MonitorInfo;
+    let mut h = Harness::new(Vec2::new(800.0, 600.0));
+    h.frame(Vec::new()).unwrap();
+    let m = |name: &str, w, hh, at| MonitorInfo { name: name.into(), w, h: hh, primary: false, at: Some(at), added: false };
+    h.r.monitors = vec![m("left", 1920, 1080, (0, 0)), m("right", 1280, 1024, (1920, 0))];
+    h.r.monitor = 0;
+    h.r.follow_screens = true;
+    assert_eq!(h.r.focus_followed((2500, 500)), None, "where it is at the start");
+    assert_eq!(h.r.focus_followed((900, 500)), None, "on the one shown");
+    assert_eq!(h.r.focus_followed((2500, 500)), Some(1), "came in front on the right one");
+    h.r.screen_changed = Some(std::time::Instant::now());
+    assert_eq!(h.r.focus_followed((100, 500)), None, "not at once after a change");
+    h.r.screen_changed = None;
+    h.r.follow_screens = false;
+    assert_eq!(h.r.focus_followed((2500, 500)), None, "not when turned off");
+}

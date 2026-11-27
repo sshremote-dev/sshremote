@@ -211,6 +211,11 @@ pub trait Capture {
     fn grab(&mut self) -> Result<Option<Image>, String>;
     /// A picture `grab` gave that is done with: its buffer may hold a later one.
     fn recycle(&mut self, _img: Image) {}
+    /// The window in front (by an id of the backend's) and its middle on the desktop, in the
+    /// monitors' coordinates (`MonitorInfo::at`), where the backend knows it.
+    fn focused(&self) -> Option<(u64, (i32, i32))> {
+        None
+    }
     /// The viewer draws the pointer itself: the pictures leave it out from now on, or put it
     /// back. False where the backend cannot keep it apart (it stays in the pictures).
     fn pointer_apart(&mut self, _on: bool) -> bool {
