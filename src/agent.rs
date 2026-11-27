@@ -568,7 +568,10 @@ fn serve_with(
     send(enc, &ToClient::Can(can)).map_err(io_err)?;
     send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
+    // No desktop runs here: one of its own once the screen is asked for (a server's), else said.
+    let mut headless = cap.name() == "none" && capture::headless_possible();
     if cap.name() == "none"
+        && !headless
         && let Err(why) = cap.windows()
     {
         send(enc, &ToClient::Notice(crate::lang::fill(n!("This computer's screen cannot be shown: {}. Its terminal and files work."), &[&why]))).map_err(io_err)?;
@@ -876,6 +879,18 @@ fn serve_with(
                     return Ok(());
                 }
                 ToAgent::Settings(s) => {
+                    // The screen is asked for (only a pane that shows it says its size).
+                    if headless && s.view_w > 0 {
+                        headless = false;
+                        match capture::headless() {
+                            Ok(c) => {
+                                *cap = c;
+                                *screens = crate::display::Session::new(cap.name());
+                                resized!();
+                            }
+                            Err(e) => send(enc, &ToClient::Notice(crate::lang::fill(n!("This computer's screen cannot be shown: {}. Its terminal and files work."), &[&e]))).map_err(io_err)?,
+                        }
+                    }
                     let t = target(desk, &s, cap.resizable());
                     if t != size {
                         cap.set_target(t.0, t.1)?;

@@ -85,6 +85,9 @@ pub struct Config {
     pub files_way: u8,
     /// The desktop's picture taken away during sessions by ID (less to send).
     pub plain_wallpaper: bool,
+    /// A Linux computer with no desktop running starts one of its own for a viewer who asks for
+    /// the screen (`capture::headless`).
+    pub headless: bool,
     /// The ID was chosen by the person (`remote-access id NUMBER`): one the relay says is
     /// another computer's is kept, and said, rather than swapped for a new one.
     pub own_id: bool,
@@ -269,7 +272,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "own_id": self.own_id, "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "headless": self.headless, "own_id": self.own_id, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -322,6 +325,7 @@ impl Config {
             clip_way: v.get("clip_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
             files_way: v.get("files_way").and_then(|x| x.as_u64()).filter(|w| *w <= 2).unwrap_or(0) as u8,
             plain_wallpaper: v.get("plain_wallpaper").and_then(|x| x.as_bool()).unwrap_or(false),
+            headless: v.get("headless").and_then(|x| x.as_bool()).unwrap_or(true),
             own_id: v.get("own_id").and_then(|x| x.as_bool()).unwrap_or(false),
         })
     }
@@ -501,6 +505,7 @@ pub fn fresh() -> Config {
         clip_way: 0,
         files_way: 0,
         plain_wallpaper: false,
+        headless: true,
         own_id: false,
         team: serde_json::Value::Null,
     }
@@ -2722,7 +2727,7 @@ pub fn uninstall_service() -> Result<(), String> {
     Err(n!("not on this system").into())
 }
 
-/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | auto-update on|off | password [NEW] | relay HOST | install | uninstall]`
+/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | auto-update on|off | headless on|off (Linux) | password [NEW] | relay HOST | install | uninstall]`
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
@@ -2914,7 +2919,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // Switches, each `on` or `off`.
-        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record" | "wallpaper" | "auto-update")) => {
+        Some(what @ ("straight" | "lan" | "direct" | "requests" | "cameras" | "record" | "wallpaper" | "auto-update" | "headless")) => {
             let on = match args.get(1).map(String::as_str) {
                 Some("on") => true,
                 Some("off") => false,
@@ -2928,6 +2933,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                 "record" => c.record = on,
                 "wallpaper" => c.plain_wallpaper = !on,
                 "auto-update" => c.auto_update = on,
+                "headless" => c.headless = on,
                 _ => c.direct = on,
             }
             save(&c)?;

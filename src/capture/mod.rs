@@ -7,6 +7,8 @@ mod hdr;
 #[cfg(target_os = "linux")]
 mod gnome;
 #[cfg(target_os = "linux")]
+mod headless;
+#[cfg(target_os = "linux")]
 pub(crate) use gnome::add_virtual as gnome_add_virtual;
 #[cfg(target_os = "linux")]
 mod kwin;
@@ -304,6 +306,22 @@ fn linux_desktop() -> Result<Box<dyn Capture>, String> {
         });
     }
     Ok(Box::new(x11::X11::open()?))
+}
+
+/// Whether a viewer asking for the screen gets a desktop of its own here, none running (Linux).
+pub fn headless_possible() -> bool {
+    #[cfg(target_os = "linux")]
+    return headless::allowed();
+    #[allow(unreachable_code)]
+    false
+}
+
+/// That desktop started, and its screen to share.
+pub fn headless() -> Result<Box<dyn Capture>, String> {
+    #[cfg(target_os = "linux")]
+    return headless::start().and_then(|()| Ok(Box::new(x11::X11::open()?) as Box<dyn Capture>));
+    #[allow(unreachable_code)]
+    Err("no desktop of its own here".into())
 }
 
 pub fn open(name: &str) -> Result<Box<dyn Capture>, String> {

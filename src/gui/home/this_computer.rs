@@ -473,6 +473,17 @@ impl App {
                                 });
                             });
                         }
+                        #[cfg(target_os = "linux")]
+                        {
+                            ui.add_space(4.0);
+                            if ui
+                                .checkbox(&mut cfg.headless, t!("Start a desktop of its own when none is running"))
+                                .on_hover_text(t!("On a computer with no desktop running (a server with no monitor), a viewer who asks for the screen gets one: the lightest desktop installed (Xfce, MATE, LXQt...), as you, until it is signed out of"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
                         ui.add_space(4.0);
                         if ui
                             .checkbox(&mut cfg.plain_wallpaper, t!("Take the desktop picture away during sessions"))
