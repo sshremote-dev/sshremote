@@ -621,44 +621,48 @@ impl Kms {
         if fb == 0 {
             return Err("the screen is off".into());
         }
-        let f = self.card.fb(fb)?;
-        let modifier = if f.flags & FB_MODIFIERS != 0 { f.modifier[0] } else { MOD_LINEAR };
-        let (w, h) = ((f.width as usize).min(o.w.max(1)), (f.height as usize).min(o.h.max(1)));
-        // Tests take the GPU's way for any buffer, to try it where no buffer is tiled.
-        let plain = (modifier == MOD_LINEAR || modifier == MOD_INVALID) && !(cfg!(test) && std::env::var_os("SSHREMOTE_KMS_GL").is_some());
-        let read = if plain {
-            self.card.map(&f).and_then(|m| to_bgrx(&m.bytes()[f.offsets[0] as usize..], f.pitches[0] as usize, f.pixel_format, w, h, &mut self.frame))
-        } else {
-            // Tiled or compressed: the GPU lays it out plainly.
-            let gl = self.gl.get_or_insert_with(|| gl::Gl::open(&self.card.path));
-            match gl {
-                Ok(gl) => {
-                    let mut fds = Vec::new();
-                    let mut planes = Vec::new();
-                    let res = (|| {
-                        for i in 0..4 {
-                            if f.handles[i] == 0 {
-                                break;
-                            }
-                            let fd = self.card.prime(f.handles[i])?;
-                            planes.push(gl::PlaneDesc { fd: fd.as_raw_fd(), offset: f.offsets[i], pitch: f.pitches[i], modifier: f.modifier[i] });
-                            fds.push(fd);
-                        }
-                        gl.read(f.width, f.height, f.pixel_format, &planes, &mut self.frame).map(|_| {
-                            if (w, h) != (f.width as usize, f.height as usize) {
-                                crop(&mut self.frame, f.width as usize, w, h);
-                            }
-                        })
-                    })();
-                    drop(fds);
-                    res
-                }
-                Err(e) => Err(format!("the screen's buffer is tiled ({}) and the GPU could not read it: {e}", modifier_name(modifier))),
-            }
-        };
-        close_handles(&self.card, &f);
-        read
+        read_framebuffer(&self.card, &mut self.gl, fb, o.w, o.h, &mut self.frame)
     }
+}
+
+/// Framebuffer `fb` as BGRx rows into `out`, at most `w` x `h` of it: a linear one mapped and
+/// read, a tiled or compressed one laid out plainly by the GPU (`gl`, opened when first needed).
+fn read_framebuffer(card: &Card, gl: &mut Option<Result<gl::Gl, String>>, fb: u32, w: usize, h: usize, out: &mut Vec<u8>) -> Result<(), String> {
+    let f = card.fb(fb)?;
+    let modifier = if f.flags & FB_MODIFIERS != 0 { f.modifier[0] } else { MOD_LINEAR };
+    let (w, h) = ((f.width as usize).min(w.max(1)), (f.height as usize).min(h.max(1)));
+    // Tests take the GPU's way for any buffer, to try it where no buffer is tiled.
+    let plain = (modifier == MOD_LINEAR || modifier == MOD_INVALID) && !(cfg!(test) && std::env::var_os("SSHREMOTE_KMS_GL").is_some());
+    let read = if plain {
+        card.map(&f).and_then(|m| to_bgrx(&m.bytes()[f.offsets[0] as usize..], f.pitches[0] as usize, f.pixel_format, w, h, out))
+    } else {
+        match gl.get_or_insert_with(|| gl::Gl::open(&card.path)) {
+            Ok(gl) => {
+                let mut fds = Vec::new();
+                let mut planes = Vec::new();
+                let res = (|| {
+                    for i in 0..4 {
+                        if f.handles[i] == 0 {
+                            break;
+                        }
+                        let fd = card.prime(f.handles[i])?;
+                        planes.push(gl::PlaneDesc { fd: fd.as_raw_fd(), offset: f.offsets[i], pitch: f.pitches[i], modifier: f.modifier[i] });
+                        fds.push(fd);
+                    }
+                    gl.read(f.width, f.height, f.pixel_format, &planes, out).map(|_| {
+                        if (w, h) != (f.width as usize, f.height as usize) {
+                            crop(out, f.width as usize, w, h);
+                        }
+                    })
+                })();
+                drop(fds);
+                res
+            }
+            Err(e) => Err(format!("the screen's buffer is tiled ({}) and the GPU could not read it: {e}", modifier_name(modifier))),
+        }
+    };
+    close_handles(card, &f);
+    read
 }
 
 fn crop(frame: &mut Vec<u8>, from_w: usize, w: usize, h: usize) {
@@ -930,6 +934,99 @@ mod tests {
                 }
                 other => panic!("{other}?"),
             }
+        }
+    }
+
+    /// As root where there is a GPU (SSHREMOTE_KMS_GBM=/dev/dri/card0): framebuffers of each kind
+    /// the GPU can scan out (plain, tiled, compressed) are made with GBM, filled with a pattern,
+    /// added as framebuffers and read back the way the screen is.
+    #[test]
+    #[ignore]
+    fn the_gpus_own_framebuffers_read_back_as_they_were() {
+        let Ok(path) = std::env::var("SSHREMOTE_KMS_GBM") else { return };
+        type P = *mut libc::c_void;
+        // SAFETY: libgbm's documented C functions, on objects it made, freed at the end.
+        unsafe {
+            let lib = libc::dlopen(c"libgbm.so.1".as_ptr(), libc::RTLD_NOW);
+            assert!(!lib.is_null(), "libgbm");
+            macro_rules! f {
+                ($n:literal, $t:ty) => {
+                    std::mem::transmute::<P, $t>(libc::dlsym(lib, concat!($n, "\0").as_ptr() as *const libc::c_char))
+                };
+            }
+            let create_device = f!("gbm_create_device", unsafe extern "C" fn(i32) -> P);
+            let create = f!("gbm_bo_create_with_modifiers", unsafe extern "C" fn(P, u32, u32, u32, *const u64, u32) -> P);
+            let map = f!("gbm_bo_map", unsafe extern "C" fn(P, u32, u32, u32, u32, u32, *mut u32, *mut P) -> P);
+            let unmap = f!("gbm_bo_unmap", unsafe extern "C" fn(P, P));
+            let planes = f!("gbm_bo_get_plane_count", unsafe extern "C" fn(P) -> i32);
+            let handle = f!("gbm_bo_get_handle_for_plane", unsafe extern "C" fn(P, i32) -> u64);
+            let stride = f!("gbm_bo_get_stride_for_plane", unsafe extern "C" fn(P, i32) -> u32);
+            let offset = f!("gbm_bo_get_offset", unsafe extern "C" fn(P, i32) -> u32);
+            let modifier = f!("gbm_bo_get_modifier", unsafe extern "C" fn(P) -> u64);
+            let destroy = f!("gbm_bo_destroy", unsafe extern "C" fn(P));
+            // The framebuffers' maker, and a reader of its own as a screen reader is.
+            let maker = Card::open(&path).unwrap();
+            let reader = Card::open(&path).unwrap();
+            let dev = create_device(maker.file.as_raw_fd());
+            assert!(!dev.is_null(), "gbm device");
+            let (w, h) = (1920u32, 1080u32);
+            let pattern = |x: u32, y: u32| [(x * 7) as u8, (y * 3) as u8, ((x ^ y) * 5) as u8];
+            let mut gl = None;
+            let kinds: [(&str, u64); 5] = [("linear", 0), ("X-tiled", 0x0100_0000_0000_0001), ("Y-tiled", 0x0100_0000_0000_0002), ("Y-tiled, compressed (CCS)", 0x0100_0000_0000_0004), ("4-tiled", 0x0100_0000_0000_0009)];
+            let mut read_any = 0;
+            for (name, m) in kinds {
+                let bo = create(dev, w, h, XRGB8888, &m, 1);
+                if bo.is_null() {
+                    eprintln!("{name}: this GPU does not make it");
+                    continue;
+                }
+                let (mut st, mut md) = (0u32, std::ptr::null_mut());
+                let px = map(bo, 0, 0, w, h, 3, &mut st, &mut md) as *mut u8;
+                assert!(!px.is_null(), "{name}: map");
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = px.add((y * st + x * 4) as usize);
+                        let c = pattern(x, y);
+                        *p = c[0];
+                        *p.add(1) = c[1];
+                        *p.add(2) = c[2];
+                        *p.add(3) = 255;
+                    }
+                }
+                unmap(bo, md);
+                let (got, n) = (modifier(bo), planes(bo).clamp(0, 4));
+                let mut fb = Fb2 { width: w, height: h, pixel_format: XRGB8888, flags: FB_MODIFIERS, ..Default::default() };
+                for i in 0..n {
+                    fb.handles[i as usize] = handle(bo, i) as u32;
+                    fb.pitches[i as usize] = stride(bo, i);
+                    fb.offsets[i as usize] = offset(bo, i);
+                    fb.modifier[i as usize] = got;
+                }
+                let added = ioctl(&maker.file, drm_rw::<Fb2>(0xB8), &mut fb);
+                if let Err(e) = added {
+                    eprintln!("{name} ({}): not a framebuffer here: {e}", modifier_name(got));
+                    destroy(bo);
+                    continue;
+                }
+                let mut out = Vec::new();
+                // The first read opens the GPU's reader; the best of the next ones is what a screen costs.
+                let mut r = read_framebuffer(&reader, &mut gl, fb.fb_id, w as usize, h as usize, &mut out);
+                let mut took = Duration::MAX;
+                for _ in 0..5 {
+                    let t = Instant::now();
+                    r = r.and_then(|_| read_framebuffer(&reader, &mut gl, fb.fb_id, w as usize, h as usize, &mut out));
+                    took = took.min(t.elapsed());
+                }
+                let mut id = fb.fb_id;
+                let _ = ioctl(&maker.file, drm_rw::<u32>(0xAF), &mut id);
+                destroy(bo);
+                r.unwrap_or_else(|e| panic!("{name}: {e}"));
+                let wrong = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| out[((y * w + x) * 4) as usize..][..3] != pattern(x, y)).count();
+                eprintln!("{name} ({}, {} planes): read in {took:?}, {wrong} pixels wrong", modifier_name(got), n);
+                assert_eq!(wrong, 0, "{name}");
+                read_any += 1;
+            }
+            assert!(read_any >= 3, "too few kinds could be tried");
         }
     }
 
