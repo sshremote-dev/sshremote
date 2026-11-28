@@ -97,6 +97,9 @@ pub(super) struct Remote {
     focus_heard: bool,
     /// The computer's ID, for one reached by it (what it says of its relays is kept for it).
     pub(in crate::gui) by_id: Option<String>,
+    /// This viewer's pointer is shown to others watching the same computer; theirs, as told.
+    pub(in crate::gui) share_pointer: bool,
+    others: Vec<(u32, String, i32, i32)>,
     screen_changed: Option<std::time::Instant>,
     /// Remote access there runs without administrator rights (`ToClient::Unelevated`); and
     /// whether they were asked for already.
@@ -409,6 +412,8 @@ impl Remote {
             pointer_desk: None,
             focus_heard: false,
             by_id: None,
+            share_pointer: crate::hosts::setting("share_pointer").is_some_and(|v| v == "yes"),
+            others: Vec::new(),
             screen_changed: None,
             followed: None,
             unelevated: false,
@@ -504,7 +509,34 @@ impl Remote {
         if taken != crate::files::OnTaken::KeepBoth {
             let _ = r.send(ToAgent::OnTaken(taken.as_u8()));
         }
+        if r.share_pointer {
+            let _ = r.send(ToAgent::SharePointer(crate::here::who_here()));
+        }
         r
+    }
+
+    /// The other viewers' pointers over the picture at `rect`, each in a colour of its own with
+    /// its name: those on the monitor shown.
+    fn draw_others(&self, painter: &egui::Painter, rect: Rect) {
+        let at = self.monitors.get(self.monitor).and_then(|m| m.at).unwrap_or((0, 0));
+        let k = rect.width() / self.sess.desk.0.max(1) as f32;
+        for (id, name, x, y) in &self.others {
+            let (lx, ly) = (x - at.0, y - at.1);
+            if lx < 0 || ly < 0 || lx >= self.sess.desk.0 as i32 || ly >= self.sess.desk.1 as i32 {
+                continue;
+            }
+            let p = rect.min + Vec2::new(lx as f32, ly as f32) * k;
+            let colour: Color32 = egui::ecolor::Hsva::new((*id % 97) as f32 / 97.0, 0.75, 0.9, 1.0).into();
+            let arrow = vec![p, p + Vec2::new(0.0, 17.0), p + Vec2::new(4.5, 13.0), p + Vec2::new(8.5, 20.0), p + Vec2::new(11.0, 19.0), p + Vec2::new(7.5, 12.0), p + Vec2::new(13.0, 12.0)];
+            painter.add(egui::Shape::convex_polygon(arrow, colour, egui::Stroke::new(1.2, Color32::WHITE)));
+            if !name.is_empty() {
+                let font = egui::FontId::proportional(11.5);
+                let galley = painter.layout_no_wrap(name.clone(), font, Color32::WHITE);
+                let box_ = Rect::from_min_size(p + Vec2::new(12.0, 18.0), galley.size() + Vec2::new(8.0, 4.0));
+                painter.rect_filled(box_, 4.0, colour);
+                painter.galley(box_.min + Vec2::new(4.0, 2.0), galley, Color32::WHITE);
+            }
+        }
     }
 
     /// One frame of the pane, with the system keys taken from Windows for it; on an error the
@@ -897,6 +929,10 @@ impl Remote {
                     }
                     ctx.request_repaint();
                 }
+                Ok(Ev::Net(ToClient::Pointers(list))) => {
+                    self.others = list;
+                    ctx.request_repaint();
+                }
                 Ok(Ev::Net(ToClient::Relays(list))) => {
                     if let Some(id) = &self.by_id {
                         crate::computers::note_relays(id, &list);
@@ -1282,6 +1318,7 @@ impl Remote {
         };
         let painter = ui.painter().with_clip_rect(area);
         painter.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        self.draw_others(&painter, rect);
         self.draw_pointer(ui, &painter, rect);
         // Where the visible part lies, when the picture is larger than the window.
         let bar = Color32::from_white_alpha(70);

@@ -231,6 +231,9 @@ pub enum ToAgent {
     /// What a file sent there does when one of its name is there (`files::OnTaken`: 0 kept
     /// beside it, 1 in its place, 2 not sent).
     OnTaken(u8),
+    /// The viewer shows its pointer to others watching this computer under this name (empty:
+    /// no longer).
+    SharePointer(String),
     /// What an agent for a session by ID hands out for `TrustMe`, given by the remote access
     /// service as the first message, before the viewer's (later ones are passed over).
     TrustToken(String),
@@ -535,6 +538,9 @@ pub enum ToClient {
     /// The relays a computer by ID is reachable at now, the one the viewer came through among
     /// them: a viewer keeps the others to go through when that one does not see it.
     Relays(Vec<String>),
+    /// The other viewers' pointers that are shown (`ToAgent::SharePointer`): an id for each, its
+    /// name, and where it is on the host's desktop.
+    Pointers(Vec<(u32, String, i32, i32)>),
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
     /// Something printed on the host to SSH Remote's printer, a PDF of `size` bytes at `path`
@@ -894,6 +900,10 @@ impl ToAgent {
                 b.push(*n);
                 63
             }
+            ToAgent::SharePointer(name) => {
+                b.extend_from_slice(name.as_bytes());
+                64
+            }
             ToAgent::TrustToken(t) => {
                 b.extend_from_slice(t.as_bytes());
                 55
@@ -1091,6 +1101,7 @@ impl ToAgent {
             KIND_ASK_ELEVATION => ToAgent::AskElevation,
             62 => ToAgent::SwitchSides { address: c.str()?, password: c.str()? },
             63 => ToAgent::OnTaken(c.u8()?),
+            64 => ToAgent::SharePointer(String::from_utf8_lossy(c.rest()).chars().take(64).collect()),
             55 => ToAgent::TrustToken(String::from_utf8_lossy(c.rest()).into_owned()),
             52 => ToAgent::FileResume {
                 id: c.u32()?,
@@ -1314,6 +1325,15 @@ impl ToClient {
             ToClient::Relays(list) => {
                 b.extend_from_slice(list.join("\n").as_bytes());
                 148
+            }
+            ToClient::Pointers(list) => {
+                for (id, name, x, y) in list.iter().take(16) {
+                    b.extend_from_slice(&id.to_le_bytes());
+                    b.extend_from_slice(&x.to_le_bytes());
+                    b.extend_from_slice(&y.to_le_bytes());
+                    put_str(&mut b, name);
+                }
+                149
             }
             ToClient::PrintJob { id, size, name, path } => {
                 b.extend_from_slice(&id.to_le_bytes());
@@ -1622,6 +1642,13 @@ impl ToClient {
             144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
             146 => ToClient::Unelevated,
             147 => ToClient::FocusAt { x: c.u32()? as i32, y: c.u32()? as i32 },
+            149 => {
+                let mut list = Vec::new();
+                while c.p < c.d.len() && list.len() < 16 {
+                    list.push((c.u32()?, c.u32()? as i32, c.u32()? as i32, c.str()?));
+                }
+                ToClient::Pointers(list.into_iter().map(|(id, x, y, n)| (id, n, x, y)).collect())
+            }
             148 => ToClient::Relays(String::from_utf8_lossy(c.rest()).split('\n').filter(|r| !r.is_empty()).take(16).map(String::from).collect()),
             145 => ToClient::PrintJob { id: c.u32()?, size: c.u64()?, name: c.str()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
@@ -1865,6 +1892,8 @@ mod tests {
             ToClient::PointerAt(None),
             ToClient::FocusAt { x: -1920, y: 540 },
             ToClient::Relays(vec!["relay.sshremote.dev".into(), "relay.example.com:7071".into()]),
+            ToClient::Pointers(vec![(4, "ana@desk".into(), -1900, 40), (9, String::new(), 10, 20)]),
+            ToClient::Pointers(Vec::new()),
             ToClient::AppList { list: vec![("calc.desktop".into(), "계산기".into(), "Sums".into())], error: String::new() },
             ToClient::Launched { ok: true, text: "Calculator".into() },
             ToClient::UiTree {

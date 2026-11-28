@@ -887,6 +887,37 @@ mod tests {
     }
 
     /// A camera listed after the screen is picked like a monitor: the viewer hears its size and
+    /// Two viewers of one computer, each with an agent of its own: the one that shares its
+    /// pointer is seen by the other, by name and place, and no longer once it stops.
+    /// SSHREMOTE_EXE=... cargo test -- --ignored one_viewer_sees_where_another_points
+    #[test]
+    #[ignore]
+    fn one_viewer_sees_where_another_points() {
+        let target = Target::Local { capture: "synthetic".into() };
+        let (mut a, _ta, _ra) = Session::open(&target, true).expect("the first agent answers");
+        let (_b, _tb, rb) = Session::open(&target, true).expect("the second agent answers");
+        let wait = |want: &dyn Fn(&[(u32, String, i32, i32)]) -> bool| {
+            let until = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < until {
+                if let Ok(Ev::Net(ToClient::Pointers(list))) = rb.recv_timeout(Duration::from_millis(200))
+                    && want(&list)
+                {
+                    return list;
+                }
+            }
+            panic!("not told in time");
+        };
+        a.send(ToAgent::SharePointer("ana@desk".into())).unwrap();
+        a.send(ToAgent::Pointer { x: 120, y: 80 }).unwrap();
+        let seen = wait(&|l| l.iter().any(|o| o.1 == "ana@desk"));
+        let ana = seen.iter().find(|o| o.1 == "ana@desk").unwrap();
+        assert!((ana.2 - 120).abs() <= 1 && (ana.3 - 80).abs() <= 1, "{seen:?}");
+        a.send(ToAgent::Pointer { x: 300, y: 200 }).unwrap();
+        wait(&|l| l.iter().any(|o| o.1 == "ana@desk" && (o.2 - 300).abs() <= 1));
+        a.send(ToAgent::SharePointer(String::new())).unwrap();
+        wait(&|l| l.iter().all(|o| o.1 != "ana@desk"));
+    }
+
     /// gets its pictures. SSHREMOTE_EXE=... SSHREMOTE_TEST_CAMERA=1 cargo test -- --ignored
     /// a_camera_is_picked_like_a_monitor (GStreamer's videotestsrc)
     #[test]

@@ -36,7 +36,7 @@ serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
 # Several sockets on one port (a straight TCP path through the routers, `tcppunch`).
-socket2 = { version = "0.6", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"], optional = true }
 base64 = "0.22"
 unicode-width = { optional = true, version = "0.2" }
 spake2 = { optional = true, version = "0.4" }
@@ -100,7 +100,7 @@ flate2 = "1"
 [features]
 default = ["gui", "remote", "web", "mcp"]
 # Remote screens, files, chat and sound, with the agent that serves them on the host.
-remote = ["dep:arboard", "dep:crossterm", "dep:png", "dep:unicode-width", "dep:zstd", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:libaom-sys", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:futures-util", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:wayland-protocols-plasma", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2"]
+remote = ["dep:arboard", "dep:crossterm", "dep:png", "dep:unicode-width", "dep:zstd", "dep:cpal", "dep:hkdf", "dep:curve25519-dalek", "dep:openh264", "dep:libaom-sys", "dep:opus", "dep:spake2", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:zbus", "dep:futures-util", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr", "dep:wayland-protocols-misc", "dep:wayland-protocols-plasma", "dep:uiautomation", "dep:windows", "dep:objc2", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-core-graphics", "dep:objc2-core-foundation", "dep:block2", "dep:dispatch2", "dep:socket2"]
 # The windows: workspace, viewer, tools. Without it, a small program for the command line and services.
 gui = ["dep:alacritty_terminal", "dep:eframe", "dep:png", "dep:unicode-width", "dep:qrcode", "dep:rasterlottie", "dep:wayland-client", "dep:wayland-backend", "dep:wayland-protocols", "dep:x11-dl", "dep:raw-window-handle", "dep:winit"]
 # The browser gateway and the MCP server; without them the registry's extensions bring them.

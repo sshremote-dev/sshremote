@@ -118,6 +118,8 @@ mod termwin;
 #[cfg(feature = "gui")]
 mod tools;
 #[cfg(feature = "remote")]
+mod pointers;
+#[cfg(feature = "remote")]
 mod tcppunch;
 #[cfg(feature = "remote")]
 mod transport;

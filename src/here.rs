@@ -100,6 +100,21 @@ pub fn addresses() -> Here {
     Here { name, dns, ips, user, ssh_port: None }
 }
 
+/// `user@computer`, as this person is shown to others watching the same computer (looked up once).
+pub fn who_here() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let user = std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).unwrap_or_default();
+        let host = names().0;
+        match (user.is_empty(), host.is_empty()) {
+            (false, false) => format!("{user}@{host}"),
+            (true, false) => host,
+            _ => user,
+        }
+    })
+    .clone()
+}
+
 fn link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => v.is_link_local(),

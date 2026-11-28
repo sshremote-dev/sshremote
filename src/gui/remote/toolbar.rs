@@ -339,6 +339,17 @@ impl Remote {
                 self.follow = follow;
                 crate::hosts::set_setting("follow_pointer", if follow { "yes" } else { "no" });
             }
+            let mut share = self.share_pointer;
+            if ui
+                .checkbox(&mut share, t!("Show my pointer to others watching"))
+                .on_hover_text(t!("Others connected to that computer at the same time see where you point, with your name; you see theirs either way"))
+                .changed()
+            {
+                self.share_pointer = share;
+                crate::hosts::set_setting("share_pointer", if share { "yes" } else { "no" });
+                let name = if share { crate::here::who_here() } else { String::new() };
+                *action = Some(Box::new(move |r, _| r.send(ToAgent::SharePointer(name))));
+            }
             let mut screens = self.follow_screens;
             if ui
                 .checkbox(&mut screens, t!("Follow the pointer and the window in front to their monitor"))

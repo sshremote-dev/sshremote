@@ -702,9 +702,14 @@ fn serve_with(
     let mut vid = video::Video::new();
     let mut colours = crate::color::Palette::default();
     // The picture's size changed: tell the viewer and start the stream over.
+    // The viewers' pointers, for one another: where this monitor lies on the desktop.
+    let mut shared = crate::pointers::Shared::default();
+    let origin_of = |cap: &dyn capture::Capture| cap.monitors().get(cap.current()).and_then(|m| m.at).unwrap_or((0, 0));
+    let mut origin = origin_of(cap.as_ref());
     macro_rules! resized {
         () => {
             desk = cap.desktop_size();
+            origin = origin_of(cap.as_ref());
             announce(enc, cap.as_mut(), screens, desk, settings, &mut size)?;
             (prev, last) = (None, None);
             vid.reset();
@@ -1041,6 +1046,7 @@ fn serve_with(
                     let sy = (y as f64 + 0.5) * desk.1 as f64 / img.1.max(1) as f64;
                     report(cap.input(Input::Move { x: sx, y: sy }));
                     pointer.moved((sx as i32, sy as i32), Instant::now());
+                    shared.moved((origin.0 + sx as i32, origin.1 + sy as i32));
                 }
                 ToAgent::PointerBy { dx, dy } => {
                     if let Err(e) = cap.input(Input::MoveBy { dx: dx as i32, dy: dy as i32 }) {
@@ -1089,6 +1095,7 @@ fn serve_with(
                 ToAgent::Resumes => inbox.keep_broken = true,
                 // Remote access asks the person here (`access::Frames`).
                 ToAgent::AskElevation => {}
+                ToAgent::SharePointer(name) => shared.set((!name.trim().is_empty()).then_some(name)),
                 ToAgent::OnTaken(n) => inbox.on_taken = crate::files::OnTaken::from_u8(n),
                 // The sides switch: the person here gets a window onto the viewer's computer.
                 ToAgent::SwitchSides { address, password } => {
@@ -1491,6 +1498,10 @@ fn serve_with(
         }
         for m in ports.pump(256 << 10) {
             send(enc, &m).map_err(io_err)?;
+        }
+        shared.tick();
+        if let Some(list) = shared.others() {
+            send(enc, &ToClient::Pointers(list)).map_err(io_err)?;
         }
         if focus.1.elapsed() > Duration::from_millis(500) {
             focus.1 = Instant::now();
