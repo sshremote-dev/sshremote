@@ -172,6 +172,18 @@ fn files_way() -> u8 {
 /// to send), and put back after.
 static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The relays this computer is reachable at now (`access::online_relays`), told to a viewer by ID.
+static RELAYS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A relay's name as passed on a command line: a host name or address and a port, nothing else.
+fn relay_word(r: &str) -> bool {
+    !r.is_empty() && r.len() <= 260 && r.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]_".contains(c))
+}
+
+pub fn set_relays(list: &str) {
+    *RELAYS.lock().unwrap_or_else(|e| e.into_inner()) = list.split(',').filter(|r| relay_word(r)).take(16).map(String::from).collect();
+}
+
 pub fn set_plain(on: bool) {
     PLAIN.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -183,6 +195,10 @@ pub fn helper_words() -> String {
     let mut s = format!(" way={}{}", clip_way(), files_way());
     if let Some((h, f)) = WHO.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         s += &format!(" who={}.{}", crate::sys::hex(h.as_bytes()), crate::sys::hex(f.as_bytes()));
+    }
+    let relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner()).join(",");
+    if !relays.is_empty() {
+        s += &format!(" relays={relays}");
     }
     if PLAIN.load(std::sync::atomic::Ordering::Relaxed) {
         s += " plain";
@@ -200,6 +216,7 @@ pub fn helper_args(words: &[&str]) -> Result<String, String> {
                 s += &format!(" --clip-way {} --files-way {}", &cf[..1], &cf[1..]);
             }
             Some(("who", hf)) if hf.len() <= 1024 && hf.split('.').count() == 2 && hf.split('.').all(|x| crate::sys::unhex(x).is_some()) => s += &format!(" --who-hex {hf}"),
+            Some(("relays", list)) if list.split(',').all(relay_word) => s += &format!(" --relays {list}"),
             None if *w == "plain" => s += " --plain-wallpaper",
             _ => return Err("bad request".into()),
         }
@@ -566,6 +583,11 @@ fn serve_with(
         | if printer { crate::proto::CAN_PRINT } else { 0 }
         | if crate::hwenc::wanted() != crate::hwenc::Want::Never && crate::hwenc::has_h265() { crate::proto::CAN_H265 } else { 0 };
     send(enc, &ToClient::Can(can)).map_err(io_err)?;
+    // Where else a viewer by ID finds this computer, for when its relay does not see it.
+    let relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if by_id() && !relays.is_empty() {
+        send(enc, &ToClient::Relays(relays)).map_err(io_err)?;
+    }
     send(enc, &monitors(cap.as_ref(), screens)).map_err(io_err)?;
     send(enc, &modes(cap.as_ref(), screens)).map_err(io_err)?;
     // No desktop runs here: one of its own once the screen is asked for (a server's), else said.

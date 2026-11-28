@@ -108,6 +108,8 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
         }
         let found: Vec<String> =
             known.as_ref().filter(|c| !c.found_refused).map(|c| list(&c.direct)).unwrap_or_default().into_iter().filter(|d| !proven.contains(d)).collect();
+        // The other relays it said it is reachable at, for when its own does not see it.
+        let relays = known.as_ref().map(|c| list(&c.relays)).unwrap_or_default();
         // A device the computer trusts gives its token where the two-step code is asked.
         let trust = crate::vault::trust_name(&crate::access::address(&addr.id, &addr.relay));
         let token = own.then(|| crate::vault::get(&trust)).flatten().filter(|t| !t.trim().is_empty());
@@ -115,7 +117,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
             Some(t) => format!("{}{}{}{t}", password.split(crate::net::CODE_SEP).next().unwrap_or(""), crate::net::CODE_SEP, crate::net::TRUST_MARK),
             None => password.clone(),
         };
-        let ((r, w), way) = match crate::net::connect_via(addr, &given, &proven, &found) {
+        let ((r, w), way) = match crate::net::connect_via(addr, &given, &proven, &found, &relays) {
             // Trusted no longer (its time is up, or it was forgotten there): the code typed
             // goes instead, else it is asked.
             Err(e) if token.is_some() && e == crate::net::NOT_TRUSTED => {
@@ -124,7 +126,7 @@ pub fn open(target: &Target, hidden: bool) -> Result<Link, String> {
                 if !typed {
                     return Err(e);
                 }
-                crate::net::connect_via(addr, password, &proven, &found)?
+                crate::net::connect_via(addr, password, &proven, &found, &relays)?
             }
             r => r?,
         };

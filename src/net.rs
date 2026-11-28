@@ -104,6 +104,8 @@ pub struct Punch {
     pub relay: String,
     /// The viewer's: the ID it called, remembered if its straight path is lost.
     pub id: String,
+    /// Whether the UDP path is tried beside the TCP one (always but in a test of TCP alone).
+    pub udp: bool,
 }
 
 /// IDs whose straight path was lost, and when: the relay only for a while (a network that cuts
@@ -142,12 +144,17 @@ struct Line {
     out: Mutex<Out>,
     tcp: TcpStream,
     udp: Mutex<Option<crate::udp::Stream>>,
+    /// A straight TCP path through the routers (`tcppunch`), once one came up.
+    tcp_path: Mutex<Option<TcpStream>>,
+    /// Woken as either straight path comes up.
     udp_ready: Condvar,
+    /// This side's writing went onto a straight path (the first that came up, UDP or TCP).
+    taken: AtomicBool,
     straight: Mutex<Option<SocketAddr>>,
     moved: AtomicU8,
     punch: Option<Punch>,
-    /// The viewer's wait for the agent's addresses.
-    answer: Mutex<Option<mpsc::Sender<(Vec<SocketAddr>, bool)>>>,
+    /// The viewer's wait for the agent's addresses: UDP, whether its packets are checked, TCP.
+    answer: Mutex<Option<mpsc::Sender<(Vec<SocketAddr>, bool, Vec<SocketAddr>)>>>,
     /// Attempts at a straight path so far.
     tried: AtomicU8,
     ended: AtomicBool,
@@ -192,7 +199,8 @@ impl Line {
         }
     }
 
-    /// Sends from here on over `path`: a "move" on the old wire marks where.
+    /// Sends from here on over `path`: a "move" on the old wire marks where. It is kept for the
+    /// other side's frames either way (it may move onto it while this side took a TCP path).
     fn go_straight(&self, path: crate::udp::Stream, to: SocketAddr) {
         if self.ended.load(Ordering::Acquire) {
             path.end();
@@ -203,6 +211,9 @@ impl Line {
         }
         *guard(&self.udp) = Some(path.clone());
         self.udp_ready.notify_all();
+        if self.taken.swap(true, Ordering::AcqRel) {
+            return;
+        }
         *guard(&self.straight) = Some(to);
         {
             let mut out = guard(&self.out);
@@ -212,6 +223,43 @@ impl Line {
             out.wire = Wire::Udp(path);
         }
         self.moved(MOVED_OUT);
+    }
+
+    /// As `go_straight`, on a straight TCP connection: "move tcp" marks where.
+    fn go_straight_tcp(&self, s: TcpStream) {
+        if self.ended.load(Ordering::Acquire) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+        let _ = s.set_read_timeout(*guard(&self.idle));
+        let Ok(reader) = s.try_clone() else { return };
+        *guard(&self.tcp_path) = Some(reader);
+        self.udp_ready.notify_all();
+        if self.taken.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        *guard(&self.straight) = s.peer_addr().ok();
+        {
+            let mut out = guard(&self.out);
+            if out.frame(b"move tcp", true).is_err() {
+                return;
+            }
+            out.wire = Wire::Tcp(s);
+        }
+        self.moved(MOVED_OUT);
+    }
+
+    fn wait_tcp(&self) -> Option<TcpStream> {
+        let deadline = std::time::Instant::now() + MOVE_WAIT;
+        loop {
+            if let Some(s) = guard(&self.tcp_path).as_ref().and_then(|s| s.try_clone().ok()) {
+                return Some(s);
+            }
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            // Woken with the UDP path's signal (paired with that path's lock), looked at again.
+            let wait = guard(&self.udp);
+            let _ = self.udp_ready.wait_timeout(wait, left.min(Duration::from_millis(100)));
+        }
     }
 
     fn wait_udp(&self) -> Option<crate::udp::Stream> {
@@ -245,17 +293,34 @@ impl Line {
                 *guard(&line.answer) = Some(tx);
                 let Ok(mut path) = crate::udp::Path::bind(true) else { return };
                 let mine = path.candidates(&p.relay);
+                // A TCP path is tried with the first round, beside the UDP one.
+                let tcp = if first == "viewer" { crate::tcppunch::Punch::open(&p.relay) } else { None };
+                let tcp_words: String = tcp.iter().flat_map(|t| t.mine.iter()).map(|a| format!(" tcp={a}")).collect();
                 let tag: [u8; 8] = crate::sys::random(8).try_into().unwrap_or([0; 8]);
                 // The key the path's packets are checked with, if the agent knows how (an older
                 // one passes the word by, as it is no address, and answers without "mac").
                 let key: [u8; 32] = crate::sys::random(32).try_into().unwrap_or([0; 32]);
-                if line.frame(format!("offer {} {first} mac={} {}", crate::sys::hex(&tag), crate::sys::hex(&key), addresses(&mine)).as_bytes(), true).is_err() {
+                if line.frame(format!("offer {} {first} mac={} {}{tcp_words}", crate::sys::hex(&tag), crate::sys::hex(&key), addresses(&mine)).as_bytes(), true).is_err() {
                     return;
                 }
-                let Ok((peers, checked)) = rx.recv_timeout(MOVE_WAIT) else { return };
-                path.punch(tag, checked.then_some(key), &peers, start(first, true));
+                let Ok((peers, checked, tcp_peers)) = rx.recv_timeout(MOVE_WAIT) else { return };
+                if let Some(t) = tcp.filter(|_| checked && !tcp_peers.is_empty()) {
+                    let line = line.clone();
+                    std::thread::spawn(move || {
+                        if let Some(s) = t.race(&tcp_peers, std::time::Instant::now() + crate::tcppunch::LIMIT, crate::tcppunch::viewer_check(tag, key)) {
+                            line.go_straight_tcp(s);
+                        }
+                    });
+                }
+                if p.udp {
+                    path.punch(tag, checked.then_some(key), &peers, start(first, true));
+                }
                 if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                     line.go_straight(path.stream(), to);
+                    return;
+                }
+                // The TCP path came up meanwhile: no more rounds.
+                if line.taken.load(Ordering::Acquire) {
                     return;
                 }
             }
@@ -264,7 +329,7 @@ impl Line {
 
     /// The viewer offered its addresses: the agent answers with its own and tries them, its
     /// packets checked with the viewer's key when it gave one.
-    fn offered(self: &Arc<Self>, tag: [u8; 8], key: Option<[u8; 32]>, first: &str, peers: Vec<SocketAddr>) {
+    fn offered(self: &Arc<Self>, tag: [u8; 8], key: Option<[u8; 32]>, first: &str, peers: Vec<SocketAddr>, tcp_peers: Vec<SocketAddr>) {
         let Some(p) = self.punch.clone().filter(|p| !p.viewer) else { return };
         if self.held.load(Ordering::Acquire) {
             return;
@@ -278,10 +343,23 @@ impl Line {
             let Ok(mut path) = crate::udp::Path::bind(false) else { return };
             let mine = path.candidates(&p.relay);
             let checked = if key.is_some() { "mac " } else { "" };
-            if line.frame(format!("answer {checked}{}", addresses(&mine)).as_bytes(), true).is_err() {
+            // The TCP path, when the viewer offered one and the key to check it with.
+            let tcp = key.filter(|_| !tcp_peers.is_empty()).and_then(|k| crate::tcppunch::Punch::open(&p.relay).map(|t| (t, k)));
+            let tcp_words: String = tcp.iter().flat_map(|(t, _)| t.mine.iter()).map(|a| format!(" tcp={a}")).collect();
+            if line.frame(format!("answer {checked}{}{tcp_words}", addresses(&mine)).as_bytes(), true).is_err() {
                 return;
             }
-            path.punch(tag, key, &peers, start);
+            if let Some((t, k)) = tcp {
+                let line = line.clone();
+                std::thread::spawn(move || {
+                    if let Some(s) = t.race(&tcp_peers, std::time::Instant::now() + crate::tcppunch::LIMIT, crate::tcppunch::agent_check(tag, k)) {
+                        line.go_straight_tcp(s);
+                    }
+                });
+            }
+            if p.udp {
+                path.punch(tag, key, &peers, start);
+            }
             if let Some(to) = path.wait(crate::udp::PUNCH_LIMIT + crate::udp::NOMINATE_GRACE + Duration::from_secs(1)) {
                 line.go_straight(path.stream(), to);
             }
@@ -298,6 +376,9 @@ impl Ender {
     pub fn end(&self) {
         self.0.ended.store(true, Ordering::Release);
         let _ = self.0.tcp.shutdown(std::net::Shutdown::Both);
+        if let Some(t) = guard(&self.0.tcp_path).as_ref() {
+            let _ = t.shutdown(std::net::Shutdown::Both);
+        }
         if let Some(u) = guard(&self.0.udp).as_ref() {
             u.end();
         }
@@ -310,6 +391,10 @@ impl Ender {
             u.finish();
         }
         let _ = self.0.tcp.shutdown(std::net::Shutdown::Both);
+        // What was written goes out before the end (the system sends it first).
+        if let Some(t) = guard(&self.0.tcp_path).as_ref() {
+            let _ = t.shutdown(std::net::Shutdown::Write);
+        }
     }
 
     /// How long the stream may be silent before a read on it fails, on the first connection
@@ -319,6 +404,9 @@ impl Ender {
         let _ = self.0.tcp.set_read_timeout(Some(d));
         if let Some(u) = guard(&self.0.udp).as_ref() {
             u.set_idle(d);
+        }
+        if let Some(t) = guard(&self.0.tcp_path).as_ref() {
+            let _ = t.set_read_timeout(Some(d));
         }
     }
 
@@ -429,6 +517,11 @@ impl SealedReader {
         let mut words = text.split_whitespace();
         match words.next() {
             // From here on its frames come on the straight path.
+            Some("move") if text.split_whitespace().nth(1) == Some("tcp") => {
+                let path = self.line.wait_tcp().ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "the straight path to the other computer did not come up"))?;
+                self.wire = Wire::Tcp(path);
+                self.line.moved(MOVED_IN);
+            }
             Some("move") => {
                 let path = self.line.wait_udp().ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "the straight path to the other computer did not come up"))?;
                 self.wire = Wire::Udp(path);
@@ -441,8 +534,9 @@ impl SealedReader {
                 let first = words.next().unwrap_or("viewer").to_string();
                 let rest: Vec<&str> = words.collect();
                 let key = rest.iter().find_map(|w| w.strip_prefix("mac=")).filter(|k| k.len() == 64).and_then(crate::sys::unhex).and_then(|k| <[u8; 32]>::try_from(k).ok());
+                let tcp: Vec<SocketAddr> = rest.iter().filter_map(|w| w.strip_prefix("tcp=")?.parse().ok()).take(8).collect();
                 if let Some(tag) = tag.and_then(|t| <[u8; 8]>::try_from(t).ok()) {
-                    self.line.offered(tag, key, &first, rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect());
+                    self.line.offered(tag, key, &first, rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect(), tcp);
                 }
             }
             // answer [mac] ADDRESS...: "mac" when it checks the packets with the key offered.
@@ -450,7 +544,8 @@ impl SealedReader {
                 if let Some(tx) = guard(&self.line.answer).take() {
                     let rest: Vec<&str> = words.collect();
                     let checked = rest.first() == Some(&"mac");
-                    let _ = tx.send((rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect(), checked));
+                    let tcp = rest.iter().filter_map(|w| w.strip_prefix("tcp=")?.parse().ok()).take(8).collect();
+                    let _ = tx.send((rest.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).take(20).collect(), checked, tcp));
                 }
             }
             _ => {}
@@ -1001,7 +1096,9 @@ fn handshake_on(stream: TcpStream, side: Side, judge: Judge, totp: Option<TwoSte
         out: Mutex::new(Out { seal: Sealer::new(&send), wire: Wire::Tcp(s.try_clone()?) }),
         tcp: s.try_clone()?,
         udp: Mutex::new(None),
+        tcp_path: Mutex::new(None),
         udp_ready: Condvar::new(),
+        taken: AtomicBool::new(false),
         straight: Mutex::new(None),
         moved: AtomicU8::new(0),
         punch,
@@ -1233,7 +1330,7 @@ pub fn accept_direct(s: &mut TcpStream, id: &str) -> bool {
 /// stands (a wrong password is not tried again through the relay). `found`: where it answered on
 /// this network but has not been proven, which anyone there could have answered for it: a
 /// refusal there is put to the relay, which reaches the computer itself.
-pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[String]) -> Result<((SealedReader, SealedWriter), Way), String> {
+pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[String], relays: &[String]) -> Result<((SealedReader, SealedWriter), Way), String> {
     let fresh = with_ticket(addr, password)?;
     let password = fresh.as_ref();
     match connect_direct(addr, password, proven) {
@@ -1247,7 +1344,42 @@ pub fn connect_via(addr: &Address, password: &str, proven: &[String], found: &[S
         Straight::Refused(at, why) => return connect(addr, password).map(|pair| (pair, Way { straight: None, refused: Some(at) })).map_err(|_| why),
         Straight::Missed => {}
     }
-    Ok((connect(addr, password)?, Way::default()))
+    let through = seen_at(addr, relays);
+    Ok((connect(&through, password)?, Way::default()))
+}
+
+/// The relay to call the computer through: its own, unless that one does not see it and one of
+/// `others` (where it said it is reachable too) does. All are asked at once, briefly: one that
+/// does not answer holds up none of the others.
+fn seen_at(addr: &Address, others: &[String]) -> Address {
+    if others.is_empty() || addr.for_whom.is_some() {
+        return addr.clone();
+    }
+    let all: Vec<String> = std::iter::once(addr.relay.clone()).chain(others.iter().filter(|r| **r != addr.relay).take(7).cloned()).collect();
+    let (tx, rx) = mpsc::channel();
+    for (i, r) in all.iter().enumerate() {
+        let (tx, id, r) = (tx.clone(), addr.id.clone(), r.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send((i, crate::access::online(&id, &r).unwrap_or(false)));
+        });
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    let mut heard = vec![None; all.len()];
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        let Ok((i, on)) = rx.recv_timeout(left) else { break };
+        heard[i] = Some(on);
+        // Its own relay first, when it sees it; else the first of the others that does, once
+        // every one before it has said no.
+        if let Some(i) = heard.iter().position(|h| *h != Some(false)).filter(|i| heard[*i] == Some(true)) {
+            return Address { relay: all[i].clone(), ..addr.clone() };
+        }
+        if heard.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    // None said yes in time: the one that did first, else its own (which says why not).
+    heard.iter().position(|h| *h == Some(true)).map_or_else(|| addr.clone(), |i| Address { relay: all[i].clone(), ..addr.clone() })
 }
 
 /// Viewer side: reaches the ID through its relay and runs the handshake.
@@ -1284,7 +1416,7 @@ pub fn connect(addr: &Address, password: &str) -> Result<(SealedReader, SealedWr
     // relay is on this computer (the web page's gateway beside it gains nothing from one).
     let local = s.peer_addr().is_ok_and(|a| a.ip().is_loopback());
     // Nor through a proxy: everything goes its way then.
-    let punch = (straight_paths() && !local && !lost_lately(&addr.id) && crate::proxy::none()).then(|| Punch { viewer: true, relay: addr.relay.clone(), id: addr.id.clone() });
+    let punch = (straight_paths() && !local && !lost_lately(&addr.id) && crate::proxy::none()).then(|| Punch { viewer: true, relay: addr.relay.clone(), id: addr.id.clone(), udp: true });
     let pair = handshake_2fa(s, password, true, &now, None, punch).map_err(|e| e.to_string())?;
     // The agent answers a ping every second: two minutes of nothing is a dead path (a network
     // change, a NAT mapping dropped), and the viewer reconnects instead of freezing.
@@ -1301,8 +1433,29 @@ pub fn straight_paths() -> bool {
 /// `punch`, both look for a straight path, asking a relay here where they are seen from.
 #[cfg(test)]
 pub fn sealed_pair(punch: bool) -> ((SealedReader, SealedWriter), (SealedReader, SealedWriter)) {
+    sealed_pair_with(punch, true)
+}
+
+/// As `sealed_pair`, the relay here answering `seen` on TCP too; with `udp` false only the
+/// straight TCP path is tried.
+#[cfg(test)]
+pub fn sealed_pair_with(punch: bool, udp: bool) -> ((SealedReader, SealedWriter), (SealedReader, SealedWriter)) {
     let relay = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let at = relay.local_addr().unwrap().to_string();
+    // The relay's TCP side on the same port: on this computer it cannot say a router's place.
+    if let Ok(seen) = std::net::TcpListener::bind(&at) {
+        std::thread::spawn(move || {
+            for mut s in seen.incoming().flatten() {
+                std::thread::spawn(move || {
+                    if crate::access::line(&mut s).is_ok_and(|l| l == "seen") {
+                        let _ = writeln!(s, "unknown");
+                        let mut b = [0u8; 16];
+                        while matches!(s.read(&mut b), Ok(1..)) {}
+                    }
+                });
+            }
+        });
+    }
     std::thread::spawn(move || {
         let mut b = [0u8; 256];
         while let Ok((n, from)) = relay.recv_from(&mut b) {
@@ -1311,7 +1464,7 @@ pub fn sealed_pair(punch: bool) -> ((SealedReader, SealedWriter), (SealedReader,
             }
         }
     });
-    let p = |viewer| punch.then(|| Punch { viewer, relay: at.clone(), id: String::new() });
+    let p = |viewer| punch.then(|| Punch { viewer, relay: at.clone(), id: String::new(), udp });
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let agent_punch = p(false);
@@ -1393,6 +1546,31 @@ mod tests {
         assert_eq!(r2.join().unwrap().unwrap(), sent2);
     }
 
+    /// The same with the straight TCP path alone (UDP left out): both move onto one connection
+    /// both took, and the stream runs on whole.
+    #[test]
+    fn a_relayed_stream_moves_to_a_straight_tcp_path() {
+        let ((vr, vw), (ar, aw)) = sealed_pair_with(true, false);
+        let (ve, ae) = (vw.ender(), aw.ender());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (w1, w2) = (writer(vw, stop.clone(), 1), writer(aw, stop.clone(), 2));
+        let (r1, r2) = (reader(ar, 1), reader(vr, 2));
+        let started = std::time::Instant::now();
+        while (ve.straight().is_none() || ae.straight().is_none()) && started.elapsed() < Duration::from_secs(12) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ve.straight().is_some() && ae.straight().is_some(), "both on the straight TCP path");
+        assert!(guard(&ve.0.udp).is_none() && guard(&ve.0.tcp_path).is_some(), "by TCP");
+        thread::sleep(Duration::from_millis(500));
+        stop.store(true, Ordering::Release);
+        let (sent1, sent2) = (w1.join().unwrap(), w2.join().unwrap());
+        thread::sleep(Duration::from_millis(300));
+        ve.finish();
+        ae.finish();
+        assert_eq!(r1.join().unwrap().unwrap(), sent1);
+        assert_eq!(r2.join().unwrap().unwrap(), sent2);
+    }
+
     /// Someone who asked without a password learns nothing of the computer's addresses, and
     /// goes no straight path, until let in (the screen's first pictures come).
     #[test]
@@ -1407,7 +1585,7 @@ mod tests {
                 }
             }
         });
-        let p = |viewer| Some(Punch { viewer, relay: at.clone(), id: String::new() });
+        let p = |viewer| Some(Punch { viewer, relay: at.clone(), id: String::new(), udp: true });
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let agent_punch = p(false);
@@ -1638,18 +1816,18 @@ mod tests {
         };
         let (addr, asked) = relay("right one");
         let fake = straight("an impostor's guess");
-        let (_, way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&fake)).unwrap();
+        let (_, way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&fake), &[]).unwrap();
         assert_eq!(way, Way { straight: None, refused: Some(fake) }, "in through the relay, the impostor named");
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         let real = straight("right one");
-        assert!(connect_via(&addr, "wrong one", &[], &[real]).is_err_and(|e| e.contains("wrong password")), "wrong is wrong both ways");
+        assert!(connect_via(&addr, "wrong one", &[], &[real], &[]).is_err_and(|e| e.contains("wrong password")), "wrong is wrong both ways");
         let real = straight("right one");
-        let ((_, w), way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&real)).unwrap();
+        let ((_, w), way) = connect_via(&addr, "right one", &[], std::slice::from_ref(&real), &[]).unwrap();
         assert_eq!(way, Way { straight: Some(real.clone()), refused: None });
         assert_eq!(w.ender().straight().map(|a| a.to_string()), Some(real), "shown as past the relay");
         let (addr, asked) = relay("right one");
         let proven = straight("someone else's");
-        assert!(connect_via(&addr, "right one", &[proven], &[]).is_err_and(|e| e.contains("wrong password")));
+        assert!(connect_via(&addr, "right one", &[proven], &[], &[]).is_err_and(|e| e.contains("wrong password")));
         assert_eq!(asked.load(Ordering::SeqCst), 0, "a proven address's word stands");
     }
 

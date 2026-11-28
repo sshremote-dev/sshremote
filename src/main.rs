@@ -118,6 +118,8 @@ mod termwin;
 #[cfg(feature = "gui")]
 mod tools;
 #[cfg(feature = "remote")]
+mod tcppunch;
+#[cfg(feature = "remote")]
 mod transport;
 #[cfg(feature = "remote")]
 mod udp;
@@ -617,6 +619,9 @@ fn run(args: &[String]) -> Result<(), String> {
                     agent::set_who_hex(hf);
                 }
                 agent::set_plain(args.iter().any(|a| a == "--plain-wallpaper"));
+                if let Some(r) = get("--relays") {
+                    agent::set_relays(r);
+                }
             }
             let r = agent::run(get("--capture").unwrap_or("auto"), pipe);
             // A relay helper has no visible stderr; keep its failure where it can be found: beside

@@ -532,6 +532,9 @@ pub enum ToClient {
     /// Another window came in front there, its middle at this place on the host's desktop (the
     /// monitors' coordinates): a viewer that follows it goes to its monitor.
     FocusAt { x: i32, y: i32 },
+    /// The relays a computer by ID is reachable at now, the one the viewer came through among
+    /// them: a viewer keeps the others to go through when that one does not see it.
+    Relays(Vec<String>),
     /// What this agent can do that older ones cannot (`CAN_*` bits), sent right after `Hello`.
     Can(u32),
     /// Something printed on the host to SSH Remote's printer, a PDF of `size` bytes at `path`
@@ -1308,6 +1311,10 @@ impl ToClient {
                 b.extend_from_slice(&y.to_le_bytes());
                 147
             }
+            ToClient::Relays(list) => {
+                b.extend_from_slice(list.join("\n").as_bytes());
+                148
+            }
             ToClient::PrintJob { id, size, name, path } => {
                 b.extend_from_slice(&id.to_le_bytes());
                 b.extend_from_slice(&size.to_le_bytes());
@@ -1615,6 +1622,7 @@ impl ToClient {
             144 => ToClient::Trusted(String::from_utf8_lossy(c.rest()).into_owned()),
             146 => ToClient::Unelevated,
             147 => ToClient::FocusAt { x: c.u32()? as i32, y: c.u32()? as i32 },
+            148 => ToClient::Relays(String::from_utf8_lossy(c.rest()).split('\n').filter(|r| !r.is_empty()).take(16).map(String::from).collect()),
             145 => ToClient::PrintJob { id: c.u32()?, size: c.u64()?, name: c.str()?, path: String::from_utf8_lossy(c.rest()).into_owned() },
             142 => ToClient::FileFrom { id: c.u32()?, from: c.u64()? },
             143 => ToClient::FetchAt {
@@ -1856,6 +1864,7 @@ mod tests {
             ToClient::PointerAt(Some((-3, 700))),
             ToClient::PointerAt(None),
             ToClient::FocusAt { x: -1920, y: 540 },
+            ToClient::Relays(vec!["relay.sshremote.dev".into(), "relay.example.com:7071".into()]),
             ToClient::AppList { list: vec![("calc.desktop".into(), "계산기".into(), "Sums".into())], error: String::new() },
             ToClient::Launched { ok: true, text: "Calculator".into() },
             ToClient::UiTree {

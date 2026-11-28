@@ -35,6 +35,8 @@ flate2 = "1"
 serde_json = "1"
 sha2 = "0.10"
 hmac = "0.12"
+# Several sockets on one port (a straight TCP path through the routers, `tcppunch`).
+socket2 = { version = "0.6", features = ["all"] }
 base64 = "0.22"
 unicode-width = { optional = true, version = "0.2" }
 spake2 = { optional = true, version = "0.4" }

@@ -1200,6 +1200,9 @@ impl Workspace {
         let again = matches!(&p.state, State::Down(d) if d.again);
         let label = format!("{}  {}x{}  {}", p.label, sess.desk.0, sess.desk.1, sess.backend);
         let mut r = Remote::new(sess, rx, ctl, label, p.ssh_cmd.clone());
+        if let Target::Direct { addr, .. } = &p.target {
+            r.by_id = Some(addr.id.clone());
+        }
         // This computer's own screen (not a test desktop or a web page): nothing typed or clicked
         // in it is sent, as it would come back to this window.
         if matches!(&p.target, Target::Local { capture } if !capture.starts_with("synthetic") && !capture.starts_with("browser:")) {

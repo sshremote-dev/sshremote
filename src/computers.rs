@@ -38,6 +38,9 @@ pub struct Computer {
     /// Where to reach it by its ID straight as the person said (`IP:PORT` or `IP`, comma
     /// separated): another network, a VPN. Tried first, as proven ones are.
     pub straight: String,
+    /// The other relays it said it is reachable at (comma separated), gone through when its own
+    /// relay does not see it.
+    pub relays: String,
     /// An address found on this network turned down the password the relay took: only proven
     /// ones are tried from then on.
     pub found_refused: bool,
@@ -75,6 +78,7 @@ impl Computer {
             "direct": self.direct,
             "proven": self.proven,
             "straight": self.straight,
+            "relays": self.relays,
             "found_refused": self.found_refused,
             "tags": self.tags,
         })
@@ -94,6 +98,7 @@ impl Computer {
             direct: v.get("direct").and_then(Value::as_str).unwrap_or("").to_string(),
             proven: v.get("proven").and_then(Value::as_str).unwrap_or("").to_string(),
             straight: v.get("straight").and_then(Value::as_str).unwrap_or("").to_string(),
+            relays: v.get("relays").and_then(Value::as_str).unwrap_or("").to_string(),
             found_refused: v.get("found_refused").and_then(Value::as_bool).unwrap_or(false),
             tags: tags(&v.get("tags").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         })
@@ -401,6 +406,19 @@ pub fn with_direct_port(a: &str) -> String {
         // A host name: with its port, or remote access's.
         Err(_) if a.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) => a.to_string(),
         Err(_) => format!("{a}:{}", crate::net::DIRECT_PORT),
+    }
+}
+
+/// What a computer by ID said of the relays it is reachable at, kept with each saved computer of
+/// that ID (its own relay left out).
+#[cfg(feature = "remote")]
+pub fn note_relays(id: &str, relays: &[String]) {
+    for c in all().into_iter().filter(|c| c.id() == Some(id)) {
+        let own = crate::net::Address::parse(&c.address).map(|a| relay_name(&a.relay)).unwrap_or_default();
+        let others = relays.iter().map(|r| relay_name(r)).filter(|r| *r != own).collect::<Vec<_>>().join(",");
+        if others != c.relays {
+            update(&c.address, |k| k.relays = others);
+        }
     }
 }
 

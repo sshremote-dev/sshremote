@@ -30,6 +30,12 @@ pub struct Config {
     pub token: String,
     pub password: String,
     pub relay: String,
+    /// Other relays this computer is reachable at too, each with a line of its own under the
+    /// same ID (where another computer has the ID, that relay says so and is left out).
+    pub relays: Vec<String>,
+    /// Their lasting keys as first seen (`RELAY HEX`, comma separated), as `relay_key` is the
+    /// first relay's.
+    pub relay_keys: String,
     pub enabled: bool,
     /// Whether the person at the screen is asked before a viewer comes in.
     pub ask: bool,
@@ -272,7 +278,7 @@ impl Passwords {
 
 impl Config {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "headless": self.headless, "own_id": self.own_id, "team": self.team })
+        serde_json::json!({ "id": self.id, "token": self.token, "password": self.password, "relay": self.relay, "enabled": self.enabled, "ask": self.ask, "allow": self.allow, "lan": self.lan, "direct": self.direct, "punch": self.punch, "totp": self.totp, "passwords": self.passwords.word(), "one_time": self.one_time, "requests": self.requests, "from": self.from, "relay_key": self.relay_key, "relays": self.relays, "relay_keys": self.relay_keys, "cameras": self.cameras, "idle": self.idle, "trusted": self.trusted.iter().map(Trusted::json).collect::<Vec<_>>(), "proxy": self.proxy, "record": self.record, "ids": self.ids, "id_keys": self.id_keys.iter().map(|(i, k, at)| serde_json::json!({ "id": i, "key": k, "at": at })).collect::<Vec<_>>(), "auto_update": self.auto_update, "clip_way": self.clip_way, "files_way": self.files_way, "plain_wallpaper": self.plain_wallpaper, "headless": self.headless, "own_id": self.own_id, "team": self.team })
     }
 
     /// The rights and whether to ask, as the agent takes them (`--grant`).
@@ -303,6 +309,8 @@ impl Config {
             requests: v.get("requests").and_then(|x| x.as_bool()).unwrap_or(false),
             from: s("from").unwrap_or_default(),
             relay_key: s("relay_key").unwrap_or_default(),
+            relays: v.get("relays").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|r| r.as_str()).map(crate::computers::relay_name).filter(|r| !r.is_empty()).take(8).collect()).unwrap_or_default(),
+            relay_keys: s("relay_keys").unwrap_or_default(),
             cameras: v.get("cameras").and_then(|x| x.as_bool()).unwrap_or(false),
             idle: v.get("idle").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             trusted: v.get("trusted").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(Trusted::from_json).collect()).unwrap_or_default(),
@@ -494,6 +502,8 @@ pub fn fresh() -> Config {
         requests: false,
         from: String::new(),
         relay_key: String::new(),
+        relays: Vec::new(),
+        relay_keys: String::new(),
         cameras: false,
         idle: 0,
         trusted: Vec::new(),
@@ -1490,9 +1500,9 @@ pub fn with_policy(mut c: Config) -> Config {
 
 /// Keeps this computer reachable by its ID until `keep` says to stop: a line to the relay, a new
 /// connection for each viewer, and the agent run as a process of its own for each.
-pub fn run(keep: impl Fn() -> Option<Config>) {
+pub fn run(keep: impl Fn() -> Option<Config> + Send + Sync + Copy + 'static) {
     // In a team, its policy over the settings; looked up each minute, with the record sent.
-    let keep = || keep().map(with_policy);
+    let keep = move || keep().map(with_policy);
     thread::spawn(|| {
         loop {
             if crate::team::client::state().joined.is_some() {
@@ -1514,24 +1524,93 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let guard = guard.clone();
         thread::spawn(move || listen_direct(guard));
     }
+    // The other relays it is reachable at, each a line of its own beside the first one's.
+    {
+        let guard = guard.clone();
+        thread::spawn(move || also_at(keep, guard));
+    }
+    serve_relay(keep, &guard, None);
+    set_state(State::Off);
+    // Off: nobody stays in.
+    end_sessions_but(None);
+}
+
+/// How each of the other relays' lines is (`Config::relays`), by relay.
+static ALSO: Mutex<std::collections::BTreeMap<String, State>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// The other relays and how their lines are, for the window and `remote-access status`.
+pub fn also_states() -> Vec<(String, State)> {
+    ALSO.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(r, s)| (r.clone(), s.clone())).collect()
+}
+
+/// The relays a viewer reaches this computer through now, the first one's first.
+pub fn online_relays() -> Vec<String> {
+    let mut out = Vec::new();
+    if matches!(*STATE.lock().unwrap_or_else(|e| e.into_inner()), Some(State::Online))
+        && let Some(c) = recent()
+    {
+        out.push(crate::computers::relay_name(&c.relay));
+    }
+    out.extend(ALSO.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, s)| matches!(s, State::Online)).map(|(r, _)| r.clone()));
+    out
+}
+
+/// Starts a line for each other relay the settings name, each ending when it is taken out of them.
+fn also_at(keep: impl Fn() -> Option<Config> + Send + Sync + Copy + 'static, guard: Arc<Guard>) {
+    let running: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
+    while let Some(cfg) = keep() {
+        let first = crate::computers::relay_name(&cfg.relay);
+        for r in cfg.relays.iter().filter(|r| **r != first) {
+            if running.lock().unwrap_or_else(|e| e.into_inner()).insert(r.clone()) {
+                let (guard, running, r) = (guard.clone(), running.clone(), r.clone());
+                thread::spawn(move || {
+                    serve_relay(keep, &guard, Some(r.clone()));
+                    ALSO.lock().unwrap_or_else(|e| e.into_inner()).remove(&r);
+                    running.lock().unwrap_or_else(|e| e.into_inner()).remove(&r);
+                });
+            }
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// The line to one relay: the first one's (`also`: None), whose state the window shows and which
+/// takes a new ID when another computer has this one there, or another the settings name too.
+fn serve_relay(keep: impl Fn() -> Option<Config>, guard: &Arc<Guard>, also: Option<String>) {
+    let say = |st: State| match &also {
+        None => set_state(st),
+        Some(r) => {
+            ALSO.lock().unwrap_or_else(|e| e.into_inner()).insert(r.clone(), st);
+        }
+    };
+    // This line's relay as the settings name it now; None once they no longer do.
+    let relay_of = |k: &Config| match &also {
+        None => Some(k.relay.clone()),
+        Some(r) => (k.relays.contains(r) && crate::computers::relay_name(&k.relay) != *r).then(|| r.clone()),
+    };
     let mut wait = 2;
     let mut password = None;
     while let Some(mut cfg) = keep() {
+        let Some(relay) = relay_of(&cfg) else { break };
         // The other service answers meanwhile; for the person's own the computer is reachable.
         if standby() {
-            set_state(if at_login_screen() { State::Connecting } else { State::Online });
+            say(if at_login_screen() { State::Connecting } else { State::Online });
             sleep_while(&keep, 1);
             continue;
         }
-        if password.as_ref().is_some_and(|p| *p != cfg.password) {
+        if also.is_none() && password.as_ref().is_some_and(|p| *p != cfg.password) {
             guard.reset();
         }
         password = Some(cfg.password.clone());
-        set_state(State::Connecting);
-        let mut s = match sealed_line(&mut cfg) {
+        cfg.relay = relay.clone();
+        if let Some(r) = &also {
+            cfg.relay_key = pin_of(&cfg.relay_keys, r);
+        }
+        say(State::Connecting);
+        let mut s = match sealed_line(&mut cfg, also.is_some()) {
             Ok(s) => s,
             Err(e) => {
-                set_state(State::Failed(e));
+                say(State::Failed(e));
                 sleep_while(&keep, wait);
                 wait = (wait * 2).min(60);
                 continue;
@@ -1540,6 +1619,8 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
         let answer = writeln!(s, "listen {} {}", cfg.id, cfg.token).and_then(|_| line(&mut s));
         let refused = match answer.as_deref() {
             Ok("ok") => None,
+            // At another relay the ID is someone else's: this one is not reached there.
+            Ok("taken") if also.is_some() => Some(crate::lang::fill(n!("Another computer has this ID at {}."), &[&relay])),
             // Another computer holds the ID the person chose: said, until they choose another.
             Ok("taken") if cfg.own_id => Some(crate::lang::fill(n!("Another computer has the ID {}: choose another, or take a new one."), &[&crate::computers::spaced(&cfg.id)])),
             Ok("taken") => {
@@ -1554,13 +1635,13 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
             Err(e) => Some(crate::lang::fill(n!("The relay did not answer: {}"), &[&e])),
         };
         if let Some(why) = refused {
-            set_state(State::Failed(why));
+            say(State::Failed(why));
             sleep_while(&keep, wait);
             wait = (wait * 2).min(60);
             continue;
         }
         wait = 2;
-        set_state(State::Online);
+        say(State::Online);
         // The relay pings every 30 s; nothing for 75 s means the line is gone. Short reads so a
         // change of the settings (off, a new password) takes effect within a second or two.
         let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
@@ -1577,8 +1658,10 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 cfg.trusted.clone_from(&k.trusted);
                 cfg.one_time.clone_from(&k.one_time);
                 cfg.from.clone_from(&k.from);
-                // Those the new settings would not let in go now.
-                end_sessions_but(Some(k));
+                // Those the new settings would not let in go now (said once, by the first line).
+                if also.is_none() {
+                    end_sessions_but(Some(k));
+                }
             }
             // At the login screen nobody can let a viewer in on request.
             if at_login_screen() {
@@ -1588,15 +1671,17 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
                 // The desktop opened: the login screen's viewers go on to the person's own service
                 // (they connect again by themselves); the person's own keep theirs.
-                if at_login_screen() {
+                if at_login_screen() && also.is_none() {
                     end_sessions_but(None);
                 }
                 break;
             }
-            if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || k.relay != cfg.relay) {
+            if now.as_ref().is_none_or(|k| k.id != cfg.id || k.password != cfg.password || relay_of(k).as_deref() != Some(relay.as_str())) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
                 // Viewers let in by the settings that changed go too.
-                end_sessions_but(now.as_ref());
+                if also.is_none() {
+                    end_sessions_but(now.as_ref());
+                }
                 break;
             }
             let mut b = [0u8; 256];
@@ -1645,12 +1730,21 @@ pub fn run(keep: impl Fn() -> Option<Config>) {
                 }
             }
         }
-        set_state(State::Connecting);
+        say(State::Connecting);
         sleep_while(&keep, 1);
     }
-    set_state(State::Off);
-    // Off: nobody stays in.
-    end_sessions_but(None);
+}
+
+/// The key `keys` (`RELAY HEX`, comma separated) pins for `relay`, as `relay_key` holds one.
+fn pin_of(keys: &str, relay: &str) -> String {
+    keys.split(',').map(str::trim).find(|p| p.split_once(' ').is_some_and(|(r, _)| r == relay)).unwrap_or("").to_string()
+}
+
+/// `keys` with `relay`'s key set to `hex`.
+fn with_pin(keys: &str, relay: &str, hex: &str) -> String {
+    let mut out: Vec<String> = keys.split(',').map(str::trim).filter(|p| !p.is_empty() && p.split_once(' ').is_none_or(|(r, _)| r != relay)).map(String::from).collect();
+    out.push(format!("{relay} {hex}"));
+    out.join(",")
 }
 
 /// The relay's lasting key this computer knows it by: the public relay's, or one of its own's as
@@ -1667,7 +1761,7 @@ fn known_key(cfg: &Config) -> Option<[u8; 32]> {
 /// The line to the relay, sealed: with the key it is known by, or (a relay of one's own seen
 /// for the first time) the key it shows, kept. A relay before 1.3 gets the plain line, unless
 /// it was known sealed: then someone in between is refusing the seal, and nothing is said.
-fn sealed_line(cfg: &mut Config) -> Result<crate::relaylink::Link, String> {
+fn sealed_line(cfg: &mut Config, also: bool) -> Result<crate::relaylink::Link, String> {
     use crate::relaylink::{Link, Outcome};
     let reach = |relay: &str| -> Result<TcpStream, String> {
         let s = dial(relay).map_err(|e| crate::lang::fill(n!("Could not reach {}"), &[&e]))?;
@@ -1678,8 +1772,20 @@ fn sealed_line(cfg: &mut Config) -> Result<crate::relaylink::Link, String> {
     match Link::seal(reach(&cfg.relay)?, known) {
         Ok(Outcome::Sealed(link, lasting)) => {
             if known.is_none() {
-                cfg.relay_key = format!("{} {}", crate::computers::relay_name(&cfg.relay), hex(&lasting));
-                let _ = save(cfg);
+                let relay = crate::computers::relay_name(&cfg.relay);
+                cfg.relay_key = format!("{relay} {}", hex(&lasting));
+                // Into the settings as kept, that field alone: the lines of other relays pin
+                // theirs at the same moment (this configuration names this line's relay first).
+                static PINNING: Mutex<()> = Mutex::new(());
+                let _one = PINNING.lock().unwrap_or_else(|e| e.into_inner());
+                if let Ok(Some(mut c)) = stored() {
+                    if also {
+                        c.relay_keys = with_pin(&c.relay_keys, &relay, &hex(&lasting));
+                    } else if crate::computers::relay_name(&c.relay) == relay {
+                        c.relay_key.clone_from(&cfg.relay_key);
+                    }
+                    let _ = save(&c);
+                }
             }
             Ok(link)
         }
@@ -1795,7 +1901,7 @@ fn serve_call(mut s: TcpStream, cfg: &Config, guard: &Guard, relayed: bool, from
     };
     let totp = (!cfg.totp.is_empty()).then_some(&two_step as crate::net::TwoStep);
     // Through a proxy everything goes its way: no straight path around it.
-    let punch = (relayed && cfg.punch && crate::proxy::none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new() });
+    let punch = (relayed && cfg.punch && crate::proxy::none()).then(|| crate::net::Punch { viewer: false, relay: cfg.relay.clone(), id: String::new(), udp: true });
     // A team's policy may let in its people alone (their tickets), no password at all.
     let policy = crate::team::client::policy();
     let passwords = policy.as_ref().is_none_or(|p| p.password);
@@ -2288,6 +2394,11 @@ fn serve_viewer(
     if cfg.plain_wallpaper {
         cmd.arg("--plain-wallpaper");
     }
+    // Told to a viewer only with more than one: it came through one of them.
+    let relays = online_relays();
+    if relays.len() > 1 {
+        cmd.args(["--relays", &relays.join(",")]);
+    }
     if cameras {
         cmd.arg("--cameras");
     }
@@ -2727,7 +2838,7 @@ pub fn uninstall_service() -> Result<(), String> {
     Err(n!("not on this system").into())
 }
 
-/// `sshremote remote-access [status | on | off | run | id [NUMBER] | clipboard|files both|out|in | wallpaper on|off | auto-update on|off | headless on|off (Linux) | password [NEW] | relay HOST | install | uninstall]`
+/// `sshremote remote-access [status | on | off | run | id [NUMBER] | also RELAY...|none | clipboard|files both|out|in | wallpaper on|off | auto-update on|off | headless on|off (Linux) | password [NEW] | relay HOST | install | uninstall]`
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut c = load();
     let show = |c: &Config| {
@@ -2739,6 +2850,23 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             println!("one-time: {} (a minute after a connection with it ends, a new one)", c.one_time);
         }
         println!("relay:    {}", c.relay);
+        if !c.relays.is_empty() {
+            // As this process's lines are, or as each relay sees the ID (a service runs them).
+            let here = also_states();
+            for r in &c.relays {
+                let how = match here.iter().find(|(x, _)| x == r).map(|(_, s)| s) {
+                    Some(State::Online) => "reachable".to_string(),
+                    Some(State::Failed(why)) => why.clone(),
+                    Some(_) => "connecting".to_string(),
+                    None => match online(&c.id, r) {
+                        Ok(true) => "reachable".into(),
+                        Ok(false) => "not reachable yet".into(),
+                        Err(e) => e,
+                    },
+                };
+                println!("also at:  {r} ({how})");
+            }
+        }
         println!("on:       {}", if c.enabled { "yes" } else { "no" });
         if c.requests {
             println!("requests: anyone with the ID may ask without a password; you decide, comparing the code you both see");
@@ -3023,8 +3151,21 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         Some("relay") => {
             c.relay = args.get(1).map(|r| crate::computers::relay_name(r)).unwrap_or_else(default_relay);
+            c.relays.retain(|r| *r != c.relay);
             save(&c)?;
             println!("relay: {}", c.relay);
+            Ok(())
+        }
+        // Other relays it is reachable at too, each a line of its own under the same ID.
+        Some("also") => {
+            let given: Vec<String> = args[1..].iter().flat_map(|a| a.split(',')).map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+            if given.is_empty() {
+                return Err("usage: sshremote remote-access also RELAY... | none".into());
+            }
+            c.relays = if given == ["none"] { Vec::new() } else { given.iter().map(|r| crate::computers::relay_name(r)).filter(|r| *r != c.relay).take(8).collect() };
+            c.relays.dedup();
+            save(&c)?;
+            println!("also at: {}", if c.relays.is_empty() { "no other relay".into() } else { c.relays.join(", ") });
             Ok(())
         }
         Some("install") => {
@@ -3129,7 +3270,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                     }
                 });
             }
-            let keep = || {
+            let keep = move || {
                 if parent.is_some_and(|p| !alive(p)) {
                     std::process::exit(0);
                 }
@@ -3303,7 +3444,7 @@ mod tests {
         };
         let mut cfg = fresh();
         cfg.relay = relay(Some(crate::relaylink::keypair([1; 32])));
-        let mut link = sealed_line(&mut cfg).unwrap();
+        let mut link = sealed_line(&mut cfg, false).unwrap();
         writeln!(link, "listen {} {}", cfg.id, cfg.token).unwrap();
         assert_eq!(line(&mut link).unwrap(), "ok");
         assert!(cfg.relay_key.starts_with(&format!("{} ", cfg.relay)), "kept: {}", cfg.relay_key);
@@ -3311,18 +3452,18 @@ mod tests {
         let other = relay(Some(crate::relaylink::keypair([2; 32])));
         cfg.relay_key = cfg.relay_key.replace(&cfg.relay, &other);
         cfg.relay = other;
-        assert!(sealed_line(&mut cfg).err().unwrap().contains("another key"));
+        assert!(sealed_line(&mut cfg, false).err().unwrap().contains("another key"));
         // One before 1.3: the plain line, the first time only.
         let mut fresh_cfg = fresh();
         fresh_cfg.relay = relay(None);
-        let mut plain = sealed_line(&mut fresh_cfg).unwrap();
+        let mut plain = sealed_line(&mut fresh_cfg, false).unwrap();
         writeln!(plain, "listen {} {}", fresh_cfg.id, fresh_cfg.token).unwrap();
         assert_eq!(line(&mut plain).unwrap(), "ok");
         assert!(fresh_cfg.relay_key.is_empty());
         let old = relay(None);
         cfg.relay_key = format!("{old} {}", "ab".repeat(32));
         cfg.relay = old;
-        assert!(sealed_line(&mut cfg).err().unwrap().contains("as it always has"));
+        assert!(sealed_line(&mut cfg, false).err().unwrap().contains("as it always has"));
         // The public relay is known by the key shipped.
         cfg.relay = crate::computers::OLD_RELAY.into();
         assert_eq!(known_key(&cfg), crate::relaylink::key_from_hex(crate::relaylink::PUBLIC_RELAY_KEY));
@@ -3334,7 +3475,7 @@ mod tests {
     fn public_relay_seals() {
         let mut cfg = fresh();
         cfg.relay = crate::computers::RELAY.into();
-        let mut link = sealed_line(&mut cfg).unwrap();
+        let mut link = sealed_line(&mut cfg, false).unwrap();
         writeln!(link, "listen {} {}", cfg.id, cfg.token).unwrap();
         assert_eq!(line(&mut link).unwrap(), "ok");
     }

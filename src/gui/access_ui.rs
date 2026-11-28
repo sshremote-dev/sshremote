@@ -15,6 +15,11 @@ pub(super) struct AccessUi {
     /// An ID of one's own choosing, being typed.
     pub(super) own_id: String,
     pub(super) relay: String,
+    /// The other relays being typed (`Config::relays`), comma separated.
+    pub(super) also: String,
+    /// Whether each of the other relays sees this ID now (for which ID), looked up with the first.
+    #[cfg(feature = "remote")]
+    pub(super) also_online: Shared<Option<(String, Vec<(String, Result<bool, String>)>)>>,
     /// Two-step sign-in being set up: the new secret, and the code typed to show the app has it.
     #[cfg(feature = "remote")]
     pub(super) totp_new: Option<String>,
@@ -82,6 +87,8 @@ fn in_background<T: Send + 'static>(slot: &Shared<Option<T>>, busy: &'static std
 #[cfg(feature = "remote")]
 static ONLINE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "remote")]
+static ALSO_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "remote")]
 static SERVICE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "remote")]
 static FRESH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -131,6 +138,20 @@ impl App {
                 let r = access::online(&id, &relay);
                 (id, relay, r)
             });
+            if !cfg.relays.is_empty() {
+                let (id, relays) = (cfg.id.clone(), cfg.relays.clone());
+                in_background(&a.also_online, &ALSO_BUSY, ctx, move || {
+                    // All at once: one that does not answer holds up none of the others.
+                    let asked: Vec<_> = relays.into_iter().map(|r| {
+                        let id = id.clone();
+                        std::thread::spawn(move || {
+                            let on = access::online(&id, &r);
+                            (r, on)
+                        })
+                    }).collect();
+                    (id, asked.into_iter().filter_map(|h| h.join().ok()).collect())
+                });
+            }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
         let svc = a.service.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();

@@ -242,6 +242,7 @@ impl App {
         if open_settings {
             // The relay field starts from the one in use; emptied, Use goes back to the default.
             self.access.relay = cfg.relay.clone();
+            self.access.also = cfg.relays.join(", ");
             self.access.from = cfg.from.clone();
             self.access.ids = cfg.ids.clone();
             self.access_sheet_open = true;
@@ -412,6 +413,29 @@ impl App {
                             egui::Label::new(RichText::new(t!("The relay is where both ends meet; it passes on what it cannot read. relay.sshremote.dev, or sshremote-relay on a server of your own. Computers added by ID go through it too.")).weak().size(12.0))
                                 .wrap(),
                         );
+                        // Other relays it is reachable at too, each a line of its own: viewers who
+                        // came in once go through whichever sees it when the first does not.
+                        let typed: Vec<String> = self.access.also.split([',', ' ']).map(str::trim).filter(|r| !r.is_empty()).map(crate::computers::relay_name).collect();
+                        kit::row(ui, t!("Also at"), |ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(typed != cfg.relays, kit::secondary(t!("Use"))).clicked() {
+                                    cfg.relays = typed.iter().filter(|r| **r != crate::computers::relay_name(&cfg.relay)).take(8).cloned().collect();
+                                    self.access.also = cfg.relays.join(", ");
+                                    changed = true;
+                                }
+                                ui.add(kit::field(&mut self.access.also, t!("other relays, comma separated (optional)")));
+                            });
+                        });
+                        let seen = self.access.also_online.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|(id, _)| *id == cfg.id).map(|(_, l)| l).unwrap_or_default();
+                        for r in &cfg.relays {
+                            let (colour, text) = match seen.iter().find(|(x, _)| x == r).map(|(_, on)| on) {
+                                Some(Ok(true)) => (good(), t!("{}: reachable", r)),
+                                Some(Ok(false)) => (bad(), t!("{}: not reachable yet", r)),
+                                Some(Err(e)) => (bad(), t!("{}: {}", r, crate::lang::tr_msg(e))),
+                                None => (ui.visuals().weak_text_color(), t!("{}: asking\u{2026}", r)),
+                            };
+                            kit::row(ui, "", |ui| ui.label(RichText::new(text).color(colour).size(12.5)));
+                        }
                     });
                     ui.add_space(kit::GAP);
                     kit::heading(ui, t!("Who comes in, and what they may do"));

@@ -1013,7 +1013,7 @@ impl Write for Stream {
 
 /// An address the other side may send to: not this computer's own, nor a link's alone (an IPv6
 /// one needs the link named), nor one only for documents.
-fn usable(ip: IpAddr) -> bool {
+pub(crate) fn usable(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => !(v.is_loopback() || v.is_unspecified() || v.is_link_local() || v.is_broadcast() || v.is_multicast()),
         IpAddr::V6(v) => {
@@ -1083,7 +1083,7 @@ pub fn reflect_answer(q: &[u8], from: SocketAddr) -> Option<Vec<u8>> {
 }
 
 /// This computer's own IPv4 addresses on its networks: the one it reaches the relay from first.
-fn local_ips(toward: Option<SocketAddr>) -> Vec<IpAddr> {
+pub(crate) fn local_ips(toward: Option<SocketAddr>) -> Vec<IpAddr> {
     let mut out = Vec::new();
     if let Some(t) = toward
         && let Some(a) = source_toward(t)

@@ -95,6 +95,8 @@ pub(super) struct Remote {
     pointer_desk: Option<((i32, i32), usize)>,
     /// The window in front there was heard of (the first time is where it is, not a change).
     focus_heard: bool,
+    /// The computer's ID, for one reached by it (what it says of its relays is kept for it).
+    pub(in crate::gui) by_id: Option<String>,
     screen_changed: Option<std::time::Instant>,
     /// Remote access there runs without administrator rights (`ToClient::Unelevated`); and
     /// whether they were asked for already.
@@ -406,6 +408,7 @@ impl Remote {
             follow_screens: crate::hosts::setting("follow_screens").is_some_and(|v| v == "yes"),
             pointer_desk: None,
             focus_heard: false,
+            by_id: None,
             screen_changed: None,
             followed: None,
             unelevated: false,
@@ -893,6 +896,11 @@ impl Remote {
                         None => self.pointer_tex = Some((ctx.load_texture("remote-pointer", img, TextureOptions::LINEAR), size, hot)),
                     }
                     ctx.request_repaint();
+                }
+                Ok(Ev::Net(ToClient::Relays(list))) => {
+                    if let Some(id) = &self.by_id {
+                        crate::computers::note_relays(id, &list);
+                    }
                 }
                 Ok(Ev::Net(ToClient::FocusAt { x, y })) => {
                     if let Some(i) = self.focus_followed((x, y)) {
