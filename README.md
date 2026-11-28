@@ -566,10 +566,19 @@ probes open the routers' firewalls the same way; when both work, the same networ
 then IPv6, then IPv4). When a path answers, the sealed
 stream moves onto it (an ordered, reliable stream over UDP with its own congestion control) with
 nothing lost or repeated, and the relay lets the session go; the toolbar's lightning sign shows
-it. The session starts on the relay at once and stays there when no path is found (a router that
-gives a new port for every destination, on both sides, or a network without UDP); a path that
+it. Beside it a straight **TCP** path is tried: each side asks the relay (`seen`) where its TCP
+port is seen from, keeps that line open, and both connect to each other's from that same port at
+once (a simultaneous open, which most routers let through as an answer to their own); the first
+connection on which both prove the key of the sealed offer carries the stream, for networks that
+let no UDP through. The session starts on the relay at once and stays there when no path is found
+(a router that gives a new port for every destination, on both sides); a path that
 stops working ends the session, which reconnects through the relay. Either side can turn it off:
-the computer in its remote access settings, the viewer in Settings, Connections. IDs are held at the relay by a secret token, wrong
+the computer in its remote access settings, the viewer in Settings, Connections. A computer can
+be reachable at **several relays** at once (`remote-access also RELAY...`, or Also at in its
+settings), each a line of its own under the same ID; it tells a viewer where else it is, and the
+viewer asks them all at once whether they see it and goes through the first that does when its
+own does not. Viewers on one computer at the same time can **see where the others point**, by
+name, when each shows its pointer (the view menu). IDs are held at the relay by a secret token, wrong
 passwords cost more time each, and attempts per address are limited. See
 [docs/architecture.md](docs/architecture.md) for how this, SSH and the extensions fit together.
 
